@@ -11,6 +11,12 @@ from typing import Annotated, Any, ClassVar, Literal, Optional, Union
 import regex as re
 import torch
 from fastapi import HTTPException, UploadFile
+# yapf: disable
+from openai.types.chat.chat_completion_audio import (
+    ChatCompletionAudio as OpenAIChatCompletionAudio)
+from openai.types.chat.chat_completion_message import (
+    Annotation as OpenAIAnnotation)
+# yapf: enable
 from openai.types.responses import (ResponseInputParam, ResponseOutputItem,
                                     ResponseOutputMessage, ResponsePrompt,
                                     ResponseStatus, ResponseTextConfig)
@@ -24,7 +30,8 @@ from typing_extensions import TypeAlias
 from vllm import envs
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          random_tool_call_id)
-from vllm.entrypoints.score_utils import ScoreMultiModalParam
+from vllm.entrypoints.score_utils import (ScoreContentPartParam,
+                                          ScoreMultiModalParam)
 from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
@@ -1348,7 +1355,7 @@ class RerankRequest(OpenAIBaseModel):
 
 class RerankDocument(BaseModel):
     text: Optional[str] = None
-    multi_modal: Optional[ScoreMultiModalParam] = None
+    multi_modal: Optional[ScoreContentPartParam] = None
 
 
 class RerankResult(BaseModel):
@@ -1393,11 +1400,16 @@ class CompletionResponseChoice(OpenAIBaseModel):
 
 class CompletionResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
-    object: str = "text_completion"
+    object: Literal["text_completion"] = "text_completion"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: list[CompletionResponseChoice]
+    service_tier: Optional[Literal["auto", "default", "flex", "scale",
+                                   "priority"]] = None
+    system_fingerprint: Optional[str] = None
     usage: UsageInfo
+
+    # vLLM-specific fields that are not in OpenAI spec
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None, description="KVTransfer parameters.")
 
@@ -1549,9 +1561,15 @@ class ExtractedToolCallInformation(BaseModel):
 
 class ChatMessage(OpenAIBaseModel):
     role: str
-    reasoning_content: Optional[str] = None
     content: Optional[str] = None
+    refusal: Optional[str] = None
+    annotations: Optional[OpenAIAnnotation] = None
+    audio: Optional[OpenAIChatCompletionAudio] = None
+    function_call: Optional[FunctionCall] = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
+
+    # vLLM-specific fields that are not in OpenAI spec
+    reasoning_content: Optional[str] = None
 
 
 class ChatCompletionLogProb(OpenAIBaseModel):
@@ -1587,7 +1605,12 @@ class ChatCompletionResponse(OpenAIBaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: list[ChatCompletionResponseChoice]
+    service_tier: Optional[Literal["auto", "default", "flex", "scale",
+                                   "priority"]] = None
+    system_fingerprint: Optional[str] = None
     usage: UsageInfo
+
+    # vLLM-specific fields that are not in OpenAI spec
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None, description="KVTransfer parameters.")

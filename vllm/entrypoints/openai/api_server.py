@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Callable, Optional
 
 import prometheus_client
 import pydantic
@@ -61,13 +61,9 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionResponse,
                                               DetokenizeRequest,
                                               DetokenizeResponse,
-                                              EmbeddingChatRequest,
-                                              EmbeddingCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse, ErrorResponse,
                                               LoadLoRAAdapterRequest,
-                                              PoolingChatRequest,
-                                              PoolingCompletionRequest,
                                               PoolingRequest, PoolingResponse,
                                               RerankRequest, RerankResponse,
                                               ResponsesRequest,
@@ -434,6 +430,7 @@ async def get_server_load_metrics(request: Request):
     # - /v1/chat/completions
     # - /v1/completions
     # - /v1/audio/transcriptions
+    # - /v1/audio/translations
     # - /v1/embeddings
     # - /pooling
     # - /classify
@@ -957,31 +954,6 @@ async def do_rerank_v2(request: RerankRequest, raw_request: Request):
     return await do_rerank(request, raw_request)
 
 
-TASK_HANDLERS: dict[str, dict[str, tuple]] = {
-    "generate": {
-        "messages": (ChatCompletionRequest, create_chat_completion),
-        "default": (CompletionRequest, create_completion),
-    },
-    "embed": {
-        "messages": (EmbeddingChatRequest, create_embedding),
-        "default": (EmbeddingCompletionRequest, create_embedding),
-    },
-    "score": {
-        "default": (RerankRequest, do_rerank)
-    },
-    "rerank": {
-        "default": (RerankRequest, do_rerank)
-    },
-    "reward": {
-        "messages": (PoolingChatRequest, create_pooling),
-        "default": (PoolingCompletionRequest, create_pooling),
-    },
-    "classify": {
-        "messages": (PoolingChatRequest, create_pooling),
-        "default": (PoolingCompletionRequest, create_pooling),
-    },
-}
-
 if envs.VLLM_SERVER_DEV_MODE:
     logger.warning("SECURITY WARNING: Development endpoints are enabled! "
                    "This should NOT be used in production!")
@@ -1033,6 +1005,30 @@ if envs.VLLM_SERVER_DEV_MODE:
         return JSONResponse(content={"is_sleeping": is_sleeping})
 
 
+# TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
+# (requires typing_extensions >= 4.13)
+RequestType = Any
+GetHandlerFn = Callable[[Request], Optional[OpenAIServing]]
+EndpointFn = Callable[[RequestType, Request], Awaitable[Any]]
+
+# NOTE: Items defined earlier take higher priority
+INVOCATION_TYPES: list[tuple[RequestType, tuple[GetHandlerFn, EndpointFn]]] = [
+    (ChatCompletionRequest, (chat, create_chat_completion)),
+    (CompletionRequest, (completion, create_completion)),
+    (EmbeddingRequest, (embedding, create_embedding)),
+    (ClassificationRequest, (classify, create_classify)),
+    (ScoreRequest, (score, create_score)),
+    (RerankRequest, (rerank, do_rerank)),
+    (PoolingRequest, (pooling, create_pooling)),
+]
+
+# NOTE: Construct the TypeAdapters only once
+INVOCATION_VALIDATORS = [
+    (pydantic.TypeAdapter(request_type), (get_handler, endpoint))
+    for request_type, (get_handler, endpoint) in INVOCATION_TYPES
+]
+
+
 @router.post("/invocations",
              dependencies=[Depends(validate_json_request)],
              responses={
@@ -1047,32 +1043,34 @@ if envs.VLLM_SERVER_DEV_MODE:
                  },
              })
 async def invocations(raw_request: Request):
-    """
-    For SageMaker, routes requests to other handlers based on model `task`.
-    """
+    """For SageMaker, routes requests based on the request type."""
     try:
         body = await raw_request.json()
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
                             detail=f"JSON decode error: {e}") from e
 
-    task = raw_request.app.state.task
+    valid_endpoints = [(validator, endpoint)
+                       for validator, (get_handler,
+                                       endpoint) in INVOCATION_VALIDATORS
+                       if get_handler(raw_request) is not None]
 
-    if task not in TASK_HANDLERS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported task: '{task}' for '/invocations'. "
-            f"Expected one of {set(TASK_HANDLERS.keys())}")
+    for request_validator, endpoint in valid_endpoints:
+        try:
+            request = request_validator.validate_python(body)
+        except pydantic.ValidationError:
+            continue
 
-    handler_config = TASK_HANDLERS[task]
-    if "messages" in body:
-        request_model, handler = handler_config["messages"]
-    else:
-        request_model, handler = handler_config["default"]
+        return await endpoint(request, raw_request)
 
-    # this is required since we lose the FastAPI automatic casting
-    request = request_model.model_validate(body)
-    return await handler(request, raw_request)
+    type_names = [
+        t.__name__ if isinstance(t := validator._type, type) else str(t)
+        for validator, _ in valid_endpoints
+    ]
+    msg = ("Cannot find suitable handler for request. "
+           f"Expected one of: {type_names}")
+    res = base(raw_request).create_error_response(message=msg)
+    return JSONResponse(content=res.model_dump(), status_code=res.code)
 
 
 if envs.VLLM_TORCH_PROFILER_DIR:
@@ -1522,7 +1520,7 @@ async def init_app_state(
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
-    ) if model_config.runner_type == "generate" else None
+    ) if "generate" in model_config.supported_tasks else None
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,
@@ -1539,7 +1537,7 @@ async def init_app_state(
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
-    ) if model_config.runner_type == "generate" else None
+    ) if "generate" in model_config.supported_tasks else None
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
         model_config,
@@ -1547,7 +1545,7 @@ async def init_app_state(
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_force_include_usage=args.enable_force_include_usage,
-    ) if model_config.runner_type == "generate" else None
+    ) if "generate" in model_config.supported_tasks else None
     state.openai_serving_pooling = OpenAIServingPooling(
         engine_client,
         model_config,
@@ -1555,7 +1553,7 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if model_config.runner_type == "pooling" else None
+    ) if "pooling" in model_config.supported_tasks else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,
@@ -1563,22 +1561,24 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if model_config.task == "embed" else None
+    ) if "embed" in model_config.supported_tasks else None
     state.openai_serving_classification = ServingClassification(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if model_config.task == "classify" else None
+    ) if "classify" in model_config.supported_tasks else None
 
-    enable_serving_reranking = (model_config.task == "classify" and getattr(
-        model_config.hf_config, "num_labels", 0) == 1)
+    enable_serving_reranking = ("classify" in model_config.supported_tasks
+                                and getattr(model_config.hf_config,
+                                            "num_labels", 0) == 1)
     state.openai_serving_scores = ServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
-        request_logger=request_logger) if (
-            model_config.task == "embed" or enable_serving_reranking) else None
+        request_logger=request_logger,
+    ) if ("embed" in model_config.supported_tasks
+          or enable_serving_reranking) else None
 
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
@@ -1593,13 +1593,13 @@ async def init_app_state(
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if model_config.runner_type == "transcription" else None
+    ) if "transcription" in model_config.supported_tasks else None
     state.openai_serving_translation = OpenAIServingTranslation(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if model_config.runner_type == "transcription" else None
+    ) if "transcription" in model_config.supported_tasks else None
     state.task = model_config.task
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
