@@ -52,6 +52,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import cachetools
+import cbor2
 import cloudpickle
 import numpy as np
 import numpy.typing as npt
@@ -3175,6 +3176,29 @@ def sha256(input) -> int:
     input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
     return int.from_bytes(hashlib.sha256(input_bytes).digest(),
                           byteorder="big")
+
+
+def sha256_cbor_64bit(input) -> int:
+    """
+    Hash objects using CBOR serialization and SHA-256, then truncate to 64bits.
+
+    This option is useful for non-Python-dependent serialization and hashing.
+
+    Args:
+        input: Object to be serialized and hashed. Supported types include
+            basic Python types and complex structures like lists, tuples, and
+            dictionaries.
+            Custom classes must implement CBOR serialization methods.
+
+    Returns:
+        An integer in the range [0, 2^64-1] representing the lower 64 bits
+        of the SHA-256 hash of the CBOR serialized input.
+    """
+    input_bytes = cbor2.dumps(input, canonical=True)
+    full_hash = int.from_bytes(hashlib.sha256(input_bytes).digest(),
+                               byteorder="big")
+
+    return full_hash & ((1 << 64) - 1)
 
 
 def is_torch_equal_or_newer(target: str) -> bool:
