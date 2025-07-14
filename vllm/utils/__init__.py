@@ -52,6 +52,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import cachetools
+import cbor2
 import cloudpickle
 import numpy as np
 import numpy.typing as npt
@@ -2085,10 +2086,10 @@ def supports_dynamo() -> bool:
     return base_torch_version >= Version("2.4.0")
 
 
-# Supports xccl with PyTorch versions >= 2.8.0 for XPU platform
+# Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
 def supports_xccl() -> bool:
     return is_torch_equal_or_newer(
-        "2.8.0") and torch.distributed.is_xccl_available()
+        "2.8.0.dev") and torch.distributed.is_xccl_available()
 
 
 # Some backends use pytorch version < 2.4.0 which doesn't
@@ -2888,8 +2889,9 @@ def get_mp_context():
 
 
 def bind_kv_cache(
-        ctx: dict[str, Any],
-        kv_cache: list[list[torch.Tensor]],  # [virtual_engine][layer_index]
+    ctx: dict[str, Any],
+    kv_cache: list[list[torch.Tensor]],  # [virtual_engine][layer_index]
+    shared_kv_cache_layers: Optional[dict[str, str]] = None
 ) -> None:
     # Bind the kv_cache tensor to Attention modules, similar to
     # ctx[layer_name].kv_cache[ve]=kv_cache[ve][extract_layer_index(layer_name)]
@@ -2901,12 +2903,17 @@ def bind_kv_cache(
     #    attention of the same layer (e.g., bart's decoder.layers.1.self_attn
     #    and decoder.layers.1.encoder_attn) is mapped to the same kv cache
     #    tensor
+    # 5. Some models have attention layers that share kv cache with previous
+    #    layers, this is specified through shared_kv_cache_layers
+    if shared_kv_cache_layers is None:
+        shared_kv_cache_layers = {}
     from vllm.attention import AttentionType
     from vllm.model_executor.models.utils import extract_layer_index
     layer_need_kv_cache = [
         layer_name for layer_name in ctx
         if (hasattr(ctx[layer_name], 'attn_type') and ctx[layer_name].attn_type
-            in (AttentionType.DECODER, AttentionType.ENCODER_DECODER))
+            in (AttentionType.DECODER, AttentionType.ENCODER_DECODER)) \
+                and ctx[layer_name].kv_sharing_target_layer_name is None
     ]
     layer_index_sorted = sorted(
         set(
@@ -2919,6 +2926,12 @@ def bind_kv_cache(
         assert len(forward_ctx.kv_cache) == len(kv_cache)
         for ve, ve_kv_cache in enumerate(kv_cache):
             forward_ctx.kv_cache[ve] = ve_kv_cache[kv_cache_idx]
+    if shared_kv_cache_layers is not None:
+        for layer_name, target_layer_name in shared_kv_cache_layers.items():
+            assert extract_layer_index(target_layer_name) < \
+               extract_layer_index(layer_name), \
+                   "v0 doesn't support interleaving kv sharing"
+            ctx[layer_name].kv_cache = ctx[target_layer_name].kv_cache
 
 
 def run_method(obj: Any, method: Union[str, bytes, Callable], args: tuple[Any],
@@ -3163,6 +3176,29 @@ def sha256(input) -> int:
     input_bytes = pickle.dumps(input, protocol=pickle.HIGHEST_PROTOCOL)
     return int.from_bytes(hashlib.sha256(input_bytes).digest(),
                           byteorder="big")
+
+
+def sha256_cbor_64bit(input) -> int:
+    """
+    Hash objects using CBOR serialization and SHA-256, then truncate to 64bits.
+
+    This option is useful for non-Python-dependent serialization and hashing.
+
+    Args:
+        input: Object to be serialized and hashed. Supported types include
+            basic Python types and complex structures like lists, tuples, and
+            dictionaries.
+            Custom classes must implement CBOR serialization methods.
+
+    Returns:
+        An integer in the range [0, 2^64-1] representing the lower 64 bits
+        of the SHA-256 hash of the CBOR serialized input.
+    """
+    input_bytes = cbor2.dumps(input, canonical=True)
+    full_hash = int.from_bytes(hashlib.sha256(input_bytes).digest(),
+                               byteorder="big")
+
+    return full_hash & ((1 << 64) - 1)
 
 
 def is_torch_equal_or_newer(target: str) -> bool:
