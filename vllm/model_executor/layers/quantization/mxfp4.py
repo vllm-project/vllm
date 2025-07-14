@@ -3,8 +3,15 @@
 from typing import Callable, Optional
 
 import torch
-import torch.nn.functional as F
 from torch.nn.parameter import Parameter
+from triton_kernels.matmul_ogs import FlexCtx, MicroscalingCtx, PrecisionConfig
+from triton_kernels.numerics import InFlexData
+from triton_kernels.numerics_details.mxfp import (SwizzlingType,
+                                                  perm_tensor_from_contig,
+                                                  perm_tuple_from_contig,
+                                                  swizzle_mx_scale_bw,
+                                                  swizzle_mxfp4_scale_hopper,
+                                                  swizzle_mxfp4_value_hopper)
 
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.linear import (LinearBase,
@@ -14,14 +21,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
-from vllm.model_executor.layers.utils import shuffle_weight
 from vllm.model_executor.utils import set_weight_attrs
 
-from triton_kernels.matmul_ogs import MicroscalingCtx, PrecisionConfig, FlexCtx
-from triton_kernels.numerics import InFlexData
-from triton_kernels.numerics_details.mxfp import (SwizzlingType, swizzle_mxfp4_value_hopper, 
-                                                  perm_tensor_from_contig, perm_tuple_from_contig,
-                                                  swizzle_mx_scale_bw, swizzle_mxfp4_scale_hopper)
 
 def swizzle_mxfp4(quant_tensor, scale):
     swizzle_value = SwizzlingType.HOPPER
@@ -30,7 +31,9 @@ def swizzle_mxfp4(quant_tensor, scale):
     swizzle_axis = 2
     # Swizzling
     if swizzle_value == SwizzlingType.HOPPER:
-        quant_tensor = swizzle_mxfp4_value_hopper(quant_tensor, op_idx=0, mma_version=3)
+        quant_tensor = swizzle_mxfp4_value_hopper(quant_tensor,
+                                                  op_idx=0,
+                                                  mma_version=3)
     assert quant_tensor.is_contiguous()
     quant_tensor = perm_tensor_from_contig(quant_tensor, axis, swizzle_axis)
 
@@ -41,9 +44,13 @@ def swizzle_mxfp4(quant_tensor, scale):
         scale = swizzle_mxfp4_scale_hopper(scale, num_warps=8)
     assert scale.is_contiguous()
     scale = perm_tensor_from_contig(scale, axis, swizzle_axis)
-    return quant_tensor, InFlexData(), MicroscalingCtx(weight_scale=scale, swizzle_scale=swizzle_scale,
-                                                swizzle_value=swizzle_value,
-                                                actual_weight_scale_shape=perm_tuple_from_contig(orig_scale_shape, axis, swizzle_axis))
+    return quant_tensor, InFlexData(), MicroscalingCtx(
+        weight_scale=scale,
+        swizzle_scale=swizzle_scale,
+        swizzle_value=swizzle_value,
+        actual_weight_scale_shape=perm_tuple_from_contig(
+            orig_scale_shape, axis, swizzle_axis))
+
 
 class Mxfp4Config(QuantizationConfig):
 
@@ -104,9 +111,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         mxfp4_block = 32
 
-        smallest_even_divide_number = lambda x, n: (
-                x // n + 1) * n if x % n != 0 else x
-        intermediate_size_per_partition_after_pad = smallest_even_divide_number(intermediate_size_per_partition, 128)
+        smallest_even_divide_number = lambda x, n: (x // n + 1
+                                                    ) * n if x % n != 0 else x
+        intermediate_size_per_partition_after_pad = smallest_even_divide_number(
+            intermediate_size_per_partition, 128)
         hidden_size_after_pad = smallest_even_divide_number(hidden_size, 256)
 
         # Fused gate_up_proj (column parallel)
@@ -124,16 +132,15 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             2 * intermediate_size_per_partition_after_pad,
             hidden_size_after_pad // mxfp4_block,
             dtype=scale_dtype),
-                                        requires_grad=False)
+                                              requires_grad=False)
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         set_weight_attrs(w13_weight_scale, extra_weight_attrs)
 
         w13_bias = torch.nn.Parameter(torch.zeros(
             num_experts,
             2 * intermediate_size_per_partition_after_pad,
-            dtype=torch.bfloat16
-        ), 
-                                        requires_grad=False)
+            dtype=torch.bfloat16),
+                                      requires_grad=False)
         layer.register_parameter("w13_bias", w13_bias)
         set_weight_attrs(w13_bias, extra_weight_attrs)
 
@@ -143,7 +150,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             hidden_size_after_pad,
             intermediate_size_per_partition_after_pad // 2,
             dtype=weight_dtype),
-                                        requires_grad=False)
+                                       requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
@@ -152,16 +159,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             hidden_size_after_pad,
             intermediate_size_per_partition_after_pad // mxfp4_block,
             dtype=scale_dtype),
-                                        requires_grad=False)
+                                             requires_grad=False)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
-        w2_bias = torch.nn.Parameter(torch.zeros(
-            num_experts,
-            hidden_size_after_pad,
-            dtype=torch.bfloat16
-        ), 
-                                        requires_grad=False)
+        w2_bias = torch.nn.Parameter(torch.zeros(num_experts,
+                                                 hidden_size_after_pad,
+                                                 dtype=torch.bfloat16),
+                                     requires_grad=False)
         layer.register_parameter("w2_bias", w2_bias)
         set_weight_attrs(w2_bias, extra_weight_attrs)
 
@@ -173,16 +178,18 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         layer.w13_bias = Parameter(w13_bias, requires_grad=False)
         layer.w2_bias = Parameter(w2_bias, requires_grad=False)
 
-        w13_weight, w13_flex, w13_mx = swizzle_mxfp4(layer.w13_weight, layer.w13_weight_scale)
-        w2_weight, w2_flex, w2_mx = swizzle_mxfp4(layer.w2_weight, layer.w2_weight_scale)
+        w13_weight, w13_flex, w13_mx = swizzle_mxfp4(layer.w13_weight,
+                                                     layer.w13_weight_scale)
+        w2_weight, w2_flex, w2_mx = swizzle_mxfp4(layer.w2_weight,
+                                                  layer.w2_weight_scale)
 
-        self.w13_precision_config = PrecisionConfig(mx_ctx=w13_mx, flex_ctx=FlexCtx(rhs_data=w13_flex))
-        self.w2_precision_config = PrecisionConfig(mx_ctx=w2_mx, flex_ctx=FlexCtx(rhs_data=w2_flex))
+        self.w13_precision_config = PrecisionConfig(
+            mx_ctx=w13_mx, flex_ctx=FlexCtx(rhs_data=w13_flex))
+        self.w2_precision_config = PrecisionConfig(
+            mx_ctx=w2_mx, flex_ctx=FlexCtx(rhs_data=w2_flex))
 
         layer.w13_weight = Parameter(w13_weight, requires_grad=False)
         layer.w2_weight = Parameter(w2_weight, requires_grad=False)
-
-
 
     def apply(
         self,
@@ -206,10 +213,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # aviod import error when triton_kernel is not installed
+        # avoid import error when triton_kernel is not installed
         from vllm.model_executor.layers.fused_moe.triton_kernels_moe import (
             triton_kernel_moe_forward)
-        
+
         if enable_eplb:
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
