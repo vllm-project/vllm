@@ -25,8 +25,9 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.utils import bind_kv_cache, report_usage_stats
+from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.tpu_model_runner import TPUModelRunner
+from vllm.v1.worker.utils import bind_kv_cache
 
 logger = init_logger(__name__)
 
