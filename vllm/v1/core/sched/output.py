@@ -151,5 +151,11 @@ class SchedulerOutput:
     # the bitmask for the whole batch
     grammar_bitmask: Optional[npt.NDArray[np.int32]]
 
+    # The budget for the current thinking step.
+    requests_with_remaining_budget: dict[str, int] 
+
+    #thinking token id
+    end_thinking_token_id: int 
+
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None

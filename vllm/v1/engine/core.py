@@ -105,6 +105,11 @@ class EngineCore:
                 "compatibility may not be maintained.",
                 vllm_config.scheduler_config.scheduler_cls)
 
+        from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
+        parser = getattr(self.model_executor, "reasoning_parser", None)
+        special_token_ids = ReasoningParserManager.get_special_token_ids(parser)
+        thinking_budget = getattr(vllm_config, "thinking_budget", None)
+        
         self.scheduler: SchedulerInterface = Scheduler(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
@@ -112,6 +117,8 @@ class EngineCore:
             include_finished_set=vllm_config.parallel_config.data_parallel_size
             > 1,
             log_stats=self.log_stats,
+            special_token_ids=special_token_ids,
+            thinking_budget=thinking_budget,
         )
 
         # Setup MM Input Mapper.

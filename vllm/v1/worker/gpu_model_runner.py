@@ -1153,6 +1153,32 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             indices=out_indices,
         )
 
+    def _force_thinking(self, scheduler_output: "SchedulerOutput",
+                        valid_sampled_token_ids: torch.Tensor):
+        '''
+        Force thinking for Cohere models.
+        This is used to ensure that the model generates a specific number of tokens
+        The following function utilizes remaining thinking budget for each request
+        in order to decide if we need to enforece thinking on valid token ids
+        for the particular request. Eg: if remaining budget is 2, and
+        valid tokens for the request are [1, 2, 3, 4, 5], we will
+        remove the last 3 tokens and append end_thinking_token_id.
+        Resulting in [1,2,end_thinking_token_id]
+            '''
+        if scheduler_output.requests_with_remaining_budget:
+            for req_id, remaining_budget in \
+                scheduler_output.requests_with_remaining_budget.items():
+                req_index = self.input_batch.req_id_to_index[req_id]
+                sampled_tokens = valid_sampled_token_ids[req_index]
+                if len(sampled_tokens) > remaining_budget:
+                    clear_indices = \
+                        len(sampled_tokens) - remaining_budget
+                    if clear_indices > 0:
+                        del sampled_tokens[-clear_indices:]
+                    sampled_tokens.append(scheduler_output.end_thinking_token_id)
+
+    
+    
     def sync_and_slice_intermediate_tensors(
             self, num_tokens: int, intermediate_tensors: IntermediateTensors,
             sync_self: bool) -> IntermediateTensors:
@@ -1509,6 +1535,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
 
+        self._force_thinking(
+            scheduler_output,
+            valid_sampled_token_ids)
+        
         if not self.speculative_config:
             # Speculative decoding is not enabled.
             spec_token_ids = None

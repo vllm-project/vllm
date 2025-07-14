@@ -48,6 +48,8 @@ class Scheduler(SchedulerInterface):
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
+        special_token_ids: Optional[dict] = None,  # NEW
+        thinking_budget: Optional[int] = None,      # NEW
     ) -> None:
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
@@ -57,7 +59,10 @@ class Scheduler(SchedulerInterface):
         self.kv_events_config = vllm_config.kv_events_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
-
+        self.special_token_ids = special_token_ids
+        self.thinking_budget = thinking_budget
+        self.start_thinking_token_id = self.special_token_ids.get("start_token_id")
+        self.end_thinking_token_id = self.special_token_ids.get("end_token_id")
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
         # by update_from_outputs(). This is currently used in the multi-engine
@@ -159,6 +164,17 @@ class Scheduler(SchedulerInterface):
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
+
+
+    def get_current_usage(self, output_tokens, start_thinking_token_id):
+        try:
+            start_thinking_token_index = output_tokens.index(
+                start_thinking_token_id)
+            current_usage = len(output_tokens) - start_thinking_token_index - 1
+            return current_usage
+        except ValueError:
+            # If the start thinking token is not found, return None.
+            return None
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -536,6 +552,27 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids,
             scheduled_spec_decode_tokens,
         )
+
+        # COHERE START
+        # dictionary of all request that require forcing of thinking token
+        # # to be scheduled in this step.
+        requests_with_remaining_budget: dict[str, int] = {}
+        for request_id, request in self.requests.items():
+            if self.thinking_budget >=0:
+                thinking_budget_used =self.get_current_usage\
+                    (request.output_token_ids,
+                                        self.start_thinking_token_id)
+                if thinking_budget_used is not None and self.thinking_budget_used\
+                <= self.thinking_budget\
+                and self.end_thinking_token_id not in request.output_token_ids\
+                and len(request.output_token_ids) >0:
+                    current_remaining_budget = self.thinking_budget\
+                    - thinking_budget_used
+                    requests_with_remaining_budget[request_id] = current_remaining_budget
+                
+        #COHERE END
+
+
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(req,
