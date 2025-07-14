@@ -377,8 +377,6 @@ class ResponsesRequest(OpenAIBaseModel):
                 raise ValueError(
                     f"Tool '{tool_name}' has not been passed in `tools`.")
             tool = tools[tool_name]
-            print(f"Using tool '{tool_name}' for guided json decoding.")
-            print(f"Tool parameters: {tool.parameters}")
             return tool.parameters
 
         if self.tool_choice == "required":
@@ -448,7 +446,7 @@ class ResponsesRequest(OpenAIBaseModel):
             elif response_format.type == "json_object":
                 raise NotImplementedError("json_object is not supported")
         # Function call
-        elif self.tool_choice != "none" or self.tools is not None:
+        elif not (self.tool_choice == "none" or self.tools is None):
             guided_decoding = GuidedDecodingParams.from_optional(
                 json=self._get_guided_json_from_tool())
         return guided_decoding
