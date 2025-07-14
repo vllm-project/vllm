@@ -185,7 +185,7 @@ def get_per_layer_parameters(
     """
 
     layers = get_layers_from_vllm_config(vllm_config, Attention)
-    per_layer_params: dict[str, PerLayerParameters] = {}
+    per_layer_params: Dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():
         impl = layer.impl
