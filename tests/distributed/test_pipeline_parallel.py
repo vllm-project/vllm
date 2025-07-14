@@ -158,7 +158,7 @@ TEXT_GENERATION_MODELS = {
     "databricks/dbrx-instruct": PPTestSettings.fast(load_format="dummy"),
     "Deci/DeciLM-7B-instruct": PPTestSettings.fast(),
     "deepseek-ai/deepseek-llm-7b-chat": PPTestSettings.fast(),
-    "deepseek-ai/DeepSeek-V2-Lite-Chat": PPTestSettings.fast(),
+    "deepseek-ai/DeepSeek-V2-Lite-Chat": PPTestSettings.fast(tp_base=2),
     "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct": PPTestSettings.fast(),
     "tiiuae/falcon-7b": PPTestSettings.fast(),
     "google/gemma-1.1-2b-it": PPTestSettings.fast(),
@@ -352,6 +352,7 @@ def _compare_tp(
         # Temporary. Currently when zeromq + SPMD is used, it does not properly
         # terminate because of a Ray Compiled Graph issue.
         common_args.append("--disable-frontend-multiprocessing")
+        testing_ray_compiled_graph = True
     elif distributed_backend == "mp":
         # Both V0/V1 of multiprocessing executor support PP
         pp_env = {
@@ -395,7 +396,6 @@ def _compare_tp(
                              tp_env,
                              method=method)
     except Exception:
-        testing_ray_compiled_graph = pp_env is not None
         if testing_ray_compiled_graph and vllm_major_version == "0":
             # Ray Compiled Graph tests are flaky for V0,
             # so we don't want to fail the test
