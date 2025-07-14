@@ -399,8 +399,7 @@ def per_token_group_quant_fp8(
     if x_q is None:
         x_q = torch.empty_like(x, device=x.device, dtype=dtype)
 
-    M = x.numel() // group_size
-    N = group_size
+    # Allocate the scale tensor in either row- or column-major format.
     if column_major_scales:
         shape = (x.shape[-1] // group_size, ) + x.shape[:-1]
         x_s = torch.empty(shape, device=x.device,
@@ -409,6 +408,16 @@ def per_token_group_quant_fp8(
         shape = x.shape[:-1] + (x.shape[-1] // group_size, )
         x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
 
+    # prefer CUDA kernel if available
+    if current_platform.is_cuda():
+        torch.ops._C.per_token_group_fp8_quant(x, x_q, x_s, group_size, eps,
+                                               fp8_min, fp8_max,
+                                               is_blackwell_deep_gemm_used())
+        return x_q, x_s
+
+    # TRITON FALLBACK
+    M = x.numel() // group_size
+    N = group_size
     BLOCK = triton.next_power_of_2(N)
     # heuristics for number of warps
     num_warps = min(max(BLOCK // 256, 1), 8)
