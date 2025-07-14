@@ -71,7 +71,7 @@ scheduling_inference = PlacementGroupSchedulingStrategy(
     placement_group_bundle_index=0,
 )
 
-# Launch the vLLM inference engine. The ``enforce_eager`` flag reduces
+# Launch the vLLM inference engine. The `enforce_eager` flag reduces
 # start-up latency.
 llm = ray.remote(
     num_cpus=0,
