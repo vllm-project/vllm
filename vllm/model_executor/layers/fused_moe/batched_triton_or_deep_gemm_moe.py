@@ -37,7 +37,6 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 block_shape=block_shape,
                 per_act_token_quant=per_act_token_quant,
             ))
-        self.allow_deep_gemm = allow_deep_gemm
 
         self.batched_triton_experts = BatchedTritonExperts(
             max_num_tokens=max_num_tokens,

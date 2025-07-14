@@ -111,7 +111,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # topk_indices_dtype() int32
         #
         if expert_map is not None:
-            logger.warn_once(
+            logger.warning_once(
                 "The PPLX backend does not support expert mapping. "
                 "The provided `expert_map` will be ignored.")
         expert_map = None  #noqa: F841
@@ -204,7 +204,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             out_expert_x_scale=expert_x_scale,
             dp_x=a1q,
             dp_x_scale=a1q_scale,
-            indices=topk_ids,
+            indices=topk_ids.view(dtype=torch.uint32),
             bound_m=bound_m,
         )
 
@@ -249,7 +249,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             topk_weights = torch.ones_like(topk_weights)
 
         self.a2a.combine(out_tokens=output,
-                         indices=topk_ids,
+                         indices=topk_ids.view(dtype=torch.uint32),
                          weights=topk_weights,
                          expert_y=fused_expert_output,
                          bound_m=bound_m)
