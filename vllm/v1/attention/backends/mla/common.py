@@ -226,6 +226,7 @@ except ImportError:
 
 try:
     from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
+    from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
     flashinfer_available = True
 except ImportError:
     flashinfer_available = False
@@ -367,8 +368,9 @@ def use_flashinfer_prefill() -> bool:
         return current_platform.has_device_capability(100)
     return False
 
+
 def use_cudnn_prefill() -> bool:
-    if envs.VLLM_USE_CUDNN_PREFILL:
+    if flashinfer_available and envs.VLLM_USE_CUDNN_PREFILL:
         return current_platform.has_device_capability(100)
     return False
 
@@ -809,7 +811,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             self._pad_v = False
         elif use_cudnn_prefill():
             logger.debug_once("Using CUDNN prefill for MLA")
-            self._run_prefill_context_chunk = self._run_prefill_context_chunk_cudnn
+            self._run_prefill_context_chunk = \
+                self._run_prefill_context_chunk_cudnn
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_cudnn
             self._pad_v = False
         else:  # Use FlashAttention
@@ -899,11 +902,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             v=v,
             return_lse=return_softmax_lse,
         )
-        
-    def _run_prefill_new_tokens_cudnn(self, prefill: MLACommonPrefillMetadata, q,
-                                   k, v, return_softmax_lse):
-        from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
 
+    def _run_prefill_new_tokens_cudnn(self, prefill: MLACommonPrefillMetadata,
+                                      q, k, v, return_softmax_lse):
         output, lse = cudnn_batch_prefill_with_kv_cache(
             q=q,
             k_cache=k,
@@ -915,13 +916,13 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             actual_seq_lens_q=prefill.query_seq_lens.view(-1, 1, 1, 1),
             actual_seq_lens_kv=prefill.query_seq_lens.view(-1, 1, 1, 1),
             causal=True,
-            return_lse=True, # do not support Flase for now
-            is_cuda_graph_compatible=True, #Indicates actual_seq_lens are on GPU or CPU.
+            return_lse=True,  # do not support False for now
+            is_cuda_graph_compatible=
+            True,  #Indicates actual_seq_lens are on GPU or CPU.
         )
         if return_softmax_lse:
             return output, lse
         return output
-        
 
     def _run_prefill_context_chunk_fa(self, prefill: MLACommonPrefillMetadata,
                                       chunk_idx: int, q, k, v):
@@ -948,11 +949,10 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             v=v,
             return_lse=True,
         )
-        
-    def _run_prefill_context_chunk_cudnn(self, prefill: MLACommonPrefillMetadata,
-                                          chunk_idx: int, q, k, v):
-        from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
-        
+
+    def _run_prefill_context_chunk_cudnn(self,
+                                         prefill: MLACommonPrefillMetadata,
+                                         chunk_idx: int, q, k, v):
         assert prefill.chunked_context is not None
         return cudnn_batch_prefill_with_kv_cache(
             q=q,
@@ -963,10 +963,12 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             max_token_per_sequence=prefill.max_query_len,
             max_sequence_kv=prefill.chunked_context.max_seq_lens[chunk_idx],
             actual_seq_lens_q=prefill.query_seq_lens.view(-1, 1, 1, 1),
-            actual_seq_lens_kv=prefill.chunked_context.seq_lens[chunk_idx].view(-1, 1, 1, 1),
+            actual_seq_lens_kv=prefill.chunked_context.seq_lens[chunk_idx].
+            view(-1, 1, 1, 1),
             causal=False,
             return_lse=True,
-            is_cuda_graph_compatible=True, #Indicates actual_seq_lens are on GPU or CPU.
+            is_cuda_graph_compatible=
+            True,  #Indicates actual_seq_lens are on GPU or CPU.
         )
 
     def _v_up_proj(self, x):
