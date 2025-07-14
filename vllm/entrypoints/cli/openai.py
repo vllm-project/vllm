@@ -170,7 +170,10 @@ class CompleteCommand(CLISubcommand):
 
         print("Please enter prompt to complete:")
         while True:
-            input_prompt = input("> ")
+            try:
+                input_prompt = input("> ")
+            except EOFError:
+                return
             completion = client.completions.create(model=model_name,
                                                    prompt=input_prompt)
             output = completion.choices[0].text
