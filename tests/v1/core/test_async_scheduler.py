@@ -34,7 +34,7 @@ def test_stop_by_max_tokens(max_tokens: int):
     requests = create_requests(num_requests=2, max_tokens=max_tokens)
     req0, req1 = requests
 
-    sched_outputs = deque()
+    sched_outputs: deque[SchedulerOutput] = deque()
     scheduler.add_request(req0)
     sched_outputs.append(scheduler.schedule())
 
@@ -62,7 +62,7 @@ def test_abort():
     for req in requests:
         scheduler.add_request(req)
 
-    sched_outputs = deque()
+    sched_outputs: deque[SchedulerOutput] = deque()
     sched_outputs.append(scheduler.schedule())
     sched_outputs.append(scheduler.schedule())
 
@@ -99,7 +99,7 @@ def test_preempt():
     for req in requests:
         scheduler.add_request(req)
 
-    sched_outputs = deque()
+    sched_outputs: deque[SchedulerOutput] = deque()
     sched_outputs.append(scheduler.schedule())
     sched_outputs.append(scheduler.schedule())
 
@@ -149,7 +149,7 @@ def test_prefix_caching_for_prefill_dedup():
     scheduler.add_request(req0)
     scheduler.add_request(req1)
 
-    sched_outputs = deque()
+    sched_outputs: deque[SchedulerOutput] = deque()
     sched_output = scheduler.schedule()
     sched_outputs.append(sched_output)
     # Make sure prefix caching de-duplicates the prompts in the same step,
@@ -192,7 +192,7 @@ def test_prefix_caching_for_multi_turn():
 
     for req in requests:
         scheduler.add_request(req)
-    sched_outputs = deque()
+    sched_outputs: deque[SchedulerOutput] = deque()
     sched_outputs.append(scheduler.schedule())
     sched_outputs.append(scheduler.schedule())
 
