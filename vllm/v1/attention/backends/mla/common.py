@@ -226,7 +226,8 @@ except ImportError:
 
 try:
     from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
-    from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
+    from flashinfer.prefill import (  # noqa: F401
+        cudnn_batch_prefill_with_kv_cache)
     flashinfer_available = True
 except ImportError:
     flashinfer_available = False
