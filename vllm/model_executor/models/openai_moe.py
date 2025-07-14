@@ -248,11 +248,13 @@ class OpenAIMoeForCausalLM(nn.Module):
         world_size = dist.get_world_size() if dist.is_initialized() else 1
         num_experts = self.config.num_experts
         intermediate_size = self.config.intermediate_size
-        per_rank_intermediate_size = intermediate_size // world_size
+        intermediate_size_block = intermediate_size // mxfp4_block
+        per_rank_intermediate_size_block = (intermediate_size_block // world_size) + 1 if intermediate_size_block % world_size != 0 else (intermediate_size_block // world_size)
+        per_rank_intermediate_size = per_rank_intermediate_size_block * mxfp4_block
 
         # Calculate common slicing bounds for current rank
         rank_start = my_rank * per_rank_intermediate_size
-        rank_end = (my_rank + 1) * per_rank_intermediate_size
+        rank_end = min((my_rank + 1) * per_rank_intermediate_size, intermediate_size)
 
         # Attention heads per rank
         heads_per_rank = self.config.num_attention_heads // world_size
