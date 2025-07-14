@@ -193,6 +193,7 @@ def as_seq_cls_model(cls: _T) -> _T:
 
             config = vllm_config.model_config.hf_config
             quant_config = vllm_config.quant_config
+            score_bias: bool = getattr(config, 'score_bias', False)
 
             self.vllm_config = vllm_config
             self.task = vllm_config.model_config.task
@@ -203,7 +204,7 @@ def as_seq_cls_model(cls: _T) -> _T:
                                            config.num_labels,
                                            quant_config=quant_config,
                                            input_is_parallel=False,
-                                           bias=False,
+                                           bias=score_bias,
                                            prefix=maybe_prefix(
                                                prefix, "score"))
 
@@ -349,13 +350,13 @@ def load_weights_using_from_2_way_softmax(
 
     false_id = tokenizer.convert_tokens_to_ids(tokens[0])
     true_id = tokenizer.convert_tokens_to_ids(tokens[1])
-    weight = model.lm_head.weight.data[[true_id]].to(
+    score_weight = model.lm_head.weight.data[[true_id]].to(
         torch.float32) - model.lm_head.weight.data[[false_id]].to(
             torch.float32)
 
     param = model.score.weight
     weight_loader = getattr(param, "weight_loader", default_weight_loader)
-    weight_loader(param, weight)
+    weight_loader(param, score_weight)
 
     del model.lm_head
     loaded_weights.add("score.weight")
@@ -368,14 +369,14 @@ def load_weights_no_post_processing(model,
                                                             torch.Tensor]]):
     from vllm.model_executor.layers.vocab_parallel_embedding import (
         ParallelLMHead)
+    from vllm.model_executor.model_loader.weight_utils import (
+        default_weight_loader)
     from vllm.model_executor.models.utils import AutoWeightsLoader
 
     model_config = model.vllm_config.model_config
     tokens = getattr(model.config, "classifier_from_token", [])
     tokens = cast(list[int], tokens)
     assert len(tokens) > 0
-
-    device = model.score.weight.device
 
     if model.config.tie_word_embeddings:
         model.lm_head = model.model.embed_tokens
@@ -394,8 +395,11 @@ def load_weights_no_post_processing(model,
                               trust_remote_code=model_config.trust_remote_code)
 
     token_ids = [tokenizer.convert_tokens_to_ids(t) for t in tokens]
-    score_weight = model.lm_head.weight.data[token_ids].to(device)
-    model.score.weight.data.copy_(score_weight)
+    score_weight = model.lm_head.weight.data[token_ids]
+
+    param = model.score.weight
+    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+    weight_loader(param, score_weight)
 
     del model.lm_head
     loaded_weights.add("score.weight")

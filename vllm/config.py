@@ -551,7 +551,7 @@ class ModelConfig:
         # For pooling models, self.task is used to indicate the
         # user-selected task
         if self.task == "score":
-            if self.registry.is_cross_encoder_model(self.architectures):
+            if self._is_classify_task(self.architectures):
                 self.task = "classify"
             else:
                 self.task = "embed"
@@ -569,7 +569,6 @@ class ModelConfig:
         runner_type = self._resolve_runner(self.runner, self.task,
                                            supported_runner_types,
                                            all_supported_tasks)
-
         logger.debug("Selected runner type: %s", runner_type)
         # For pooling models, self.task is used to indicate the
         # user-selected task
@@ -806,6 +805,12 @@ class ModelConfig:
                 f"one of {get_args(TokenizerMode)}.")
         self.tokenizer_mode = tokenizer_mode
 
+    def _is_classify_task(self, architectures):
+        for arch in architectures:
+            if arch.endswith("ForSequenceClassification"):
+                return True
+        return self.registry.is_cross_encoder_model(architectures)
+
     def _get_preferred_pooling_task(
         self,
         architectures: list[str],
@@ -813,14 +818,11 @@ class ModelConfig:
         model_id = self.model
         if get_pooling_config(model_id, self.revision):
             return "embed"
-        if self.registry.is_cross_encoder_model(architectures):
-            return "classify"
         if self.registry.is_transcription_model(architectures):
             return "transcription"
 
         suffix_to_preferred_task: list[tuple[str, _ResolvedTask]] = [
             # Other models follow this pattern
-            ("ForSequenceClassification", "classify"),
             ("EmbeddingModel", "embed"),
             ("RewardModel", "reward"),
         ]
@@ -878,11 +880,14 @@ class ModelConfig:
         self,
         task_option: TaskOption,
     ) -> dict[RunnerType, list[_ResolvedTask]]:
-        return {
-            "generate": self._get_supported_generation_tasks(task_option),
-            "pooling": self._get_supported_pooling_tasks(task_option),
-            "draft": ["draft"]
-        }
+        if self._is_classify_task(self.architectures):
+            return {"generate": [], "pooling": ["classify"], "draft": []}
+        else:
+            return {
+                "generate": self._get_supported_generation_tasks(task_option),
+                "pooling": self._get_supported_pooling_tasks(task_option),
+                "draft": ["draft"]
+            }
 
     def _get_supported_runner_types(
         self,
@@ -925,12 +930,16 @@ class ModelConfig:
                     f"Available tasks for runner={task_runner!r}: "
                     f"{supported_tasks[task_runner]}")
 
+        if "classify" in supported_tasks.get("pooling", []):
+            # When multiple pooling tasks are present, default to
+            # pooling (eg cross-encoder) for non-standard architectures.
+            return "pooling"
+
         suffix_to_preferred_runner: list[tuple[str, RunnerType]] = [
             ("ForCausalLM", "generate"),
             ("ForConditionalGeneration", "generate"),
             ("ChatModel", "generate"),
             ("LMHeadModel", "generate"),
-            ("ForSequenceClassification", "pooling"),
             ("EmbeddingModel", "pooling"),
             ("RewardModel", "pooling"),
         ]
@@ -940,10 +949,6 @@ class ModelConfig:
             if arch.endswith(suffix) and pref_runner in supported_runner_types:
                 return pref_runner
 
-        if "classify" in supported_tasks.get("pooling", []):
-            # When multiple pooling tasks are present, default to
-            # pooling (eg cross-encoder) for non-standard architectures.
-            return "pooling"
         if "generate" in supported_runner_types:
             return "generate"
         if "pooling" in supported_runner_types:

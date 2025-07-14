@@ -22,7 +22,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.adapters import (as_embedding_model,
-                                                 as_reward_model)
+                                                 as_reward_model, as_seq_cls_model)
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.utils import is_pin_memory_available
 
@@ -238,6 +238,25 @@ def get_model_architecture(
     vllm_supported_archs = ModelRegistry.get_supported_archs()
     vllm_not_supported = not any(arch in vllm_supported_archs
                                  for arch in architectures)
+
+    if vllm_not_supported:
+        # try automatic conversion in adapters.py
+        for arch in architectures:
+            if not arch.endswith("ForSequenceClassification"):
+                continue
+
+            assert model_config.task in ["auto", "classify"]
+            model_config.task = "classify"
+
+            old_arch = arch
+            arch = arch.replace("ForSequenceClassification", "ForCausalLM")
+            logger.info("Automatic conversion %s -> %s", arch, old_arch)
+            vllm_supported = not any(arch in vllm_supported_archs
+                                         for arch in architectures)
+            if vllm_supported:
+                architectures = [arch]
+                vllm_not_supported = False
+
     if (model_config.model_impl == ModelImpl.TRANSFORMERS or
             model_config.model_impl != ModelImpl.VLLM and vllm_not_supported):
         architectures = resolve_transformers_arch(model_config, architectures)
@@ -250,9 +269,7 @@ def get_model_architecture(
     if model_config.task == "embed":
         model_cls = as_embedding_model(model_cls)
     elif model_config.task == "classify":
-        # Cannot automatically run as_seq_cls_model,
-        # otherwise it will cause a circular reference on is_cross_encoder_model
-        pass
+        model_cls = as_seq_cls_model(model_cls)
     elif model_config.task == "reward":
         model_cls = as_reward_model(model_cls)
 
