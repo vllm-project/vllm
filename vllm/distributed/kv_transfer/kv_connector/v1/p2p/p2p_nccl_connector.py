@@ -244,11 +244,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
             request_id = request.request_id
             ip, port = self.parse_request_id(request_id, True)
             remote_address = ip + ":" + str(port + self._rank)
-            self.p2p_nccl_engine.send_tensor(request_id + "#" + layer_name,
-                                             kv_layer, remote_address,
-                                             request.slot_mapping,
-                                             isinstance(attn_metadata,
-                                                        MLACommonMetadata))
+            self.p2p_nccl_engine.send_tensor(
+                request_id + "#" + layer_name, kv_layer, remote_address,
+                request.slot_mapping,
+                isinstance(attn_metadata, MLACommonMetadata))
 
     def wait_for_save(self):
         if self.is_producer:
