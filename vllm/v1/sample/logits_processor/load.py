@@ -3,16 +3,17 @@
 import importlib
 import itertools
 import logging
-from typing import Optional, Union
+from typing import Optional, Union, TYPE_CHECKING
 
 import torch
-
-from vllm.config import VllmConfig
 from vllm.v1.sample.logits_processor import LogitsProcessor
 from vllm.v1.sample.logits_processor.impls import (LogitBiasLogitsProcessor,
                                                    MinPLogitsProcessor,
                                                    MinTokensLogitsProcessor)
 from vllm.v1.sample.logits_processor.state import LogitsProcessors
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +144,7 @@ def load_custom_logitsprocs(
             _load_logitsprocs_by_fqcns(logits_processors))
 
 
-def build_logitsprocs(vllm_config: VllmConfig, 
+def build_logitsprocs(vllm_config: "VllmConfig", 
                       device: torch.device, 
                       is_pin_memory: bool) -> LogitsProcessors:
     custom_logitsprocs_classes = vllm_config.logits_processors or []

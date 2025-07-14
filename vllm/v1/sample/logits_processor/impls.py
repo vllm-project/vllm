@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import torch
 
@@ -10,11 +10,12 @@ from vllm.v1.sample.logits_processor.core import LogitsProcessor
 from vllm.v1.sample.logits_processor.state import (BatchUpdate,
                                                    MoveDirectionality)
 
-from vllm.config import VllmConfig
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 class MinPLogitsProcessor(LogitsProcessor):
 
-    def __init__(self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool):
+    def __init__(self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool):
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.min_p_count: int = 0
 
@@ -183,7 +184,7 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
 
 class MinTokensLogitsProcessor(LogitsProcessor):
 
-    def __init__(self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool):
+    def __init__(self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool):
         # index -> (min_toks, output_token_ids, stop_token_ids)
         self.device=device
         self.pin_memory=is_pin_memory
