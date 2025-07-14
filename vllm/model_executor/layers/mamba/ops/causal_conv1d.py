@@ -55,7 +55,6 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     USE_PAD_SLOT: tl.constexpr,
     NP2_STATELEN: tl.constexpr,
-    DECODE_SEQLEN: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
@@ -415,7 +414,7 @@ def causal_conv1d_fn(
         activation = "silu"
 
     args = None
-    out = torch.zeros_like(x)
+    out = torch.empty_like(x)
     if metadata is not None:
         cu_seqlen = metadata.cu_seqlen
         nums_dict = metadata.nums_dict
@@ -606,7 +605,6 @@ def causal_conv1d_fn(
         IS_CONTINUOUS_BATCHING=cache_indices is not None,
         USE_PAD_SLOT=pad_slot_id is not None,
         NP2_STATELEN=np2_statelen,
-        DECODE_SEQLEN=1,
         #launch_cooperative_grid=True
         BLOCK_M=8,
         BLOCK_N=256,
