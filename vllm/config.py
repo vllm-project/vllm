@@ -71,6 +71,7 @@ if TYPE_CHECKING:
     ConfigType = type[DataclassInstance]
     HfOverrides = Union[dict, Callable[[type], type]]
 else:
+    DataclassInstance = Any
     PlacementGroup = Any
     PretrainedConfig = Any
     ExecutorBase = Any
@@ -87,7 +88,7 @@ else:
                            "vllm.model_executor.models")
 
 logger = init_logger(__name__)
-
+DataclassInstanceT = TypeVar("DataclassInstanceT", bound=DataclassInstance)
 ConfigT = TypeVar("ConfigT", bound=ConfigType)
 
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
@@ -532,16 +533,12 @@ class ModelConfig:
             self.config_format = ConfigFormat(self.config_format)
 
         hf_config = get_config(self.hf_config_path or self.model,
-                               self.trust_remote_code, self.revision,
-                               self.code_revision, self.config_format)
-
-        if hf_overrides_kw:
-            logger.debug("Overriding HF config with %s", hf_overrides_kw)
-            hf_config.update(hf_overrides_kw)
-        if hf_overrides_fn:
-            logger.debug("Overriding HF config with %s", hf_overrides_fn)
-            hf_config = hf_overrides_fn(hf_config)
-
+                               self.trust_remote_code,
+                               self.revision,
+                               self.code_revision,
+                               self.config_format,
+                               hf_overrides_kw=hf_overrides_kw,
+                               hf_overrides_fn=hf_overrides_fn)
         self.hf_config = hf_config
 
         self.hf_text_config = get_hf_text_config(self.hf_config)
@@ -1567,7 +1564,7 @@ class ModelConfig:
 
 BlockSize = Literal[1, 8, 16, 32, 64, 128]
 CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
-PrefixCachingHashAlgo = Literal["builtin", "sha256"]
+PrefixCachingHashAlgo = Literal["builtin", "sha256", "sha256_cbor_64bit"]
 
 
 @config
@@ -1612,7 +1609,12 @@ class CacheConfig:
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "builtin"
     """Set the hash algorithm for prefix caching:\n
     - "builtin" is Python's built-in hash.\n
-    - "sha256" is collision resistant but with certain overheads."""
+    - "sha256" is collision resistant but with certain overheads.
+    This option uses Pickle for object serialization before hashing.\n
+    - "sha256_cbor_64bit" provides a reproducible, cross-language compatible 
+    hash. It serializes objects using canonical CBOR and hashes them with 
+    SHA-256. The resulting hash consists of the lower 64 bits of the SHA-256
+    digest."""
     cpu_offload_gb: float = 0
     """The space in GiB to offload to CPU, per GPU. Default is 0, which means
     no offloading. Intuitively, this argument can be seen as a virtual way to
@@ -5053,3 +5055,21 @@ class SpeechToTextConfig:
     @property
     def allow_audio_chunking(self) -> bool:
         return self.min_energy_split_window_size is not None
+
+
+def update_config(config: DataclassInstanceT,
+                  overrides: dict[str, Any]) -> DataclassInstanceT:
+    processed_overrides = {}
+    for field_name, value in overrides.items():
+        assert hasattr(
+            config, field_name), f"{type(config)} has no field `{field_name}`"
+        current_value = getattr(config, field_name)
+        if is_dataclass(current_value) and not is_dataclass(value):
+            assert isinstance(value, dict), (
+                f"Overrides to {type(config)}.{field_name} must be a dict"
+                f"  or {type(current_value)}, but got {type(value)}")
+            value = update_config(
+                current_value,  # type: ignore[type-var]
+                value)
+        processed_overrides[field_name] = value
+    return replace(config, **processed_overrides)

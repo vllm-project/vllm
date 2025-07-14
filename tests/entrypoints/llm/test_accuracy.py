@@ -71,9 +71,8 @@ def test_lm_eval_accuracy_v1_engine(model, monkeypatch: pytest.MonkeyPatch):
             # Limit compilation time for TPU V1
 
             if model == "google/gemma-3-1b-it":
-                pytest.skip(
-                    "Temporarily disabled due to test failures"
-                    "(timeout or accuracy mismatch). Re-enable once fixed.")
+                # TPU + google/gemma-3-1b-it + xet doesn't work well.
+                m.setenv("HF_HUB_DISABLE_XET", "1")
 
             more_args = "max_model_len=2048,max_num_seqs=64"
 

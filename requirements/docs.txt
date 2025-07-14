@@ -11,6 +11,7 @@ ruff
 # Required for argparse hook only
 -f https://download.pytorch.org/whl/cpu
 cachetools
+cbor2
 cloudpickle
 fastapi
 msgspec
