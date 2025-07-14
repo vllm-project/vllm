@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Dict, List, Literal, Optional, Tuple, TypedDict, Union
+from typing import Any, Literal, Optional, TypedDict, Union
 
 import numpy as np
 import torch
@@ -586,7 +586,7 @@ class Phi4MMAudioEmbedding(nn.Module):
 
         return audio_embeds.flatten(0, 1)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
+    def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -617,7 +617,7 @@ class Phi4MMAudioEmbedding(nn.Module):
 
 class Phi4MMImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: Union[torch.Tensor, List[torch.Tensor]]
+    data: Union[torch.Tensor, list[torch.Tensor]]
     """
     Shape:
     `(batch_size * num_images, 1 + num_patches, num_channels, height, width)`
@@ -642,7 +642,7 @@ class Phi4MMImagePixelInputs(TypedDict):
 
 class Phi4MMImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
-    data: Union[torch.Tensor, List[torch.Tensor]]
+    data: Union[torch.Tensor, list[torch.Tensor]]
     """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
 
     `hidden_size` must match the hidden size of language model backbone.
@@ -651,7 +651,7 @@ class Phi4MMImageEmbeddingInputs(TypedDict):
 
 class Phi4MMAudioFeatureInputs(TypedDict):
     type: Literal["audio_features"]
-    data: Union[torch.Tensor, List[torch.Tensor]]
+    data: Union[torch.Tensor, list[torch.Tensor]]
     """Shape: `(batch_size * num_audios, 80, M)"""
 
 
@@ -1223,8 +1223,8 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         ]
         return audio_embeds
 
-    def _parse_and_validate_image_input(self,
-                                        **kwargs: object) -> Optional[Dict]:
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[Phi4MMImagePixelInputs]:
         image_pixel_values: NestedTensors = kwargs.get("image_pixel_values")
         if image_pixel_values is None:
             return None
@@ -1430,8 +1430,8 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> None:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 

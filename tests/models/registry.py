@@ -55,9 +55,6 @@ class _HfExamplesInfo:
     fail.
     """
 
-    revision: Optional[str] = None
-    """The revision of the model to load."""
-
     trust_remote_code: bool = False
     """The ``trust_remote_code`` level required to load the model."""
 
