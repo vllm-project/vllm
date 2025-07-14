@@ -406,8 +406,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 attn_metadata.decode_wrapper = self._get_decode_wrapper()
                 if not FlashInferBackend.use_trtllm_decode_attention(
                         self._num_decodes, attn_metadata.max_seq_len,
-                        attn_metadata.kv_data_type, attn_metadata.num_qo_heads,
-                        attn_metadata.num_kv_heads, attn_metadata.head_dim):
+                        self.runner.cache_config.cache_dtype,
+                        attn_metadata.num_qo_heads, attn_metadata.num_kv_heads,
+                        attn_metadata.head_dim):
                     attn_metadata.decode_wrapper.plan(
                         attn_metadata.paged_kv_indptr[:self._num_decodes + 1],
                         attn_metadata.paged_kv_indices,
@@ -594,10 +595,10 @@ class FlashInferImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache: shape - 
+            kv_cache: shape -
             # NHD: [num_blocks, 2, block_size, num_kv_heads, head_size]
             # HND: [num_blocks, 2,  num_kv_heads, block_size, head_size]
-            
+
 
             attn_metadata: Metadata for attention.
         Returns:
