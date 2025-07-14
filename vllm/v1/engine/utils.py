@@ -403,7 +403,7 @@ class CoreEngineActorManager:
 
         return placement_groups, local_dp_ranks
 
-    def scale_up(self, old_vllm_config: VllmConfig,
+    def scale_up(self, cur_vllm_config: VllmConfig,
                  new_data_parallel_size: int) -> None:
         import copy
 
@@ -414,19 +414,20 @@ class CoreEngineActorManager:
 
         from vllm.v1.engine.core import DPEngineCoreActor
 
-        old_data_parallel_size = len(self.local_engine_actors) + \
+        cur_data_parallel_size = len(self.local_engine_actors) + \
             len(self.remote_engine_actors)
 
-        assert new_data_parallel_size > old_data_parallel_size, (
-            "New data parallel size must be greater than old data parallel "
-            "size for scale up")
+        assert new_data_parallel_size > cur_data_parallel_size, (
+            f"New data parallel size {new_data_parallel_size} must be greater "
+            f"than current data parallel size {cur_data_parallel_size} "
+            "for scale up")
 
         placement_groups, local_dp_ranks = \
             self.add_dp_placement_groups(
-                old_vllm_config, new_data_parallel_size)
+                cur_vllm_config, new_data_parallel_size)
 
-        world_size = old_vllm_config.parallel_config.world_size
-        dp_master_ip = old_vllm_config.parallel_config.data_parallel_master_ip
+        world_size = cur_vllm_config.parallel_config.world_size
+        dp_master_ip = cur_vllm_config.parallel_config.data_parallel_master_ip
         new_local_engines = 0
 
         runtime_env = RuntimeEnv(env_vars=self.env_vars_dict
@@ -434,8 +435,8 @@ class CoreEngineActorManager:
         for i, (pg,
                 local_rank) in enumerate(zip(placement_groups,
                                              local_dp_ranks)):
-            rank = old_data_parallel_size + i
-            dp_vllm_config = copy.deepcopy(old_vllm_config)
+            rank = cur_data_parallel_size + i
+            dp_vllm_config = copy.deepcopy(cur_vllm_config)
             dp_vllm_config.parallel_config.data_parallel_size = \
                 new_data_parallel_size
             dp_vllm_config.parallel_config.placement_group = pg
@@ -449,7 +450,7 @@ class CoreEngineActorManager:
                 new_local_engines += 1
                 # Update data_parallel_size_local
                 dp_vllm_config.parallel_config.data_parallel_size_local = (
-                    old_vllm_config.parallel_config.data_parallel_size_local +
+                    cur_vllm_config.parallel_config.data_parallel_size_local +
                     new_local_engines)
 
             actor = ray.remote(DPEngineCoreActor).options(
@@ -489,19 +490,22 @@ class CoreEngineActorManager:
         for actor in actors:
             self.run_refs.append(actor.run.remote())
 
-        old_vllm_config.parallel_config.data_parallel_size = \
+        cur_vllm_config.parallel_config.data_parallel_size = \
             new_data_parallel_size
         # Update old_vllm_config with new data_parallel_size_local if any new
         # local engines were added
         if new_local_engines > 0:
-            old_vllm_config.parallel_config.data_parallel_size_local += \
+            cur_vllm_config.parallel_config.data_parallel_size_local += \
                 new_local_engines
 
-    def scale_down(self, old_data_parallel_size: int,
+    def scale_down(self, cur_data_parallel_size: int,
                    new_data_parallel_size: int) -> None:
         import ray
-        assert old_data_parallel_size > new_data_parallel_size
-        for _ in range(old_data_parallel_size - new_data_parallel_size):
+        assert cur_data_parallel_size > new_data_parallel_size, (
+            f"cur_data_parallel_size {cur_data_parallel_size} must be greater "
+            f"than new_data_parallel_size {new_data_parallel_size} "
+            "for scale down")
+        for _ in range(cur_data_parallel_size - new_data_parallel_size):
             pg = self.created_placement_groups.pop()
             is_local = self.placement_group_is_local.pop()
             if is_local:

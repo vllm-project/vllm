@@ -1088,10 +1088,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     async def scale_up(self, new_data_parallel_size: int) -> None:
         """Scale up the data parallel size by creating new engine cores
         and reconfiguring existing ones."""
-        current_dp_size = len(self.core_engines)
+        cur_data_parallel_size = len(self.core_engines)
 
-        if new_data_parallel_size <= current_dp_size:
-            return
+        assert new_data_parallel_size > cur_data_parallel_size, (
+            f"new_data_parallel_size {new_data_parallel_size} must be greater "
+            f"than cur_data_parallel_size {cur_data_parallel_size} "
+            "for scale up")
 
         # Phase 1: Send reconfigure messages to all existing engines and wait
         # for them to be sent
@@ -1124,7 +1126,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         # Create new CoreEngine objects for the new engines
         new_engine_identities = set()
-        for i in range(current_dp_size, new_data_parallel_size):
+        for i in range(cur_data_parallel_size, new_data_parallel_size):
             new_engine = i.to_bytes(2, "little")
             self.core_engines.append(new_engine)
             new_engine_identities.add(new_engine)
@@ -1160,17 +1162,19 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     async def scale_down(self, new_data_parallel_size: int) -> None:
         """Scale down the data parallel size by shutting down and
         reconfiguring existing engine cores."""
-        current_dp_size = len(self.core_engines)
+        cur_data_parallel_size = len(self.core_engines)
 
-        if new_data_parallel_size >= current_dp_size:
-            return
+        assert new_data_parallel_size <= cur_data_parallel_size, (
+            f"new_data_parallel_size {new_data_parallel_size} must be less "
+            f"than cur_data_parallel_size {cur_data_parallel_size} "
+            "for scale down")
 
         # one for stateless group in EngineCore, one for worker's distributed
         # world group
         self.vllm_config.parallel_config.data_parallel_master_port += 2
 
         reconfig_futures = []
-        for old_dp_rank, engine in enumerate(self.core_engines):
+        for cur_dp_rank, engine in enumerate(self.core_engines):
             reconfig_request = ReconfigureDistributedRequest(
                 new_data_parallel_size=new_data_parallel_size,
                 new_data_parallel_rank=-1,  # Keep original rank
@@ -1179,20 +1183,20 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 data_parallel_master_ip,
                 new_data_parallel_master_port=self.vllm_config.parallel_config.
                 data_parallel_master_port)
-            if old_dp_rank >= new_data_parallel_size:
+            if cur_dp_rank >= new_data_parallel_size:
                 reconfig_request.new_data_parallel_rank = -2
             future = await self._send_reconfig_message(reconfig_request,
                                                        engine)
             reconfig_futures.append(future)
 
-        for _ in range(new_data_parallel_size, current_dp_size):
+        for _ in range(new_data_parallel_size, cur_data_parallel_size):
             self.core_engines.pop()
 
         await asyncio.gather(*reconfig_futures)
 
         assert isinstance(self.resources.engine_manager,
                           CoreEngineActorManager)
-        self.resources.engine_manager.scale_down(current_dp_size,
+        self.resources.engine_manager.scale_down(cur_data_parallel_size,
                                                  new_data_parallel_size)
 
         self._ensure_stats_update_task()
