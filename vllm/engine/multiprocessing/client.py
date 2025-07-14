@@ -539,7 +539,7 @@ class MQLLMEngineClient(EngineClient):
         if isinstance(params, SamplingParams) and \
             params.guided_decoding is not None:
             raise ValueError(
-                "Structured outputs is not longer supported in V0. Switch to V1 for better performance"  # noqa: E501
+                "Structured outputs is no longer supported in V0. Switch to V1 for better performance"  # noqa: E501
             )
 
         # 1) Create output queue for this requests.
