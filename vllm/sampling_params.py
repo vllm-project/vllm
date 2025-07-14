@@ -43,7 +43,8 @@ class GuidedDecodingParams:
     disable_any_whitespace: bool = False
     disable_additional_properties: bool = False
     whitespace_pattern: Optional[str] = None
-    structural_tag: Optional[str] = None
+    structural_tag: Optional[str] = None,
+    thinking_budget: Optional[int] = -1
 
     @staticmethod
     def from_optional(
@@ -55,6 +56,7 @@ class GuidedDecodingParams:
         backend: Optional[str] = None,
         whitespace_pattern: Optional[str] = None,
         structural_tag: Optional[str] = None,
+        thinking_budget: Optional[int] = -1
     ) -> Optional["GuidedDecodingParams"]:
         if all(arg is None for arg in (json, regex, choice, grammar,
                                        json_object, structural_tag)):
@@ -71,6 +73,7 @@ class GuidedDecodingParams:
             backend=backend,
             whitespace_pattern=whitespace_pattern,
             structural_tag=structural_tag,
+            thinking_budget=thinking_budget
         )
 
     def __post_init__(self):

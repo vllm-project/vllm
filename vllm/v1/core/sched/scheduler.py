@@ -558,15 +558,15 @@ class Scheduler(SchedulerInterface):
         # # to be scheduled in this step.
         requests_with_remaining_budget: dict[str, int] = {}
         for request_id, request in self.requests.items():
-            if self.thinking_budget >=0:
+            if request.sampling_params.thinking_budget >=0:
                 thinking_budget_used =self.get_current_usage\
                     (request.output_token_ids,
                                         self.start_thinking_token_id)
-                if thinking_budget_used is not None and self.thinking_budget_used\
-                <= self.thinking_budget\
+                if thinking_budget_used is not None and request.sampling_params.thinking_budget_used\
+                <= request.sampling_params.thinking_budget\
                 and self.end_thinking_token_id not in request.output_token_ids\
                 and len(request.output_token_ids) >0:
-                    current_remaining_budget = self.thinking_budget\
+                    current_remaining_budget = request.sampling_params.thinking_budget\
                     - thinking_budget_used
                     requests_with_remaining_budget[request_id] = current_remaining_budget
                 

@@ -272,7 +272,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     prompt_logprobs: Optional[int] = None
     allowed_token_ids: Optional[list[int]] = None
-    bad_words: list[str] = Field(default_factory=list)
+    bad_words: list[str] = Field(default_factory=list),
+    thinking_budget: Optional[int] = -1
     # --8<-- [end:chat-completion-sampling-params]
 
     # --8<-- [start:chat-completion-extra-params]
@@ -563,6 +564,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
             bad_words= self.bad_words,
+            thinking_budget=self.thinking_budget,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
         )
