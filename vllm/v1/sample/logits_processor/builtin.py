@@ -278,13 +278,14 @@ def process_dict_updates(
 class MaxThinkTokensLogitsProcessor(LogitsProcessor):
     """A logits processor that limits the maximum number of thinking tokens."""
 
-    def __init__(self, reasoning_config: ReasoningConfig, pin_memory: bool, device: torch.device):
+    def __init__(self, reasoning_config: ReasoningConfig, pin_memory: bool,
+                 device: torch.device):
         """
         Args:
-            think_start_token_id (int): Token ID for the start of thinking section.
-            think_end_token_id (int): Token ID for the end of thinking section.
-            pin_memory (bool): Whether to use pinned memory for tensors.
-            device (torch.device): Device to use for tensor operations.
+          reasoning_config: Configuration for reasoning, which includes
+            the token IDs for thinking start and end.
+          pin_memory (bool): Whether to use pinned memory for tensors.
+          device (torch.device): Device to use for tensor operations.
         """
         super().__init__()
         self.think_start_token_id = reasoning_config.think_start_token_id
@@ -300,19 +301,25 @@ class MaxThinkTokensLogitsProcessor(LogitsProcessor):
             return -1
 
     def is_argmax_invariant(self) -> bool:
-        """This logits processor can change the outcome of greedy sampling
-        by forcing that the thinking section ends after a certain number of tokens."""
+        """This logits processor can change the outcome of
+        greedy sampling by forcing that the thinking section
+        ends after a certain number of tokens."""
         return False
 
     def update_state(self, batch_update: Optional[BatchUpdate]):
         if batch_update:
-            for index, params, prompt_tok_ids, output_tok_ids in batch_update.added:
-                max_think_tokens = params.max_think_tokens if isinstance(params, SamplingParams) else None
+            for (index, params, prompt_tok_ids,
+                 output_tok_ids) in batch_update.added:
+                max_think_tokens = (params.max_think_tokens if isinstance(
+                    params, SamplingParams) else None)
                 if max_think_tokens is not None:
-                    last_start = self._find_last_token_index(prompt_tok_ids, self.think_start_token_id)
-                    last_end = self._find_last_token_index(prompt_tok_ids, self.think_end_token_id)
+                    last_start = self._find_last_token_index(
+                        prompt_tok_ids, self.think_start_token_id)
+                    last_end = self._find_last_token_index(
+                        prompt_tok_ids, self.think_end_token_id)
                     in_think = last_start > last_end
-                    count = len(prompt_tok_ids) - (last_start + 1) if in_think else 0
+                    count = len(prompt_tok_ids) - (last_start +
+                                                   1) if in_think else 0
 
                     self._state[index] = {
                         "in_think": in_think,
@@ -323,13 +330,14 @@ class MaxThinkTokensLogitsProcessor(LogitsProcessor):
                     }
 
             for index in batch_update.removed:
-                self._state.pop(index, None)
+                self._state.pop(index, {})
 
             for i1, i2, direction in batch_update.moved:
                 if direction == MoveDirectionality.SWAP:
-                    self._state[i1], self._state[i2] = self._state[i2], self._state[i1]
+                    self._state[i1], self._state[i2] = self._state[
+                        i2], self._state[i1]
                 else:
-                    self._state[i2] = self._state.pop(i1, None)
+                    self._state[i2] = self._state.pop(i1, {})
 
         # Update in_think and count for all active requests
         for state in self._state.values():
@@ -360,7 +368,8 @@ class MaxThinkTokensLogitsProcessor(LogitsProcessor):
             if not state:
                 continue
 
-            if state["in_think"] and state["count"] >= state["max_think_tokens"]:
+            if state["in_think"] and state["count"] >= state[
+                    "max_think_tokens"]:
                 mask[index] = True
 
         if mask.any():

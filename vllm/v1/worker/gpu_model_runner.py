@@ -24,8 +24,8 @@ from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
-from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
-                         get_layers_from_vllm_config, update_config)
+from vllm.config import (CompilationLevel, CUDAGraphMode, ReasoningConfig,
+                         VllmConfig, get_layers_from_vllm_config, update_config)
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
@@ -57,6 +57,7 @@ from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem,
                                     PlaceholderRange)
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.pooling_params import PoolingParams
+from vllm.reasoning import ReasoningParserManager
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
@@ -113,10 +114,6 @@ from .utils import (AttentionGroup, MultiModalBudget,
                     add_kv_sharing_layers_to_kv_cache_groups, bind_kv_cache,
                     gather_mm_placeholders, sanity_check_mm_encoder_outputs,
                     scatter_mm_placeholders)
-
-from vllm.config import ReasoningConfig
-from vllm.reasoning import ReasoningParserManager
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -195,7 +192,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
 
-        if self.vllm_config.decoding_config.reasoning_backend in ('deepseek_r1', 'qwen'):
+        if self.vllm_config.decoding_config.reasoning_backend in (
+                'deepseek_r1', 'qwen'):
             tokenizer = init_tokenizer_from_configs(
                 model_config=self.vllm_config.model_config,
                 scheduler_config=self.vllm_config.scheduler_config,
@@ -206,8 +204,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             reasoner_cls = ReasoningParserManager.get_reasoning_parser(
                 reasoning_backend)
             reasoning_parser = reasoner_cls(tokenizer=tokenizer)
-            self.vllm_config.reasoning_config = ReasoningConfig(think_start_token_id=reasoning_parser.think_start_token_id,
-                                                                think_end_token_id=reasoning_parser.think_end_token_id)
+            self.vllm_config.reasoning_config = ReasoningConfig(
+                think_start_token_id=reasoning_parser.think_start_token_id,
+                think_end_token_id=reasoning_parser.think_end_token_id)
 
         from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
         set_cpu_offload_max_bytes(
