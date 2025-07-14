@@ -569,6 +569,7 @@ class ModelConfig:
         runner_type = self._resolve_runner(self.runner, self.task,
                                            supported_runner_types,
                                            all_supported_tasks)
+
         logger.debug("Selected runner type: %s", runner_type)
         # For pooling models, self.task is used to indicate the
         # user-selected task

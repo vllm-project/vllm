@@ -297,6 +297,7 @@ _EMBEDDING_EXAMPLE_MODELS = {
                                    hf_overrides={"architectures": ["GteNewModel"]}),  # noqa: E501
     "InternLM2ForRewardModel": _HfExamplesInfo("internlm/internlm2-1_8b-reward",
                                                trust_remote_code=True),
+    "JambaForSequenceClassification": _HfExamplesInfo("ai21labs/Jamba-tiny-reward-dev"),  # noqa: E501
     "LlamaModel": _HfExamplesInfo("llama", is_available_online=False),
     "MistralModel": _HfExamplesInfo("intfloat/e5-mistral-7b-instruct"),
     "ModernBertModel": _HfExamplesInfo("Alibaba-NLP/gte-modernbert-base",
@@ -443,7 +444,6 @@ _AUTOMATIC_CONVERTED_MODELS = {
                                                                     "method": "no_post_processing"}),  # noqa: E501
     "GPT2ForSequenceClassification": _HfExamplesInfo("nie3e/sentiment-polish-gpt2-small"),  # noqa: E501
     "LlamaForSequenceClassification": _HfExamplesInfo("Skywork/Skywork-Reward-V2-Llama-3.2-1B"),  # noqa: E501
-    "JambaForSequenceClassification": _HfExamplesInfo("ai21labs/Jamba-tiny-reward-dev"),  # noqa: E501
     "Qwen2ForSequenceClassification": _HfExamplesInfo("jason9693/Qwen2.5-1.5B-apeach"),  # noqa: E501
     "Qwen3ForSequenceClassification": _HfExamplesInfo("tomaarsen/Qwen3-Reranker-0.6B-seq-cls"),  # noqa: E501
 }
