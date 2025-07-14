@@ -9,6 +9,7 @@ import torch
 import vllm.envs as envs
 from vllm.attention.ops.rocm_aiter_mla import aiter_mla_decode_fwd
 from vllm.config import VllmConfig
+from vllm.utils import cdiv
 # yapf conflicts with isort for this docstring
 # yapf: disable
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
@@ -72,6 +73,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             "only supports block size 1."
 
         self.compilation_config = vllm_config.compilation_config
+        max_num_pages_per_req = cdiv(vllm_config.model_config.max_model_len,
+                                     self.kv_cache_spec.block_size)
+        max_num_req = vllm_config.scheduler_config.max_num_seqs
+        max_num_pages = max_num_req * max_num_pages_per_req
 
         # Preparing persistent buffers
         if vllm_config.compilation_config.full_cuda_graph:
@@ -79,9 +84,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self.paged_kv_indptr = torch.zeros(max_num_reqs + 1,
                                                dtype=torch.int32,
                                                device=device)
-            # We'll assume a reasonable max number of pages
-            max_pages = max_num_reqs * 1024  # Rough estimate
-            self.paged_kv_indices = torch.zeros(max_pages,
+            self.paged_kv_indices = torch.zeros(max_num_pages,
                                                 dtype=torch.int32,
                                                 device=device)
             self.paged_kv_last_page_len = torch.zeros(max_num_reqs,
