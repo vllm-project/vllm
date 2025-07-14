@@ -49,8 +49,8 @@ class XIELU(nn.Module):
         alpha_n = self.beta + nn.functional.softplus(self.alpha_n)
         return torch.where(
             x > 0,
-            x * (self.beta + alpha_p * x),
-            alpha_n * torch.expm1(torch.min(x, self.eps)) + ((self.beta - alpha_n) * x)
+            self.beta * x + alpha_p * x * x,
+            alpha_n * torch.expm1(torch.min(x, self.eps)) + self.beta * x - alpha_n * x
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
