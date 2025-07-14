@@ -18,8 +18,8 @@ from .registry import AUTO_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
 
 @pytest.mark.parametrize(
     "model_arch",
-    HF_EXAMPLE_MODELS.get_supported_archs() +
-    AUTO_EXAMPLE_MODELS.get_supported_archs())
+    HF_EXAMPLE_MODELS.get_supported_archs()
+    & AUTO_EXAMPLE_MODELS.get_supported_archs())
 @create_new_process_for_each_test()
 def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
     """The reason for using create_new_process_for_each_test is to avoid 

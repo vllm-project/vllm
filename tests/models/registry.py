@@ -434,7 +434,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "JinaVLForRanking": _HfExamplesInfo("jinaai/jina-reranker-m0"),   # noqa: E501
 }
 
-_AUTOMATIC_CONVERED_MODELS = {
+_AUTOMATIC_CONVERTED_MODELS = {
     # Use as_seq_cls_model for automatic conversion
     "GemmaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-gemma",  # noqa: E501
                                                       v0_only=True,
@@ -516,4 +516,4 @@ class HfExampleModels:
 
 
 HF_EXAMPLE_MODELS = HfExampleModels(_EXAMPLE_MODELS)
-AUTO_EXAMPLE_MODELS = HfExampleModels(_AUTOMATIC_CONVERED_MODELS)
+AUTO_EXAMPLE_MODELS = HfExampleModels(_AUTOMATIC_CONVERTED_MODELS)

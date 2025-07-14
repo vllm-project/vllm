@@ -480,12 +480,13 @@ class _ModelRegistry:
             filter(lambda model: model in self.models, architectures))
 
         # try automatic conversion in adapters.py
-        for arch in architectures:
-            if not arch.endswith("ForSequenceClassification"):
+        for arch_name in architectures:
+            if not arch_name.endswith("ForSequenceClassification"):
                 continue
-            old_arch = arch
-            arch = arch.replace("ForSequenceClassification", "ForCausalLM")
-            if arch in self.models:
+            old_arch = arch_name
+            arch_name = arch_name.replace("ForSequenceClassification",
+                                          "ForCausalLM")
+            if arch_name in self.models:
                 normalized_arch.append(old_arch)
 
         # make sure Transformers backend is put at the last as a fallback

@@ -22,7 +22,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.adapters import (as_embedding_model,
-                                                 as_reward_model, as_seq_cls_model)
+                                                 as_reward_model,
+                                                 as_seq_cls_model)
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.utils import is_pin_memory_available
 
@@ -249,13 +250,14 @@ def get_model_architecture(
             model_config.task = "classify"
 
             old_arch = arch
-            arch = arch.replace("ForSequenceClassification", "ForCausalLM")
-            logger.info("Automatic conversion %s -> %s", arch, old_arch)
+            new_arch = arch.replace("ForSequenceClassification", "ForCausalLM")
+            logger.info("Automatic conversion %s -> %s", new_arch, old_arch)
             vllm_supported = not any(arch in vllm_supported_archs
-                                         for arch in architectures)
+                                     for arch in architectures)
             if vllm_supported:
-                architectures = [arch]
+                architectures = [new_arch]
                 vllm_not_supported = False
+                break
 
     if (model_config.model_impl == ModelImpl.TRANSFORMERS or
             model_config.model_impl != ModelImpl.VLLM and vllm_not_supported):

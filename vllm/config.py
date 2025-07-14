@@ -805,7 +805,7 @@ class ModelConfig:
                 f"one of {get_args(TokenizerMode)}.")
         self.tokenizer_mode = tokenizer_mode
 
-    def _is_classify_task(self, architectures):
+    def _is_classify_task(self, architectures: list[str]):
         for arch in architectures:
             if arch.endswith("ForSequenceClassification"):
                 return True
