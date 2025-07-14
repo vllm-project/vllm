@@ -444,11 +444,11 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                               task_type: str,
                               request_prompt: str) -> PromptType:
         tokenizer = cached_tokenizer_from_config(model_config)
-        audio = Audio(audio, stt_config.sample_rate, format="wav")  # lossless
+        audio = Audio(audio, int(stt_config.sample_rate), format="wav")  # lossless
         req = TranscriptionRequest(model=model_config.model, audio=RawAudio.from_audio(audio), language=language)
 
         tokenized = tokenizer.instruct.encode_transcription(req)
-        audio = (tokenized.audios[0].audio_array, stt_config.model_sr)
+        audio = (tokenized.audios[0].audio_array, stt_config.sample_rate)
         prompts_dict = {"multi_modal_data": {"audio": audio}}
         prompts_dict["prompt_token_ids"] = tokenized.tokens
         return cast(PromptType, prompts_dict)
