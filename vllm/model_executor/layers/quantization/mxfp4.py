@@ -24,8 +24,8 @@ from triton_kernels.numerics_details.mxfp import (SwizzlingType, swizzle_mxfp4_v
                                                   swizzle_mx_scale_bw, swizzle_mxfp4_scale_hopper)
 
 def swizzle_mxfp4(quant_tensor, scale):
-    swizzle_value = None
-    swizzle_scale = None
+    swizzle_value = SwizzlingType.HOPPER
+    swizzle_scale = SwizzlingType.HOPPER
     axis = 1
     swizzle_axis = 2
     # Swizzling
@@ -93,12 +93,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
-        # TODO: we only register parameter here
-        # and do not pre-allocate tensor
-        # since they need to be transformed when loading
-        # allocating will cause pytorch OOM
-        # these dummy weight will be
-        # replace in func FusedMoE::_load_weights_oai_mlp
 
         weight_dtype = torch.uint8
         scale_dtype = torch.uint8
@@ -110,28 +104,33 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         mxfp4_block = 32
 
+        smallest_even_divide_number = lambda x, n: (
+                x // n + 1) * n if x % n != 0 else x
+        intermediate_size_per_partition_after_pad = smallest_even_divide_number(intermediate_size_per_partition, 128)
+        hidden_size_after_pad = smallest_even_divide_number(hidden_size, 256)
+
         # Fused gate_up_proj (column parallel)
-        w13_weight = torch.nn.Parameter(torch.empty(
+        w13_weight = torch.nn.Parameter(torch.zeros(
             num_experts,
-            2 * intermediate_size_per_partition,
-            hidden_size // 2,
+            2 * intermediate_size_per_partition_after_pad,
+            hidden_size_after_pad // 2,
             dtype=weight_dtype),
                                         requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
-        w13_weight_scale = torch.nn.Parameter(torch.empty(
+        w13_weight_scale = torch.nn.Parameter(torch.zeros(
             num_experts,
-            2 * intermediate_size_per_partition,
-            hidden_size // mxfp4_block,
+            2 * intermediate_size_per_partition_after_pad,
+            hidden_size_after_pad // mxfp4_block,
             dtype=scale_dtype),
                                         requires_grad=False)
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         set_weight_attrs(w13_weight_scale, extra_weight_attrs)
 
-        w13_bias = torch.nn.Parameter(torch.empty(
+        w13_bias = torch.nn.Parameter(torch.zeros(
             num_experts,
-            2 * intermediate_size_per_partition,
+            2 * intermediate_size_per_partition_after_pad,
             dtype=torch.bfloat16
         ), 
                                         requires_grad=False)
@@ -139,27 +138,27 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w13_bias, extra_weight_attrs)
 
         # down_proj (row parallel)
-        w2_weight = torch.nn.Parameter(torch.empty(
+        w2_weight = torch.nn.Parameter(torch.zeros(
             num_experts,
-            hidden_size,
-            intermediate_size_per_partition // 2,
+            hidden_size_after_pad,
+            intermediate_size_per_partition_after_pad // 2,
             dtype=weight_dtype),
                                         requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
-        w2_weight_scale = torch.nn.Parameter(torch.empty(
+        w2_weight_scale = torch.nn.Parameter(torch.zeros(
             num_experts,
-            hidden_size,
-            intermediate_size_per_partition // mxfp4_block,
+            hidden_size_after_pad,
+            intermediate_size_per_partition_after_pad // mxfp4_block,
             dtype=scale_dtype),
                                         requires_grad=False)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
-        w2_bias = torch.nn.Parameter(torch.empty(
+        w2_bias = torch.nn.Parameter(torch.zeros(
             num_experts,
-            hidden_size,
+            hidden_size_after_pad,
             dtype=torch.bfloat16
         ), 
                                         requires_grad=False)
@@ -169,14 +168,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer):
 
         w13_bias = layer.w13_bias.to(torch.float32)
-        # w13_bias = F.pad(w13_bias, (0, layer.w13_right_pad, 0, 0),
-        #                  mode="constant",
-        #                  value=0)
-
         w2_bias = layer.w2_bias.to(torch.float32)
-        # w2_bias = F.pad(w2_bias, (0, layer.w2_right_pad, 0, 0),
-        #                 mode="constant",
-        #                 value=0)
 
         layer.w13_bias = Parameter(w13_bias, requires_grad=False)
         layer.w2_bias = Parameter(w2_bias, requires_grad=False)

@@ -677,7 +677,11 @@ class FusedMoE(torch.nn.Module):
         self.use_triton_kernels = False
         if quant_config.get_name() == "mxfp4":
             if has_triton_kernels:
+                smallest_even_divide_number = lambda x, n: (
+                 x // n + 1) * n if x % n != 0 else x
+                
                 self.use_triton_kernels = True
+                self.hidden_size_pad = smallest_even_divide_number(hidden_size, 256) - hidden_size
             else:
                 raise ValueError("triton_kernels must be installed first")
 
@@ -1001,7 +1005,13 @@ class FusedMoE(torch.nn.Module):
         # if expert_id is None, then 
         # all the experts are loaded at the same time
         if not expert_id and self.use_triton_kernels:
-            param.data.copy_(loaded_weight)
+            if "bias" in weight_name:
+                dim1 = loaded_weight.shape[1]
+                param.data[:, :dim1].copy_(loaded_weight)
+            else:
+                dim1 = loaded_weight.shape[1]
+                dim2 = loaded_weight.shape[2]
+                param.data[:, :dim1, :dim2].copy_(loaded_weight)
             return
 
         expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
@@ -1496,6 +1506,9 @@ class FusedMoE(torch.nn.Module):
         if do_naive_dispatch_combine:
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)
+            
+        if self.hidden_size_pad is not None:
+            hidden_states = F.pad(hidden_states, (0, self.hidden_size_pad, 0, 0), mode="constant", value=0)
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
