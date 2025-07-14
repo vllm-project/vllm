@@ -339,6 +339,7 @@ def _compare_tp(
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
 
     specific_case = tp_size == 2 and pp_size == 2 and chunked_prefill
+    testing_ray_compiled_graph = False
     if distributed_backend == "ray" and (vllm_major_version == "1"
                                          or specific_case):
         # For V1, test Ray Compiled Graph for all the tests
