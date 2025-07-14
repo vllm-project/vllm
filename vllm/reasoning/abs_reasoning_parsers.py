@@ -35,6 +35,16 @@ class ReasoningParser:
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
+
+    @property
+    def special_token_ids(self) -> dict:
+        """
+        Returns a dictionary of special token IDs for model-agnostic access.
+        Example: {"start_token_id": int, "end_token_id": int}
+        """
+        # Default: not implemented, override in subclasses if needed
+        return {}
+
     @abstractmethod
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         """
@@ -121,6 +131,16 @@ class ReasoningParserManager:
         raise KeyError(
             f"reasoning helper: '{name}' not found in reasoning_parsers")
 
+    @staticmethod
+    def get_special_token_ids(parser) -> dict:
+        """
+        Get special token IDs from a parser instance, if available.
+        Returns an empty dict if not present.
+        """
+        if parser is not None and hasattr(parser, "special_token_ids"):
+            return parser.special_token_ids
+        return {}
+    
     @classmethod
     def _register_module(
         cls,

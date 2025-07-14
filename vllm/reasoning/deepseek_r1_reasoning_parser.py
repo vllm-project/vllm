@@ -44,6 +44,17 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                 "DeepSeek R1 reasoning parser could not locate think start/end "
                 "tokens in the tokenizer!")
 
+    @property
+    def special_token_ids(self) -> dict:
+        """
+        Returns a dictionary of special token IDs for model-agnostic access.
+        Example: {"start_token_id": int, "end_token_id": int}
+        """
+        return {
+            "start_token_id": self.start_token_id,
+            "end_token_id": self.end_token_id,
+        }
+    
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         return self.end_token_id in input_ids
 
