@@ -62,13 +62,13 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from ..sample.logits_processor import LogitsProcessorManager
-from .utils import (gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
+from .utils import (bind_kv_cache, gather_mm_placeholders,
+                    initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
 if TYPE_CHECKING:
