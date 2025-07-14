@@ -320,7 +320,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # no support (e.g., no piecewise compilation) or want only capturing
         # full cudagraph for pure decode batches.
         self.capture_mixed_batches = self.cudagraph_mode != CUDAGraphMode.NONE
-        self.no_compilation = self.compilation_config.level != \
+        self.no_piecewise_compilation = self.compilation_config.level != \
             CompilationLevel.PIECEWISE or self.model_config.enforce_eager
 
         # Cudagraph dispatcher for runtime cudagraph dispatching.
@@ -2312,12 +2312,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.capture_mixed_batches:
                 # select between full cudagraph and piecewise cudagraph
                 # for mixed prefill-decode batches.
-                attn_cuda_graphs = False if self.cudagraph_mode == \
-                    CUDAGraphMode.PIECEWISE else (
-                    self.attn_metadata_builders[0].attn_cudagraph_support in [
-                        AttentionCGSupport.ALWAYS_UNIFIED,
-                        AttentionCGSupport.ALWAYS_SEPARATE,
-                    ])
+                attn_cuda_graphs = self.cudagraph_mode == CUDAGraphMode.FULL \
+                    and self.attn_metadata_builders[0].attn_cudagraph_support \
+                    in [AttentionCGSupport.ALWAYS_UNIFIED,
+                        AttentionCGSupport.ALWAYS_SEPARATE]
                 cudagraph_runtime_style = CUDAGraphRuntimeStyle.FULL if \
                     attn_cuda_graphs else CUDAGraphRuntimeStyle.PIECEWISE
 
@@ -2381,9 +2379,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     cudagraph_runtime_style == CUDAGraphRuntimeStyle.FULL)
                 self._dummy_run(
                     num_tokens,
-                    is_pure_decode=is_pure_decode,
                     cudagraph_runtime_style=CUDAGraphRuntimeStyle.NONE,
                     force_attention=force_attention,
+                    is_pure_decode=is_pure_decode,
                     skip_eplb=True)
             self._dummy_run(num_tokens,
                             cudagraph_runtime_style=cudagraph_runtime_style,
@@ -2470,27 +2468,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # CompilationConfig.separate_attention_routine
                 if attn_cg == AttentionCGSupport.ALWAYS_UNIFIED and \
                     self.compilation_config.separate_attention_routine:
-                    expected = False
                     logger.warning_once(
-                        f"Full CUDAGraph for {attn_backend_i.__name__} "
-                        f"supports unified attention routine for mixed "
-                        f"batches or pure decode batches, which expect "
-                        f"CompilationConfig.separate_attention_rountine"
-                        f" as: {expected}. Now set it to: {expected}.")
+                        f"Full CUDAGraph support for {attn_backend_i.__name__}"
+                        f" is {AttentionCGSupport.ALWAYS_UNIFIED}, which expect"
+                        f"CompilationConfig.separate_attention_rountine as "
+                        f"False. Set it to False now.")
                     self.compilation_config.separate_attention_routine = \
-                                                                    expected
+                                                                    False
 
                 if attn_cg == AttentionCGSupport.PURE_DECODE_ONLY and \
                     not self.compilation_config.separate_attention_routine:
-                    expected = True
+
                     logger.warning_once(
-                        f"Full CUDAGraph for {attn_backend_i.__name__} "
-                        f"requires separate attention routines for mixed "
-                        f"batches or pure decode batches, which expect "
-                        f"CompilationConfig.separate_attention_rountine"
-                        f" as: {expected}. Now set it to: {expected}.")
+                        f"Full CUDAGraph support for {attn_backend_i.__name__}"
+                        f" is {AttentionCGSupport.PURE_DECODE_ONLY}, which "
+                        f"expect CompilationConfig.separate_attention_rountine"
+                        f"as True. Set it to True now.")
                     self.compilation_config.separate_attention_routine = \
-                                                                    expected
+                                                                    True
 
                 # when AttentionCGSupport.ALWAYS_SEPARATE, we don't change
                 # the separate_attention_routine flag, but should inform
@@ -2505,16 +2500,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         f"You can turn on CompilationConfig.separate_"
                         f"attention_routine to obtain better performance.")
 
-                # for attn_cg is pure decode only, and no compilation,
+                # for attn_cg is pure decode only, and no piecewise compilation,
                 # we skip capturing mix prefill-decode (general) batches.
-                if attn_cg == AttentionCGSupport.PURE_DECODE_ONLY and \
-                                                    self.no_compilation:
-                    logger.warning_once(
-                        f"Skipping capturing mixed prefill-decode batches, "
-                        f"since full cudagraph for {attn_backend_i.__name__}"
-                        f"only supports pure decode batches while piecewise "
-                        f"cudagraph is disabled as no vllm compilation.")
-                    self.capture_mixed_batches = False
+                if attn_cg == AttentionCGSupport.PURE_DECODE_ONLY:
+                    if self.no_piecewise_compilation:
+                        logger.warning_once(
+                            f"Skipping capturing mixed prefill-decode batches, "
+                            f"since backend {attn_backend_i.__name__} only "
+                            f"supports full cudagraph for pure decode only and "
+                            f"vllm piecewise compilation is no enabled.")
+                        self.capture_mixed_batches = False
+                    else:
+                        assert all(op in self.compilation_config.splitting_ops
+                            for op in ["vllm.unified_attention",
+                                       "vllm.unified_attention_with_output"]),\
+                        "Invalid splitting_ops for piecewise compilation"
+                        "with cudagraph_mode `FULL` for backend "
+                        f"{attn_backend_i.__name__}, which support "
+                        "cudagraph on pure decode only. Please include "
+                        "attention ops in compilation_config.splitting_ops"
 
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)

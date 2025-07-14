@@ -527,7 +527,7 @@ class Platform:
         """
         Return the global graph pool for the this platform.
         """
-        cls = type(self)
+        cls = self.__class__
         if cls._global_graph_pool is None:
             cls._global_graph_pool = self.graph_pool_handle()
         return cls._global_graph_pool

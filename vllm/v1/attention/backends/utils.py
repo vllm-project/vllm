@@ -65,8 +65,8 @@ class AttentionCGSupport(enum.Enum):
     ALWAYS_UNIFIED = 2
     """Cudagraph always supported with unified routine"""
     ALWAYS_SEPARATE = 3
-    """ Cudagraph supported for both mixed prefill-decode
-    or pure decode attention routines."""
+    """Cudagraph always supported, with better performance when separate
+    routines are used for mixed prefill-decode and pure decode batches."""
 
 
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):

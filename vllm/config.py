@@ -4451,10 +4451,8 @@ class CompilationConfig:
                 "vllm.unified_attention_with_output",
             ]
         elif len(self.splitting_ops) == 0:
-            assert self.cudagraph_mode == CUDAGraphMode.FULL, (
-                "Seting splitting_ops as empty list requires "
-                "cudagraph_mode be CUDAGraphMode.FULL")
-
+            assert self.cudagraph_mode != CUDAGraphMode.PIECEWISE, (
+                "Cannot use piecewise CUDAGraph without splitting ops.")
             self.splitting_ops = []
 
 
@@ -4724,8 +4722,8 @@ class VllmConfig:
             self.compilation_config.custom_ops.append("+rms_norm")
         if envs.VLLM_USE_V1 and self.model_config is not None and \
             not self.model_config.enforce_eager:
-            # By default, V1 uses piecewise CUDA graphs. If full_cuda_graph
-            # is set to True, full CUDA graphs will be used.
+            # By default, V1 uses piecewise CUDA graphs. If cudagraph_mode
+            # is set to `FULL`, full CUDA graphs will be used.
             self.compilation_config.cudagraph_num_of_warmups = 1
             if self.compilation_config.level is None:
                 self.compilation_config.level = CompilationLevel.PIECEWISE
