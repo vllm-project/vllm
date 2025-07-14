@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -281,9 +282,10 @@ class EagleProposer:
 
         # [q1 - n1, q2 - n2, q3 - n3] ->
         # [0, q1 - n1, q1 + q2 - n1 - n2, q1 + q2 + q3 - n1 - n2 - n3]
-        new_query_start_loc_cpu = torch.zeros(query_start_loc_cpu.shape,
-                                              dtype=torch.int32,
-                                              pin_memory=True)
+        new_query_start_loc_cpu = torch.zeros(
+            query_start_loc_cpu.shape,
+            dtype=torch.int32,
+            pin_memory=is_pin_memory_available())
         new_query_start_loc_np = new_query_start_loc_cpu.numpy()
         np.cumsum(new_num_tokens_per_req_np, out=new_query_start_loc_np[1:])
 
