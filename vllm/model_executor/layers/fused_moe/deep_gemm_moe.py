@@ -13,7 +13,7 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-    TopKWeightAndReduceDelegate)
+    TopKWeightAndReduceContiguous, TopKWeightAndReduceNoOP)
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
@@ -90,8 +90,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        # Let PrepareAndFinalize::finalize() decide the impl.
-        return TopKWeightAndReduceDelegate()
+        return TopKWeightAndReduceNoOP()
 
     def workspace_shapes(
         self, a: torch.Tensor, aq: torch.Tensor, M: int, N: int, K: int,
@@ -104,9 +103,9 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         block_m = self.block_shape[0]
         M_sum = (M * topk) + num_experts * (block_m - 1)
         M_sum = round_up(M_sum, block_m)
-        workspace1 = (M_sum, max(N * 2, K))
+        workspace1 = (M_sum, max(N // 2, K))
         workspace2 = (M_sum, max(N, K))
-        output = (M, topk, K)
+        output = (M, K)
         return (workspace1, workspace2, output, a.dtype)
 
     def apply(
@@ -115,6 +114,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
+        topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,
@@ -128,11 +128,14 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        apply_router_weight_on_input: bool,
     ):
         assert self.block_shape is not None
 
         a1q = hidden_states
         _, N, K = w1.size()
+        M, _ = output.size()
+        num_topk = topk_ids.size(1)
 
         if global_num_experts == -1:
             global_num_experts = w1.size(0)
@@ -159,11 +162,12 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # Note: M_sum is different than the pre-permuted shape of a1q.
         M_sum = a1q.size(0)
 
-        mm1_out = _resize_cache(workspace13, (M_sum, N))
-        act_out = _resize_cache(workspace2, (M_sum, N // 2))
-        quant_out = _resize_cache(workspace13.view(dtype=torch.float8_e4m3fn),
+        mm1_out = _resize_cache(workspace2, (M_sum, N))
+        act_out = _resize_cache(workspace13, (M_sum, N // 2))
+        quant_out = _resize_cache(workspace2.view(dtype=torch.float8_e4m3fn),
                                   (M_sum, N // 2))
-        mm2_out = _resize_cache(workspace2, (M_sum, K))
+        mm2_out = _resize_cache(workspace13, (M_sum, K))
+        perm_out = _resize_cache(workspace2, (M * num_topk, K))
 
         m_grouped_fp8_gemm_nt_contiguous((a1q, a1q_scale), (w1, w1_scale),
                                          mm1_out, expert_ids)
@@ -179,7 +183,14 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         m_grouped_fp8_gemm_nt_contiguous((a2q, a2q_scale), (w2, w2_scale),
                                          mm2_out, expert_ids)
 
-        torch.index_select(mm2_out, 0, inv_perm, out=output.view((-1, K)))
+        torch.index_select(mm2_out, 0, inv_perm, out=perm_out)
+
+        TopKWeightAndReduceContiguous().apply(
+            output=output,
+            fused_expert_output=perm_out,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            apply_router_weight_on_input=apply_router_weight_on_input)
 
 
 def deep_gemm_moe_fp8(
