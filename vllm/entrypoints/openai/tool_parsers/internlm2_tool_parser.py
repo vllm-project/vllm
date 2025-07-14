@@ -9,9 +9,12 @@ import partial_json_parser
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import random_tool_call_id
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest, DeltaFunctionCall, DeltaMessage, DeltaToolCall,
-    ExtractedToolCallInformation, FunctionCall, ResponsesRequest, ToolCall)
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              DeltaFunctionCall, DeltaMessage,
+                                              DeltaToolCall,
+                                              ExtractedToolCallInformation,
+                                              FunctionCall, ResponsesRequest,
+                                              ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.entrypoints.openai.tool_parsers.utils import (
@@ -30,7 +33,10 @@ class Internlm2ToolParser(ToolParser):
         self.position = 0
 
     def adjust_request(
-            self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        self, request: Union[ChatCompletionRequest, ResponsesRequest]
+    ) -> Union[ChatCompletionRequest, ResponsesRequest]:
+        if not isinstance(request, ChatCompletionRequest):
+            return request
         if request.tools and request.tool_choice != 'none':
             # do not skip special tokens because internlm use the special
             # tokens to indicated the start and end of the tool calls
