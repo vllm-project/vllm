@@ -259,43 +259,56 @@ class CudaPlatformBase(Platform):
                 logger.info_once("Using Flash Attention backend on V1 engine.")
                 return FLASH_ATTN_V1
 
-            from vllm.attention.selector import supports_head_size
+            from vllm.attention.selector import is_attn_backend_supported
 
             # Default backends for V1 engine
-            # FP32 is only supported by FlexAttention
-            if dtype not in (torch.float16, torch.bfloat16):
-                logger.info_once(
-                    "Using FlexAttention backend for %s on V1 engine.",
-                    dtype,
-                )
-                return FLEX_ATTENTION_V1
-
             # Prefer FlashInfer for Blackwell GPUs if installed
-            if cls.is_device_capability(100) and \
-                supports_head_size(FLASHINFER_V1, head_size):
-                try:
-                    import flashinfer  # noqa: F401
-
+            if cls.is_device_capability(100):
+                if is_default_backend_supported := is_attn_backend_supported(
+                        FLASHINFER_V1, head_size, dtype):
                     from vllm.v1.attention.backends.utils import (
                         set_kv_cache_layout)
+
                     logger.info_once(
                         "Using FlashInfer backend with HND KV cache layout on "
                         "V1 engine by default for Blackwell (SM 10.0) GPUs.")
                     set_kv_cache_layout("HND")
+
                     return FLASHINFER_V1
-                except ImportError:
-                    logger.info_once(
+
+                if not is_default_backend_supported.can_import:
+                    logger.warning_once(
                         "FlashInfer failed to import for V1 engine on "
                         "Blackwell (SM 10.0) GPUs; it is recommended to "
                         "install FlashInfer for better performance.")
-                    pass
-            # FlashAttention is the default for SM 8.0+ GPUs
-            if cls.has_device_capability(80) and \
-                supports_head_size(FLASH_ATTN_V1, head_size):
-                logger.info_once("Using Flash Attention backend on V1 engine.")
-                return FLASH_ATTN_V1
 
-            logger.info_once("Using FlexAttention backend on V1 engine.")
+            # FlashAttention is the default for SM 8.0+ GPUs
+            if cls.has_device_capability(80):
+                if is_default_backend_supported := is_attn_backend_supported(
+                        FLASH_ATTN_V1, head_size, dtype,
+                        allow_import_error=False):
+                    logger.info_once("Using Flash Attention backend on "
+                                     "V1 engine.")
+                    return FLASH_ATTN_V1
+
+            # FlexAttention is the default for older GPUs
+            else:
+                logger.info_once("Using FlexAttention backend on V1 engine.")
+                return FLEX_ATTENTION_V1
+
+            assert not is_default_backend_supported
+
+            use_flex_attention_reason = {}
+            if not is_default_backend_supported.head_size:
+                use_flex_attention_reason["head_size"] = head_size
+            if not is_default_backend_supported.dtype:
+                use_flex_attention_reason["dtype"] = dtype
+
+            logger.info_once(
+                "Using FlexAttention backend for %s on V1 engine.",
+                ", ".join(f"{k}={v}"
+                          for k, v in use_flex_attention_reason.items()),
+            )
             return FLEX_ATTENTION_V1
 
         # Backends for V0 engine
