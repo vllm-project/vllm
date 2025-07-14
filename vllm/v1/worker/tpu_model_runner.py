@@ -3,7 +3,7 @@
 import bisect
 import gc
 import time
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -18,7 +18,8 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import ParallelConfig, VllmConfig, get_layers_from_vllm_config
+from vllm.config import (ParallelConfig, VllmConfig,
+                         get_layers_from_vllm_config, update_config)
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -41,11 +42,10 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsLists,
                              LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
-from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.tpu_input_batch import CachedRequestState, InputBatch
 
-from .utils import (initialize_kv_cache_for_kv_sharing,
+from .utils import (bind_kv_cache, initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs)
 
 if TYPE_CHECKING:
@@ -1111,6 +1111,18 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         return model_runner_output
 
+    def update_config(self, overrides: dict[str, Any]) -> None:
+        # TODO: TPU config may need extra validation
+        # https://github.com/vllm-project/vllm/pull/20095#discussion_r2201497754
+        allowed_config_names = {"load_config", "model_config"}
+        for config_name, config_overrides in overrides.items():
+            assert config_name in allowed_config_names, \
+                f"Config `{config_name}` not supported. " \
+                f"Allowed configs: {allowed_config_names}"
+            config = getattr(self, config_name)
+            new_config = update_config(config, config_overrides)
+            setattr(self, config_name, new_config)
+
     def load_model(self) -> None:
         self.device = self.device_config.device
 
@@ -1128,26 +1140,33 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 "vllm.model_executor.layers.vocab_parallel_embedding."
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
-            if self.use_spmd:
-                tpu_loader = TPUModelLoader(
-                    load_config=self.vllm_config.load_config)
-                model = tpu_loader.load_model(
-                    vllm_config=self.vllm_config,
-                    model_config=self.vllm_config.model_config,
-                    mesh=self.mesh)
-            else:
-                # model = get_model(vllm_config=self.vllm_config)
-                model_loader = get_model_loader(self.load_config)
-                if not hasattr(self, "model"):
-                    logger.info("Loading model from scratch...")
-                    model = model_loader.load_model(
+            try:
+                if self.use_spmd:
+                    tpu_loader = TPUModelLoader(
+                        load_config=self.vllm_config.load_config)
+                    model = tpu_loader.load_model(
                         vllm_config=self.vllm_config,
-                        model_config=self.model_config)
+                        model_config=self.vllm_config.model_config,
+                        mesh=self.mesh)
                 else:
-                    logger.info("Model was already initialized. \
-                            Loading weights inplace...")
-                    model_loader.load_weights(self.model,
-                                              model_config=self.model_config)
+                    model_loader = get_model_loader(self.load_config)
+                    if not hasattr(self, "model"):
+                        logger.info("Loading model from scratch...")
+                        model = model_loader.load_model(
+                            vllm_config=self.vllm_config,
+                            model_config=self.model_config)
+                    else:
+                        logger.info("Model was already initialized. \
+                                Loading weights inplace...")
+                        model_loader.load_weights(
+                            self.model, model_config=self.model_config)
+            except RuntimeError as e:
+                raise RuntimeError(
+                    f"Unable to load model, a likely reason is the model is "
+                    "too large for the current device's HBM memory. "
+                    "Consider switching to a smaller model "
+                    "or sharding the weights on more chips. "
+                    f"See the detailed error: {e}") from e
         if self.lora_config is not None:
             model = self.load_lora_model(model, self.model_config,
                                          self.scheduler_config,

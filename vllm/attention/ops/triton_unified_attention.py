@@ -8,11 +8,10 @@
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
 import torch
-import triton
-import triton.language as tl
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
 float8_info = torch.finfo(current_platform.fp8_dtype())
