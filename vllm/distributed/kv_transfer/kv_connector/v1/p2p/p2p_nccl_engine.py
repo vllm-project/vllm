@@ -195,7 +195,7 @@ class P2pNcclEngine:
         tensor: torch.Tensor,
         remote_address: typing.Optional[str] = None,
         slot_mapping: torch.Tensor = None,
-        is_mla: Boolean = False,
+        is_mla: bool = False,
     ) -> bool:
         if remote_address is None:
             with self.recv_store_cv:
@@ -542,7 +542,7 @@ class P2pNcclEngine:
     @staticmethod
     def extract_kv_from_layer(
             self,
-            is_mla: Boolean,
+            is_mla: bool,
             layer: torch.Tensor,
             slot_mapping: torch.Tensor,
     ) -> torch.Tensor:
