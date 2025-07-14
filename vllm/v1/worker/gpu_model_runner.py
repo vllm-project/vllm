@@ -1429,13 +1429,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if run_additional_heads:
             assert hasattr(self.model, "compute_additional_head")
+            additional_heads_data = [
+                self.input_batch.additional_heads_data.get(i, None)
+                for i in range(self.input_batch.num_reqs)
+            ]
+            if not any(additional_heads_data):
+                additional_heads_data = None
 
             # NOTE: In theory not all logit indices need additional
             # head outputs and we could save some flops by masking.
             # In practice, this is a small number of flops and this
             # is simpler/introduces less overhead.
             additional_heads_tensor = self.model.compute_additional_head(
-                sample_hidden_states, )
+                sample_hidden_states, additional_heads_data)
 
             # Should be num_decode_tokens x additional_head_size
             assert len(additional_heads_tensor.shape) == 2

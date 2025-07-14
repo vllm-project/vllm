@@ -250,6 +250,7 @@ class SamplingParams(
 
     # Fields used for additional heads (e.g. classifiers)
     additional_heads: Optional[bool] = None
+    additional_heads_data: Optional[dict[str, Any]] = None
 
     @staticmethod
     def from_optional(
