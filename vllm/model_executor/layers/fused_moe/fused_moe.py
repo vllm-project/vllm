@@ -1064,24 +1064,25 @@ direct_register_custom_op(
 )
 
 
-def flashinfer_fused_moe_blockscale_fp8(router_logits: torch.Tensor,
-                             e_score_correction_bias: torch.Tensor,
-                             x: torch.Tensor,
-                             w13_weight: torch.Tensor,
-                             w13_weight_scale_inv: torch.Tensor,
-                             w2_weight: torch.Tensor,
-                             w2_weight_scale_inv: torch.Tensor,
-                             global_num_experts: int,
-                             top_k: int,
-                             num_expert_group: int,
-                             topk_group: int,
-                             intermediate_size_per_partition: int,
-                             expert_offset: int,
-                             local_num_experts: int,
-                             block_shape: list[int],
-                             routed_scaling: float = 1.0,
-                             tile_tokens_dim: int = 8,
-                             routing_method_type: int = 2) -> torch.Tensor:
+def flashinfer_fused_moe_blockscale_fp8(
+        router_logits: torch.Tensor,
+        e_score_correction_bias: torch.Tensor,
+        x: torch.Tensor,
+        w13_weight: torch.Tensor,
+        w13_weight_scale_inv: torch.Tensor,
+        w2_weight: torch.Tensor,
+        w2_weight_scale_inv: torch.Tensor,
+        global_num_experts: int,
+        top_k: int,
+        num_expert_group: int,
+        topk_group: int,
+        intermediate_size_per_partition: int,
+        expert_offset: int,
+        local_num_experts: int,
+        block_shape: list[int],
+        routed_scaling: float = 1.0,
+        tile_tokens_dim: int = 8,
+        routing_method_type: int = 2) -> torch.Tensor:
     assert top_k <= global_num_experts
     assert top_k <= 8
     assert topk_group <= 4
