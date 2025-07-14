@@ -296,10 +296,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "NomicBertModel": NomicBertModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
-    "FalconH1ForCausalLM": HybridAttentionMambaModelConfig,
-    "BambaForCausalLM": HybridAttentionMambaModelConfig,
-    "GraniteMoeHybridForCausalLM": HybridAttentionMambaModelConfig,
-    "NemotronHForCausalLM": HybridAttentionMambaModelConfig,
-    "Zamba2ForCausalLM": HybridAttentionMambaModelConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
 }
