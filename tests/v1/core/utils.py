@@ -115,12 +115,15 @@ def create_scheduler(
     )
 
 
-def create_requests(num_requests: int,
-                    num_tokens: int = 10,
-                    mm_positions: Optional[list[PlaceholderRange]] = None,
-                    max_tokens: int = 16,
-                    stop_token_ids: Optional[list[int]] = None,
-                    prompt_logprobs: Optional[int] = None):
+def create_requests(
+    num_requests: int,
+    num_tokens: int = 10,
+    mm_positions: Optional[list[PlaceholderRange]] = None,
+    max_tokens: int = 16,
+    stop_token_ids: Optional[list[int]] = None,
+    prompt_logprobs: Optional[int] = None,
+    same_prompt: bool = False,
+) -> list[Request]:
     sampling_params = SamplingParams(ignore_eos=False,
                                      max_tokens=max_tokens,
                                      stop_token_ids=stop_token_ids,
@@ -133,9 +136,11 @@ def create_requests(num_requests: int,
         else:
             mm_position = None
             mm_inputs = None
+        prompt_token_ids = ([0] * num_tokens if same_prompt else [i] *
+                            num_tokens)
         request = Request(
             request_id=f"{i}",
-            prompt_token_ids=[i] * num_tokens,
+            prompt_token_ids=prompt_token_ids,
             sampling_params=sampling_params,
             pooling_params=None,
             multi_modal_inputs=mm_inputs,
