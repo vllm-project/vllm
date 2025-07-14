@@ -969,7 +969,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         else:
             mm_embeds = []
         xm.mark_step()
-        # Prepare inputs, the requests might be splitted into multiple
+        # Prepare inputs, the requests might be split into multiple
         # executions, combine the result of each execution.
         start_index = 0
         combined_selected_tokens: list[torch.Tensor] = []
