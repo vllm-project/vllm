@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 from enum import IntEnum
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -312,6 +311,9 @@ class PoolerHead(nn.Module):
                     for vecs, d in zip(pooled_data, dimensions_list)
                 ]
 
+        return self.activation(pooled_data)
+
+    def activation(self, pooled_data: Union[list[torch.Tensor], torch.Tensor]):
         if self.normalize:
             if isinstance(pooled_data, list):
                 pooled_data = [
@@ -367,6 +369,10 @@ class Pooler(nn.Module):
         )
 
 
+PoolerActivation = Callable[[Union[torch.Tensor, list[torch.Tensor]]],
+                            Union[torch.Tensor, list[torch.Tensor]]]
+
+
 class ClassifierPooler(nn.Module):
     """A pooling layer for classification tasks.
 
@@ -384,15 +390,17 @@ class ClassifierPooler(nn.Module):
         config: ModelConfig,
         classifier: nn.Module,
         pooler: Optional[nn.Module] = None,
-    ):
+        act_fn: Optional[PoolerActivation] = None,
+    ) -> None:
         super().__init__()
+
         self.classifier = classifier
         self.pooler = pooler
 
         self.classification_act_fn = get_classification_activation_function(
-            config.hf_config)
+            config.hf_config) if act_fn is None else act_fn
         self.cross_encoder_act_fn = get_cross_encoder_activation_function(
-            config.hf_config)
+            config.hf_config) if act_fn is None else act_fn
 
     def _get_act_fn(self, use_cross_encoder: bool):
         return (self.cross_encoder_act_fn

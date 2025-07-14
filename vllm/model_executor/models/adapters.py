@@ -63,17 +63,20 @@ def _create_pooling_model_cls(
                 if hasattr(self, attr):
                     delattr(self, attr)
 
+            # If the model already defines a pooler instance, don't overwrite it
+            if not getattr(self, "_pooler", None):
+                self._pooler = self._init_pooler(vllm_config)
+
+        def _init_pooler(self, vllm_config: "VllmConfig"):
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
 
-            # If the model already defines a pooler instance, don't overwrite it
-            if not getattr(self, "_pooler", None):
-                self._pooler = Pooler.from_config_with_defaults(
-                    pooler_config,
-                    pooling_type=default_pooling_type,
-                    normalize=default_normalize,
-                    softmax=default_softmax,
-                )
+            return Pooler.from_config_with_defaults(
+                pooler_config,
+                pooling_type=default_pooling_type,
+                normalize=default_normalize,
+                softmax=default_softmax,
+            )
 
         def pooler(
             self,
@@ -165,7 +168,8 @@ def as_seq_cls_model(cls: _T) -> _T:
 
     # Lazy import
     from vllm.model_executor.layers.linear import RowParallelLinear
-    from vllm.model_executor.layers.pooler import PoolerOutput, PoolingType
+    from vllm.model_executor.layers.pooler import (ClassifierPooler,
+                                                   PoolerOutput, PoolingType)
     from vllm.model_executor.models.interfaces import SupportsCrossEncoding
     from vllm.model_executor.pooling_metadata import PoolingMetadata
     from vllm.sequence import IntermediateTensors
@@ -196,8 +200,6 @@ def as_seq_cls_model(cls: _T) -> _T:
 
             self.vllm_config = vllm_config
             self.task = vllm_config.model_config.task
-            self.pooling_type = (
-                vllm_config.model_config.pooler_config.pooling_type)
 
             self.score = RowParallelLinear(config.hidden_size,
                                            config.num_labels,
@@ -206,6 +208,16 @@ def as_seq_cls_model(cls: _T) -> _T:
                                            bias=False,
                                            prefix=maybe_prefix(
                                                prefix, "score"))
+
+        def _init_pooler(self, vllm_config: "VllmConfig"):
+            pooler_config = vllm_config.model_config.pooler_config
+            assert pooler_config is not None
+
+            return ClassifierPooler(
+                vllm_config.model_config,
+                self.score,
+                act_fn=super()._init_pooler(vllm_config).head.activation,
+            )
 
         def forward(
             self,
@@ -222,27 +234,7 @@ def as_seq_cls_model(cls: _T) -> _T:
             hidden_states: Union[torch.Tensor, list[torch.Tensor]],
             pooling_metadata: PoolingMetadata,
         ) -> PoolerOutput:
-
-            def get_logits(hidden_states):
-                if isinstance(hidden_states, list):
-                    logits = [self.score(state)[0] for state in hidden_states]
-                else:
-                    logits, _ = self.score(hidden_states)
-                return logits
-
-            if self.pooling_type == PoolingType.ALL:
-                logits = get_logits(hidden_states)
-                return self._pooler(logits, pooling_metadata)
-            else:
-                hidden_states = self._pooler.extract_states(
-                    hidden_states, pooling_metadata)
-                logits = get_logits(hidden_states)
-                pooled_data = self._pooler.head(logits, pooling_metadata)
-
-                pooled_outputs = [
-                    self._pooler.build_output(data) for data in pooled_data
-                ]
-                return PoolerOutput(outputs=pooled_outputs)
+            return self._pooler(hidden_states, pooling_metadata)
 
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
             tokens = getattr(self.config, "classifier_from_token", None)
