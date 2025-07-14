@@ -130,7 +130,8 @@ class P2pNcclEngine:
 
         # The sending type includes tree mutually exclusive options:
         # PUT, GET, PUT_ASYNC.
-        self.send_type = self.config.get_from_extra_config("send_type", "PUT")
+        self.send_type = self.config.get_from_extra_config("send_type",
+                                                           "PUT_ASYNC")
         if self.send_type == "GET":
             # tensor_id: torch.Tensor
             self.send_store: dict[str, torch.Tensor] = {}
