@@ -4,7 +4,7 @@
 import copy
 import gc
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 import torch.distributed
@@ -193,6 +193,9 @@ class Worker(WorkerBase):
         with context:
             self.model_runner.load_model()
 
+    def update_config(self, overrides: dict[str, Any]) -> None:
+        self.model_runner.update_config(overrides)
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much 
@@ -338,6 +341,10 @@ class Worker(WorkerBase):
                     output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
                 output.finished_sending = finished_sending
                 output.finished_recving = finished_recving
+
+            # Clear KVConnector state for this step.
+            get_kv_transfer_group().clear_connector_metadata()
+
             # with a connector, the scheduler expects output from all workers
             return output
 
