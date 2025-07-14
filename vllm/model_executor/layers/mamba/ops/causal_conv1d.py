@@ -92,7 +92,8 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
 
     if IS_CONTINUOUS_BATCHING:
         # cache_idx
-        conv_state_batch_coord = tl.load(conv_state_indices_ptr + idx_seq)
+        conv_state_batch_coord = tl.load(conv_state_indices_ptr + idx_seq).to(
+            tl.int64)
     else:
         # cache_idx
         conv_state_batch_coord = idx_seq
