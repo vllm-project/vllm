@@ -136,7 +136,7 @@ class TestAGScaledMMModel(_BaseScaledMMModel):
 
     def forward(self, input: torch.Tensor):
         """
-        Forward pass implementing the mm + all gather in the FX graph
+        Forward pass implementing the all gather + scaled_mm in the FX graph
         """
         # Reshape input
         fp8_input = input.to(FP8_DTYPE)
@@ -157,10 +157,61 @@ class TestAGScaledMMModel(_BaseScaledMMModel):
         return [torch.ops.symm_mem.fused_all_gather_scaled_matmul.default]
 
 
+class TestCutlassScaledMMRSModel(_BaseScaledMMModel):
+
+    def forward(self, input: torch.Tensor):
+        """
+        Forward pass implementing the cutlass_scaled_mm + reduce scatter in the FX graph
+    
+        """
+        fp8_input = input.to(FP8_DTYPE)
+        scale_a = torch.ones(input.shape[0], 1, dtype=torch.float32)
+        mm_out = torch.empty((fp8_input.shape[0], self.weight.shape[1]),
+                             dtype=self.dtype,
+                             device=input.device)
+        torch.ops._C.cutlass_scaled_mm(mm_out, fp8_input, self.weight, scale_a,
+                                       self.scale_b, None)
+        reduce_scatter = tensor_model_parallel_reduce_scatter(mm_out, dim=0)
+        return reduce_scatter
+
+    def ops_in_model_before(self):
+        return [torch.ops.vllm.reduce_scatter.default]
+
+    def ops_in_model_after(self):
+        return [torch.ops.symm_mem.fused_scaled_matmul_reduce_scatter.default]
+
+
+class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
+
+    def forward(self, input: torch.Tensor):
+        """
+        Forward pass implementing the all gather + cutlass_scaled_mm in the FX graph
+        """
+        # Reshape input
+        fp8_input = input.to(FP8_DTYPE)
+        all_gather = tensor_model_parallel_all_gather(fp8_input, dim=0)
+
+        scale_a = torch.ones(all_gather.shape[0], 1, dtype=torch.float32)
+
+        mm_out = torch.empty((all_gather.shape[0], self.weight.shape[1]),
+                             dtype=self.dtype,
+                             device=all_gather.device)
+        torch.ops._C.cutlass_scaled_mm(mm_out, all_gather, self.weight,
+                                       scale_a, self.scale_b, None)
+        return mm_out
+
+    def ops_in_model_before(self):
+        return [torch.ops.vllm.all_gather.default]
+
+    def ops_in_model_after(self):
+        return [torch.ops.symm_mem.fused_all_gather_scaled_matmul.default]
+
+
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize(
-    "test_model",
-    [TestMMRSModel, TestAGMMModel, TestScaledMMRSModel, TestAGScaledMMModel])
+@pytest.mark.parametrize("test_model", [
+    TestMMRSModel, TestAGMMModel, TestScaledMMRSModel, TestAGScaledMMModel,
+    TestCutlassScaledMMRSModel, TestAGCutlassScaledMMModel
+])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [16])
 @pytest.mark.parametrize("hidden_size", [16])
@@ -169,10 +220,11 @@ class TestAGScaledMMModel(_BaseScaledMMModel):
                     reason="Only test on CUDA")
 def test_async_tp_pass_replace(test_model: str, batch_size: int, seq_len: int,
                                hidden_size: int, dtype: torch.dtype):
-    if test_model in (TestScaledMMRSModel,
-                      TestAGScaledMMModel) and dtype == torch.float16:
+    if test_model in (TestScaledMMRSModel, TestAGScaledMMModel,
+                      TestCutlassScaledMMRSModel,
+                      TestAGCutlassScaledMMModel) and dtype == torch.float16:
         pytest.skip(
-            "TestScaledMMRSModel and TestAGScaledMMModel do not support float16"
+            "Only bf16 high precision output types are supported for row-wise scaling"
         )
 
     num_processes = 2
