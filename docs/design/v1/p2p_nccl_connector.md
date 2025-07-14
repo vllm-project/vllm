@@ -318,4 +318,8 @@ curl -X POST -s http://10.0.1.1:10001/v1/completions \
 pgrep python | xargs kill -9 && pkill -f python
 ```
 
+# Test data
+
+## **Scenario**: 1K input & 200 output tokens, E2E P99 latency ~2s
+
 ![testdata](https://github.com/user-attachments/assets/f791bfc7-9f3d-4e5c-9171-a42f9f4da627)
