@@ -413,6 +413,7 @@ class Qwen2MoeModel(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
@@ -442,7 +443,7 @@ class Qwen2MoeModel(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                for mapping in self.get_expert_mapping():
+                for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
                         continue
