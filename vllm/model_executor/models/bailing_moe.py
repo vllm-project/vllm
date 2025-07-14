@@ -29,7 +29,6 @@ from typing import Optional, Union
 import torch
 import torch.nn.functional as F
 from torch import nn
-
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.attention import Attention
