@@ -369,11 +369,13 @@ class Llama4Model(LlamaModel):
         # Store the original layer_type and override it with a lambda
         original_layer_type = layer_type
 
-        def create_layer(prefix):
+        def create_layer(config, cache_config, quant_config, prefix):
+            # We use the config from vllm_config instead of the passed one
+            # to ensure we get the Llama4TextConfig type
             config = cast(Llama4TextConfig, vllm_config.model_config.hf_config)
             return original_layer_type(config=config,
-                                       cache_config=vllm_config.cache_config,
-                                       quant_config=vllm_config.quant_config,
+                                       cache_config=cache_config,
+                                       quant_config=quant_config,
                                        prefix=prefix,
                                        enable_eplb=self.enable_eplb)
 

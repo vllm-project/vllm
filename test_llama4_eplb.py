@@ -19,6 +19,7 @@ def main():
     llm = LLM(
         model="/fp8-llama/llama4scout-fp8/",
         tensor_parallel_size=8,
+        max_model_len=2048,
         enable_expert_parallel=True,
         enable_eplb=True,
         num_redundant_experts=16,
