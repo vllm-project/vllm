@@ -417,7 +417,7 @@ class P2pNcclEngine:
         tensor: torch.Tensor,
         remote_address: typing.Optional[str] = None,
         slot_mapping: torch.Tensor = None,
-        is_mla: Boolean = False,
+        is_mla: bool = False,
     ) -> bool:
         if remote_address is None:
             return False
