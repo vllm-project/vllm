@@ -3259,6 +3259,16 @@ class PoolerConfig:
     validation logic. Defaults to None (use max_model_len validation).
     """
 
+    allow_non_mean_chunking: Optional[bool] = None
+    """
+    Whether to allow chunked processing for non-MEAN pooling types without 
+    warnings. By default (None or False), a warning will be shown when using 
+    chunked processing with pooling types other than MEAN, as they may produce 
+    different results than non-chunked processing. Set to True to explicitly 
+    allow and suppress warnings for non-MEAN pooling types. Only applies when 
+    enable_chunked_processing is True.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

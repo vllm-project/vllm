@@ -152,7 +152,7 @@ class EmbeddingMixin(OpenAIServing):
         hf_config = self.model_config.hf_config
 
         # Start with max_position_embeddings from model config
-        derived_max_len = getattr(hf_config, 'max_position_embeddings', 2048)
+        derived_max_len = getattr(hf_config, 'max_position_embeddings', 512)
 
         # Get tokenizer config for pooling models (embedding models)
         if self.model_config.runner_type == "pooling":
@@ -179,8 +179,38 @@ class EmbeddingMixin(OpenAIServing):
             return False
 
         pooler_config = getattr(self.model_config, 'pooler_config', None)
-        return (pooler_config is not None
-                and getattr(pooler_config, 'enable_chunked_processing', False))
+        if not (pooler_config is not None and getattr(
+                pooler_config, 'enable_chunked_processing', False)):
+            return False
+
+        # Check pooling type compatibility for chunked processing
+        pooling_type = getattr(pooler_config, 'pooling_type', None)
+        if pooling_type:
+            pooling_type_upper = pooling_type.upper()
+
+            # Warn about non-MEAN pooling types
+            if pooling_type_upper not in ['MEAN', 'AVG']:
+                # Check if user explicitly allowed non-mean chunking
+                allow_non_mean = getattr(pooler_config,
+                                         'allow_non_mean_chunking', False)
+                if not allow_non_mean:
+                    logger.warning(
+                        "Chunked processing with pooling type '%s' "
+                        "may produce different results than non-chunked "
+                        "processing. Only MEAN pooling is mathematically "
+                        "equivalent when using weighted averaging aggregation. "
+                        "For other pooling types, different aggregation "
+                        "strategies will be used that approximate the original "
+                        "behavior. Set 'allow_non_mean_chunking: true' "
+                        "in pooler config to suppress this warning.",
+                        pooling_type)
+                    # Still allow it but with warning
+                else:
+                    logger.info(
+                        "Using chunked processing with pooling type "
+                        "'%s' (explicitly enabled)", pooling_type)
+
+        return True
 
     def _chunk_token_ids(self, token_ids: list[int],
                          chunk_size: int) -> list[list[int]]:
@@ -211,8 +241,9 @@ class EmbeddingMixin(OpenAIServing):
         chunks = self._chunk_token_ids(token_ids, max_pos_embeddings)
 
         logger.info(
-            "Split input of %s tokens into %s chunks (max_chunk_size: %s)",
-            len(token_ids), len(chunks), max_pos_embeddings)
+            "Split input of %s tokens into %s chunks "
+            "(max_chunk_size: %s)", len(token_ids), len(chunks),
+            max_pos_embeddings)
 
         for chunk_idx, chunk_tokens in enumerate(chunks):
             # Create a request ID for this chunk
@@ -256,11 +287,44 @@ class EmbeddingMixin(OpenAIServing):
         original_token_count: int,
         original_prompt_token_ids: Optional[list[int]] = None,
     ) -> PoolingRequestOutput:
-        """Aggregate results from multiple chunks
-        using vLLM-compatible weighted averaging."""
+        """Aggregate results from multiple chunks using 
+        pooling-type-specific strategies."""
         if len(chunk_results) == 1:
             return chunk_results[0]
 
+        # Get pooling type to determine aggregation strategy
+        pooler_config = getattr(self.model_config, 'pooler_config', None)
+        pooling_type = getattr(pooler_config, 'pooling_type', 'MEAN')
+        if pooling_type:
+            pooling_type = pooling_type.upper()
+
+        # Route to appropriate aggregation method based on pooling type
+        if pooling_type in ['MEAN', 'AVG']:
+            return await self._aggregate_mean_pooling(
+                chunk_results, original_token_count, original_prompt_token_ids)
+        elif pooling_type == 'LAST':
+            return await self._aggregate_last_pooling(
+                chunk_results, original_prompt_token_ids)
+        elif pooling_type == 'CLS':
+            return await self._aggregate_cls_pooling(
+                chunk_results, original_prompt_token_ids)
+        else:
+            # For unsupported pooling types,
+            # fall back to mean aggregation with warning
+            logger.warning(
+                "Chunked aggregation for pooling type '%s' is not "
+                "specifically implemented. Falling back to weighted "
+                "averaging which may produce incorrect results.", pooling_type)
+            return await self._aggregate_mean_pooling(
+                chunk_results, original_token_count, original_prompt_token_ids)
+
+    async def _aggregate_mean_pooling(
+        self,
+        chunk_results: list[PoolingRequestOutput],
+        original_token_count: int,
+        original_prompt_token_ids: Optional[list[int]] = None,
+    ) -> PoolingRequestOutput:
+        """Aggregate results using weighted averaging for MEAN pooling."""
         # Extract embeddings and use vLLM's token counting approach
         chunk_embeddings = []
         chunk_weights = []
@@ -327,6 +391,58 @@ class EmbeddingMixin(OpenAIServing):
         )
 
         return aggregated_result
+
+    async def _aggregate_last_pooling(
+        self,
+        chunk_results: list[PoolingRequestOutput],
+        original_prompt_token_ids: Optional[list[int]] = None,
+    ) -> PoolingRequestOutput:
+        """Aggregate results for LAST pooling by using the last chunk.
+        
+        For LAST pooling, we use the embedding from the last chunk since
+        it contains the final token's representation, which is what LAST
+        pooling extracts from the full sequence.
+        """
+        last_result = chunk_results[-1]
+
+        # Preserve original prompt token ids for consistency
+        if original_prompt_token_ids is not None:
+            # Create a new result with updated prompt_token_ids
+            aggregated_result = PoolingRequestOutput(
+                request_id=last_result.request_id,
+                outputs=last_result.outputs,
+                prompt_token_ids=original_prompt_token_ids,
+                finished=True,
+            )
+            return aggregated_result
+
+        return last_result
+
+    async def _aggregate_cls_pooling(
+        self,
+        chunk_results: list[PoolingRequestOutput],
+        original_prompt_token_ids: Optional[list[int]] = None,
+    ) -> PoolingRequestOutput:
+        """Aggregate results for CLS pooling by using the first chunk.
+        
+        For CLS pooling, we use the embedding from the first chunk since
+        it contains the CLS token's representation, which is what CLS
+        pooling extracts (typically the first token).
+        """
+        first_result = chunk_results[0]
+
+        # Preserve original prompt token ids for consistency
+        if original_prompt_token_ids is not None:
+            # Create a new result with updated prompt_token_ids
+            aggregated_result = PoolingRequestOutput(
+                request_id=first_result.request_id,
+                outputs=first_result.outputs,
+                prompt_token_ids=original_prompt_token_ids,
+                finished=True,
+            )
+            return aggregated_result
+
+        return first_result
 
     def _validate_input(
         self,

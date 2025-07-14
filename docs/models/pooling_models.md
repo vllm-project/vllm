@@ -38,8 +38,14 @@ vLLM supports **chunked processing** for embedding models to handle text inputs 
 
 ### Supported Models
 
-- `intfloat/multilingual-e5-large`
-- Other embedding models can be extended to support this feature
+Chunked processing is supported for the following embedding models:
+
+- `intfloat/multilingual-e5-large` (Recommended pool type: `MEAN`)
+- `jinaai/jina-embeddings-v3` (Recommended pool type: `MEAN`)  
+- `jinaai/jina-embeddings-v4-vllm-retrieval` (Recommended pool type: `MEAN`)
+- `Qwen/Qwen3-Embedding-4B` (Recommended pool type: `MEAN`)
+
+Other embedding models can be extended to support this feature by ensuring proper pooling type compatibility.
 
 ### How Chunked Processing Works
 
@@ -56,7 +62,7 @@ Enable chunked processing and configure maximum embedding input length:
 ```bash
 vllm serve intfloat/multilingual-e5-large \
   --task embed \
-  --override-pooler-config '{"pooling_type": "CLS", "normalize": true, "enable_chunked_processing": true, "max_embed_len": 10240}' \
+  --override-pooler-config '{"pooling_type": "MEAN", "normalize": true, "enable_chunked_processing": true, "max_embed_len": 3072000}' \
   --trust-remote-code
 ```
 
@@ -90,7 +96,17 @@ This ensures that longer chunks contribute proportionally more to the final repr
 | **Compatibility** | Full | Full (backward compatible) |
 | **Input Validation** | Standard max_model_len check | Extended max_embed_len check |
 
+#### Extreme Long Text Support
+
+With the enhanced `max_embed_len` configuration (up to 3M+ tokens), you can process:
+- **Complete Documents**: Research papers, legal contracts, technical manuals
+- **Large Codebases**: Entire repositories and documentation
+- **Books and Literature**: Full chapters or small books
+- **Multi-document Analysis**: Combined content for comprehensive understanding
+
 ### Example Usage
+
+#### Basic Configuration
 
 ```python
 from openai import OpenAI
@@ -101,13 +117,35 @@ client = OpenAI(
 )
 
 # This will automatically use chunked processing for very long text
-# max_embed_len=10240 allows inputs up to 10k tokens
+# max_embed_len=3072000 allows inputs up to 3M+ tokens
 response = client.embeddings.create(
-    input="Very long text that exceeds the model's position embeddings..." * 500,
+    input="Very long text that exceeds the model's position embeddings..." * 5000,
     model="multilingual-e5-large"
 )
 
 print(f"Embedding dimension: {len(response.data[0].embedding)}")
+```
+
+#### Alternative Model Configurations
+
+```bash
+# For Jina embeddings v3 (optimized for performance)
+vllm serve jinaai/jina-embeddings-v3 \
+  --task embed \
+  --override-pooler-config '{"pooling_type": "MEAN", "normalize": true, "enable_chunked_processing": true, "max_embed_len": 1048576}' \
+  --trust-remote-code
+
+# For Jina embeddings v4 (latest retrieval model)  
+vllm serve jinaai/jina-embeddings-v4-vllm-retrieval \
+  --task embed \
+  --override-pooler-config '{"pooling_type": "MEAN", "normalize": true, "enable_chunked_processing": true, "max_embed_len": 2097152}' \
+  --trust-remote-code
+
+# For Qwen3 Embedding (large-scale multilingual)
+vllm serve Qwen/Qwen3-Embedding-4B \
+  --task embed \
+  --override-pooler-config '{"pooling_type": "MEAN", "normalize": true, "enable_chunked_processing": true, "max_embed_len": 1572864}' \
+  --trust-remote-code
 ```
 
 ### Logging and Monitoring
@@ -115,8 +153,8 @@ print(f"Embedding dimension: {len(response.data[0].embedding)}")
 When chunked processing is active, you'll see informative log messages:
 
 ```
-INFO: Input length 10000 exceeds max_position_embeddings 512, will use chunked processing
-INFO: Split input of 10000 tokens into 20 chunks (max_chunk_size: 512)
+INFO: Input length 100000 exceeds max_position_embeddings 512, will use chunked processing
+INFO: Split input of 100000 tokens into 196 chunks (max_chunk_size: 512)
 ```
 
 ### Limitations

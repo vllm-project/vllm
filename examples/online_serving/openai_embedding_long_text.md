@@ -9,13 +9,17 @@ This directory contains examples for using vLLM's **chunked processing** feature
 Use the provided script to start a vLLM server with chunked processing enabled:
 
 ```bash
-# Basic usage
+# Basic usage (supports very long texts up to ~3M tokens)
 ./openai_embedding_long_text_service.sh
 
-# Custom configuration
+# Custom configuration with different models
+MODEL_NAME="jinaai/jina-embeddings-v3" \
+MAX_EMBED_LEN=1048576 \
+./openai_embedding_long_text_service.sh
+
+# For extremely long documents
 MODEL_NAME="intfloat/multilingual-e5-large" \
-PORT=31090 \
-MAX_EMBED_LEN=10240 \
+MAX_EMBED_LEN=3072000 \
 ./openai_embedding_long_text_service.sh
 ```
 
@@ -43,10 +47,10 @@ The key parameters for chunked processing are in the `--override-pooler-config`:
 
 ```json
 {
-  "pooling_type": "CLS",
+  "pooling_type": "MEAN",
   "normalize": true,
   "enable_chunked_processing": true,
-  "max_embed_len": 10240
+  "max_embed_len": 3072000
 }
 ```
 
@@ -54,10 +58,10 @@ The key parameters for chunked processing are in the `--override-pooler-config`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MODEL_NAME` | `intfloat/multilingual-e5-large` | Embedding model to use |
+| `MODEL_NAME` | `intfloat/multilingual-e5-large` | Embedding model to use (supports multiple models) |
 | `PORT` | `31090` | Server port |
 | `GPU_COUNT` | `1` | Number of GPUs to use |
-| `MAX_EMBED_LEN` | `10240` | Maximum embedding input length (allows longer inputs without VLLM_ALLOW_LONG_MAX_MODEL_LEN) |
+| `MAX_EMBED_LEN` | `3072000` | Maximum embedding input length (supports very long documents) |
 | `API_KEY` | `EMPTY` | API key for authentication |
 
 ## 🔧 How It Works
@@ -70,10 +74,18 @@ The key parameters for chunked processing are in the `--override-pooler-config`:
 
 ### Input Length Handling
 
-- **Within max_embed_len**: Input is accepted and processed
+- **Within max_embed_len**: Input is accepted and processed (up to 3M+ tokens)
 - **Exceeds max_position_embeddings**: Chunked processing is automatically triggered
 - **Exceeds max_embed_len**: Input is rejected with clear error message
 - **No environment variables required**: Works without `VLLM_ALLOW_LONG_MAX_MODEL_LEN`
+
+### Extreme Long Text Support
+
+With `MAX_EMBED_LEN=3072000`, you can process:
+- **Academic papers**: Full research papers with references
+- **Legal documents**: Complete contracts and legal texts  
+- **Books**: Entire chapters or small books
+- **Code repositories**: Large codebases and documentation
 
 ## 📊 Performance Characteristics
 
@@ -91,6 +103,7 @@ The test client demonstrates:
 - ✅ **Medium text**: Single chunk processing
 - ✅ **Long text**: Multi-chunk processing with aggregation
 - ✅ **Very long text**: Many chunks processing
+- ✅ **Extreme long text**: Document-level processing (100K+ tokens)
 - ✅ **Batch processing**: Mixed-length inputs in one request
 - ✅ **Consistency**: Reproducible results across runs
 
@@ -109,7 +122,7 @@ The test client demonstrates:
 2. **Input exceeds max_embed_len**:
 
    ```
-   ValueError: This model's maximum embedding input length is 10240 tokens...
+   ValueError: This model's maximum embedding input length is 3072000 tokens...
    ```
 
    **Solution**: Increase `max_embed_len` in pooler config or reduce input length
@@ -130,8 +143,8 @@ The test client demonstrates:
 Server logs show chunked processing activity:
 
 ```
-INFO: Input length 15000 exceeds max_position_embeddings 4096, will use chunked processing
-INFO: Split input of 15000 tokens into 4 chunks (max_chunk_size: 4096)
+INFO: Input length 150000 exceeds max_position_embeddings 4096, will use chunked processing
+INFO: Split input of 150000 tokens into 37 chunks (max_chunk_size: 4096)
 ```
 
 ## 📚 Additional Resources
@@ -157,6 +170,7 @@ The new `max_embed_len` parameter provides:
 
 - **Simplified Configuration**: No need for `VLLM_ALLOW_LONG_MAX_MODEL_LEN` environment variable
 - **Flexible Input Validation**: Accept inputs longer than `max_model_len` up to `max_embed_len`
+- **Extreme Length Support**: Process documents with millions of tokens
 - **Clear Error Messages**: Better feedback when inputs exceed limits
 - **Backward Compatibility**: Existing configurations continue to work
 
