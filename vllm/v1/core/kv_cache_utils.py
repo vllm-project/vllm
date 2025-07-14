@@ -752,11 +752,13 @@ def is_kv_cache_page_size_uniform(
     page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
     return len(page_sizes) == 1
 
+
 def is_kv_cache_type_attention_free(
         kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
 
     # kv_cache_spec is an empty dict for attention free models
     return not kv_cache_spec
+
 
 def _get_kv_cache_config_uniform_page_size(
         vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec],
@@ -901,9 +903,8 @@ def _get_kv_cache_config_uniform_page_size(
 
 
 def _get_kv_cache_config_attention_free() -> KVCacheConfig:
-    return KVCacheConfig(num_blocks=1,
-                         kv_cache_tensors=[],
-                         kv_cache_groups=[])
+    return KVCacheConfig(num_blocks=1, kv_cache_tensors=[], kv_cache_groups=[])
+
 
 def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
     """
