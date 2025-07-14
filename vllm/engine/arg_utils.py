@@ -1420,7 +1420,7 @@ class EngineArgs:
             supported = False
             if current_platform.is_rocm() or (
                     current_platform.is_cuda()
-                    and current_platform.has_device_capability(100)):
+                    and current_platform.is_device_capability(100)):
                 supported = True
             elif fp8_attention and will_use_fa:
                 from vllm.attention.utils.fa_utils import (
