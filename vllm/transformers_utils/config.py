@@ -305,6 +305,9 @@ def get_config(
     revision: Optional[str] = None,
     code_revision: Optional[str] = None,
     config_format: ConfigFormat = ConfigFormat.AUTO,
+    hf_overrides_kw: Optional[dict[str, Any]] = None,
+    hf_overrides_fn: Optional[Callable[[PretrainedConfig],
+                                       PretrainedConfig]] = None,
     **kwargs,
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
@@ -422,6 +425,13 @@ def get_config(
                 f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
+
+    if hf_overrides_kw:
+        logger.debug("Overriding HF config with %s", hf_overrides_kw)
+        config.update(hf_overrides_kw)
+    if hf_overrides_fn:
+        logger.debug("Overriding HF config with %s", hf_overrides_fn)
+        config = hf_overrides_fn(config)
 
     patch_rope_scaling(config)
 
