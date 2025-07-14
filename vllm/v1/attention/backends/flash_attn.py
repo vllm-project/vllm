@@ -45,6 +45,10 @@ class FlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
     @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [32, 64, 96, 128, 160, 192, 224, 256]
 
