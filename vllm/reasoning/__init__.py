@@ -4,6 +4,7 @@
 from .abs_reasoning_parsers import ReasoningParser, ReasoningParserManager
 from .deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 from .granite_reasoning_parser import GraniteReasoningParser
+from .hunyuan_a13b_reasoning_parser import HunyuanA13BReasoningParser
 from .qwen3_reasoning_parser import Qwen3ReasoningParser
 
 __all__ = [
@@ -11,5 +12,6 @@ __all__ = [
     "ReasoningParserManager",
     "DeepSeekR1ReasoningParser",
     "GraniteReasoningParser",
+    "HunyuanA13BReasoningParser",
     "Qwen3ReasoningParser",
 ]

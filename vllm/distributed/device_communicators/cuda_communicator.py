@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 from .base_device_communicator import DeviceCommunicatorBase
 
@@ -41,6 +42,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             CustomAllreduce)
         from vllm.distributed.device_communicators.pynccl import (
             PyNcclCommunicator)
+        from vllm.distributed.device_communicators.quick_all_reduce import (
+            QuickAllReduce)
 
         self.pynccl_comm: Optional[PyNcclCommunicator] = None
         if use_pynccl and self.world_size > 1:
@@ -50,6 +53,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             )
 
         self.ca_comm: Optional[CustomAllreduce] = None
+        self.qr_comm: Optional[QuickAllReduce] = None
         if use_custom_allreduce and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
             self.ca_comm = CustomAllreduce(
@@ -57,6 +61,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 device=self.device,
             )
 
+            if current_platform.is_rocm():
+                # Initialize a custom quick all-reduce implementation for AMD.
+                # Quick reduce is designed as a complement to custom allreduce.
+                # Based on quickreduce (https://github.com/mk1-project/quickreduce).
+                # If it's a rocm, 'use_custom_allreduce==True' means it must
+                # currently be an MI300 series.
+                self.qr_comm = QuickAllReduce(group=self.cpu_group,
+                                              device=self.device)
         if self.use_all2all:
             all2all_backend = envs.VLLM_ALL2ALL_BACKEND
             if all2all_backend == "naive":
@@ -79,8 +91,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 raise ValueError(f"Unknown all2all backend: {all2all_backend}")
 
     def all_reduce(self, input_):
-        # always try custom allreduce first,
-        # and then pynccl.
+        # always try quick reduce first, then custom allreduce,
+        # and then pynccl. (quick reduce just for ROCM MI3*)
+        qr_comm = self.qr_comm
+        if qr_comm is not None and not qr_comm.disabled and \
+            qr_comm.should_quick_allreduce(input_):
+            out = qr_comm.quick_all_reduce(input_)
+            assert out is not None
+            return out
         ca_comm = self.ca_comm
         if ca_comm is not None and not ca_comm.disabled and \
             ca_comm.should_custom_ar(input_):
@@ -124,6 +142,42 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
 
+    def reduce_scatterv(self,
+                        input_: torch.Tensor,
+                        dim: int = -1,
+                        sizes: Optional[list[int]] = None):
+        world_size = self.world_size
+        pynccl_comm = self.pynccl_comm
+        assert pynccl_comm is not None
+        if dim < 0:
+            # Convert negative dim to positive.
+            dim += input_.dim()
+
+        # Note: This will produce an incorrect answer if we don't make
+        # the input_tensor contiguous. Possible bug in reduce_scatter_tensor?
+        input_tensor = input_.movedim(0, dim).contiguous()
+
+        if sizes is not None:
+            assert len(sizes) == world_size
+            assert input_tensor.shape[0] == sum(sizes)
+            chunk_size = sizes[self.rank_in_group]
+        else:
+            assert input_tensor.shape[0] % world_size == 0
+            chunk_size = input_tensor.shape[0] // world_size
+        output_shape = (chunk_size, ) + input_tensor.shape[1:]
+
+        output = torch.empty(output_shape,
+                             dtype=input_tensor.dtype,
+                             device=input_tensor.device)
+
+        if sizes is not None:
+            pynccl_comm.reduce_scatterv(output, input_, sizes=sizes)
+        else:
+            pynccl_comm.reduce_scatter(output, input_)
+
+        # Reshape before returning
+        return output.movedim(0, dim).contiguous()
+
     def send(self, tensor: torch.Tensor, dst: Optional[int] = None) -> None:
         """Sends a tensor to the destination rank in a non-blocking way"""
         """NOTE: `dst` is the local rank of the destination rank."""
@@ -161,6 +215,51 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.all2all_manager is not None:
             self.all2all_manager.destroy()
             self.all2all_manager = None
+
+    def all_gatherv(self,
+                    input_: Union[torch.Tensor, list[torch.Tensor]],
+                    dim: int = 0,
+                    sizes: Optional[list[int]] = None):
+        if dim != 0:
+            raise NotImplementedError("only dim 0 all-gatherv is supported")
+        world_size = self.world_size
+        pynccl_comm = self.pynccl_comm
+        assert pynccl_comm is not None and not pynccl_comm.disabled
+
+        # 'sizes' is not needed if all inputs in the same group have the same
+        # shape
+        if sizes is not None and all(s == sizes[0] for s in sizes):
+            sizes = None
+
+        def _all_gather_single(input_: torch.Tensor,
+                               sizes: Optional[list[int]] = None):
+            input_size = input_.size()
+            if sizes is not None:
+                assert len(sizes) == world_size
+                assert input_.shape[dim] == sizes[self.rank_in_group]
+                output_size = (sum(sizes), ) + input_size[1:]
+            else:
+                output_size = (input_size[0] * world_size, ) + input_size[1:]
+            # Allocate output tensor.
+            output_tensor = torch.empty(output_size,
+                                        dtype=input_.dtype,
+                                        device=input_.device)
+            if sizes is not None:
+                pynccl_comm.all_gatherv(output_tensor, input_, sizes=sizes)
+            else:
+                pynccl_comm.all_gather(output_tensor, input_)
+            return output_tensor
+
+        if isinstance(input_, torch.Tensor):
+            return _all_gather_single(input_, sizes)
+
+        output_list = []
+        pynccl_comm.group_start()
+        for inp in input_:
+            output_list.append(_all_gather_single(inp, sizes=sizes))
+        pynccl_comm.group_end()
+
+        return output_list
 
     def dispatch(
             self, hidden_states: torch.Tensor,
