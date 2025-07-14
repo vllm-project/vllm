@@ -10,9 +10,12 @@ import regex as re
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import random_tool_call_id
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest, DeltaFunctionCall, DeltaMessage, DeltaToolCall,
-    ExtractedToolCallInformation, FunctionCall, ResponsesRequest, ToolCall)
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              DeltaFunctionCall, DeltaMessage,
+                                              DeltaToolCall,
+                                              ExtractedToolCallInformation,
+                                              FunctionCall, ResponsesRequest,
+                                              ToolCall)
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.openai.tool_parsers.utils import (
     extract_intermediate_diff)
@@ -62,8 +65,10 @@ class JambaToolParser(ToolParser):
                 "tokens in the tokenizer!")
 
     def adjust_request(
-        self, request: Union[ChatCompletionRequest | ResponsesRequest]
-    ) -> Union[ChatCompletionRequest | ResponsesRequest]:
+        self, request: Union[ChatCompletionRequest, ResponsesRequest]
+    ) -> Union[ChatCompletionRequest, ResponsesRequest]:
+        if not isinstance(request, ChatCompletionRequest):
+            return request
         if request.tools and request.tool_choice != 'none':
             # do not skip special tokens because jamba use the special
             # tokens to indicate the start and end of the tool calls
@@ -72,8 +77,8 @@ class JambaToolParser(ToolParser):
         return request
 
     def extract_tool_calls(
-        self, model_output: str,
-        request: Union[ChatCompletionRequest | ResponsesRequest]
+        self, model_output: str, request: Union[ChatCompletionRequest,
+                                                ResponsesRequest]
     ) -> ExtractedToolCallInformation:
 
         # sanity check; avoid unnecessary processing
