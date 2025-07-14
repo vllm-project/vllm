@@ -97,7 +97,6 @@ class TorchCompileWrapperWithCustomDispatcher:
         if isinstance(debug_dump_dir, str) and debug_dump_dir != "":
             decompiled_file = os.path.join(debug_dump_dir,
                                            "transformed_code.py")
-            print(f"decompiled_file:{decompiled_file}")
             if not os.path.exists(decompiled_file):
                 try:
                     # usually the decompilation will succeed for most models,
