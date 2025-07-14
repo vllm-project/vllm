@@ -100,31 +100,23 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     parser.add_argument("--allow-credentials",
                         action='store_true',
                         help="Allow credentials.")
-    parser.add_argument(
-        "--allowed-origins",
-        type=json.loads,
-        default=["*"],
-        help="Allowed origins."
-    )
-    parser.add_argument(
-        "--allowed-methods",
-        type=json.loads,
-        default=["*"],
-        help="Allowed methods."
-    )
-    parser.add_argument(
-        "--allowed-headers",
-        type=json.loads,
-        default=["*"],
-        help="Allowed headers."
-    )
-    parser.add_argument(
-        "--api-key",
-        type=optional_type(str),
-        default=None,
-        help="If provided, the server will require this key "
-        "to be presented in the header."
-    )
+    parser.add_argument("--allowed-origins",
+                        type=json.loads,
+                        default=["*"],
+                        help="Allowed origins.")
+    parser.add_argument("--allowed-methods",
+                        type=json.loads,
+                        default=["*"],
+                        help="Allowed methods.")
+    parser.add_argument("--allowed-headers",
+                        type=json.loads,
+                        default=["*"],
+                        help="Allowed headers.")
+    parser.add_argument("--api-key",
+                        type=optional_type(str),
+                        default=None,
+                        help="If provided, the server will require this key "
+                        "to be presented in the header.")
     parser.add_argument(
         "--lora-modules",
         type=optional_type(str),
@@ -165,45 +157,34 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         'Example: ``"Hello World"``\n'
         '* "openai" will render the content as a list of dictionaries, '
         "similar to OpenAI schema. "
-        'Example: ``[{"type": "text", "text": "Hello world!"}]``'
-    )
-    parser.add_argument(
-        "--response-role",
-        type=optional_type(str),
-        default="assistant",
-        help="The role name to return if "
-        "``request.add_generation_prompt=true``."
-    )
-    parser.add_argument(
-        "--ssl-keyfile",
-        type=optional_type(str),
-        default=None,
-        help="The file path to the SSL key file."
-    )
-    parser.add_argument(
-        "--ssl-certfile",
-        type=optional_type(str),
-        default=None,
-        help="The file path to the SSL cert file."
-    )
-    parser.add_argument(
-        "--ssl-ca-certs",
-        type=optional_type(str),
-        default=None,
-        help="The CA certificates file."
-    )
+        'Example: ``[{"type": "text", "text": "Hello world!"}]``')
+    parser.add_argument("--response-role",
+                        type=optional_type(str),
+                        default="assistant",
+                        help="The role name to return if "
+                        "``request.add_generation_prompt=true``.")
+    parser.add_argument("--ssl-keyfile",
+                        type=optional_type(str),
+                        default=None,
+                        help="The file path to the SSL key file.")
+    parser.add_argument("--ssl-certfile",
+                        type=optional_type(str),
+                        default=None,
+                        help="The file path to the SSL cert file.")
+    parser.add_argument("--ssl-ca-certs",
+                        type=optional_type(str),
+                        default=None,
+                        help="The CA certificates file.")
     parser.add_argument(
         "--enable-ssl-refresh",
         action='store_true',
         default=False,
-        help="Refresh SSL Context when SSL certificate files change"
-    )
+        help="Refresh SSL Context when SSL certificate files change")
     parser.add_argument(
         "--ssl-cert-reqs",
         type=int,
         default=int(ssl.CERT_NONE),
-        help=
-        "Whether client certificate is required (see stdlib ssl module's)."
+        help="Whether client certificate is required (see stdlib ssl module's)."
     )
     parser.add_argument(
         "--root-path",
@@ -315,7 +296,8 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         action='store_true',
         default=False,
         help=
-        "If set to True, enable tracking server_load_metrics in the app state.")
+        "If set to True, enable tracking server_load_metrics in the app state."
+    )
     parser.add_argument(
         "--enable-log-outputs",
         action='store_true',

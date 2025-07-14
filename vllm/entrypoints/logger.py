@@ -49,7 +49,6 @@ class RequestLogger:
             prompt, params, prompt_token_ids,
             prompt_embeds.shape if prompt_embeds is not None else None,
             lora_request, prompt_adapter_request)
-        
 
     def log_outputs(
         self,

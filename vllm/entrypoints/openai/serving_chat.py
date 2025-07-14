@@ -69,13 +69,12 @@ class OpenAIServingChat(OpenAIServing):
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
     ) -> None:
-        super().__init__(
-            engine_client=engine_client,
-            model_config=model_config,
-            models=models,
-            request_logger=request_logger,
-            return_tokens_as_token_ids=return_tokens_as_token_ids,
-            enable_force_include_usage=enable_force_include_usage)
+        super().__init__(engine_client=engine_client,
+                         model_config=model_config,
+                         models=models,
+                         request_logger=request_logger,
+                         return_tokens_as_token_ids=return_tokens_as_token_ids,
+                         enable_force_include_usage=enable_force_include_usage)
 
         self.response_role = response_role
         self.chat_template = chat_template
@@ -302,7 +301,6 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 request_metadata,
                 enable_force_include_usage=self.enable_force_include_usage)
-
 
         try:
             return await self.chat_completion_full_generator(
@@ -1013,7 +1011,7 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
-        
+
         created_time = int(time.time())
         final_res: Optional[RequestOutput] = None
 
