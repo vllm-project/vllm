@@ -11,7 +11,7 @@ on HuggingFace model repository.
 import os
 from pathlib import Path
 from dataclasses import asdict
-from typing import NamedTuple, Optional, Dict, Any
+from typing import NamedTuple, Optional, Any
 
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
@@ -32,8 +32,8 @@ question_per_audio_count = {
 class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
     prompt: Optional[str] = None
-    prompt_token_ids: Optional[Dict[str, list[int]]] = None
-    multi_modal_data: Optional[Dict[str, Any]] = None
+    prompt_token_ids: Optional[dict[str, list[int]]] = None
+    multi_modal_data: Optional[dict[str, Any]] = None
     stop_token_ids: Optional[list[int]] = None
     lora_requests: Optional[list[LoRARequest]] = None
 

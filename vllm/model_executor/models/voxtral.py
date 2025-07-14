@@ -97,9 +97,9 @@ class VoxtralProcessorAdapter:
 
     def __call__(
         self,
-        text: Optional[TextInput | list[TextInput]] = None,
-        audios: Optional[np.ndarray | list[np.ndarray]] = None,
-        return_tensors: Optional[str | TensorType] = None,
+        text: Optional[Union[TextInput, list[TextInput]]] = None,
+        audios: Optional[Union[np.ndarray, list[np.ndarray]]] = None,
+        return_tensors: Optional[Union[str, TensorType]] = None,
         **kwargs,
     ) -> Mapping[str, NestedTensors]:
         if text is None:
@@ -322,7 +322,11 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.audio_language_adapter = AudioLanguageAdapter(
             hidden_size=config.audio_config.d_model * self.downsample_factor,
             dim=config.text_config.hidden_size,
+
         )
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.language_model
 
     def forward(
         self,
@@ -352,7 +356,7 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def get_multimodal_embeddings(
         self, **kwargs
-    ) -> list[torch.Tensor] | torch.Tensor | tuple[torch.Tensor, ...] | None:
+    ) -> Union[list[torch.Tensor], torch.Tensor, tuple[torch.Tensor, ...], None]:
         audio_inputs = self._parse_and_validate_audio_arrays(**kwargs)
         if audio_inputs is None:
             return None
@@ -397,13 +401,13 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         return inputs_embeds
 
     def _parse_and_validate_audio_arrays(
-            self, **kwargs: object) -> list[torch.Tensor] | None:
+            self, **kwargs: object) -> Union[list[torch.Tensor], None]:
         audio_arrays = kwargs.pop("audio_arrays", None)
         if audio_arrays is None:
             return None
 
         if not isinstance(audio_arrays, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of images. "
+            raise ValueError("Incorrect type of audio_arrays. "
                              f"Got type: {type(audio_arrays)}")
 
         audio_arrays = flatten_bn(audio_arrays)
@@ -418,13 +422,6 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states,
                                                   sampling_metadata)
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -496,7 +493,6 @@ class AudioLanguageAdapter(nn.Module):
 
 
 class VoxtralEncoderModel(nn.Module):
-    config_class = WhisperConfig
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     # fmt: off
