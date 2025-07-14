@@ -7,7 +7,11 @@
 
 #include <c10/util/BFloat16.h>
 #include <c10/util/Half.h>
-#include <c10/cuda/CUDAException.h>  // For C10_CUDA_CHECK and C10_CUDA_KERNEL_LAUNCH_CHECK
+#ifdef USE_ROCM
+    #include <c10/hip/HIPException.h>  // For C10_HIP_CHECK and C10_HIP_KERNEL_LAUNCH_CHECK
+#else
+    #include <c10/cuda/CUDAException.h>  // For C10_CUDA_CHECK and C10_CUDA_KERNEL_LAUNCH_CHECK
+#endif
 
 #ifndef USE_ROCM
     #include <cub/block/block_load.cuh>
@@ -320,8 +324,13 @@ void selective_scan_fwd_launch(SSMParamsBase &params, cudaStream_t stream) {
                 dim3 grid(params.batch, params.dim / kNRows);
                 auto kernel = &selective_scan_fwd_kernel<Ktraits>;
                 if (kSmemSize >= 48 * 1024) {
+#ifdef USE_ROCM
+                    C10_HIP_CHECK(hipFuncSetAttribute(
+                        reinterpret_cast<const void*>(kernel), hipFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+#else
                     C10_CUDA_CHECK(cudaFuncSetAttribute(
                         kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+#endif
                 }
                 kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
                 C10_CUDA_KERNEL_LAUNCH_CHECK();
