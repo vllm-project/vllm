@@ -23,11 +23,6 @@ if sys.version_info >= (3, 12):
 else:
     from typing_extensions import TypedDict
 
-if sys.version_info >= (3, 12):
-    from typing import TypedDict
-else:
-    from typing_extensions import TypedDict
-
 import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
