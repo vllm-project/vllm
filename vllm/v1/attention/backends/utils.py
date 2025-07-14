@@ -438,12 +438,12 @@ def reorder_batch_to_split_decodes_and_prefills(
     Returns:
         True if the batch was modified, False otherwise.
     """
-    # We now want to reorder the batch so that the "decode" requests are and
-    # the front and the "prefill" requests are at the using the least amount
-    # swaps possible. (NOTE for now we loosely use "decode" to mean requests
-    # where attention is likely memory-bound and "prefill" to mean requests
-    # where attention is likely compute-bound, TODO(lucas): figure out a
-    # better naming here)
+    # We now want to reorder the batch so that the "decode" requests are at
+    # the front and the "prefill" requests are at the back using the least
+    # amount of swaps possible. (NOTE for now we loosely use "decode" to mean
+    # requests where attention is likely memory-bound and "prefill" to mean
+    # requests where attention is likely compute-bound, TODO(lucas): figure out
+    # a better naming here)
     decodes = []
     prefills = []
     num_decode_tokens = 0
