@@ -263,6 +263,10 @@ class MLACommonBackend(AttentionBackend):
         return (num_blocks, block_size, head_size)
 
     @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [576]
 

@@ -38,6 +38,10 @@ class TorchSDPABackend(AttentionBackend):
     accept_output_buffer: bool = False
 
     @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.float32]
+
+    @classmethod
     def validate_head_size(cls, head_size: int) -> None:
         attn_impl = _get_paged_attn_impl()
         is_valid, supported_head_sizes = attn_impl.validate_head_size(
