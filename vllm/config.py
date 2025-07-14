@@ -10,6 +10,7 @@ import json
 import textwrap
 import uuid
 import warnings
+import os
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import (MISSING, Field, asdict, field, fields, is_dataclass,
@@ -53,6 +54,8 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
                         resolve_obj_by_qualname)
 
 # yapf: enable
+
+SMALL_MODEL_THRESHOLD = 1_000_000_000
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -1574,6 +1577,30 @@ class ModelConfig:
         except Exception as e:
             logger.debug("Could not determine model size: %s", e)
             return False  # Conservative: assume large model
+
+    def get_num_parameters(self) -> int:
+        """Estimate total parameters based on model architecture."""
+        try:
+            # Some configs store the exact count.
+            if hasattr(self.hf_config, 'num_parameters') and \
+                    self.hf_config.num_parameters is not None:
+                return int(self.hf_config.num_parameters)
+
+            # Rough estimation for standard Transformer architectures
+            hidden = getattr(self.hf_config, 'hidden_size', 768)
+            layers = getattr(self.hf_config, 'num_hidden_layers', 12)
+            vocab = getattr(self.hf_config, 'vocab_size', 50_000)
+
+            # Parameter breakdown (very coarse):
+            embeddings = vocab * hidden                       # token embeddings
+            attention = layers * (4 * hidden * hidden)        # Q, K, V, O projections
+            mlp = layers * (8 * hidden * hidden)              # two linear layers per block
+
+            return embeddings + attention + mlp
+        except Exception:
+            # If anything goes wrong fall back to a large value so that we do
+            # NOT enable small-model optimisations erroneously.
+            return 2_000_000_000
 
 BlockSize = Literal[1, 8, 16, 32, 64, 128]
 CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
