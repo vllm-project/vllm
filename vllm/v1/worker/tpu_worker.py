@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A TPU worker class."""
 import os
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.distributed
@@ -259,6 +259,9 @@ class TPUWorker:
 
     def load_model(self) -> None:
         self.model_runner.load_model()
+
+    def update_config(self, overrides: dict[str, Any]) -> None:
+        self.model_runner.update_config(overrides)
 
     def compile_or_warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
