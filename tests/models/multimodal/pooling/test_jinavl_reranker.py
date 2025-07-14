@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Union
 
 import pytest
 from transformers import AutoModel
+
+from vllm.entrypoints.chat_utils import ChatCompletionContentPartImageParam
+from vllm.entrypoints.score_utils import ScoreMultiModalParam
 
 from ....conftest import HfRunner, VllmRunner
 
@@ -26,20 +30,22 @@ def vllm_reranker(
     doc_type: str = "text",
 ):
 
-    def create_image_param(url: str):
+    def create_image_param(url: str) -> ChatCompletionContentPartImageParam:
         return {"type": "image_url", "image_url": {"url": f"{url}"}}
 
+    query: Union[list[str], ScoreMultiModalParam]
     if query_type == "text":
         query = query_strs
     elif query_type == "image":
-        query = {"content": [create_image_param(url) for url in query_strs]}
+        query = ScoreMultiModalParam(
+            content=[create_image_param(url) for url in query_strs])
 
+    documents: Union[list[str], ScoreMultiModalParam]
     if doc_type == "text":
         documents = document_strs
     elif doc_type == "image":
-        documents = {
-            "content": [create_image_param(url) for url in document_strs]
-        }
+        documents = ScoreMultiModalParam(
+            content=[create_image_param(url) for url in document_strs])
 
     with vllm_runner(
             model_name,
