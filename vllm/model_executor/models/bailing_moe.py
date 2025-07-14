@@ -30,6 +30,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from transformers.configuration_utils import PretrainedConfig
+
 from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
@@ -52,7 +54,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.bailing_moe import BailingMoeConfig
 
 from .interfaces import SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
@@ -64,7 +65,7 @@ class BailingAttention(nn.Module):
 
     def __init__(
         self,
-        config: BailingMoeConfig,
+        config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -147,7 +148,7 @@ class BailingMLP(nn.Module):
     def __init__(
         self,
         intermediate_size: int,
-        config: BailingMoeConfig,
+        config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         reduce_results: Optional[bool] = True,
         prefix: str = "",
@@ -182,7 +183,7 @@ class BailingMoE(nn.Module):
     def __init__(
         self,
         intermediate_size: int,
-        config: BailingMoeConfig,
+        config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         reduce_results: Optional[bool] = True,
         prefix: str = "",
@@ -247,7 +248,7 @@ class BailingMoeBlock(nn.Module):
 
     def __init__(
         self,
-        config: BailingMoeConfig,
+        config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
