@@ -628,11 +628,6 @@ async def create_chat_completion(request: ChatCompletionRequest,
         return base(raw_request).create_error_response(
             message="The model does not support Chat Completions API")
 
-    if raw_request.app.state.scaling:
-        raise HTTPException(
-            status_code=503,
-            detail="The model is currently scaling. Please try again later.")
-
     generator = await handler.create_chat_completion(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
@@ -671,11 +666,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return base(raw_request).create_error_response(
             message="The model does not support Completions API")
 
-    if raw_request.app.state.scaling:
-        raise HTTPException(
-            status_code=503,
-            detail="The model is currently scaling. Please try again later.")
-
     try:
         generator = await handler.create_completion(request, raw_request)
     except OverflowError as e:
@@ -711,11 +701,6 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     if handler is None:
         return base(raw_request).create_error_response(
             message="The model does not support Embeddings API")
-
-    if raw_request.app.state.scaling:
-        raise HTTPException(
-            status_code=503,
-            detail="The model is currently scaling. Please try again later.")
 
     generator = await handler.create_embedding(request, raw_request)
 
@@ -1046,7 +1031,8 @@ async def scale(raw_request: Request):
                             detail="drain_timeout must be a positive integer")
 
     # Set scaling flag to prevent new requests
-    raw_request.app.state.scaling = True
+    global _scaling_state
+    _scaling_state = True
     client = engine_client(raw_request)
     try:
         await client.scale(new_data_parallel_size, drain_timeout)
@@ -1063,7 +1049,7 @@ async def scale(raw_request: Request):
         logger.error("Scale failed: %s", e)
         raise HTTPException(status_code=500, detail="Scale failed") from e
     finally:
-        raw_request.app.state.scaling = False
+        _scaling_state = False
 
 
 # TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
@@ -1264,6 +1250,41 @@ class XRequestIdMiddleware:
         return self.app(scope, receive, send_with_request_id)
 
 
+# Global variable to track scaling state
+_scaling_state = False
+
+
+class ScalingMiddleware:
+    """
+    Middleware that checks if the model is currently scaling and
+    returns a 503 Service Unavailable response if it is.
+    
+    This middleware applies to all HTTP requests and prevents
+    processing when the model is in a scaling state.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    def __call__(self, scope: Scope, receive: Receive,
+                 send: Send) -> Awaitable[None]:
+        if scope["type"] != "http":
+            return self.app(scope, receive, send)
+
+        # Check global scaling state
+        global _scaling_state
+        if _scaling_state:
+            # Return 503 Service Unavailable response
+            response = JSONResponse(content={
+                "error":
+                "The model is currently scaling. Please try again later."
+            },
+                                    status_code=503)
+            return response(scope, receive, send)
+
+        return self.app(scope, receive, send)
+
+
 def _extract_content_from_chunk(chunk_data: dict) -> str:
     """Extract content from a streaming response chunk."""
     try:
@@ -1451,6 +1472,9 @@ def build_app(args: Namespace) -> FastAPI:
 
     if args.enable_request_id_headers:
         app.add_middleware(XRequestIdMiddleware)
+
+    # Add scaling middleware to check for scaling state
+    app.add_middleware(ScalingMiddleware)
 
     if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
         logger.warning("CAUTION: Enabling log response in the API Server. "
