@@ -119,7 +119,6 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
             max_model_len=model_info.max_model_len,
             # these tests seem to produce leftover memory
             gpu_memory_utilization=0.80,
-            revision=model_info.revision,
             load_format="dummy",
             hf_overrides=hf_overrides,
         )

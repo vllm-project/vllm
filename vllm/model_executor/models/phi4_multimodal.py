@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Dict, List, Literal, Optional, Tuple, TypedDict, Union
@@ -979,6 +980,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
             prompt_ids = self.info.get_tokenizer().encode(prompt)
@@ -990,7 +992,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             mm_data['audio'] = audio_data
 
         processed_outputs = super()._call_hf_processor(prompt, mm_data,
-                                                       mm_kwargs)
+                                                       mm_kwargs, tok_kwargs)
 
         if "image_pixel_values" in processed_outputs:
             num_img_tokens = [
@@ -1119,6 +1121,15 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             ".down_proj_for_vision_speech.": ".vision_speech_projection.down.",
         },
     )
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<|image|>"
+        if modality.startswith("audio"):
+            return "<|audio|>"
+
+        raise ValueError("Only image or audio modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

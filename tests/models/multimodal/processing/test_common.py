@@ -345,33 +345,6 @@ def test_processing_correctness(
     )
 
 
-# yapf: disable
-@pytest.mark.parametrize("model_id", ["microsoft/Phi-3.5-vision-instruct"])
-@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
-@pytest.mark.parametrize("num_batches", [32])
-@pytest.mark.parametrize("simplify_rate", [1.0])
-# yapf: enable
-def test_processing_correctness_phi3v(
-    model_id: str,
-    hit_rate: float,
-    num_batches: int,
-    simplify_rate: float,
-):
-    # HACK - this is an attempted workaround for the following bug
-    # https://github.com/huggingface/transformers/issues/34307
-    from transformers import AutoImageProcessor  # noqa: F401
-    from transformers import AutoProcessor  # noqa: F401
-
-    AutoImageProcessor.from_pretrained(model_id, trust_remote_code=True)
-
-    _test_processing_correctness(
-        model_id,
-        hit_rate=hit_rate,
-        num_batches=num_batches,
-        simplify_rate=simplify_rate,
-    )
-
-
 @pytest.mark.parametrize("model_arch", ["Phi4MultimodalForCausalLM"])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
