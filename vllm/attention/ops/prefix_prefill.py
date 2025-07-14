@@ -43,7 +43,7 @@ def _fwd_kernel(Q,
                 sm_scale,
                 k_scale,
                 v_scale,
-                out_scale,
+                out_scale_inv,
                 B_Start_Loc,
                 B_Seqlen,
                 x: tl.constexpr,
@@ -280,7 +280,7 @@ def _fwd_kernel(Q,
              cur_head * stride_oh + offs_d[None, :] * stride_od)
     out_ptrs = Out + off_o
     if USE_FP8:
-        acc = acc * tl.load(out_scale)
+        acc = acc * tl.load(out_scale_inv)
         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
     tl.store(out_ptrs,
              acc,

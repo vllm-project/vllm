@@ -36,7 +36,7 @@ def kernel_paged_attention_2d(
         scale,  # float32
         k_scale,  # float32
         v_scale,  # float32
-        out_scale,
+        out_scale_inv,
         num_query_heads: tl.constexpr,  # int
         num_queries_per_kv: tl.constexpr,  # int
         num_queries_per_kv_padded: tl.constexpr,  # int
@@ -199,7 +199,7 @@ def kernel_paged_attention_2d(
     # epilogue
     acc = acc / L[:, None]
     if USE_FP8:
-        acc = acc * tl.load(out_scale)
+        acc = acc * tl.load(out_scale_inv)
         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
 
     output_offset = (cur_batch_in_all_start_index * output_stride_0 +
