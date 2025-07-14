@@ -191,7 +191,7 @@ def test_attention_fusion_v1(example_prompts, monkeypatch, model: str,
 
     vllm_config.compilation_config.inductor_compile_config = {
         "post_grad_custom_post_pass":
-        PrinterInductorPass("test_print", vllm_config, always=True)
+        PrinterInductorPass("test_print", vllm_config)
     }
     with set_current_vllm_config(vllm_config):
         backend = TestBackend()  # also force disable caches
