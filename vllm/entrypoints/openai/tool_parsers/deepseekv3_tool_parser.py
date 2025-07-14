@@ -7,12 +7,15 @@ from typing import Union
 import regex as re
 
 from vllm.entrypoints.chat_utils import random_tool_call_id
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ResponsesRequest,
                                               ToolCall)
+# yapf: enable
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.logger import init_logger

@@ -10,12 +10,15 @@ import regex as re
 from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ResponsesRequest,
                                               ToolCall)
+# yapf: enable
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.logger import init_logger
