@@ -7,15 +7,14 @@
 # Copyright (c) 2023 OpenGVLab
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
-from abc import ABC, abstractmethod
+from abc import ABC
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Optional, Union
+from typing import Optional, Union
 
-import numpy.typing as npt
 import torch
 import torch.nn as nn
 from PIL import Image
-from transformers import BatchEncoding, PretrainedConfig, TensorType
+from transformers import PretrainedConfig
 from transformers.image_processing_utils_fast import BaseImageProcessorFast
 
 from vllm.config import VllmConfig
@@ -23,11 +22,9 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.models.internvl import (
     BaseInternVLDummyInputsBuilder, BaseInternVLMultiModalProcessor,
-    BaseInternVLProcessingInfo, InternVLImageEmbeddingInputs,
-    InternVLImageInputs, InternVLImagePixelInputs, InternVLVideoPixelInputs,
-    calculate_internvl_targets, get_internvl_target_ratios,
-    image_to_pixel_values_internvl, resolve_internvl_min_max_num,
-    video_to_pixel_values_internvl)
+    InternVLImageEmbeddingInputs, InternVLImageInputs,
+    InternVLImagePixelInputs, InternVLProcessingInfo, InternVLProcessor,
+    InternVLVideoPixelInputs)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -54,14 +51,7 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
-class BaseNemotronVLProcessor(ABC):
-    """
-    This model doesn't define its own HF processor,
-    so we implement our own one here.
-
-    The code to insert image tokens is based on:
-    https://huggingface.co/OpenGVLab/InternVL2-1B/blob/main/modeling_internvl_chat.py#L252
-    """
+class NemotronVLProcessor(InternVLProcessor):
 
     def __init__(
         self,
@@ -72,9 +62,9 @@ class BaseNemotronVLProcessor(ABC):
         min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
+        video_token: Optional[str] = None,
     ) -> None:
-        super().__init__()
-
+        ABC.__init__(self)
         self.config = config
         self.tokenizer = tokenizer
         self.image_processor = image_processor
@@ -101,103 +91,12 @@ class BaseNemotronVLProcessor(ABC):
         self.dynamic_image_size = dynamic_image_size
         self.use_thumbnail: bool = self.image_processor.use_thumbnail
 
+        # add extra video token for video processing
+        self.video_token = video_token
+
     @property
-    @abstractmethod
     def image_token_id(self) -> int:
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_image_repl(
-        self,
-        feature_size: int,
-        num_patches: Optional[int],
-    ) -> PromptUpdateDetails[str]:
-        raise NotImplementedError
-
-    def resolve_min_max_num(
-        self,
-        *,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        use_thumbnail: Optional[bool] = None,
-    ) -> tuple[int, int]:
-        min_dynamic_patch = (self.min_dynamic_patch if min_dynamic_patch
-                             is None else min_dynamic_patch)
-        max_dynamic_patch = (self.max_dynamic_patch if max_dynamic_patch
-                             is None else max_dynamic_patch)
-        dynamic_image_size = (self.dynamic_image_size if dynamic_image_size
-                              is None else dynamic_image_size)
-        use_thumbnail = (self.use_thumbnail
-                         if use_thumbnail is None else use_thumbnail)
-
-        return resolve_internvl_min_max_num(
-            min_dynamic_patch=min_dynamic_patch,
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
-            use_thumbnail=use_thumbnail,
-        )
-
-    def resolve_target_ratios(
-        self,
-        *,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        use_thumbnail: Optional[bool] = None,
-    ) -> list[tuple[int, int]]:
-        min_num, max_num = self.resolve_min_max_num(
-            min_dynamic_patch=min_dynamic_patch,
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
-            use_thumbnail=use_thumbnail,
-        )
-
-        return get_internvl_target_ratios(min_num, max_num)
-
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
-        target_ratios = self.resolve_target_ratios(
-            use_thumbnail=False,  # Applied in calculate_targets
-        )
-
-        num_patches, _, _ = calculate_internvl_targets(
-            orig_width=image_width,
-            orig_height=image_height,
-            image_size=self.image_size,
-            target_ratios=target_ratios,
-            use_thumbnail=self.use_thumbnail,
-        )
-
-        return num_patches * self.num_image_token
-
-    def _images_to_pixel_values_lst(
-        self,
-        images: list[Image.Image],
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-    ) -> list[torch.Tensor]:
-        min_num, max_num = self.resolve_min_max_num(
-            min_dynamic_patch=min_dynamic_patch,
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
-            use_thumbnail=False,  # Applied in image_to_pixel_values
-        )
-
-        return [
-            image_to_pixel_values_internvl(
-                image,
-                input_size=self.image_size,
-                min_num=min_num,
-                max_num=max_num,
-                use_thumbnail=self.use_thumbnail,
-            ) for image in images
-        ]
+        return self.tokenizer.get_vocab()[IMG_CONTEXT]
 
     def _preprocess_image(
         self,
@@ -235,171 +134,6 @@ class BaseNemotronVLProcessor(ABC):
             text = [t.replace("<NVL_IMG_CONTEXT>", IMG_CONTEXT) for t in text]
         return text, image_inputs
 
-    def _make_batch_input(self,
-                          input_item: Optional[Union[Any, list[Any]]] = None):
-        if input_item is None:
-            input_item = []
-        if not isinstance(input_item, list):
-            input_item = [input_item]
-        return input_item
-
-    def __call__(
-        self,
-        text: Optional[Union[str, list[str]]] = None,
-        images: Optional[Union[Image.Image, list[Image.Image]]] = None,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        return_tensors: Optional[Union[str, TensorType]] = None,
-    ) -> Mapping[str, NestedTensors]:
-        text, images = [self._make_batch_input(x) for x in (text, images)]
-
-        text, image_inputs = self._preprocess_image(
-            text=text,
-            images=images,
-            min_dynamic_patch=min_dynamic_patch,
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
-        )
-
-        text_inputs = self.tokenizer(text)
-
-        return {
-            **BatchEncoding(text_inputs, tensor_type=return_tensors),
-            **image_inputs,
-        }
-
-
-class NemotronVLProcessor(BaseNemotronVLProcessor):
-    """
-    HF Processor for InternVLChatModel with extended video processing logic.
-
-    Code for video processing is adapted from video example:
-    https://huggingface.co/OpenGVLab/InternVL3-1B#inference-with-transformers
-    """
-
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        tokenizer: AnyTokenizer,
-        image_processor: BaseImageProcessorFast,
-        *,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        video_token: Optional[str] = None,
-    ) -> None:
-        super().__init__(
-            config=config,
-            tokenizer=tokenizer,
-            image_processor=image_processor,
-            min_dynamic_patch=min_dynamic_patch,
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
-        )
-        # add extra video token for video processing
-        self.video_token = video_token
-
-    @property
-    def image_token_id(self) -> int:
-        return self.tokenizer.get_vocab()[IMG_CONTEXT]
-
-    @property
-    def video_token_id(self) -> Optional[int]:
-        if self.video_token is None:
-            return None
-        return self.tokenizer.get_vocab().get(self.video_token, None)
-
-    @property
-    def supports_video(self) -> bool:
-        return self.video_token_id is not None
-
-    def _videos_to_pixel_values_lst(
-        self,
-        videos: list[npt.NDArray],
-        dynamic_image_size: Optional[bool] = None,
-    ) -> list[torch.Tensor]:
-        min_num, max_num = self.resolve_min_max_num(
-            min_dynamic_patch=1,
-            max_dynamic_patch=1,
-            dynamic_image_size=dynamic_image_size,
-            use_thumbnail=False,  # Applied in image_to_pixel_values
-        )
-
-        return [
-            video_to_pixel_values_internvl(
-                video,
-                input_size=self.image_size,
-                min_num=min_num,
-                max_num=max_num,
-                use_thumbnail=False,
-            ) for video in videos
-        ]
-
-    def _preprocess_video(
-        self,
-        text: list[str],
-        videos: list[npt.NDArray],
-        dynamic_image_size: Optional[bool] = None,
-    ):
-        if len(videos) == 0 or not self.supports_video:
-            video_inputs = {}
-        else:
-            pixel_values_lst_video = self._videos_to_pixel_values_lst(
-                videos,
-                dynamic_image_size=dynamic_image_size,
-            )
-            video_inputs: dict[str, NestedTensors] = {
-                "pixel_values_flat_video":
-                torch.cat(pixel_values_lst_video),
-                "video_num_patches":
-                torch.tensor([len(item) for item in pixel_values_lst_video]),
-            }
-
-            for pixel_values in pixel_values_lst_video:
-                num_patches = pixel_values.shape[0]
-
-                video_repl = self.get_video_repl(self.num_image_token,
-                                                 num_patches, self.video_token)
-                text = [t.replace('<video>', video_repl.full, 1) for t in text]
-        return text, video_inputs
-
-    def __call__(
-        self,
-        text: Optional[Union[str, list[str]]] = None,
-        images: Optional[Union[Image.Image, list[Image.Image]]] = None,
-        videos: Optional[Union[npt.NDArray, list[npt.NDArray]]] = None,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        return_tensors: Optional[Union[str, TensorType]] = None,
-    ) -> Mapping[str, NestedTensors]:
-        text, images, videos = [
-            self._make_batch_input(x) for x in (text, images, videos)
-        ]
-
-        text, image_inputs = self._preprocess_image(
-            text=text,
-            images=images,
-            min_dynamic_patch=min_dynamic_patch,
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
-        )
-
-        text, video_inputs = self._preprocess_video(
-            text=text,
-            videos=videos,
-            dynamic_image_size=dynamic_image_size,
-        )
-
-        text_inputs = self.tokenizer(text)
-
-        return {
-            **BatchEncoding(text_inputs, tensor_type=return_tensors),
-            **image_inputs,
-            **video_inputs,
-        }
-
     def get_image_repl(
         self,
         feature_size: int,
@@ -426,39 +160,8 @@ class NemotronVLProcessor(BaseNemotronVLProcessor):
         return PromptUpdateDetails.select_text(repl_full, video_context_token)
 
 
-class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
-    """InternVL ProcessingInfo extended for video processing"""
-
-    @property
-    def supports_video(self):
-        return self.get_hf_processor().supports_video
-
-    def get_supported_mm_limits(self):
-        video_limit = {"video": None} if self.supports_video else {}
-        return {**super().get_supported_mm_limits(), **video_limit}
-
-    def get_video_token(self) -> Optional[str]:
-        text_model_type = self.get_hf_config().get_text_config().model_type
-        if text_model_type == "qwen2":
-            return "<|video_pad|>"
-        return None
-
-    def get_num_frames_with_most_features(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> int:
-        max_images = mm_counts.get("image", 0)
-        max_videos = mm_counts.get("video", 0)
-
-        processor = self.get_hf_processor()
-
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = (seq_len -
-                            max_image_tokens) // processor.num_image_token
-        max_frames_per_video = max_total_frames // max(max_videos, 1)
-
-        return max(max_frames_per_video, 1)
+class NemotronVLProcessingInfo(InternVLProcessingInfo):
+    """Nemotron VL ProcessingInfo extended for video processing"""
 
     def get_hf_processor(
         self,
@@ -497,7 +200,7 @@ class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
 
 class NemotronVLDummyInputsBuilder(
         BaseInternVLDummyInputsBuilder[NemotronVLProcessingInfo]):
-    """InternVL DummyInputsBuilder extended for video support"""
+    """Nemotron VL DummyInputsBuilder extended for video support"""
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_videos = mm_counts.get("video", 0)
@@ -531,7 +234,7 @@ class NemotronVLDummyInputsBuilder(
 
 class NemotronVLMultiModalProcessor(
         BaseInternVLMultiModalProcessor[NemotronVLProcessingInfo]):
-    """InternVL MultiModalProcessor extended for video support"""
+    """Nemotron VL MultiModalProcessor extended for video support"""
 
     def _call_hf_processor(
         self,
