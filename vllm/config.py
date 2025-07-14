@@ -4325,6 +4325,7 @@ class CompilationConfig:
                 "vllm.unified_attention_with_output",
             ]
 
+
 class ReasoningConfig:
     """Configuration for reasoning models."""
 
@@ -4333,9 +4334,12 @@ class ReasoningConfig:
     think_end_token_id: Optional[int] = None
     """Token ID that indicates the end of reasoning."""
 
-    def __init__(self, think_start_token_id: Optional[int] = None, think_end_token_id: Optional[int] = None):
+    def __init__(self,
+                 think_start_token_id: Optional[int] = None,
+                 think_end_token_id: Optional[int] = None):
         self.think_start_token_id = think_start_token_id
         self.think_end_token_id = think_end_token_id
+
 
 @config
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
