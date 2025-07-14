@@ -109,6 +109,7 @@ class EngineCoreOutput(
     new_prompt_logprobs_tensors: Optional[LogprobsTensors] = None
 
     pooling_output: Optional[torch.Tensor] = None
+    hidden_states: Optional[torch.Tensor] = None
 
     finish_reason: Optional[FinishReason] = None
     stop_reason: Union[int, str, None] = None

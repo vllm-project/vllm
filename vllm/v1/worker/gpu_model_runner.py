@@ -1152,6 +1152,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 mm_embeds.append(mm_embeds_item)
         return mm_embeds
 
+    def _maybe_return_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        final_hidden_states: list[torch.Tensor] = []
+        if self.vllm_config.model_config.process_hidden_states:
+            final_hidden_states = []
+            for hidden_state in hidden_states:
+                final_hidden_states.append(hidden_state.cpu())
+
+        return final_hidden_states
+
     def get_model(self) -> nn.Module:
         return self.model
 
@@ -1359,6 +1371,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 pooler_output.append(None)
 
+        return_hidden_states = self._maybe_return_hidden_states(
+            extracted_hidden_states)
+
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -1367,8 +1382,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
-            finished_sending=finished_sending,
-            finished_recving=finished_recving,
+            hidden_states=return_hidden_states,
         )
 
     @torch.inference_mode()

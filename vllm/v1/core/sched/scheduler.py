@@ -757,6 +757,7 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
+        hidden_states = model_runner_output.hidden_states
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
@@ -821,6 +822,10 @@ class Scheduler(SchedulerInterface):
                 else:
                     stopped_preempted_reqs.add(request)
 
+            req_hidden_states = None
+            if hidden_states:
+                req_hidden_states = hidden_states[req_index]
+
             # Extract sample logprobs if needed.
             if request.sampling_params is not None \
                 and request.sampling_params.logprobs is not None and logprobs:
@@ -864,6 +869,7 @@ class Scheduler(SchedulerInterface):
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         pooling_output=pooler_output,
+                        hidden_states=req_hidden_states,
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
                         kv_transfer_params=kv_transfer_params,

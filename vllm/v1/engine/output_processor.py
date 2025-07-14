@@ -8,8 +8,10 @@ from typing import Any, Optional, Union, cast
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.outputs import (CompletionOutput, PoolingOutput,
                           PoolingRequestOutput, RequestOutput)
+from vllm.plugins.hidden_states_processors import get_hidden_states_processor
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
@@ -164,6 +166,7 @@ class RequestState:
         self,
         new_token_ids: list[int],
         pooling_output: Optional[torch.Tensor],
+        processed_hidden_states: Optional[Any],
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
         kv_transfer_params: Optional[dict[str, Any]] = None,
@@ -179,9 +182,12 @@ class RequestState:
 
         request_id = self.request_id
         if pooling_output is not None:
-            return self._new_request_output(
-                request_id, [self._new_pooling_output(pooling_output)],
-                finished)
+            output = self._new_pooling_output(
+                pooling_output,
+                processed_hidden_states=processed_hidden_states)
+            return self._new_request_output(request_id=request_id,
+                                            outputs=[output],
+                                            finished=finished)
 
         output = self._new_completion_output(new_token_ids, finish_reason,
                                              stop_reason)
@@ -266,9 +272,11 @@ class RequestState:
     def _new_pooling_output(
         self,
         pooling_output: torch.Tensor,
+        processed_hidden_states: Any,
     ) -> PoolingOutput:
 
-        return PoolingOutput(data=pooling_output)
+        return PoolingOutput(data=pooling_output,
+                             processed_hidden_states=processed_hidden_states)
 
 
 class OutputProcessor:
@@ -276,6 +284,7 @@ class OutputProcessor:
 
     def __init__(
         self,
+        vllm_config: VllmConfig,
         tokenizer: TokenizerGroup,
         log_stats: bool,
     ):
@@ -284,6 +293,11 @@ class OutputProcessor:
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
         self.lora_states = LoRARequestStates()
+        if vllm_config.model_config.process_hidden_states:
+            if not (processor := (get_hidden_states_processor(vllm_config))):
+                raise ValueError(
+                    "Process hidden states is set but no processor plugins")
+            self.hidden_states_processor = processor
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -391,6 +405,7 @@ class OutputProcessor:
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
             num_cached_tokens = engine_core_output.num_cached_tokens
+            hidden_states = engine_core_output.hidden_states
             req_state.is_prefilling = False
 
             if pooling_output is None:
@@ -408,10 +423,18 @@ class OutputProcessor:
                 req_state.logprobs_processor.update_from_output(
                     engine_core_output)
 
+            if pooling_output is not None and hidden_states is not None:
+                # Currently we process hidden states only for pooling models
+                processed_hidden_states = \
+                    self.hidden_states_processor.apply(hidden_states)
+            else:
+                processed_hidden_states = None
+
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
-                    new_token_ids, pooling_output, finish_reason, stop_reason,
-                    kv_transfer_params, num_cached_tokens):
+                    new_token_ids, pooling_output, processed_hidden_states,
+                    finish_reason, stop_reason, kv_transfer_params,
+                    num_cached_tokens):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
                     req_state.queue.put(request_output)
