@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import json
 import os
 from collections import defaultdict
 from dataclasses import dataclass
@@ -19,6 +19,7 @@ from vllm.executor.ray_utils import (RayWorkerWrapper, initialize_ray_cluster,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.platforms import current_platform
+from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (_run_task_with_lock, get_distributed_init_method,
                         get_ip, get_open_port, make_async)
@@ -56,17 +57,6 @@ class RayDistributedExecutor(DistributedExecutorBase):
     WORKER_SPECIFIC_ENV_VARS = {
         "VLLM_HOST_IP", "VLLM_HOST_PORT", "LOCAL_RANK", "CUDA_VISIBLE_DEVICES"
     }
-
-    config_home = envs.VLLM_CONFIG_ROOT
-    # This file contains a list of env vars that should not be copied
-    # from the driver to the Ray workers.
-    non_carry_over_env_vars_file = os.path.join(
-        config_home, "ray_non_carry_over_env_vars.json")
-    if os.path.exists(non_carry_over_env_vars_file):
-        with open(non_carry_over_env_vars_file) as f:
-            non_carry_over_env_vars = set(json.load(f))
-    else:
-        non_carry_over_env_vars = set()
 
     uses_ray: bool = True
 
@@ -334,13 +324,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
         } for (node_id, _) in worker_node_and_gpu_ids]
 
         # Environment variables to copy from driver to workers
-        env_vars_to_copy = [
-            v for v in envs.environment_variables
-            if v not in self.WORKER_SPECIFIC_ENV_VARS
-            and v not in self.non_carry_over_env_vars
-        ]
-
-        env_vars_to_copy.extend(current_platform.additional_env_vars)
+        env_vars_to_copy = get_env_vars_to_copy(
+            exclude_vars=self.WORKER_SPECIFIC_ENV_VARS,
+            additional_vars=set(current_platform.additional_env_vars),
+            destination="workers")
 
         # Copy existing env vars to each worker's args
         for args in all_args_to_update_environment_variables:
@@ -348,15 +335,6 @@ class RayDistributedExecutor(DistributedExecutorBase):
             for name in env_vars_to_copy:
                 if name in os.environ:
                     args[name] = os.environ[name]
-
-        logger.info("non_carry_over_env_vars from config: %s",
-                    self.non_carry_over_env_vars)
-        logger.info(
-            "Copying the following environment variables to workers: %s",
-            [v for v in env_vars_to_copy if v in os.environ])
-        logger.info(
-            "If certain env vars should NOT be copied to workers, add them to "
-            "%s file", self.non_carry_over_env_vars_file)
 
         self._env_vars_for_all_workers = (
             all_args_to_update_environment_variables)
@@ -528,12 +506,12 @@ class RayDistributedExecutor(DistributedExecutorBase):
         ray.get(parallel_worker_tasks)
 
     def _check_ray_cgraph_installation(self):
-        import pkg_resources
+        import importlib.metadata
+
         from packaging import version
 
         required_version = version.parse("2.43.0")
-        current_version = version.parse(
-            pkg_resources.get_distribution("ray").version)
+        current_version = version.parse(importlib.metadata.version("ray"))
         if current_version < required_version:
             raise ValueError(f"Ray version {required_version} is "
                              f"required, but found {current_version}")
@@ -556,8 +534,17 @@ class RayDistributedExecutor(DistributedExecutorBase):
     def _compiled_ray_dag(self, enable_asyncio: bool):
         assert self.parallel_config.use_ray
         self._check_ray_cgraph_installation()
+        # Enlarge the default value of "RAY_CGRAPH_get_timeout" to 300 seconds
+        # (it is 10 seconds by default). This is a Ray environment variable to
+        # control the timeout of getting result from a compiled graph execution,
+        # i.e., the distributed execution that includes model forward runs and
+        # intermediate tensor communications, in the case of vllm.
+        # Note: we should set this env var before importing
+        # ray.dag, otherwise it will not take effect.
+        os.environ.setdefault("RAY_CGRAPH_get_timeout", "300")  # noqa: SIM112
         from ray.dag import InputNode, MultiOutputNode
-
+        logger.info("RAY_CGRAPH_get_timeout is set to %s",
+                    os.environ["RAY_CGRAPH_get_timeout"])  # noqa: SIM112
         logger.info("VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE = %s",
                     envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE)
         logger.info("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM = %s",
@@ -568,15 +555,6 @@ class RayDistributedExecutor(DistributedExecutorBase):
             raise ValueError(
                 "Invalid value for VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: "
                 f"{channel_type}. Valid values are: 'auto', 'nccl', or 'shm'.")
-
-        # Enlarge the default value of "RAY_CGRAPH_get_timeout" to 300 seconds
-        # (it is 10 seconds by default). This is a Ray environment variable to
-        # control the timeout of getting result from a compiled graph execution,
-        # i.e., the distributed execution that includes model forward runs and
-        # intermediate tensor communications, in the case of vllm.
-        os.environ.setdefault("RAY_CGRAPH_get_timeout", "300")  # noqa: SIM112
-        logger.info("RAY_CGRAPH_get_timeout is set to %s",
-                    os.environ["RAY_CGRAPH_get_timeout"])  # noqa: SIM112
 
         with InputNode() as input_data:
             # Example DAG: PP=2, TP=4

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
 from vllm.transformers_utils.configs.cohere2 import Cohere2Config
@@ -10,8 +11,6 @@ from vllm.transformers_utils.configs.exaone import ExaoneConfig
 # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
 # `FalconConfig` class from the official HuggingFace transformers library.
 from vllm.transformers_utils.configs.falcon import RWConfig
-from vllm.transformers_utils.configs.h2ovl import H2OVLChatConfig
-from vllm.transformers_utils.configs.internvl import InternVLChatConfig
 from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig
 from vllm.transformers_utils.configs.medusa import MedusaConfig
@@ -22,6 +21,7 @@ from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 from vllm.transformers_utils.configs.mpt import MPTConfig
 from vllm.transformers_utils.configs.nemotron import NemotronConfig
+from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 from vllm.transformers_utils.configs.nvlm_d import NVLM_D_Config
 from vllm.transformers_utils.configs.ovis import OvisConfig
 from vllm.transformers_utils.configs.skyworkr1v import SkyworkR1VChatConfig
@@ -36,8 +36,6 @@ __all__ = [
     "DeepseekVLV2Config",
     "MPTConfig",
     "RWConfig",
-    "H2OVLChatConfig",
-    "InternVLChatConfig",
     "JAISConfig",
     "MedusaConfig",
     "EAGLEConfig",
@@ -49,6 +47,7 @@ __all__ = [
     "MoonViTConfig",
     "KimiVLConfig",
     "NemotronConfig",
+    "NemotronHConfig",
     "NVLM_D_Config",
     "OvisConfig",
     "SkyworkR1VChatConfig",

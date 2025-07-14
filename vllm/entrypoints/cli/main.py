@@ -1,42 +1,43 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+'''The CLI entrypoints of vLLM
 
-# The CLI entrypoint to vLLM.
-import signal
-import sys
+Note that all future modules must be lazily loaded within main
+to avoid certain eager import breakage.'''
+from __future__ import annotations
 
-import vllm.entrypoints.cli.benchmark.main
-import vllm.entrypoints.cli.collect_env
-import vllm.entrypoints.cli.openai
-import vllm.entrypoints.cli.serve
-import vllm.version
-from vllm.entrypoints.utils import cli_env_setup
-from vllm.utils import FlexibleArgumentParser
-
-CMD_MODULES = [
-    vllm.entrypoints.cli.openai,
-    vllm.entrypoints.cli.serve,
-    vllm.entrypoints.cli.benchmark.main,
-    vllm.entrypoints.cli.collect_env,
-]
-
-
-def register_signal_handlers():
-
-    def signal_handler(sig, frame):
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTSTP, signal_handler)
+import importlib.metadata
 
 
 def main():
+    import vllm.entrypoints.cli.benchmark.main
+    import vllm.entrypoints.cli.collect_env
+    import vllm.entrypoints.cli.openai
+    import vllm.entrypoints.cli.run_batch
+    import vllm.entrypoints.cli.serve
+    from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG, cli_env_setup
+    from vllm.utils import FlexibleArgumentParser
+
+    CMD_MODULES = [
+        vllm.entrypoints.cli.openai,
+        vllm.entrypoints.cli.serve,
+        vllm.entrypoints.cli.benchmark.main,
+        vllm.entrypoints.cli.collect_env,
+        vllm.entrypoints.cli.run_batch,
+    ]
+
     cli_env_setup()
 
-    parser = FlexibleArgumentParser(description="vLLM CLI")
-    parser.add_argument('-v',
-                        '--version',
-                        action='version',
-                        version=vllm.version.__version__)
+    parser = FlexibleArgumentParser(
+        description="vLLM CLI",
+        epilog=VLLM_SUBCMD_PARSER_EPILOG,
+    )
+    parser.add_argument(
+        '-v',
+        '--version',
+        action='version',
+        version=importlib.metadata.version('vllm'),
+    )
     subparsers = parser.add_subparsers(required=False, dest="subparser")
     cmds = {}
     for cmd_module in CMD_MODULES:

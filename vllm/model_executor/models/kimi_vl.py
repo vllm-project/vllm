@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
 # Adapted from https://huggingface.co/moonshotai/Kimi-VL-A3B-Instruct/blob/main/modeling_kimi_vl.py
 # Copyright 2025 The Moonshot AI Team, DeepSeek-AI, and HuggingFace Inc. team. All rights reserved.
@@ -43,10 +44,9 @@
 
 import copy
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import (Any, Iterable, List, Literal, Optional, Sequence, Tuple,
-                    TypedDict, Union)
+from typing import Any, Literal, Optional, TypedDict, Union
 
 import torch
 from torch import nn
@@ -120,7 +120,7 @@ class KimiVLMultiModalProjector(nn.Module):
 
 class KimiVLImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    pixel_values: Union[torch.Tensor, List[torch.Tensor]]
+    pixel_values: Union[torch.Tensor, list[torch.Tensor]]
     """
     Shape:`(num_patches, num_channels, patch_size, patch_size)`
     """
@@ -264,6 +264,13 @@ class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
                                         dummy_inputs=KimiVLDummyInputsBuilder)
 class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<|media_start|>image<|media_content|><|media_pad|><|media_end|>"
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -393,7 +400,8 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
         # model as one of the requirements of basic vLLM model implementation.
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
 
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None and len(
+                multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids=input_ids,
                 inputs_embeds=inputs_embeds,
@@ -447,7 +455,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
                                        sampling_metadata, **kwargs)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         config = self.config.text_config
         _KEYS_TO_MODIFY_MAPPING = {
             "language_model.lm_head": "lm_head",

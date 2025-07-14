@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 import torch
 
@@ -58,8 +59,9 @@ def test_rocm_wvsplitk_kernel(n, k, m, dtype, seed):
 @pytest.mark.parametrize("m", M + [28672])  # m >= 16
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.skipif(not current_platform.is_rocm(),
-                    reason="only test for rocm")
+@pytest.mark.skipif(
+    not (current_platform.is_rocm() and current_platform.supports_fp8()),
+    reason="only test for rocm fp8")
 def test_rocm_wvsplitk_fp8_kernel(n, k, m, dtype, seed):
     torch.manual_seed(seed)
 

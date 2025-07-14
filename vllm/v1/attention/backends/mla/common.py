@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 # MLA Common Components
 
@@ -188,8 +189,8 @@ return curr_o @ W_O
 
 import functools
 from abc import abstractmethod
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, Optional, TypeVar
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Generic, Optional, TypeVar, Union
 
 import torch
 
@@ -206,7 +207,10 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                UnquantizedLinearMethod)
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata,
+                                              get_per_layer_parameters,
+                                              infer_global_hyperparameters)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
@@ -215,8 +219,15 @@ try:
     is_vllm_fa = True
 except ImportError:
     # For rocm use upstream flash attention
-    from flash_attn import flash_attn_varlen_func
+    if current_platform.is_rocm():
+        from flash_attn import flash_attn_varlen_func
     is_vllm_fa = False
+
+try:
+    from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
+    flashinfer_available = True
+except ImportError:
+    flashinfer_available = False
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -251,9 +262,24 @@ class MLACommonBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, head_size)
 
-    @staticmethod
-    def get_supported_head_sizes() -> list[int]:
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
         return [576]
+
+    @classmethod
+    def validate_head_size(cls, head_size: int) -> None:
+        supported_head_sizes = cls.get_supported_head_sizes()
+        if head_size not in supported_head_sizes:
+            attn_type = cls.__name__.removesuffix("Backend")
+            raise ValueError(
+                f"Head size {head_size} is not supported by {attn_type}. "
+                f"Supported head sizes are: {supported_head_sizes}. "
+                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
+                "FlexAttention backend which supports all head sizes.")
 
 
 @dataclass
@@ -274,6 +300,13 @@ class MLACommonPrefillMetadata:
     query_start_loc: torch.Tensor
     max_query_len: int
     chunked_context: Optional[ChunkedContextMetadata] = None
+
+
+@dataclass
+class FlashInferPrefillMetadata(MLACommonPrefillMetadata):
+    prefill_main: Optional['BatchPrefillWithRaggedKVCacheWrapper'] = None
+    prefill_chunks: list['BatchPrefillWithRaggedKVCacheWrapper'] = field(
+        default_factory=list)
 
 
 @dataclass
@@ -314,21 +347,32 @@ class MLACommonMetadata(Generic[D]):
     head_dim: Optional[int] = None
 
     decode: Optional[D] = None
-    prefill: Optional[MLACommonPrefillMetadata] = None
+    prefill: Optional[Union[MLACommonPrefillMetadata,
+                            FlashInferPrefillMetadata]] = None
 
     def __post_init__(self):
-        supported_head_sizes = MLACommonBackend.get_supported_head_sizes()
-        if self.head_dim is not None and self.head_dim \
-                not in supported_head_sizes:
-            raise ValueError(
-                f"Only {supported_head_sizes} are supported for head_dim,",
-                f"received {self.head_dim}.")
+        if self.head_dim is not None:
+            MLACommonBackend.validate_head_size(self.head_dim)
 
 
 M = TypeVar("M", bound=MLACommonMetadata)
 
 
-class MLACommonMetadataBuilder(Generic[M]):
+def use_flashinfer_prefill() -> bool:
+    if flashinfer_available:
+        # For blackwell default to flashinfer prefill if its available since
+        #  its faster than FA2.
+        return current_platform.has_device_capability(100)
+    return False
+
+
+# Currently 394MB, this can be tuned based on GEMM sizes used.
+# Choosen to be the same as sglang:
+#  https://github.com/sgl-project/sglang/blob/766392c6bda2558b61ce6d1c1bfd8081a549e1f1/python/sglang/global_config.py#L37
+FLASHINFER_WORKSPACE_BUFFER_SIZE = 394 * 1024 * 1024
+
+
+class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -349,7 +393,7 @@ class MLACommonMetadataBuilder(Generic[M]):
         self.num_heads = model_config.get_num_attention_heads(
             runner.parallel_config)
         self.mla_dims = get_mla_dims(model_config)
-        self.aot_schedule = is_vllm_fa and (get_flash_attn_version() == 3)
+        self.aot_schedule = current_platform.is_cuda()
         self.kv_cache_spec = kv_cache_spec
 
         # Dont try to access the runner on AMD
@@ -381,6 +425,101 @@ class MLACommonMetadataBuilder(Generic[M]):
                 device=runner.device,
             )
         self.block_table = block_table
+
+        self._use_fi_prefill = use_flashinfer_prefill()
+        self.prefill_metadata_cls = FlashInferPrefillMetadata \
+            if self._use_fi_prefill else MLACommonPrefillMetadata
+
+        if self._use_fi_prefill:
+            self._workspace_buffer = torch.empty(
+                FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                dtype=torch.uint8,
+                device=runner.device)
+
+            self._fi_prefill_main: Optional[
+                BatchPrefillWithRaggedKVCacheWrapper] = None
+            self._fi_prefill_chunks: list[
+                BatchPrefillWithRaggedKVCacheWrapper] = []
+
+            self._global_hyperparameters = infer_global_hyperparameters(
+                get_per_layer_parameters(runner.vllm_config, MLACommonImpl))
+
+    def _build_fi_prefill_wrappers(self, prefill: FlashInferPrefillMetadata):
+        qo_indptr = prefill.query_start_loc
+
+        has_context = False
+        if prefill.chunked_context is not None:
+            chunked_context = prefill.chunked_context
+            has_context = True
+
+        if self._fi_prefill_main is None:
+            self._fi_prefill_main = BatchPrefillWithRaggedKVCacheWrapper(
+                self._workspace_buffer, "NHD", backend="cutlass")
+
+        if has_context:
+            num_chunks = chunked_context.cu_seq_lens.shape[0]
+            # Allocate more prefill chunk wrappers if needed
+            if len(self._fi_prefill_chunks) < num_chunks:
+                for _ in range(len(self._fi_prefill_chunks), num_chunks):
+                    self._fi_prefill_chunks.append(
+                        BatchPrefillWithRaggedKVCacheWrapper(
+                            self._workspace_buffer, "NHD", backend="cutlass"))
+            assert num_chunks <= len(self._fi_prefill_chunks)
+
+        # In MLA, the non-latent num_qo_heads == num_kv_heads
+        num_qo_heads = self.runner.num_query_heads
+        num_kv_heads = num_qo_heads
+
+        # Sanity: Verify that num_kv_heads == 1 since it is latent space
+        assert self.kv_cache_spec.num_kv_heads == 1
+
+        # Get non-latent head_dim_qk and head_dim_vo
+        head_dim_qk = (self.mla_dims.qk_nope_head_dim +
+                       self.mla_dims.qk_rope_head_dim)
+        head_dim_vo = self.mla_dims.v_head_dim
+
+        # For main run, qo_indptr == kv_indptr
+        kv_indptr = qo_indptr.clone()
+
+        # Prepare main prefill
+        self._fi_prefill_main.plan(
+            qo_indptr=qo_indptr,
+            kv_indptr=kv_indptr,
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim_qk=head_dim_qk,
+            head_dim_vo=head_dim_vo,
+            causal=True,  # This is main run
+            sm_scale=self._global_hyperparameters.sm_scale,
+            window_left=self._global_hyperparameters.window_left,
+            logits_soft_cap=self._global_hyperparameters.logits_soft_cap,
+            q_data_type=self.runner.dtype,
+            kv_data_type=self.kv_cache_spec.dtype,
+        )
+
+        # Prepare context prefills
+        if has_context:
+            for i in range(num_chunks):
+                kv_indptr_chunk = chunked_context.cu_seq_lens[i]
+
+                self._fi_prefill_chunks[i].plan(
+                    qo_indptr=qo_indptr,
+                    kv_indptr=kv_indptr_chunk,
+                    num_qo_heads=num_qo_heads,
+                    num_kv_heads=num_kv_heads,
+                    head_dim_qk=head_dim_qk,
+                    head_dim_vo=head_dim_vo,
+                    causal=False,  # This is context run
+                    sm_scale=self._global_hyperparameters.sm_scale,
+                    window_left=self._global_hyperparameters.window_left,
+                    logits_soft_cap=self._global_hyperparameters.
+                    logits_soft_cap,
+                    q_data_type=self.runner.dtype,
+                    kv_data_type=self.kv_cache_spec.dtype,
+                )
+
+        prefill.prefill_main = self._fi_prefill_main
+        prefill.prefill_chunks = self._fi_prefill_chunks
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -449,9 +588,32 @@ class MLACommonMetadataBuilder(Generic[M]):
             seq_lens=seq_lens,
         )
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int,
+    def build_for_cudagraph_capture(
+            self, common_attn_metadata: CommonAttentionMetadata) -> M:
+        """
+        This method builds the metadata for full cudagraph capture.
+        Currently, only decode is supported for full cudagraphs with MLA.
+        """
+        m = common_attn_metadata
+        assert m.num_reqs == m.num_actual_tokens, \
+            "MLA only supports decode-only full CUDAGraph capture. " \
+            "Make sure all cudagraph capture sizes <= max_num_seq."
+
+        m.max_query_len = 1  # decode-only
+
+        # Update state usually set in reorder_batch.
+        self._num_decodes = m.num_reqs
+        self._num_decode_tokens = m.num_actual_tokens
+        self._num_prefills = 0
+        self._num_prefill_tokens = 0
+        return self.build(0, m)
+
+    def build(self, common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata) -> M:
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+        max_query_len = common_attn_metadata.max_query_len
+
         assert self._num_decodes + self._num_prefills == num_reqs
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
@@ -460,8 +622,11 @@ class MLACommonMetadataBuilder(Generic[M]):
         device = self.runner.device
         block_table = self.block_table
         block_table_tensor = block_table.get_device_tensor()[:num_reqs]
-        slot_mapping = block_table.slot_mapping_cpu[:num_actual_tokens].to(
-            device, non_blocking=True).long()
+        block_table.slot_mapping[:num_actual_tokens].copy_(
+            block_table.slot_mapping_cpu[:num_actual_tokens],
+            non_blocking=True)
+        block_table.slot_mapping[num_actual_tokens:].fill_(-1)
+        slot_mapping = block_table.slot_mapping[:num_actual_tokens]
 
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
@@ -536,7 +701,7 @@ class MLACommonMetadataBuilder(Generic[M]):
                 assert max(chunked_context_metadata.max_seq_lens) <= \
                     self.chunked_prefill_workspace_size
 
-            prefill_metadata = MLACommonPrefillMetadata(
+            prefill_metadata = self.prefill_metadata_cls(
                 block_table=block_table_tensor[reqs_start:, ...],
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=max_query_len,
@@ -550,7 +715,7 @@ class MLACommonMetadataBuilder(Generic[M]):
                 seq_lens=seq_lens[:self._num_decodes],
             )
 
-        return self.metadata_cls(
+        attn_metadata = self.metadata_cls(
             num_actual_tokens=num_actual_tokens,
             query_start_loc=query_start_loc,
             slot_mapping=slot_mapping,
@@ -563,8 +728,15 @@ class MLACommonMetadataBuilder(Generic[M]):
             decode=decode_metadata,
         )
 
-    def use_cascade_attention(self, *args, **kwargs) -> bool:
-        return False
+        if self._use_fi_prefill and self._num_prefills > 0:
+            assert isinstance(attn_metadata.prefill, FlashInferPrefillMetadata)
+            self._build_fi_prefill_wrappers(attn_metadata.prefill)
+
+        return attn_metadata
+
+    def can_run_in_cudagraph(
+            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
+        return common_attn_metadata.max_query_len == 1
 
 
 class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
@@ -585,6 +757,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         blocksparse_params: Optional[dict[str, Any]],
         logits_soft_cap: Optional[float],
         attn_type: str,
+        kv_sharing_target_layer_name: Optional[str],
         # MLA Specific Arguments
         q_lora_rank: Optional[int],
         kv_lora_rank: int,
@@ -594,6 +767,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
     ) -> None:
+        if kv_sharing_target_layer_name is not None:
+            raise NotImplementedError("KV sharing is not supported for MLA")
+
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -607,25 +783,35 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
-        self.vllm_flash_attn_version = get_flash_attn_version()
 
-        # Handle the differences between the flash_attn_varlen from flash_attn
-        # and the one from vllm_flash_attn. The former is used on RoCM and the
-        # latter has an additional parameter to control FA2 vs FA3
-        self.flash_attn_varlen_func = flash_attn_varlen_func
-        self.vllm_flash_attn_version = get_flash_attn_version()
-        if self.vllm_flash_attn_version is not None:
-            self.flash_attn_varlen_func = \
-                functools.partial(flash_attn_varlen_func,
-                                  fa_version=self.vllm_flash_attn_version)
+        if use_flashinfer_prefill():
+            logger.debug_once("Using FlashInfer prefill for MLA")
+            self._run_prefill_context_chunk = self._run_prefill_context_chunk_fi
+            self._run_prefill_new_tokens = self._run_prefill_new_tokens_fi
+            self._pad_v = False
+        else:  # Use FlashAttention
+            logger.debug_once("Using FlashAttention prefill for MLA")
+            self._run_prefill_context_chunk = self._run_prefill_context_chunk_fa
+            self._run_prefill_new_tokens = self._run_prefill_new_tokens_fa
 
-        # For MLA the v head dim is smaller than qk head dim so we pad out
-        # v with 0s to match the qk head dim for attention backends that do
-        # not support different headdims
-        # We don't need to pad V if we are on a hopper system with FA3
-        self._pad_v = self.vllm_flash_attn_version is None or not (
-            self.vllm_flash_attn_version == 3
-            and current_platform.get_device_capability()[0] == 9)
+            # Handle the differences between the flash_attn_varlen from
+            # flash_attn and the one from vllm_flash_attn. The former is used on
+            # RoCM and the latter has an additional parameter to control
+            # FA2 vs FA3
+            self.flash_attn_varlen_func = flash_attn_varlen_func
+            self.vllm_flash_attn_version = get_flash_attn_version()
+            if self.vllm_flash_attn_version is not None:
+                self.flash_attn_varlen_func = \
+                    functools.partial(flash_attn_varlen_func,
+                                    fa_version=self.vllm_flash_attn_version)
+
+            # For MLA the v head dim is smaller than qk head dim so we pad out
+            # v with 0s to match the qk head dim for attention backends that do
+            # not support different headdims
+            # We don't need to pad V if we are on a hopper system with FA3
+            self._pad_v = self.vllm_flash_attn_version is None or not (
+                self.vllm_flash_attn_version == 3
+                and current_platform.get_device_capability()[0] == 9)
 
     def _flash_attn_varlen_diff_headdims(self,
                                          q,
@@ -639,11 +825,17 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             maybe_padded_v = torch.nn.functional.pad(
                 v, [0, q.shape[-1] - v.shape[-1]], value=0)
 
+        if is_vllm_fa:
+            kwargs["return_softmax_lse"] = return_softmax_lse
+        else:
+            # ROCm leverages the upstream flash_attn, which takes a parameter
+            # called "return_attn_probs" instead of return_softmax_lse
+            kwargs["return_attn_probs"] = return_softmax_lse
+
         attn_out = self.flash_attn_varlen_func(
             q=q,
             k=k,
             v=maybe_padded_v,
-            return_softmax_lse=return_softmax_lse,
             softmax_scale=softmax_scale,
             **kwargs,
         )
@@ -653,15 +845,63 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         if isinstance(attn_out, tuple):
             attn_out, lse = attn_out[0], attn_out[1]
 
-        # unpad if necessary
-        if self._pad_v:
-            attn_out = attn_out[..., :v.shape[-1]]
-
         # Remain consistent with old `flash_attn_varlen_func` where there
         # is only one output tensor if `return_softmax_lse` is False.
         if return_softmax_lse:
             return attn_out, lse
         return attn_out
+
+    def _run_prefill_new_tokens_fa(self, prefill: MLACommonPrefillMetadata, q,
+                                   k, v, return_softmax_lse):
+        return self._flash_attn_varlen_diff_headdims(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=prefill.query_start_loc,
+            cu_seqlens_k=prefill.query_start_loc,
+            max_seqlen_q=prefill.max_query_len,
+            max_seqlen_k=prefill.max_query_len,
+            softmax_scale=self.scale,
+            causal=True,
+            return_softmax_lse=return_softmax_lse,
+        )
+
+    def _run_prefill_new_tokens_fi(self, prefill: MLACommonPrefillMetadata, q,
+                                   k, v, return_softmax_lse):
+        assert isinstance(prefill, FlashInferPrefillMetadata)
+        assert prefill.prefill_main is not None
+        return prefill.prefill_main.run(
+            q=q,
+            k=k,
+            v=v,
+            return_lse=return_softmax_lse,
+        )
+
+    def _run_prefill_context_chunk_fa(self, prefill: MLACommonPrefillMetadata,
+                                      chunk_idx: int, q, k, v):
+        assert prefill.chunked_context is not None
+        return self._flash_attn_varlen_diff_headdims(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=prefill.query_start_loc,
+            cu_seqlens_k=prefill.chunked_context.cu_seq_lens[chunk_idx],
+            max_seqlen_q=prefill.max_query_len,
+            max_seqlen_k=prefill.chunked_context.max_seq_lens[chunk_idx],
+            softmax_scale=self.scale,
+            causal=False,  # Context is unmasked
+            return_softmax_lse=True,
+        )
+
+    def _run_prefill_context_chunk_fi(self, prefill: MLACommonPrefillMetadata,
+                                      chunk_idx: int, q, k, v):
+        assert isinstance(prefill, FlashInferPrefillMetadata)
+        return prefill.prefill_chunks[chunk_idx].run(
+            q=q,
+            k=k,
+            v=v,
+            return_lse=True,
+        )
 
     def _v_up_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
@@ -761,18 +1001,12 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
                           dim=-1)
 
-            attn_output, attn_softmax_lse = \
-                self._flash_attn_varlen_diff_headdims(
+            attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
+                prefill=prefill_metadata,
+                chunk_idx=i,
                 q=q,
                 k=k,
                 v=v,
-                cu_seqlens_q=prefill_metadata.query_start_loc,
-                cu_seqlens_k=prefill_metadata.chunked_context.cu_seq_lens[i],
-                max_seqlen_q=prefill_metadata.max_query_len,
-                max_seqlen_k=prefill_metadata.chunked_context.max_seq_lens[i],
-                softmax_scale=self.scale,
-                causal=False,  # Context is unmasked
-                return_softmax_lse=True,
             )
 
             if output is None:
@@ -812,16 +1046,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
-        output = self._flash_attn_varlen_diff_headdims(
+        output = self._run_prefill_new_tokens(
+            prefill=attn_metadata.prefill,
             q=q,
             k=k,
             v=v,
-            cu_seqlens_q=attn_metadata.prefill.query_start_loc,
-            cu_seqlens_k=attn_metadata.prefill.query_start_loc,
-            max_seqlen_q=attn_metadata.prefill.max_query_len,
-            max_seqlen_k=attn_metadata.prefill.max_query_len,
-            softmax_scale=self.scale,
-            causal=True,
             return_softmax_lse=has_context,
         )
 
@@ -838,6 +1067,10 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 suffix_output=suffix_output,
                 suffix_lse=suffix_lse,
             )
+
+        # unpad if necessary
+        if self._pad_v:
+            output = output[..., :v.shape[-1]]
 
         return output.flatten(start_dim=-2)
 
@@ -860,13 +1093,20 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         kv_cache: torch.Tensor,
         attn_metadata: M,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-
         assert output is not None, "Output tensor must be provided."
 
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for MLACommonImpl")
+
         if attn_metadata is None:
-            # Profiling run.
-            return output
+            # The zero fill is required when used with DP + EP
+            # to ensure all ranks within a DP group compute the
+            # same expert outputs.
+            return output.fill_(0)
 
         num_actual_toks = attn_metadata.num_actual_tokens
 

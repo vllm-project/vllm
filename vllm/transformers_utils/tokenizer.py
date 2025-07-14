@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
 import copy
@@ -13,17 +14,20 @@ import huggingface_hub
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
-from vllm.envs import VLLM_USE_MODELSCOPE
+from vllm import envs
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizer_base import (TokenizerBase,
-                                                    TokenizerRegistry)
 from vllm.transformers_utils.tokenizers import MistralTokenizer
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import make_async
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+    from vllm.lora.request import LoRARequest
+    from vllm.transformers_utils.tokenizer_base import TokenizerBase
+else:
+    ModelConfig = Any
+    LoRARequest = Any
+    TokenizerBase = Any
 
 logger = init_logger(__name__)
 
@@ -168,7 +172,7 @@ def get_tokenizer(
 ) -> AnyTokenizer:
     """Gets a tokenizer for the given model name via HuggingFace or ModelScope.
     """
-    if VLLM_USE_MODELSCOPE:
+    if envs.VLLM_USE_MODELSCOPE:
         # download model from ModelScope hub,
         # lazy import so that modelscope is not required for normal use.
         # pylint: disable=C.
@@ -221,6 +225,7 @@ def get_tokenizer(
         tokenizer = MistralTokenizer.from_pretrained(str(tokenizer_name),
                                                      revision=revision)
     elif tokenizer_mode == "custom":
+        from vllm.transformers_utils.tokenizer_base import TokenizerRegistry
         tokenizer = TokenizerRegistry.get_tokenizer(str(tokenizer_name),
                                                     *args,
                                                     revision=revision,
@@ -270,7 +275,7 @@ cached_get_tokenizer = lru_cache(get_tokenizer)
 
 
 def cached_tokenizer_from_config(
-    model_config: "ModelConfig",
+    model_config: ModelConfig,
     **kwargs: Any,
 ):
     return cached_get_tokenizer(

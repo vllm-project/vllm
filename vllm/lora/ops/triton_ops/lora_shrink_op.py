@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Based on:
 Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023). 
@@ -6,14 +7,12 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from typing import List
-
 import torch
-import triton
-import triton.language as tl
 
 from vllm.lora.ops.triton_ops.kernel_utils import do_shrink_kernel
 from vllm.lora.ops.triton_ops.utils import _get_lora_a_ptr
+from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op
 
 
@@ -98,7 +97,7 @@ def _lora_shrink_kernel(input_ptr, lora_ptr, out_ptr, M, N, K,
 @torch.inference_mode()
 def _lora_shrink(
     inputs: torch.Tensor,  #  shape [num_tokens, hidden_size]
-    lora_a_weights: List[
+    lora_a_weights: list[
         torch.Tensor],  # shape [num_loras, lora_rank, hidden_size]
     output_tensor: torch.Tensor,  # shape [num_slices, num_tokens, lora_rank]
     token_lora_mapping: torch.Tensor,  # shape [num_tokens]
@@ -112,7 +111,7 @@ def _lora_shrink(
     """
     Args:
         inputs (torch.Tensor): Input tensor
-        lora_a_weights (List[torch.Tensor]): LoRA weights
+        lora_a_weights (list[torch.Tensor]): LoRA weights
         output_tensor (torch.Tensor): output tensor
         token_lora_mapping (torch.Tensor): A tensor mapping each input token
             to the lora-id related to that token. A value of -1 indicates that
@@ -219,7 +218,7 @@ def _lora_shrink(
 
 def _lora_shrink_fake(
     inputs: torch.Tensor,
-    lora_a_weights: List[torch.Tensor],
+    lora_a_weights: list[torch.Tensor],
     output_tensor: torch.Tensor,
     token_lora_mapping: torch.Tensor,
     token_indices_sorted_by_lora_ids: torch.Tensor,
@@ -238,6 +237,7 @@ try:
         op_func=_lora_shrink,
         mutates_args=["output_tensor"],
         fake_impl=_lora_shrink_fake,
+        dispatch_key=current_platform.dispatch_key,
     )
     lora_shrink = torch.ops.vllm.lora_shrink
 

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This file contains the command line arguments for the vLLM's
 OpenAI-compatible server. It is kept in a separate file for documentation
@@ -11,6 +12,7 @@ import ssl
 from collections.abc import Sequence
 from typing import Optional, Union, get_args
 
+import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          validate_chat_template)
@@ -214,13 +216,24 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--enable-request-id-headers",
         action="store_true",
         help="If specified, API server will add X-Request-Id header to "
-        "responses. Caution: this hurts performance at high QPS.")
+        "responses.")
     parser.add_argument(
         "--enable-auto-tool-choice",
         action="store_true",
         default=False,
         help="Enable auto tool choice for supported models. Use "
         "``--tool-call-parser`` to specify which parser to use.")
+    parser.add_argument(
+        "--expand-tools-even-if-tool-choice-none",
+        action="store_true",
+        default=False,
+        deprecated=True,
+        help="Include tool definitions in prompts "
+        "even when tool_choice='none'. "
+        "This is a transitional option that will be removed in v0.10.0. "
+        "In v0.10.0, tool definitions will always be included regardless of "
+        "tool_choice setting. Use this flag now to test the new behavior "
+        "before the breaking change.")
 
     valid_tool_parsers = ToolParserManager.tool_parsers.keys()
     parser.add_argument(
@@ -243,6 +256,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         " into OpenAI API format, the name register in this plugin can be used "
         "in ``--tool-call-parser``.")
 
+    parser.add_argument(
+        "--log-config-file",
+        type=str,
+        default=envs.VLLM_LOGGING_CONFIG_PATH,
+        help="Path to logging config JSON file for both vllm and uvicorn",
+    )
+
     parser = AsyncEngineArgs.add_cli_args(parser)
 
     parser.add_argument('--max-log-len',
@@ -263,6 +283,11 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         action='store_true',
         default=False,
         help="If set to True, enable prompt_tokens_details in usage.")
+    parser.add_argument(
+        "--enable-force-include-usage",
+        action='store_true',
+        default=False,
+        help="If set to True, including usage on every request.")
     parser.add_argument(
         "--enable-server-load-tracking",
         action='store_true',
@@ -286,6 +311,9 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_auto_tool_choice and not args.tool_call_parser:
         raise TypeError("Error: --enable-auto-tool-choice requires "
                         "--tool-call-parser")
+    if args.enable_prompt_embeds and args.enable_prompt_adapter:
+        raise ValueError(
+            "Cannot use prompt embeds and prompt adapter at the same time.")
 
 
 def log_non_default_args(args: argparse.Namespace):

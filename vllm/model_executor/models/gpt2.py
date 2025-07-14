@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gpt2/modeling_gpt2.py
@@ -18,7 +19,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GPT-2 model compatible with HuggingFace weights."""
-from typing import Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -38,11 +40,13 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors
+from vllm.sequence import IntermediateTensors, PoolerOutput
 
+from ..layers.pooler import Pooler, PoolingType
 from .interfaces import SupportsPP
-from .utils import (is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -234,6 +238,35 @@ class GPT2Model(nn.Module):
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
 
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: set[str] = set()
+        for name, loaded_weight in weights:
+            if ".attn.bias" in name or ".attn.masked_bias" in name:
+                # Skip attention mask.
+                # NOTE: "c_attn.bias" should not be skipped.
+                continue
+
+            if is_pp_missing_parameter(name, self):
+                continue
+
+            param = params_dict[name]
+            # The HF's GPT-2 implementation uses Conv1D instead of Linear.
+            # Because of this, we need to transpose the weights.
+            # Note(zhuohan): the logic below might break quantized models.
+            for conv1d_weight_name in ["c_attn", "c_proj", "c_fc"]:
+                if conv1d_weight_name not in name:
+                    continue
+                if not name.endswith(".weight"):
+                    continue
+                loaded_weight = loaded_weight.t()
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
 
 class GPT2LMHeadModel(nn.Module, SupportsPP):
 
@@ -280,34 +313,70 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
-        for name, loaded_weight in weights:
-            if ".attn.bias" in name or ".attn.masked_bias" in name:
-                # Skip attention mask.
-                # NOTE: "c_attn.bias" should not be skipped.
-                continue
-            if not name.startswith("transformer.") and not name.startswith(
-                    "lm_head"):
-                name = "transformer." + name
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        weights = _add_transformer_prefix(weights)
+        return loader.load_weights(weights)
 
-            if is_pp_missing_parameter(name, self):
-                continue
 
-            param = params_dict[name]
-            # The HF's GPT-2 implementation uses Conv1D instead of Linear.
-            # Because of this, we need to transpose the weights.
-            # Note(zhuohan): the logic below might break quantized models.
-            for conv1d_weight_name in ["c_attn", "c_proj", "c_fc"]:
-                if conv1d_weight_name not in name:
-                    continue
-                if not name.endswith(".weight"):
-                    continue
-                loaded_weight = loaded_weight.t()
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+class GPT2ForSequenceClassification(nn.Module):
+    """GPT2 Model for sequence classification.
+
+    This class expands GPT2Model with pooling and score functions - last token
+    is being used for classification.
+
+    Attributes:
+        transformer: An instance of GPT2Model used for forward operations.
+        score: A layer for calculating logits.
+        _pooler: An instance of Pooler used for pooling operations.
+    """
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        self.transformer = GPT2Model(vllm_config=vllm_config,
+                                     prefix=maybe_prefix(prefix, "gpt2"))
+        self.score = nn.Linear(config.n_embd, config.num_labels, bias=False)
+        pooler_config = vllm_config.model_config.pooler_config
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.LAST,
+            normalize=False,
+            softmax=True)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)
+
+    def pooler(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> Optional[PoolerOutput]:
+        return self._pooler(hidden_states, pooling_metadata)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        hidden_states = self.transformer(
+            input_ids=input_ids,
+            position_ids=positions,
+            inputs_embeds=inputs_embeds,
+            intermediate_tensors=intermediate_tensors)
+        logits = self.score(hidden_states)
+        return logits
+
+
+def _add_transformer_prefix(
+    weights: Iterable[tuple[str, torch.Tensor]]
+) -> Iterable[tuple[str, torch.Tensor]]:
+    for name, tensor in weights:
+        if not name.startswith('transformer.') and not name.startswith(
+                "lm_head"):
+            name = 'transformer.' + name
+        yield name, tensor

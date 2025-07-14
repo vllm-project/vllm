@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This file test accuracy of the vLLM server via LMEval.
 It uses local-completions, which interacts with vLLM
@@ -68,6 +69,11 @@ def test_lm_eval_accuracy_v1_engine(model, monkeypatch: pytest.MonkeyPatch):
         more_args = None
         if current_platform.is_tpu():
             # Limit compilation time for TPU V1
+
+            if model == "google/gemma-3-1b-it":
+                # TPU + google/gemma-3-1b-it + xet doesn't work well.
+                m.setenv("HF_HUB_DISABLE_XET", "1")
+
             more_args = "max_model_len=2048,max_num_seqs=64"
 
             # Add TP test (if provided)

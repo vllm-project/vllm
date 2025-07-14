@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Final, Optional, Union
 
@@ -65,6 +66,8 @@ class OpenAIServingTokenization(OpenAIServing):
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
             if isinstance(request, TokenizeChatRequest):
+                tool_dicts = (None if request.tools is None else
+                              [tool.model_dump() for tool in request.tools])
                 (
                     _,
                     request_prompts,
@@ -73,6 +76,7 @@ class OpenAIServingTokenization(OpenAIServing):
                     request,
                     tokenizer,
                     request.messages,
+                    tool_dicts=tool_dicts,
                     chat_template=request.chat_template or self.chat_template,
                     chat_template_content_format=self.
                     chat_template_content_format,
@@ -91,7 +95,7 @@ class OpenAIServingTokenization(OpenAIServing):
                  )
         except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            return self.create_error_response(f"{e} {e.__cause__}")
 
         input_ids: list[int] = []
         for i, engine_prompt in enumerate(engine_prompts):
@@ -103,10 +107,16 @@ class OpenAIServingTokenization(OpenAIServing):
 
             # Silently ignore prompt adapter since it does not affect
             # tokenization (Unlike in Embeddings API where an error is raised)
+            if isinstance(engine_prompt,
+                          dict) and "prompt_token_ids" in engine_prompt:
+                input_ids.extend(engine_prompt["prompt_token_ids"])
 
-            input_ids.extend(engine_prompt["prompt_token_ids"])
+        token_strs = None
+        if request.return_token_strs:
+            token_strs = tokenizer.convert_ids_to_tokens(input_ids)
 
         return TokenizeResponse(tokens=input_ids,
+                                token_strs=token_strs,
                                 count=len(input_ids),
                                 max_model_len=self.max_model_len)
 

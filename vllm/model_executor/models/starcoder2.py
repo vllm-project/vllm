@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2024 BigCode and the HuggingFace Inc. team. All rights reserved.
 #
@@ -19,7 +20,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """ PyTorch Starcoder2 model."""
-from typing import Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -255,8 +257,8 @@ class Starcoder2Model(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -265,7 +267,7 @@ class Starcoder2Model(nn.Module):
         ]
 
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
@@ -342,14 +344,13 @@ class Starcoder2ForCausalLM(nn.Module, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             # Models trained using ColossalAI may include these tensors in
             # the checkpoint. Skip them.
-            skip_prefixes=([
-                "rotary_emb.inv_freq", "lm_head.weight"
-            ] if self.config.tie_word_embeddings else ["rotary_emb.inv_freq"]),
+            skip_prefixes=(["lm_head.weight"]
+                           if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)

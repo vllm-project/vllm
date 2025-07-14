@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Literal, get_args
 
@@ -14,7 +15,7 @@ QuantizationMethods = Literal[
     "ptpc_fp8",
     "fbgemm_fp8",
     "modelopt",
-    "nvfp4",
+    "modelopt_fp4",
     "marlin",
     "bitblas",
     "gguf",
@@ -33,6 +34,8 @@ QuantizationMethods = Literal[
     "quark",
     "moe_wna16",
     "torchao",
+    "auto-round",
+    "rtn",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
@@ -84,6 +87,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
     from .aqlm import AQLMConfig
+    from .auto_round import AutoRoundConfig
     from .awq import AWQConfig
     from .awq_marlin import AWQMarlinConfig
     from .bitblas import BitBLASConfig
@@ -107,6 +111,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .neuron_quant import NeuronQuantConfig
     from .ptpc_fp8 import PTPCFp8Config
     from .qqq import QQQConfig
+    from .rtn import RTNConfig
     from .torchao import TorchAOConfig
     from .tpu_int8 import Int8TpuConfig
 
@@ -118,7 +123,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "fp8": Fp8Config,
         "fbgemm_fp8": FBGEMMFp8Config,
         "modelopt": ModelOptFp8Config,
-        "nvfp4": ModelOptNvFp4Config,
+        "modelopt_fp4": ModelOptNvFp4Config,
         "marlin": MarlinConfig,
         "bitblas": BitBLASConfig,
         "gguf": GGUFConfig,
@@ -138,6 +143,8 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,
         "torchao": TorchAOConfig,
+        "auto-round": AutoRoundConfig,
+        "rtn": RTNConfig
     }
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)

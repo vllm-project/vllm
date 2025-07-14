@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
 
-from vllm.v1.utils import bind_kv_cache
+from vllm.v1.worker.utils import bind_kv_cache
 
 
 def test_bind_kv_cache():

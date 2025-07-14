@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-
-from abc import ABC
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Generic, NamedTuple, Optional, TypeVar, cast
+from typing import Generic, NamedTuple, Optional, TypeVar, Union, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -25,11 +25,12 @@ logger = init_logger(__name__)
 class ProcessorInputs:
     """
     Represents the keyword arguments to
-    {meth}`vllm.multimodal.processing.BaseMultiModalProcessor.apply`.
+    [`vllm.multimodal.processing.BaseMultiModalProcessor.apply`][].
     """
-    prompt_text: str
+    prompt: Union[str, list[int]]
     mm_data: MultiModalDataDict
     hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
+    tokenization_kwargs: Mapping[str, object] = field(default_factory=dict)
 
 
 class DummyEncoderData(NamedTuple):
@@ -60,24 +61,14 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
 
         self.info = info
 
-    # TODO: @abstractmethod after transition
+    @abstractmethod
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         """
         Build the text input corresponding to `mm_counts`.
         """
-        if (type(self).get_dummy_processor_inputs ==
-                BaseDummyInputsBuilder.get_dummy_processor_inputs):
-            raise NotImplementedError
+        raise NotImplementedError
 
-        logger.warning_once("`get_dummy_processor_inputs` has been split up "
-                            "into `get_dummy_text` and `get_dummy_mm_data`. "
-                            "These two methods will be marked as abstract "
-                            "in an upcoming release.")
-
-        seq_len = self.info.ctx.model_config.max_model_len
-        return self.get_dummy_processor_inputs(seq_len, mm_counts).prompt_text
-
-    # TODO: @abstractmethod after transition
+    @abstractmethod
     def get_dummy_mm_data(
         self,
         seq_len: int,
@@ -100,8 +91,11 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         """
         dummy_text = self.get_dummy_text(mm_counts)
         dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts)
+        tokenization_kwargs = {"truncation": False}
 
-        return ProcessorInputs(prompt_text=dummy_text, mm_data=dummy_mm_data)
+        return ProcessorInputs(prompt=dummy_text,
+                               mm_data=dummy_mm_data,
+                               tokenization_kwargs=tokenization_kwargs)
 
     def _get_dummy_audios(
         self,
@@ -177,9 +171,10 @@ class MultiModalProfiler(Generic[_I]):
             seq_len, mm_counts)
 
         return self.processor.apply(
-            prompt=processor_inputs.prompt_text,
+            prompt=processor_inputs.prompt,
             mm_data=processor_inputs.mm_data,
             hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
+            tokenization_kwargs=processor_inputs.tokenization_kwargs,
         )
 
     def _get_mm_num_tokens(
@@ -263,6 +258,31 @@ class MultiModalProfiler(Generic[_I]):
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
     ) -> Mapping[str, int]:
-        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
+        if mm_counts is None:
+            mm_counts = self.get_mm_limits()
 
+        max_tokens_per_item = self.processing_info.get_mm_max_tokens_per_item(
+            seq_len=seq_len,
+            mm_counts=mm_counts,
+        )
+        if max_tokens_per_item is not None:
+            if mm_counts is None:
+                total_mm_tokens = sum(max_tokens_per_item.values())
+            else:
+                total_mm_tokens = sum(max_tokens_per_item[k] * mm_counts[k]
+                                      for k in max_tokens_per_item.keys()
+                                      & mm_counts.keys())
+            if total_mm_tokens > seq_len:
+                logger.warning_once(
+                    "The sequence length (%d) is smaller than the pre-defined"
+                    " wosrt-case total number of multimodal tokens (%d). "
+                    "This may cause certain multi-modal inputs to fail during "
+                    "inference. To avoid this, you should increase "
+                    "`max_model_len` or reduce `mm_counts`.",
+                    seq_len,
+                    total_mm_tokens,
+                )
+            return max_tokens_per_item
+
+        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
         return self._get_mm_num_tokens(mm_inputs)

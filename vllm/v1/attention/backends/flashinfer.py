@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 from __future__ import annotations
 
@@ -9,16 +10,20 @@ import torch
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
+from flashinfer.decode import trtllm_batch_decode_with_kv_cache
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
-from vllm.attention.layer import Attention
-from vllm.config import (VllmConfig, get_current_vllm_config,
-                         get_layers_from_vllm_config)
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata,
+                                              PerLayerParameters,
+                                              get_kv_cache_layout,
+                                              get_per_layer_parameters,
+                                              infer_global_hyperparameters)
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.block_table import BlockTable
 
@@ -35,10 +40,27 @@ logger = init_logger(__name__)
 class FlashInferBackend(AttentionBackend):
 
     accept_output_buffer: bool = True
+    cached_sm100a_supported: Optional[bool] = None
 
-    @staticmethod
-    def get_supported_head_sizes() -> list[int]:
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
         return [64, 128, 256]
+
+    @classmethod
+    def validate_head_size(cls, head_size: int) -> None:
+        supported_head_sizes = cls.get_supported_head_sizes()
+        if head_size not in supported_head_sizes:
+            attn_type = cls.__name__.removesuffix("Backend")
+            raise ValueError(
+                f"Head size {head_size} is not supported by {attn_type}. "
+                f"Supported head sizes are: {supported_head_sizes}. "
+                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
+                "FlexAttention backend which supports all head sizes.")
 
     @staticmethod
     def get_name() -> str:
@@ -65,69 +87,69 @@ class FlashInferBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
+    @staticmethod
+    def get_kv_cache_stride_order() -> tuple[int, ...]:
+        # `stride_order` indicates the permutation that gets us from
+        # `get_kv_cache_shape` to the actual memory layout we want.
+        cache_layout = get_kv_cache_layout()
+        if cache_layout == "NHD":
+            stride_order = (0, 1, 2, 3, 4)
+        elif cache_layout == "HND":
+            stride_order = (0, 1, 3, 2, 4)
+        else:
+            raise ValueError(f"Unknown cache layout format {cache_layout}.")
+        return stride_order
 
-@dataclass
-class PerLayerParameters:
-    """
-    Currently, FlashInfer backend only support models in which all layers share
-    the same values for the following hyperparameters.
-    """
+    @staticmethod
+    def use_trtllm_decode_attention(
+        batch_size: int,
+        max_seq_len: int,
+        kv_cache_dtype: str,
+        num_qo_heads: int,
+        num_kv_heads: int,
+        attn_head_size: int,
+    ) -> bool:
+        if FlashInferBackend.cached_sm100a_supported is None:
+            FlashInferBackend.cached_sm100a_supported = (
+                current_platform.has_device_capability(100))
+        if not FlashInferBackend.cached_sm100a_supported:
+            return False
+        if (num_qo_heads // num_kv_heads > 8
+                or num_qo_heads % num_kv_heads != 0 or attn_head_size != 128):
+            return False
+        env_value = envs.VLLM_USE_TRTLLM_DECODE_ATTENTION
+        if env_value is not None:
+            logger.info_once("VLLM_USE_TRTLLM_DECODE_ATTENTION is set to %s",
+                             env_value)
+            # Environment variable is set - respect it
+            # Making the conditional check for zero because
+            # the path is automatically enabled if the batch size condition
+            # is satisfied.
+            no_use_trtllm = env_value == "0"
+            if not no_use_trtllm:
+                logger.info_once(
+                    "VLLM_USE_TRTLLM_DECODE_ATTENTION is set to 1, "
+                    "using TRTLLM decode attention.")
+            return not no_use_trtllm
+        else:
+            # Environment variable not set - use auto-detection
+            # Only supports attention head size of 128
+            use_trtllm = (FlashInferBackend.cached_sm100a_supported
+                          and batch_size <= 256 and max_seq_len < 131072
+                          and kv_cache_dtype == "auto")
+            if use_trtllm:
+                logger.warning_once(
+                    "Using TRTLLM decode attention (auto-detected).")
+        return use_trtllm
 
-    window_left: int
-    logits_soft_cap: Optional[float]
-    sm_scale: float
-
-
-def get_per_layer_parameters(
-        vllm_config: VllmConfig) -> dict[str, PerLayerParameters]:
-    """
-    Scan all attention layers and determine some hyperparameters
-    to use during `plan`.
-    """
-
-    layers = get_layers_from_vllm_config(vllm_config, Attention)
-    per_layer_params: dict[str, PerLayerParameters] = {}
-
-    for key, layer in layers.items():
-        impl = layer.impl
-        assert isinstance(impl, FlashInferImpl)
-
-        # Infer hyperparameters from the attention layer
-        window_size = impl.sliding_window
-        window_left = window_size[0] if window_size is not None else -1
-        logits_soft_cap = impl.logits_soft_cap
-        sm_scale = impl.scale
-
-        per_layer_params[key] = PerLayerParameters(window_left,
-                                                   logits_soft_cap, sm_scale)
-
-    return per_layer_params
-
-
-def infer_global_hyperparameters(
-        per_layer_params: dict[str, PerLayerParameters]) -> PerLayerParameters:
-    """
-    Currently, FlashInfer backend only support models in which all layers share
-    the same values for the following hyperparameters:
-    - `window_left`
-    - `logits_soft_cap`
-    - `sm_scale`
-
-    So this function asserts that all layers share the same values for these
-    hyperparameters and returns the global values.
-    """
-
-    assert len(per_layer_params) > 0, "No attention layers found in the model."
-
-    param_sets = list(per_layer_params.values())
-    global_params = param_sets[0]
-    for params in param_sets:
-        assert params == global_params, (
-            "FlashInfer backend currently only supports models in which all "
-            "layers share the same values for the following hyperparameters: "
-            "`window_left`, `logits_soft_cap`, `sm_scale`.")
-
-    return global_params
+    @staticmethod
+    def get_fp8_dtype_for_flashinfer(kv_cache_dtype: str) -> torch.dtype:
+        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+            return torch.float8_e4m3fn
+        elif kv_cache_dtype == "fp8_e5m2":
+            return torch.float8_e5m2
+        else:
+            raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
 
 
 @dataclass
@@ -163,11 +185,17 @@ class FlashInferMetadata:
     # Block size of vllm
     page_size: int
     # The data type of the paged kv cache
-    data_type: torch.dtype
+    kv_data_type: torch.dtype
     # The data type of the query
     q_data_type: torch.dtype
 
     slot_mapping: torch.Tensor
+
+    # For flashinfer trtllm batch decode
+    max_seq_len: int
+    seq_lens: torch.Tensor
+    block_table_tensor: torch.Tensor
+    workspace_buffer: torch.Tensor
 
     # For handling prefill decode split
     num_decodes: int
@@ -192,17 +220,11 @@ class FlashInferMetadata:
         return self.qo_indptr
 
     def __post_init__(self):
-        # Refer to
-        # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
-        supported_head_sizes = FlashInferBackend.get_supported_head_sizes()
-        if self.head_dim is not None and self.head_dim \
-                not in supported_head_sizes:
-            raise ValueError(
-                f"Only {supported_head_sizes} are supported for head_dim,",
-                f" received {self.head_dim}.")
+        if self.head_dim is not None:
+            FlashInferBackend.validate_head_size(self.head_dim)
 
 
-class FlashInferMetadataBuilder:
+class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def __init__(self, runner: GPUModelRunner, kv_cache_spec: AttentionSpec,
                  block_table: BlockTable):
@@ -215,7 +237,7 @@ class FlashInferMetadataBuilder:
         # Global hyperparameters shared by all attention layers
         self.global_hyperparameters: Optional[PerLayerParameters] = None
 
-        self.vllm_config = get_current_vllm_config()
+        self.vllm_config = runner.vllm_config
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
 
@@ -289,7 +311,7 @@ class FlashInferMetadataBuilder:
     def _get_prefill_wrapper(self):
         if self._prefill_wrapper is None:
             self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(), "NHD")
+                self._get_workspace_buffer(), get_kv_cache_layout())
         return self._prefill_wrapper
 
     def _get_decode_wrapper(self):
@@ -302,20 +324,20 @@ class FlashInferMetadataBuilder:
                 num_qo_heads // num_kv_heads > 4)
             self._decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(),
-                "NHD",
+                get_kv_cache_layout(),
                 use_tensor_cores=use_tensor_cores)
         return self._decode_wrapper
 
     def _get_cascade_wrapper(self):
         if self._cascade_wrapper is None:
             self._cascade_wrapper = MultiLevelCascadeAttentionWrapper(
-                2, self._get_workspace_buffer(), "NHD")
+                2, self._get_workspace_buffer(), get_kv_cache_layout())
         return self._cascade_wrapper
 
     def _plan(self, attn_metadata: FlashInferMetadata):
         if self.global_hyperparameters is None:
             self.global_hyperparameters = infer_global_hyperparameters(
-                get_per_layer_parameters(self.vllm_config))
+                get_per_layer_parameters(self.vllm_config, FlashInferImpl))
         if attn_metadata.use_cascade:
             attn_metadata.cascade_wrapper = self._get_cascade_wrapper()
             attn_metadata.cascade_wrapper.plan(
@@ -341,6 +363,7 @@ class FlashInferMetadataBuilder:
                 window_left=self.global_hyperparameters.window_left,
                 logits_soft_cap=self.global_hyperparameters.logits_soft_cap,
                 q_data_type=attn_metadata.q_data_type,
+                kv_data_type=attn_metadata.kv_data_type,
             )
         else:
             # Regular attention (common case).
@@ -376,38 +399,46 @@ class FlashInferMetadataBuilder:
                     logits_soft_cap=self.global_hyperparameters.
                     logits_soft_cap,
                     q_data_type=attn_metadata.q_data_type,
-                    kv_data_type=attn_metadata.data_type,
+                    kv_data_type=attn_metadata.kv_data_type,
                 )
 
             if self._num_decodes > 0:
                 attn_metadata.decode_wrapper = self._get_decode_wrapper()
-                attn_metadata.decode_wrapper.plan(
-                    attn_metadata.paged_kv_indptr[:self._num_decodes + 1],
-                    attn_metadata.paged_kv_indices,
-                    attn_metadata.paged_kv_last_page_len[:self._num_decodes],
-                    attn_metadata.num_qo_heads,
-                    attn_metadata.num_kv_heads,
-                    attn_metadata.head_dim,
-                    attn_metadata.page_size,
-                    # Disable flashinfer's pos encoding and use vllm's rope.
-                    pos_encoding_mode="NONE",
-                    sm_scale=self.global_hyperparameters.sm_scale,
-                    window_left=self.global_hyperparameters.window_left,
-                    logits_soft_cap=self.global_hyperparameters.
-                    logits_soft_cap,
-                    q_data_type=attn_metadata.q_data_type,
-                    kv_data_type=attn_metadata.data_type,
-                )
+                if not FlashInferBackend.use_trtllm_decode_attention(
+                        self._num_decodes, attn_metadata.max_seq_len,
+                        attn_metadata.kv_data_type, attn_metadata.num_qo_heads,
+                        attn_metadata.num_kv_heads, attn_metadata.head_dim):
+                    attn_metadata.decode_wrapper.plan(
+                        attn_metadata.paged_kv_indptr[:self._num_decodes + 1],
+                        attn_metadata.paged_kv_indices,
+                        attn_metadata.paged_kv_last_page_len[:self.
+                                                             _num_decodes],
+                        attn_metadata.num_qo_heads,
+                        attn_metadata.num_kv_heads,
+                        attn_metadata.head_dim,
+                        attn_metadata.page_size,
+                        # Disable flashinfer's pos encoding and use vllm's rope.
+                        pos_encoding_mode="NONE",
+                        sm_scale=self.global_hyperparameters.sm_scale,
+                        window_left=self.global_hyperparameters.window_left,
+                        logits_soft_cap=self.global_hyperparameters.
+                        logits_soft_cap,
+                        q_data_type=attn_metadata.q_data_type,
+                        kv_data_type=attn_metadata.kv_data_type,
+                    )
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
-              common_prefix_len: int,
+    def build(self, common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata):
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+
         assert self._num_decodes + self._num_prefills == num_reqs
         assert (self._num_decode_tokens +
                 self._num_prefill_tokens == num_actual_tokens)
         page_size = self.kv_cache_spec.block_size
         device = self.runner.device
         qo_indptr = common_attn_metadata.query_start_loc
+        max_seq_len = int(self.runner.seq_lens_np[:num_reqs].max())
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = self.block_table.get_device_tensor()[:num_reqs]
         slot_mapping = self.block_table.slot_mapping_cpu[:num_actual_tokens].to(
@@ -456,7 +487,12 @@ class FlashInferMetadataBuilder:
         paged_kv_last_page_len = seq_lens % page_size
         paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
                                              page_size, paged_kv_last_page_len)
-
+        cache_dtype = self.runner.cache_config.cache_dtype
+        if cache_dtype.startswith("fp8"):
+            kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                cache_dtype)
+        else:
+            kv_cache_dtype = self.kv_cache_spec.dtype
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
             qo_indptr=qo_indptr,
@@ -467,7 +503,7 @@ class FlashInferMetadataBuilder:
             num_kv_heads=self.kv_cache_spec.num_kv_heads,
             head_dim=self.kv_cache_spec.head_size,
             page_size=page_size,
-            data_type=self.kv_cache_spec.dtype,
+            kv_data_type=kv_cache_dtype,
             q_data_type=self.runner.dtype,
             slot_mapping=slot_mapping,
             num_decodes=self._num_decodes,
@@ -479,6 +515,10 @@ class FlashInferMetadataBuilder:
             shared_kv_page_indptr=shared_kv_page_indptr,
             shared_kv_page_indices=shared_kv_page_indices,
             shared_kv_last_page_len=shared_kv_last_page_len,
+            max_seq_len=max_seq_len,
+            seq_lens=seq_lens,
+            block_table_tensor=block_table_tensor,
+            workspace_buffer=self._workspace_buffer,
         )
 
         self._plan(attn_metadata)
@@ -507,7 +547,13 @@ class FlashInferImpl(AttentionImpl):
         blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[int] = None,
+        use_irope: bool = False,
     ) -> None:
+        if use_irope:
+            logger.warning_once(
+                "Using irope in FlashInfer is not supported yet, it will fall"
+                " back to global attention for long context.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -521,8 +567,8 @@ class FlashInferImpl(AttentionImpl):
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
         self.logits_soft_cap = logits_soft_cap
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         if attn_type != AttentionType.DECODER:
@@ -540,6 +586,7 @@ class FlashInferImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: FlashInferMetadata,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashInfer.
 
@@ -547,12 +594,21 @@ class FlashInferImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache = [num_blocks, 2, block_size, num_kv_heads, head_size]
+            kv_cache: shape - 
+            # NHD: [num_blocks, 2, block_size, num_kv_heads, head_size]
+            # HND: [num_blocks, 2,  num_kv_heads, block_size, head_size]
+            
+
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
+
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for FlashInferImpl")
 
         if attn_metadata is None:
             # Profiling run.
@@ -568,21 +624,32 @@ class FlashInferImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
 
         num_actual_tokens = attn_metadata.num_actual_tokens
-        # Reshape the input keys and values and store them in the cache.
-        # NOTE(woosuk): Here, key and value are padded while slot_mapping is
-        # not padded. However, we don't need to do key[:num_actual_tokens] and
-        # value[:num_actual_tokens] because the reshape_and_cache_flash op uses
-        # the slot_mapping's shape to determine the number of actual tokens.
-        torch.ops._C_cache_ops.reshape_and_cache_flash(
-            key,
-            value,
-            kv_cache[:, 0],
-            kv_cache[:, 1],
-            attn_metadata.slot_mapping,
-            self.kv_cache_dtype,
-            layer._k_scale,
-            layer._v_scale,
-        )
+
+        if self.kv_sharing_target_layer_name is None:
+            # Reshape the input keys and values and store them in the cache.
+            # Skip this if sharing KV cache with an earlier attention layer.
+            # NOTE(woosuk): Here, key and value are padded while slot_mapping is
+            # not padded. However, we don't need to do key[:num_actual_tokens]
+            # and value[:num_actual_tokens] because the reshape_and_cache_flash
+            # op uses the slot_mapping's shape to determine the number of
+            # actual tokens.
+            torch.ops._C_cache_ops.reshape_and_cache_flash(
+                key,
+                value,
+                kv_cache[:, 0],
+                kv_cache[:, 1],
+                attn_metadata.slot_mapping,
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
+
+            # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
+            # to process the cache when the kv_cache_dtype is fp8
+            if self.kv_cache_dtype.startswith("fp8"):
+                torch_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                    self.kv_cache_dtype)
+                kv_cache = kv_cache.view(torch_dtype)
 
         window_left = (self.sliding_window[0]
                        if self.sliding_window is not None else -1)
@@ -601,6 +668,7 @@ class FlashInferImpl(AttentionImpl):
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_prefill_tokens = attn_metadata.num_prefill_tokens
 
+        stride_order = FlashInferBackend.get_kv_cache_stride_order()
         # Regular attention (common case).
         # Decodes are at the front and prefills are at the back,
         # according to reorder_batch()
@@ -615,26 +683,50 @@ class FlashInferImpl(AttentionImpl):
             assert prefill_wrapper._sm_scale == self.scale
             prefill_wrapper.run(
                 prefill_query,
-                kv_cache,
+                kv_cache.permute(*stride_order),
                 k_scale=layer._k_scale_float,
                 v_scale=layer._v_scale_float,
                 out=output[num_decode_tokens:],
             )
-
         if decode_wrapper := attn_metadata.decode_wrapper:
             decode_query = query[:num_decode_tokens]
             assert decode_query.shape[0] == num_decode_tokens
-            assert decode_wrapper is not None
-            assert decode_wrapper._window_left == window_left
-            assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap
-                                                       or 0.0)
-            assert decode_wrapper._sm_scale == self.scale
-            decode_wrapper.run(
-                decode_query,
-                kv_cache,
-                k_scale=layer._k_scale_float,
-                v_scale=layer._v_scale_float,
-                out=output[:num_decode_tokens],
-            )
-
+            if not FlashInferBackend.use_trtllm_decode_attention(
+                    attn_metadata.num_decodes, attn_metadata.max_seq_len,
+                    self.kv_cache_dtype, attn_metadata.num_qo_heads,
+                    attn_metadata.num_kv_heads, attn_metadata.head_dim):
+                assert decode_wrapper is not None
+                assert decode_wrapper._window_left == window_left
+                assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap
+                                                           or 0.0)
+                assert decode_wrapper._sm_scale == self.scale
+                decode_wrapper.run(
+                    decode_query,
+                    kv_cache.permute(*stride_order),
+                    k_scale=layer._k_scale_float,
+                    v_scale=layer._v_scale_float,
+                    out=output[:num_decode_tokens],
+                )
+            else:
+                # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
+                if num_decode_tokens > 0:
+                    assert get_kv_cache_layout() == "HND"
+                    output[:num_decode_tokens] = (
+                        trtllm_batch_decode_with_kv_cache(
+                            query=decode_query,
+                            kv_cache=kv_cache.permute(*stride_order),
+                            workspace_buffer=attn_metadata.workspace_buffer,
+                            num_heads=self.num_heads,
+                            num_kv_heads=self.num_kv_heads,
+                            scale=self.scale,
+                            block_tables=attn_metadata.
+                            block_table_tensor[:num_decode_tokens],
+                            seq_lens=attn_metadata.
+                            seq_lens[:num_decode_tokens],
+                            block_size=attn_metadata.page_size,
+                            max_seq_len=attn_metadata.max_seq_len,
+                            kv_cache_dtype=self.kv_cache_dtype,
+                            k_scale=layer._k_scale_float,
+                            v_scale=layer._v_scale_float,
+                        ))
         return output_padded
