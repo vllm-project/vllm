@@ -61,7 +61,7 @@ To address the above issues, I have designed and developed a local Tensor memory
 
 # Install vLLM
 
-??? Commands
+??? console "Commands"
 
     ```shell
     # Enter the home directory or your working directory.
@@ -106,7 +106,7 @@ python3 disagg_prefill_proxy_xpyd.py &
 
 ### Prefill1 (e.g. 10.0.1.2 or 10.0.1.1)
 
-??? Command
+??? console "Command"
 
     ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=0 vllm serve {your model directory} \
@@ -128,7 +128,7 @@ python3 disagg_prefill_proxy_xpyd.py &
 
 ### Decode1 (e.g. 10.0.1.3 or 10.0.1.1)
 
-??? Command
+??? console "Command"
 
     ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=1 vllm serve {your model directory} \
@@ -150,7 +150,7 @@ python3 disagg_prefill_proxy_xpyd.py &
 
 ### Decode2 (e.g. 10.0.1.4 or 10.0.1.1)
 
-??? Command
+??? console "Command"
 
     ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=2 vllm serve {your model directory} \
@@ -172,7 +172,7 @@ python3 disagg_prefill_proxy_xpyd.py &
 
 ### Decode3 (e.g. 10.0.1.5 or 10.0.1.1)
 
-??? Command
+??? console "Command"
 
     ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=3 vllm serve {your model directory} \
@@ -203,7 +203,7 @@ python3 disagg_prefill_proxy_xpyd.py &
 
 ### Prefill1 (e.g. 10.0.1.2 or 10.0.1.1)
 
-??? Command
+??? console "Command"
 
     ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=0 vllm serve {your model directory} \
@@ -225,7 +225,7 @@ python3 disagg_prefill_proxy_xpyd.py &
 
 ### Prefill2 (e.g. 10.0.1.3 or 10.0.1.1)
 
-??? Command
+??? console "Command"
 
     ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=1 vllm serve {your model directory} \
@@ -247,7 +247,7 @@ python3 disagg_prefill_proxy_xpyd.py &
 
 ### Prefill3 (e.g. 10.0.1.4 or 10.0.1.1)
 
-??? Command
+??? console "Command"
 
     ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=2 vllm serve {your model directory} \
@@ -269,7 +269,7 @@ python3 disagg_prefill_proxy_xpyd.py &
 
 ### Decode1 (e.g. 10.0.1.5 or 10.0.1.1)
 
-??? Command
+??? console "Command"
 
     ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=3 vllm serve {your model directory} \
@@ -304,7 +304,7 @@ curl -X POST -s http://10.0.1.1:10001/v1/completions \
 
 # Benchmark
 
-??? Command
+??? console "Command"
 
     ```shell
     python3 benchmark_serving.py \

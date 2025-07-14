@@ -227,7 +227,12 @@ def get_model_architecture(
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
     mixtral_supported = [
-        "fp8", "compressed-tensors", "gptq_marlin", "awq_marlin", "quark"
+        "fp8",
+        "compressed-tensors",
+        "gptq_marlin",
+        "awq_marlin",
+        "quark",
+        "bitsandbytes",
     ]
 
     vllm_supported_archs = ModelRegistry.get_supported_archs()

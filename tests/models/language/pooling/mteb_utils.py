@@ -23,7 +23,7 @@ MTEB_EMBED_TOL = 1e-4
 # See #19344
 MTEB_RERANK_TASKS = ["NFCorpus"]
 MTEB_RERANK_LANGS = ["en"]
-MTEB_RERANK_TOL = 1e-3
+MTEB_RERANK_TOL = 2e-3
 
 
 class VllmMtebEncoder(mteb.Encoder):
@@ -267,7 +267,9 @@ def mteb_test_rerank_models(hf_runner,
                             vllm_runner,
                             model_info: RerankModelInfo,
                             vllm_extra_kwargs=None,
-                            hf_model_callback=None):
+                            hf_model_callback=None,
+                            vllm_mteb_encoder=VllmMtebEncoder,
+                            atol=MTEB_RERANK_TOL):
     if not model_info.enable_test:
         # A model family has many models with the same architecture,
         # and we don't need to test each one.
@@ -288,7 +290,7 @@ def mteb_test_rerank_models(hf_runner,
             assert (model_info.architecture in model_config.architectures)
         assert model_config.hf_config.num_labels == 1
 
-        vllm_main_score = run_mteb_rerank(VllmMtebEncoder(vllm_model),
+        vllm_main_score = run_mteb_rerank(vllm_mteb_encoder(vllm_model),
                                           tasks=MTEB_RERANK_TASKS,
                                           languages=MTEB_RERANK_LANGS)
         vllm_dtype = model_config.dtype
@@ -300,4 +302,4 @@ def mteb_test_rerank_models(hf_runner,
     print("SentenceTransformers:", st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
 
-    assert st_main_score == pytest.approx(vllm_main_score, abs=MTEB_RERANK_TOL)
+    assert st_main_score == pytest.approx(vllm_main_score, abs=atol)

@@ -175,12 +175,21 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
 
             # Original output: (1, num_images, Pn, Px * Py * C)
             # New output: (num_images, Pn, Px * Py * C)
-            assert (isinstance(image_patches, list)
-                    and len(image_patches) == 1)
-            assert (isinstance(image_patches[0], torch.Tensor)
-                    and len(image_patches[0]) == len(images))
-
-            processed_outputs["image_patches"] = image_patches[0]
+            # image_patches is a list with shape:
+            # (1, num_images, Pn, Px * Py * C)
+            # before Transformers 4.53
+            if isinstance(image_patches, list):
+                assert len(image_patches) == 1
+                assert (isinstance(image_patches[0], torch.Tensor)
+                        and len(image_patches[0]) == len(images))
+                processed_outputs["image_patches"] = image_patches[0]
+            # image_patches is a tensor with shape:
+            # (num_images, Pn, Px * Py * C)
+            # after Transformers 4.53
+            elif isinstance(image_patches, torch.Tensor):
+                assert len(image_patches) == len(images)
+            else:
+                raise AssertionError("This line should be unreachable.")
 
         return processed_outputs
 
@@ -193,8 +202,10 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
         vocab = tokenizer.get_vocab()
 
         boa_token_id = vocab["<0x04>"]
+        if prompt_tokens[-1] != boa_token_id:
+            prompt_tokens.append(boa_token_id)
 
-        return prompt_tokens + [boa_token_id]
+        return prompt_tokens
 
     def _get_mm_fields_config(
         self,
