@@ -508,7 +508,7 @@ class EngineArgs:
         load_general_plugins()
         if envs.VLLM_USE_V1:
             # Setup V1 custom logitsprocs. Load plugins & any logitsprocs
-            # specified by FQN
+            # specified by FQCN
             self.logits_processors = load_custom_logitsprocs(
                 self.logits_processors)
         elif self.logits_processors is not None:

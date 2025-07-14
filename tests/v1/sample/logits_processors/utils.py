@@ -15,7 +15,7 @@ DUMMY_LOGITPROC_FQN = (
     "tests.v1.sample.logits_processors.utils:DummyLogitsProcessor")
 DUMMY_LOGITPROC_ARG = "target_token"
 LOGITPROC_SOURCE_ENTRYPOINT = "entrypoint"
-LOGITPROC_SOURCE_FQN = "fqn"
+LOGITPROC_SOURCE_FQCN = "fqcn"
 TEMP_GREEDY = 0.0
 MAX_TOKENS = 20
 

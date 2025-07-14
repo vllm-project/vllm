@@ -6,7 +6,7 @@ import pytest
 
 from tests.v1.sample.logits_processors.utils import (
     DUMMY_LOGITPROC_ARG, DUMMY_LOGITPROC_ENTRYPOINT, DUMMY_LOGITPROC_FQN,
-    LOGITPROC_SOURCE_ENTRYPOINT, LOGITPROC_SOURCE_FQN, MAX_TOKENS, MODEL_NAME,
+    LOGITPROC_SOURCE_ENTRYPOINT, LOGITPROC_SOURCE_FQCN, MAX_TOKENS, MODEL_NAME,
     TEMP_GREEDY, prompts)
 from vllm import LLM, SamplingParams
 
@@ -24,7 +24,7 @@ sampling_params_list = [
 
 
 @pytest.mark.parametrize("logitproc_source",
-                         [LOGITPROC_SOURCE_FQN, LOGITPROC_SOURCE_ENTRYPOINT])
+                         [LOGITPROC_SOURCE_FQCN, LOGITPROC_SOURCE_ENTRYPOINT])
 def test_custom_logitsprocs_py(logitproc_source: str):
     """Test Python interface for passing custom logitsprocs
     
@@ -42,7 +42,7 @@ def test_custom_logitsprocs_py(logitproc_source: str):
     * Requests which activate the custom logitproc, only output `target_token`
 
     Args:
-      logitproc_source: what source (entrypoint or fully-qualified name) the 
+      logitproc_source: what source (entrypoint or fully-qualified class name) the 
                         user pulls the logitproc from
     """
     random.seed(40)

@@ -71,7 +71,7 @@ async def test_custom_logitsprocs_cli(client: openai.AsyncOpenAI,
     Launch vLLM OpenAI-compatible server with CLI argument to loads a custom
     logitproc that has a well-defined behavior (mask out all tokens except one
     `target_token`) Test is implicitly parameterized by the logitproc source
-    (fully-qualified name or entrypoint)
+    (fully-qualified class name or entrypoint)
 
     Pass in requests, 50% of which pass a `target_token` value
     in through `extra_body["vllm_xargs"]`, 50% of which do not.
