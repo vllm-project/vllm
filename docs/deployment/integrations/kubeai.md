@@ -1,7 +1,4 @@
----
-title: KubeAI
----
-[](){ #deployment-kubeai }
+# KubeAI
 
 [KubeAI](https://github.com/substratusai/kubeai) is a Kubernetes operator that enables you to deploy and manage AI models on Kubernetes. It provides a simple and scalable way to deploy vLLM in production. Functionality such as scale-from-zero, load based autoscaling, model caching, and much more is provided out of the box with zero external dependencies.
 

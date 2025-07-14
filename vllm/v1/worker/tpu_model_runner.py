@@ -3,7 +3,7 @@
 import bisect
 import gc
 import time
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -18,7 +18,8 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import ParallelConfig, VllmConfig, get_layers_from_vllm_config
+from vllm.config import (ParallelConfig, VllmConfig,
+                         get_layers_from_vllm_config, update_config)
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -41,11 +42,10 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsLists,
                              LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
-from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.tpu_input_batch import CachedRequestState, InputBatch
 
-from .utils import (initialize_kv_cache_for_kv_sharing,
+from .utils import (bind_kv_cache, initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs)
 
 if TYPE_CHECKING:
@@ -418,21 +418,24 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             req_ids_to_add.append(req_id)
 
         # Update the states of the running/resumed requests.
-        for req_data in scheduler_output.scheduled_cached_reqs:
-            req_id = req_data.req_id
+        req_data = scheduler_output.scheduled_cached_reqs
+        for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
+            num_computed_tokens = req_data.num_computed_tokens[i]
+            new_block_ids = req_data.new_block_ids[i]
+            resumed_from_preemption = req_data.resumed_from_preemption[i]
 
             # Update the cached states.
-            req_state.num_computed_tokens = req_data.num_computed_tokens
-            if not req_data.resumed_from_preemption:
+            req_state.num_computed_tokens = num_computed_tokens
+            if not resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
-                for block_ids, new_block_ids in zip(req_state.block_ids,
-                                                    req_data.new_block_ids):
-                    block_ids.extend(new_block_ids)
+                for block_ids, new_ids in zip(req_state.block_ids,
+                                              new_block_ids):
+                    block_ids.extend(new_ids)
             else:
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
-                req_state.block_ids = req_data.new_block_ids
+                req_state.block_ids = new_block_ids
 
             req_index = self.input_batch.req_id_to_index.get(req_id)
             if req_index is None:
@@ -444,9 +447,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
-                req_data.num_computed_tokens)
-            self.input_batch.block_table.append_row(req_data.new_block_ids,
-                                                    req_index)
+                num_computed_tokens)
+            self.input_batch.block_table.append_row(new_block_ids, req_index)
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
@@ -711,8 +713,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 self.device)
         block_tables = block_tables.to(self.device)
 
+        # Calculate the slot mapping
         slot_mapping_metadata = self._get_slot_mapping_metadata(
             num_reqs, num_scheduled_tokens_per_req)
+        num_kv_update_slices = slot_mapping_metadata.shape[0]
         padded_num_slices = _get_padded_num_kv_cache_update_slices(
             padded_total_num_scheduled_tokens, self.max_num_reqs,
             self.block_size)
@@ -743,6 +747,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             num_seqs=torch.tensor([num_reqs],
                                   dtype=torch.int32,
                                   device=self.device),
+            num_kv_update_slices=torch.tensor([num_kv_update_slices],
+                                              dtype=torch.int32,
+                                              device=self.device),
             num_slices_per_kv_cache_update_block=
             NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK,
         )
@@ -1104,6 +1111,18 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         return model_runner_output
 
+    def update_config(self, overrides: dict[str, Any]) -> None:
+        # TODO: TPU config may need extra validation
+        # https://github.com/vllm-project/vllm/pull/20095#discussion_r2201497754
+        allowed_config_names = {"load_config", "model_config"}
+        for config_name, config_overrides in overrides.items():
+            assert config_name in allowed_config_names, \
+                f"Config `{config_name}` not supported. " \
+                f"Allowed configs: {allowed_config_names}"
+            config = getattr(self, config_name)
+            new_config = update_config(config, config_overrides)
+            setattr(self, config_name, new_config)
+
     def load_model(self) -> None:
         self.device = self.device_config.device
 
@@ -1121,26 +1140,33 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 "vllm.model_executor.layers.vocab_parallel_embedding."
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
-            if self.use_spmd:
-                tpu_loader = TPUModelLoader(
-                    load_config=self.vllm_config.load_config)
-                model = tpu_loader.load_model(
-                    vllm_config=self.vllm_config,
-                    model_config=self.vllm_config.model_config,
-                    mesh=self.mesh)
-            else:
-                # model = get_model(vllm_config=self.vllm_config)
-                model_loader = get_model_loader(self.load_config)
-                if not hasattr(self, "model"):
-                    logger.info("Loading model from scratch...")
-                    model = model_loader.load_model(
+            try:
+                if self.use_spmd:
+                    tpu_loader = TPUModelLoader(
+                        load_config=self.vllm_config.load_config)
+                    model = tpu_loader.load_model(
                         vllm_config=self.vllm_config,
-                        model_config=self.model_config)
+                        model_config=self.vllm_config.model_config,
+                        mesh=self.mesh)
                 else:
-                    logger.info("Model was already initialized. \
-                            Loading weights inplace...")
-                    model_loader.load_weights(self.model,
-                                              model_config=self.model_config)
+                    model_loader = get_model_loader(self.load_config)
+                    if not hasattr(self, "model"):
+                        logger.info("Loading model from scratch...")
+                        model = model_loader.load_model(
+                            vllm_config=self.vllm_config,
+                            model_config=self.model_config)
+                    else:
+                        logger.info("Model was already initialized. \
+                                Loading weights inplace...")
+                        model_loader.load_weights(
+                            self.model, model_config=self.model_config)
+            except RuntimeError as e:
+                raise RuntimeError(
+                    f"Unable to load model, a likely reason is the model is "
+                    "too large for the current device's HBM memory. "
+                    "Consider switching to a smaller model "
+                    "or sharding the weights on more chips. "
+                    f"See the detailed error: {e}") from e
         if self.lora_config is not None:
             model = self.load_lora_model(model, self.model_config,
                                          self.scheduler_config,
@@ -1172,6 +1198,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                    dtype=torch.int32).to(self.device)
         padded_num_slices = _get_padded_num_kv_cache_update_slices(
             num_tokens, self.max_num_reqs, self.block_size)
+        num_kv_update_slices = torch.tensor([padded_num_slices],
+                                            dtype=torch.int32).to(self.device)
         slot_mapping = torch.zeros((3, padded_num_slices),
                                    dtype=torch.int32).to(self.device)
         block_tables = torch.zeros((num_reqs, num_blocks),
@@ -1191,6 +1219,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             context_lens=context_lens,
             query_start_loc=query_start_loc,
             num_seqs=num_seqs,
+            num_kv_update_slices=num_kv_update_slices,
             num_slices_per_kv_cache_update_block=
             NUM_SLICES_PER_KV_CACHE_UPDATE_BLOCK,
         )

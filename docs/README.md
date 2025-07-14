@@ -1,7 +1,8 @@
 # Welcome to vLLM
 
 <figure markdown="span">
-  ![](./assets/logos/vllm-logo-text-light.png){ align="center" alt="vLLM" class="no-scaled-link" width="60%" }
+  ![](./assets/logos/vllm-logo-text-light.png){ align="center" alt="vLLM Light" class="logo-light" width="60%" }
+  ![](./assets/logos/vllm-logo-text-dark.png){ align="center" alt="vLLM Dark" class="logo-dark" width="60%" }
 </figure>
 
 <p style="text-align:center">
@@ -35,7 +36,7 @@ vLLM is flexible and easy to use with:
 
 - Seamless integration with popular HuggingFace models
 - High-throughput serving with various decoding algorithms, including *parallel sampling*, *beam search*, and more
-- Tensor parallelism and pipeline parallelism support for distributed inference
+- Tensor, pipeline, data and expert parallelism support for distributed inference
 - Streaming outputs
 - OpenAI-compatible API server
 - Support NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs, Gaudi® accelerators and GPUs, IBM Power CPUs, TPU, and AWS Trainium and Inferentia Accelerators.
@@ -47,4 +48,4 @@ For more information, check out the following:
 - [vLLM announcing blog post](https://vllm.ai) (intro to PagedAttention)
 - [vLLM paper](https://arxiv.org/abs/2309.06180) (SOSP 2023)
 - [How continuous batching enables 23x throughput in LLM inference while reducing p50 latency](https://www.anyscale.com/blog/continuous-batching-llm-inference) by Cade Daniel et al.
-- [vLLM Meetups][meetups]
+- [vLLM Meetups](community/meetups.md)
