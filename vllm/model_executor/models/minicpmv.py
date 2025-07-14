@@ -45,6 +45,7 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
+from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -341,7 +342,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         mm_limits = {"image": None}
-        if self.get_model_version() == (2, 6):
+        if self.get_model_version() == (2, 6) or self.get_model_version() == (4, 0):
             mm_limits["video"] = None
 
         return mm_limits
@@ -622,7 +623,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         out_keys: set[str],
     ) -> dict[str, NestedTensors]:
         # This processor supports zipping prompt and mm_data together
-        if self.info.get_model_version() == (2, 6):
+        if self.info.get_model_version() == (2, 6) or self.info.get_model_version() == (4, 0):
             inputs = super()._call_hf_processor(
                 prompt=prompts,  # type: ignore
                 mm_data=mm_data,
@@ -681,10 +682,19 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
-        placeholder = {
-            "image": self.info.image_pattern,
-            "video": self.info.video_pattern,
-        }
+        placeholders = [
+            ("image", self.info.image_pattern),
+            ("video", self.info.video_pattern)
+        ]
+
+        # hard code for inconsistency of encode-decode image_pattern
+        additional_placeholders = []
+        tokenizer = self.info.get_tokenizer()
+        for modality, pattern in placeholders:
+            sub_pattern = tokenizer.decode(tokenizer.encode(pattern, add_special_tokens=False))
+            if sub_pattern != pattern:
+                additional_placeholders.append((modality, sub_pattern))
+        placeholders += additional_placeholders
 
         def get_image_replacement(item_idx: int):
             images = mm_items.get_items(
@@ -716,9 +726,9 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         return [
             PromptReplacement(modality=modality,
-                              target=placeholder[modality],
+                              target=pattern,
                               replacement=get_replacement[modality])
-            for modality in ("image", "video")
+            for modality, pattern in placeholders
         ]
 
     def _get_mm_fields_config(
@@ -1189,7 +1199,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        assert self.version == (2, 6)
+        assert self.version == (2, 6) or self.version == (4, 0)
 
     def init_llm(
         self,
@@ -1264,11 +1274,52 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
 
         return self.resampler(vision_embedding, tgt_sizes)
 
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=["apm.", "audio", "tts"]
+        )
+        return loader.load_weights(weights)
+
+class MiniCPMV4_0(MiniCPMV2_6):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+    def init_llm(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> nn.Module:
+        if self.version == (4, 0):
+            return LlamaForCausalLM(vllm_config=vllm_config, prefix=prefix)
+        else:
+            raise ValueError(f"Unsupported version: {self.version}")
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=["apm.", "audio", "tts"]
+        )
+        return loader.load_weights(weights)
 
 _SUPPORT_VERSION = {
     (2, 0): MiniCPMV2_0,
     (2, 5): MiniCPMV2_5,
     (2, 6): MiniCPMV2_6,
+    (4, 0): MiniCPMV4_0,
 }
 
 
@@ -1297,7 +1348,7 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsMultiModal, SupportsLoRA):
         instance_cls = _SUPPORT_VERSION.get(version)
         if instance_cls is None:
             raise ValueError(
-                "Currently, MiniCPMV only supports versions 2.0, 2.5, and 2.6")
+                f"Currently, MiniCPMV only supports versions 2.0, 2.5, 2.6, and 4.0. Got version: {version}")
 
         # quant_config references base class members,
         # so update values before init is called
