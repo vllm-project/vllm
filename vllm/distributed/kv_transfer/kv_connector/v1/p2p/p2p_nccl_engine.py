@@ -541,7 +541,6 @@ class P2pNcclEngine:
 
     @staticmethod
     def extract_kv_from_layer(
-            self,
             is_mla: bool,
             layer: torch.Tensor,
             slot_mapping: torch.Tensor,
