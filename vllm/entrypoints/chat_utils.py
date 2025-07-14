@@ -545,6 +545,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<|fim_prefix|><|img|><|fim_suffix|>"
             if model_type == "gemma3":
                 return "<start_of_image>"
+            if model_type == "gemma3n":
+                return "<image_soft_token>"
             if model_type == "kimi_vl":
                 return "<|media_start|>image<|media_content|><|media_pad|><|media_end|>" # noqa: E501
 
@@ -559,6 +561,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                         f"<|audio_bos|><|AUDIO|><|audio_eos|>")
             if model_type == "minicpmo":
                 return "(<audio>./</audio>)"
+            if model_type == "gemma3n":
+                return "<audio_soft_token>"
             raise TypeError(f"Unknown model type: {model_type}")
         elif modality == "video":
             if model_type == "internvl_chat":
