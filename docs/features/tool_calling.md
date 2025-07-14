@@ -15,7 +15,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 Next, make a request to the model that should result in it using the available tools:
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI
@@ -53,7 +53,7 @@ Next, make a request to the model that should result in it using the available t
     tool_call = response.choices[0].message.tool_calls[0].function
     print(f"Function called: {tool_call.name}")
     print(f"Arguments: {tool_call.arguments}")
-    print(f"Result: {get_weather(**json.loads(tool_call.arguments))}")
+    print(f"Result: {tool_functions[tool_call.name](**json.loads(tool_call.arguments))}")
     ```
 
 Example output:
@@ -264,6 +264,15 @@ For Qwen2.5, the chat template in tokenizer_config.json has already included sup
 
 Flags: `--tool-call-parser hermes`
 
+### MiniMax Models (`minimax_m1`)
+
+Supported models:
+
+* `MiniMaxAi/MiniMax-M1-40k` (use with <gh-file:examples/tool_chat_template_minimax_m1.jinja>)
+* `MiniMaxAi/MiniMax-M1-80k` (use with <gh-file:examples/tool_chat_template_minimax_m1.jinja>)
+
+Flags: `--tool-call-parser minimax --chat-template examples/tool_chat_template_minimax_m1.jinja`
+
 ### DeepSeek-V3 Models (`deepseek_v3`)
 
 Supported models:
@@ -272,6 +281,14 @@ Supported models:
 * `deepseek-ai/DeepSeek-R1-0528` (use with <gh-file:examples/tool_chat_template_deepseekr1.jinja>)
 
 Flags: `--tool-call-parser deepseek_v3 --chat-template {see_above}`
+
+### Kimi-K2 Models (`kimi_k2`)
+
+Supported models:
+
+* `moonshotai/Kimi-K2-Instruct`
+
+Flags: `--tool-call-parser kimi_k2`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 
@@ -290,20 +307,17 @@ Limitations:
 
 Example supported models:
 
-* `meta-llama/Llama-3.2-1B-Instruct`\* (use with <gh-file:examples/tool_chat_template_llama3.2_pythonic.jinja>)
-* `meta-llama/Llama-3.2-3B-Instruct`\* (use with <gh-file:examples/tool_chat_template_llama3.2_pythonic.jinja>)
+* `meta-llama/Llama-3.2-1B-Instruct` ⚠️ (use with <gh-file:examples/tool_chat_template_llama3.2_pythonic.jinja>)
+* `meta-llama/Llama-3.2-3B-Instruct` ⚠️ (use with <gh-file:examples/tool_chat_template_llama3.2_pythonic.jinja>)
 * `Team-ACE/ToolACE-8B` (use with <gh-file:examples/tool_chat_template_toolace.jinja>)
 * `fixie-ai/ultravox-v0_4-ToolACE-8B` (use with <gh-file:examples/tool_chat_template_toolace.jinja>)
-* `meta-llama/Llama-4-Scout-17B-16E-Instruct`\* (use with <gh-file:examples/tool_chat_template_llama4_pythonic.jinja>)
-* `meta-llama/Llama-4-Maverick-17B-128E-Instruct`\* (use with <gh-file:examples/tool_chat_template_llama4_pythonic.jinja>)
+* `meta-llama/Llama-4-Scout-17B-16E-Instruct` ⚠️ (use with <gh-file:examples/tool_chat_template_llama4_pythonic.jinja>)
+* `meta-llama/Llama-4-Maverick-17B-128E-Instruct` ⚠️ (use with <gh-file:examples/tool_chat_template_llama4_pythonic.jinja>)
 
 Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 
----
-**WARNING**
-Llama's smaller models frequently fail to emit tool calls in the correct format. Your mileage may vary.
-
----
+!!! warning
+    Llama's smaller models frequently fail to emit tool calls in the correct format. Your mileage may vary.
 
 ## How to write a tool parser plugin
 
@@ -311,7 +325,7 @@ A tool parser plugin is a Python file containing one or more ToolParser implemen
 
 Here is a summary of a plugin file:
 
-??? Code
+??? code
 
     ```python
 
