@@ -99,6 +99,7 @@ def replace_submodule(model: nn.Module, module_name: str,
 
 
 def is_moe_model(model: nn.Module) -> bool:
+    """Checks if the model contains FusedMoE layers and warns the user."""
     if any(isinstance(module, FusedMoE) for module in model.modules()):
         logger.warning_once(
             "For MoE models, vLLM currently does not support fused MoE LoRA "
