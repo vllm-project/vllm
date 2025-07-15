@@ -7,17 +7,6 @@ to avoid certain eager import breakage.'''
 from __future__ import annotations
 
 import importlib.metadata
-import signal
-import sys
-
-
-def register_signal_handlers():
-
-    def signal_handler(sig, frame):
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTSTP, signal_handler)
 
 
 def main():
