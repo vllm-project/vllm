@@ -37,7 +37,7 @@ information, see [Storage options for Cloud TPU data](https://cloud.devsite.corp
 
 - Google Cloud TPU VM
 - TPU versions: v6e, v5e, v5p, v4
-- Python: 3.10 or newer
+- Python: 3.11 or newer
 
 ### Provision Cloud TPUs
 
@@ -117,7 +117,7 @@ source ~/.bashrc
 Create and activate a Conda environment for vLLM:
 
 ```bash
-conda create -n vllm python=3.10 -y
+conda create -n vllm python=3.12 -y
 conda activate vllm
 ```
 
