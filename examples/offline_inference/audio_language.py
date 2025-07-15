@@ -54,7 +54,7 @@ def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
     from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 
-    model_name = "mistralai/voxtral-mini"
+    model_name = "mistralai/Voxtral-Mini-3B-2507"
     tokenizer = MistralTokenizer.from_hf_hub(model_name)
 
     engine_args = EngineArgs(
