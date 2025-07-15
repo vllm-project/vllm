@@ -236,6 +236,34 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     register all arguments instead of manually enumerating them here. This
     avoids code duplication and keeps the argument definitions in one place.
     """
+    parser.add_argument("model_tag",
+                        type=str,
+                        nargs="?",
+                        help="The model tag to serve "
+                        "(optional if specified in config)")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        default=False,
+        help="Run in headless mode. See multi-node data parallel "
+        "documentation for more details.")
+    parser.add_argument(
+        "--data-parallel-start-rank",
+        "-dpr",
+        type=int,
+        default=0,
+        help="Starting data parallel rank for secondary nodes. "
+        "Requires --headless.")
+    parser.add_argument("--api-server-count",
+                        "-asc",
+                        type=int,
+                        default=1,
+                        help="How many API server processes to run.")
+    parser.add_argument(
+        "--config",
+        help="Read CLI options from a config file. "
+        "Must be a YAML with the following options: "
+        "https://docs.vllm.ai/en/latest/configuration/serve_args.html")
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
 
