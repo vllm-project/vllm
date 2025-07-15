@@ -154,7 +154,8 @@ async def test_streaming_response(winning_call):
                 file=winning_call,
                 language="en",
                 temperature=0.0,
-                extra_body=dict(stream=True))
+                extra_body=dict(stream=True),
+                timeout=30)
             # Reconstruct from chunks and validate
             async for chunk in res:
                 # just a chunk
@@ -184,7 +185,8 @@ async def test_stream_options(winning_call):
                 temperature=0.0,
                 extra_body=dict(stream=True,
                                 stream_include_usage=True,
-                                stream_continuous_usage_stats=True))
+                                stream_continuous_usage_stats=True),
+                timeout=30)
             final = False
             continuous = True
             async for chunk in res:
