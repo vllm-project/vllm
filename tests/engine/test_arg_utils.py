@@ -25,18 +25,10 @@ from vllm.utils import FlexibleArgumentParser
         "foo": 1,
         "bar": 2
     }),
-    (json.loads, "foo=1,bar=2", {
-        "foo": 1,
-        "bar": 2
-    }),
 ])
 def test_parse_type(type, value, expected):
     parse_type_func = parse_type(type)
-    context = nullcontext()
-    if value == "foo=1,bar=2":
-        context = pytest.warns(DeprecationWarning)
-    with context:
-        assert parse_type_func(value) == expected
+    assert parse_type_func(value) == expected
 
 
 def test_optional_type():
