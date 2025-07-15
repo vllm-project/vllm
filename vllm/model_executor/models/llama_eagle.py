@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -23,20 +24,23 @@ from .utils import AutoWeightsLoader, maybe_prefix
 
 logger = init_logger(__name__)
 
-# Weight name mapping for speculators format compatibility
+# Map speculators weight names to vLLM names
 SPECULATORS_WEIGHT_MAP = {
     "fusion_fc.weight": "fc.weight",
     "fusion_fc.bias": "fc.bias",
-    "embedding_layernorm.weight": "embedding_layernorm.weight",
     "pre_lm_head_layernorm.weight": "hidden_states_layernorm.weight",
 }
 
 
-def remap_speculators_weight_name(name: str) -> str | None:
-    """Remap speculators format weight names to vLLM names."""
+def remap_speculators_weight_name(name: str) -> Optional[str]:
+    """Remap speculators format weight names to vLLM names.
+    
+    Returns None for transformer weights that should be skipped.
+    """
     if name in SPECULATORS_WEIGHT_MAP:
         return SPECULATORS_WEIGHT_MAP[name]
     elif name.startswith("transformer."):
+        # Skip transformer weights - they're handled separately
         return None
     return name
 
@@ -60,18 +64,6 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
 
 @support_torch_compile
 class LlamaModel(nn.Module):
-    """
-    Eagle draft model based on Llama architecture with projection layer.
-    
-    This model extends the standard Llama architecture for Eagle speculative decoding
-    by adding a projection layer that combines input embeddings with hidden states
-    from the target model. It also supports HASS (Hierarchical Aggregation for
-    Sequence Sketching) variants that include additional layernorm layers.
-    
-    The projection layer takes concatenated input embeddings and hidden states
-    (2 * hidden_size) and projects them back to hidden_size for processing
-    through the transformer layers.
-    """
 
     def __init__(
         self,
@@ -81,7 +73,8 @@ class LlamaModel(nn.Module):
         start_layer_id: int = 0,
     ) -> None:
         super().__init__()
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        self.config = vllm_config. \
+            speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
@@ -97,22 +90,17 @@ class LlamaModel(nn.Module):
                 prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
             ) for i in range(self.config.num_hidden_layers)
         ])
-        
-        # Projection layer: combines input embeddings with target hidden states
         self.fc = torch.nn.Linear(self.config.hidden_size * 2,
                                   self.config.hidden_size,
                                   bias=False)
         
-        # Support for additional layernorms (HASS variant)
-        # HASS adds layernorms to input embeddings and hidden states for better
-        # representation alignment between draft and target models
-        self.has_embedding_layernorms = False
-        if hasattr(self.config, "add_para_norm") and self.config.add_para_norm:
+        # HASS variant support
+        self.has_embedding_layernorms = getattr(self.config, "add_para_norm", False)
+        if self.has_embedding_layernorms:
             self.embedding_layernorm = RMSNorm(self.config.hidden_size, 
-                                             eps=self.config.rms_norm_eps)
+                                               eps=self.config.rms_norm_eps)
             self.hidden_states_layernorm = RMSNorm(self.config.hidden_size,
-                                                 eps=self.config.rms_norm_eps)
-            self.has_embedding_layernorms = True
+                                                   eps=self.config.rms_norm_eps)
 
     def forward(
         self,
@@ -120,32 +108,15 @@ class LlamaModel(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass through the Eagle draft model.
-        
-        Args:
-            input_ids: Input token IDs for the draft model
-            positions: Position indices for the tokens
-            hidden_states: Hidden states from the target model at the same positions
-        
-        Returns:
-            Tuple of (output_hidden_states, output_hidden_states) for compatibility
-        """
         input_embeds = self.embed_tokens(input_ids)
         
-        # Apply layernorms if enabled (HASS variant)
-        # HASS normalizes both input embeddings and target hidden states
-        # before combining them to improve alignment
+        # Apply HASS normalization if enabled
         if self.has_embedding_layernorms:
             input_embeds = self.embedding_layernorm(input_embeds)
             hidden_states = self.hidden_states_layernorm(hidden_states)
         
-        # Project concatenated embeddings and hidden states
-        # This combines information from both the input tokens and target model
         hidden_states = self.fc(
             torch.cat((input_embeds, hidden_states), dim=-1))
-        
-        # Process through transformer layers
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(
@@ -158,19 +129,6 @@ class LlamaModel(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        """
-        Load model weights with support for speculators format.
-        
-        This method handles weight name mapping between speculators format
-        and vLLM's expected naming convention, ensuring compatibility
-        with both standard Eagle models and speculators-packaged models.
-        
-        Args:
-            weights: Iterable of (weight_name, weight_tensor) pairs
-        
-        Returns:
-            Set of parameter names that were successfully loaded
-        """
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -181,14 +139,12 @@ class LlamaModel(nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        
         for name, loaded_weight in weights:
             remapped_name = remap_speculators_weight_name(name)
             if remapped_name is None:
                 continue
             name = remapped_name
             
-            # Handle stacked parameters (attention and MLP projections)
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -198,8 +154,8 @@ class LlamaModel(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # Skip embedding weights if pipeline parallelism is disabled
-                # In this case, draft model shares embeddings with target model
+
+                # if PP disabled then draft will share embed with target
                 if get_pp_group().world_size == 1 and \
                     "embed_tokens." in name:
                     continue
@@ -217,32 +173,11 @@ class LlamaModel(nn.Module):
 
 
 class EagleLlamaForCausalLM(LlamaForCausalLM):
-    """
-    Eagle draft model for causal language modeling.
-    
-    This class implements the Eagle draft model architecture for speculative
-    decoding with Llama-based models. It consists of:
-    1. A subset of transformer layers (starting after the target model layers)
-    2. A projection layer that combines input embeddings with target hidden states
-    3. Optional layernorms for HASS variant
-    4. Logits processing for token generation
-    
-    The model generates draft tokens by processing the combination of input
-    embeddings and hidden states from the target model, enabling faster
-    speculative decoding.
-    """
-    
-    # Weight name mapping for speculators format compatibility
-    SPECULATORS_WEIGHT_MAP = {
-        "fusion_fc.weight": "projection_layer.weight",
-        "fusion_fc.bias": "projection_layer.bias",
-        "embedding_layernorm.weight": "embedding_layernorm.weight",
-        "pre_lm_head_layernorm.weight": "hidden_states_layernorm.weight",
-    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        self.config = vllm_config. \
+            speculative_config.draft_model_config.hf_config
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config)
         self.model = LlamaModel(vllm_config=vllm_config,
@@ -259,29 +194,9 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass through the Eagle draft model.
-        
-        Args:
-            input_ids: Input token IDs for the draft model
-            positions: Position indices for the tokens  
-            hidden_states: Hidden states from the target model
-        
-        Returns:
-            Tuple of (output_hidden_states, output_hidden_states) for compatibility
-        """
         return self.model(input_ids, positions, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        """
-        Load model weights with support for speculators format.
-        
-        This method handles weight name mapping between speculators format
-        and vLLM's expected naming convention.
-        
-        Args:
-            weights: Iterable of (weight_name, weight_tensor) pairs
-        """
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=None,
@@ -293,8 +208,7 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
             if remapped_name is None:
                 continue
             name = remapped_name
-                
-            # Add model prefix for non-lm_head weights
+            
             if "lm_head" not in name:
                 name = "model." + name
             model_weights[name] = loaded_weight
