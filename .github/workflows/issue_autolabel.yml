@@ -84,12 +84,12 @@ jobs:
               
               const keywordPattern = escapedKeywords.join('|');
               
-              if (escapedExclusions.length > 0) {
-                const exclusionPattern = escapedExclusions.join('|');
-                return new RegExp(`\\b(?!.*(?:${exclusionPattern}))(${keywordPattern})\\b`, 'i');
+              if (escapedExclusions.length === 0) {
+                return new RegExp(`\\b(${keywordPattern})\\b`, 'i');
               }
-              
-              return new RegExp(`\\b(${keywordPattern})\\b`, 'i');
+
+              const exclusionPattern = escapedExclusions.join('|');
+              return new RegExp(`\\b(?!.*(?:${exclusionPattern}))(${keywordPattern})\\b`, 'i');
             }
 
             // Helper function to check if label should be added
@@ -112,14 +112,12 @@ jobs:
                   });
                   core.notice(`Label "${labelName}" added.`);
                   return true;
-                } else {
-                  core.notice(`Label "${labelName}" already present.`);
-                  return false;
                 }
-              } else {
-                core.notice(`No keywords found for label "${labelName}".`);
+                core.notice(`Label "${labelName}" already present.`);
                 return false;
               }
+              core.notice(`No keywords found for label "${labelName}".`);
+              return false;
             }
 
             // Process all configured labels
