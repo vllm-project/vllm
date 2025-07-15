@@ -18,7 +18,7 @@ from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, List,
 import regex as re
 import torch
 from pydantic import TypeAdapter, ValidationError
-from typing_extensions import TypeIs, deprecated
+from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
@@ -65,9 +65,6 @@ def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
 
     def _parse_type(val: str) -> T:
         try:
-            if return_type is json.loads and not re.match(
-                    r"(?s)^\s*{.*}\s*$", val):
-                return cast(T, nullable_kvs(val))
             return return_type(val)
         except ValueError as e:
             raise argparse.ArgumentTypeError(
@@ -91,42 +88,6 @@ def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
     if not re.match(r"(?s)^\s*{.*}\s*$", val):
         return str(val)
     return optional_type(json.loads)(val)
-
-
-@deprecated(
-    "Passing a JSON argument as a string containing comma separated key=value "
-    "pairs is deprecated. This will be removed in v0.10.0. Please use a JSON "
-    "string instead.")
-def nullable_kvs(val: str) -> dict[str, int]:
-    """Parses a string containing comma separate key [str] to value [int]
-    pairs into a dictionary.
-
-    Args:
-        val: String value to be parsed.
-
-    Returns:
-        Dictionary with parsed values.
-    """
-    out_dict: dict[str, int] = {}
-    for item in val.split(","):
-        kv_parts = [part.lower().strip() for part in item.split("=")]
-        if len(kv_parts) != 2:
-            raise argparse.ArgumentTypeError(
-                "Each item should be in the form KEY=VALUE")
-        key, value = kv_parts
-
-        try:
-            parsed_value = int(value)
-        except ValueError as exc:
-            msg = f"Failed to parse value of item {key}={value}"
-            raise argparse.ArgumentTypeError(msg) from exc
-
-        if key in out_dict and out_dict[key] != parsed_value:
-            raise argparse.ArgumentTypeError(
-                f"Conflicting values specified for key: {key}")
-        out_dict[key] = parsed_value
-
-    return out_dict
 
 
 def is_type(type_hint: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
