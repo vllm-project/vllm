@@ -551,7 +551,7 @@ class ModelConfig:
         # For pooling models, self.task is used to indicate the
         # user-selected task
         if self.task == "score":
-            if self.registry.is_cross_encoder_model(self.architectures):
+            if self._is_classify_task(self.architectures):
                 self.task = "classify"
             else:
                 self.task = "embed"
@@ -772,14 +772,31 @@ class ModelConfig:
                     if getattr(pooler_config, k) is None:
                         setattr(pooler_config, k, v)
 
-            if self.is_matryoshka:
-                if pooler_config.normalize is None:
+            # set default pooler config
+            if pooler_config.pooling_type is None:
+                default_pooling_type = self.model_info.default_pooling_type
+                pooler_config.pooling_type = default_pooling_type
+            if pooler_config.normalize is None:
+                if self.task in ["classify", "reward", "pooling"]:
+                    pooler_config.normalize = False
+                elif self.task == "embed":
                     pooler_config.normalize = True
-                elif not pooler_config.normalize:
-                    raise ValueError(
-                        "`normalize` must be enabled (set to True) "
-                        "for models that are compatible with "
-                        "Matryoshka Representation.")
+                else:
+                    raise ValueError(f"Pooling runner does not "
+                                     f"support {self.task} task.")
+            if pooler_config.softmax is None:
+                if self.task == "classify":
+                    pooler_config.softmax = True
+                elif self.task in ["embed", "reward", "pooling"]:
+                    pooler_config.softmax = False
+                else:
+                    raise ValueError(f"Pooling runner does not "
+                                     f"support {self.task} task.")
+
+            if self.is_matryoshka and not pooler_config.normalize:
+                raise ValueError("`normalize` must be enabled (set to True) "
+                                 "for models that are compatible with "
+                                 "Matryoshka Representation.")
 
             return pooler_config
 
@@ -806,6 +823,12 @@ class ModelConfig:
                 f"one of {get_args(TokenizerMode)}.")
         self.tokenizer_mode = tokenizer_mode
 
+    def _is_classify_task(self, architectures: list[str]):
+        for arch in architectures:
+            if arch.endswith("ForSequenceClassification"):
+                return True
+        return self.registry.is_cross_encoder_model(architectures)
+
     def _get_preferred_pooling_task(
         self,
         architectures: list[str],
@@ -813,14 +836,11 @@ class ModelConfig:
         model_id = self.model
         if get_pooling_config(model_id, self.revision):
             return "embed"
-        if self.registry.is_cross_encoder_model(architectures):
-            return "classify"
         if self.registry.is_transcription_model(architectures):
             return "transcription"
 
         suffix_to_preferred_task: list[tuple[str, _ResolvedTask]] = [
             # Other models follow this pattern
-            ("ForSequenceClassification", "classify"),
             ("EmbeddingModel", "embed"),
             ("RewardModel", "reward"),
         ]
@@ -878,11 +898,14 @@ class ModelConfig:
         self,
         task_option: TaskOption,
     ) -> dict[RunnerType, list[_ResolvedTask]]:
-        return {
-            "generate": self._get_supported_generation_tasks(task_option),
-            "pooling": self._get_supported_pooling_tasks(task_option),
-            "draft": ["draft"]
-        }
+        if self._is_classify_task(self.architectures):
+            return {"generate": [], "pooling": ["classify"], "draft": []}
+        else:
+            return {
+                "generate": self._get_supported_generation_tasks(task_option),
+                "pooling": self._get_supported_pooling_tasks(task_option),
+                "draft": ["draft"]
+            }
 
     def _get_supported_runner_types(
         self,
@@ -925,12 +948,16 @@ class ModelConfig:
                     f"Available tasks for runner={task_runner!r}: "
                     f"{supported_tasks[task_runner]}")
 
+        if "classify" in supported_tasks.get("pooling", []):
+            # When multiple pooling tasks are present, default to
+            # pooling (eg cross-encoder) for non-standard architectures.
+            return "pooling"
+
         suffix_to_preferred_runner: list[tuple[str, RunnerType]] = [
             ("ForCausalLM", "generate"),
             ("ForConditionalGeneration", "generate"),
             ("ChatModel", "generate"),
             ("LMHeadModel", "generate"),
-            ("ForSequenceClassification", "pooling"),
             ("EmbeddingModel", "pooling"),
             ("RewardModel", "pooling"),
         ]
@@ -940,10 +967,6 @@ class ModelConfig:
             if arch.endswith(suffix) and pref_runner in supported_runner_types:
                 return pref_runner
 
-        if "classify" in supported_tasks.get("pooling", []):
-            # When multiple pooling tasks are present, default to
-            # pooling (eg cross-encoder) for non-standard architectures.
-            return "pooling"
         if "generate" in supported_runner_types:
             return "generate"
         if "pooling" in supported_runner_types:
@@ -1525,7 +1548,7 @@ class ModelConfig:
 
     @property
     def is_matryoshka(self) -> bool:
-        return (hasattr(self.hf_config, "matryoshka_dimensions")
+        return (bool(getattr(self.hf_config, "matryoshka_dimensions", []))
                 or getattr(self.hf_config, "is_matryoshka", False))
 
     @property

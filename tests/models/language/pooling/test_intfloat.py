@@ -2,34 +2,34 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
-from ...utils import EmbedModelInfo
+from ...utils import CLSEmbedModelInfo, EmbedModelInfo
 from .embed_utils import correctness_test_embed_models
 from .mteb_utils import mteb_test_embed_models
 
 MODELS = [
     ########## BertModel
-    EmbedModelInfo("intfloat/e5-small",
-                   architecture="BertModel",
-                   enable_test=True),
-    EmbedModelInfo("intfloat/e5-base",
-                   architecture="BertModel",
-                   enable_test=False),
-    EmbedModelInfo("intfloat/e5-large",
-                   architecture="BertModel",
-                   enable_test=False),
-    EmbedModelInfo("intfloat/multilingual-e5-small",
-                   architecture="BertModel",
-                   enable_test=False),
+    CLSEmbedModelInfo("intfloat/e5-small",
+                      architecture="BertModel",
+                      enable_test=True),
+    CLSEmbedModelInfo("intfloat/e5-base",
+                      architecture="BertModel",
+                      enable_test=False),
+    CLSEmbedModelInfo("intfloat/e5-large",
+                      architecture="BertModel",
+                      enable_test=False),
+    CLSEmbedModelInfo("intfloat/multilingual-e5-small",
+                      architecture="BertModel",
+                      enable_test=False),
     ########## XLMRobertaModel
-    EmbedModelInfo("intfloat/multilingual-e5-base",
-                   architecture="XLMRobertaModel",
-                   enable_test=True),
-    EmbedModelInfo("intfloat/multilingual-e5-large",
-                   architecture="XLMRobertaModel",
-                   enable_test=False),
-    EmbedModelInfo("intfloat/multilingual-e5-large-instruct",
-                   architecture="XLMRobertaModel",
-                   enable_test=False),
+    CLSEmbedModelInfo("intfloat/multilingual-e5-base",
+                      architecture="XLMRobertaModel",
+                      enable_test=True),
+    CLSEmbedModelInfo("intfloat/multilingual-e5-large",
+                      architecture="XLMRobertaModel",
+                      enable_test=False),
+    CLSEmbedModelInfo("intfloat/multilingual-e5-large-instruct",
+                      architecture="XLMRobertaModel",
+                      enable_test=False),
 ]
 
 

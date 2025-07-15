@@ -138,7 +138,6 @@ _EMBEDDING_MODELS = {
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
-    "GPT2ForSequenceClassification": ("gpt2", "GPT2ForSequenceClassification"),
     "GritLM": ("gritlm", "GritLM"),
     "GteModel": ("bert_with_rope", "SnowflakeGteNewModel"),
     "GteNewModel": ("bert_with_rope", "GteNewModel"),
@@ -181,10 +180,6 @@ _CROSS_ENCODER_MODELS = {
     "ModernBertForSequenceClassification": ("modernbert",
                                             "ModernBertForSequenceClassification"),
     # [Auto-converted (see adapters.py)]
-    "GemmaForSequenceClassification": ("gemma", "GemmaForSequenceClassification"), # noqa: E501
-    "Qwen2ForSequenceClassification": ("qwen2", "Qwen2ForSequenceClassification"), # noqa: E501
-    "Qwen3ForSequenceClassification": ("qwen3", "Qwen3ForSequenceClassification"), # noqa: E501
-    "LlamaForSequenceClassification": ("llama", "LlamaForSequenceClassification"), # noqa: E501
     "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"), # noqa: E501,
 }
 
@@ -273,11 +268,12 @@ _SUBPROCESS_COMMAND = [
 ]
 
 
-@dataclass(frozen=True)
+@dataclass()
 class _ModelInfo:
     architecture: str
     is_text_generation_model: bool
     is_pooling_model: bool
+    default_pooling_type: str
     supports_cross_encoding: bool
     supports_multimodal: bool
     supports_pp: bool
@@ -295,6 +291,8 @@ class _ModelInfo:
             architecture=model.__name__,
             is_text_generation_model=is_text_generation_model(model),
             is_pooling_model=True,  # Can convert any model into a pooling model
+            default_pooling_type=getattr(model, "default_pooling_type",
+                                         "LAST"),
             supports_cross_encoding=supports_cross_encoding(model),
             supports_multimodal=supports_multimodal(model),
             supports_pp=supports_pp(model),
@@ -459,10 +457,19 @@ class _ModelRegistry:
         return _try_load_model_cls(model_arch, self.models[model_arch])
 
     def _try_inspect_model_cls(self, model_arch: str) -> Optional[_ModelInfo]:
-        if model_arch not in self.models:
-            return None
+        if model_arch in self.models:
+            return _try_inspect_model_cls(model_arch, self.models[model_arch])
 
-        return _try_inspect_model_cls(model_arch, self.models[model_arch])
+        if model_arch.endswith("ForSequenceClassification"):
+            arch = model_arch.replace("ForSequenceClassification",
+                                      "ForCausalLM")
+            if arch not in self.models:
+                return None
+            info = _try_inspect_model_cls(model_arch, self.models[arch])
+            info.supports_cross_encoding = True
+            return info
+
+        return None
 
     def _normalize_archs(
         self,
@@ -476,6 +483,16 @@ class _ModelRegistry:
         # filter out support architectures
         normalized_arch = list(
             filter(lambda model: model in self.models, architectures))
+
+        # try automatic conversion in adapters.py
+        for arch_name in architectures:
+            if not arch_name.endswith("ForSequenceClassification"):
+                continue
+            old_arch = arch_name
+            arch_name = arch_name.replace("ForSequenceClassification",
+                                          "ForCausalLM")
+            if arch_name in self.models:
+                normalized_arch.append(old_arch)
 
         # make sure Transformers backend is put at the last as a fallback
         if len(normalized_arch) != len(architectures):

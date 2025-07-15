@@ -316,6 +316,7 @@ class BertOutput(nn.Module):
 
 class BertModel(nn.Module, SupportsQuant):
     packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
+    default_pooling_type = "CLS"
 
     def __init__(self,
                  *,
@@ -398,6 +399,7 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
         model: An instance of BertModel used for forward operations.
         _pooler: An instance of Pooler used for pooling operations.
     """
+    default_pooling_type = "CLS"
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -461,6 +463,7 @@ class BertForSequenceClassification(nn.Module, SupportsV0Only,
        model: An instance of BertModel used for forward operations.
        _pooler: An instance of Pooler used for pooling operations.
    """
+    default_pooling_type = "CLS"
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

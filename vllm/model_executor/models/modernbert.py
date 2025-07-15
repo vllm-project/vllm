@@ -197,6 +197,7 @@ class ModernBertEncoderLayer(nn.Module):
 
 @support_torch_compile
 class ModernBertModel(nn.Module):
+    default_pooling_type = "CLS"
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"layers.": "encoder_layer.layers."})
 
@@ -279,6 +280,7 @@ class ModernBertPooler(nn.Module):
 
 class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
                                           SupportsCrossEncoding):
+    default_pooling_type = "CLS"
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

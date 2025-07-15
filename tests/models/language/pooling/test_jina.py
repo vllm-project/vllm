@@ -6,26 +6,26 @@ import pytest
 
 from vllm import PoolingParams
 
-from ...utils import EmbedModelInfo, RerankModelInfo
+from ...utils import CLSEmbedModelInfo, CLSRerankModelInfo
 from .embed_utils import (check_embeddings_close,
                           correctness_test_embed_models, matryoshka_fy)
 from .mteb_utils import mteb_test_embed_models, mteb_test_rerank_models
 
 EMBEDDING_MODELS = [
-    EmbedModelInfo("jinaai/jina-embeddings-v3",
-                   architecture="XLMRobertaModel",
-                   is_matryoshka=True)
+    CLSEmbedModelInfo("jinaai/jina-embeddings-v3",
+                      architecture="XLMRobertaModel",
+                      is_matryoshka=True)
 ]
 
 RERANK_MODELS = [
-    RerankModelInfo("jinaai/jina-reranker-v2-base-multilingual",
-                    architecture="XLMRobertaForSequenceClassification")
+    CLSRerankModelInfo("jinaai/jina-reranker-v2-base-multilingual",
+                       architecture="XLMRobertaForSequenceClassification")
 ]
 
 
 @pytest.mark.parametrize("model_info", EMBEDDING_MODELS)
 def test_embed_models_mteb(hf_runner, vllm_runner,
-                           model_info: EmbedModelInfo) -> None:
+                           model_info: CLSEmbedModelInfo) -> None:
 
     def hf_model_callback(model):
         model.encode = partial(model.encode, task="text-matching")
@@ -38,7 +38,7 @@ def test_embed_models_mteb(hf_runner, vllm_runner,
 
 @pytest.mark.parametrize("model_info", EMBEDDING_MODELS)
 def test_embed_models_correctness(hf_runner, vllm_runner,
-                                  model_info: EmbedModelInfo,
+                                  model_info: CLSEmbedModelInfo,
                                   example_prompts) -> None:
 
     def hf_model_callback(model):
@@ -53,7 +53,7 @@ def test_embed_models_correctness(hf_runner, vllm_runner,
 
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
 def test_rerank_models_mteb(hf_runner, vllm_runner,
-                            model_info: RerankModelInfo) -> None:
+                            model_info: CLSRerankModelInfo) -> None:
     mteb_test_rerank_models(hf_runner, vllm_runner, model_info)
 
 
