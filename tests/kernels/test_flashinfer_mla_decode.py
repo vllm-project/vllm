@@ -45,13 +45,12 @@ def ref_mla(
 
     return out
 
-# @pytest.mark.parametrize("dtype", [torch.bfloat16])
-# @pytest.mark.parametrize("mean_seq_len", [128, 1024, 4096])
-# @pytest.mark.parametrize("bs", [1, 2, 4, 16])
-# @pytest.mark.parametrize("block_size", [32, 64])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("bs", [1])
-@pytest.mark.parametrize("block_size", [32])
+@pytest.mark.parametrize("bs", [1, 2, 4, 16])
+@pytest.mark.parametrize("block_size", [32, 64])
+# @pytest.mark.parametrize("dtype", [torch.bfloat16])
+# @pytest.mark.parametrize("bs", [1])
+# @pytest.mark.parametrize("block_size", [32])
 def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int,
                             block_size: int):
     torch.set_default_dtype(dtype)
@@ -64,7 +63,7 @@ def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int,
     qk_nope_head_dim = 128
     qk_rope_head_dim = 64
     qk_head_dim = kv_lora_rank + qk_rope_head_dim
-    scale = qk_head_dim**(-0.5)
+    scale = 1.0
 
     MAX_SEQ_LEN = 1024
 
@@ -97,32 +96,19 @@ def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int,
         block_id += num_blocks_needed
 
     kv_cache = torch.randn(block_tables.numel(), block_size, qk_head_dim)
-    kv_cache_duplicate = torch.stack([kv_cache, kv_cache], dim=1)
     q = torch.randn(bs, num_heads, qk_head_dim)
 
     out_ref = q.new_zeros(bs, num_heads, kv_lora_rank)
-    ref_mla(out_ref, q, kv_cache, scale, block_tables, seq_lens)
+    ref_scale = scale / ((qk_nope_head_dim + qk_rope_head_dim) ** 0.5)
+    ref_mla(out_ref, q, kv_cache, ref_scale, block_tables, seq_lens_tensor)
 
     workspace_buffer = torch.empty(
         FLASHINFER_WORKSPACE_BUFFER_SIZE,
         dtype=torch.uint8,
         device=q.device,
     )
-    # print("Arguments to trtllm_batch_decode_with_kv_cache_mla:")
-    # print("  query:", q.shape, q.dtype, q.device)
-    # print("  kv_cache:", kv_cache_duplicate.shape, kv_cache_duplicate.dtype, kv_cache_duplicate.device)
-    # print("  workspace_buffer:", workspace_buffer.shape, workspace_buffer.dtype, workspace_buffer.device)
-    # print("  qk_nope_head_dim:", qk_nope_head_dim)
-    # print("  kv_lora_rank:", kv_lora_rank)
-    # print("  qk_rope_head_dim:", qk_rope_head_dim)
-    # print("  block_tables:", block_tables.shape, block_tables.dtype, block_tables.device)
-    # print("  seq_lens_tensor:", seq_lens_tensor.shape, seq_lens_tensor.dtype, seq_lens_tensor.device)
-    # print("  block_size:", block_size)
-    # print("  max_seq_len:", max_seq_len)
-    # print("  scale:", scale)
-    # print("  out:", out_ans.shape, out_ans.dtype, out_ans.device)
+    kv_cache_duplicate = torch.stack([kv_cache, kv_cache], dim=1)
 
-    # out_ans = torch.zeros_like(out_ref)
     out_ans = trtllm_batch_decode_with_kv_cache_mla(
         query=q,
         kv_cache=kv_cache_duplicate,
@@ -135,7 +121,6 @@ def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int,
         block_size=block_size,
         max_seq_len=max_seq_len,
         sm_scale=scale,
-        # out=out_ans,
     )
 
     torch.testing.assert_close(out_ans, out_ref, atol=1e-2, rtol=1e-2)
