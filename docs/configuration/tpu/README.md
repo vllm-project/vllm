@@ -3,7 +3,13 @@
 This doc serves as a collection of handy tips for optimizing your vLLM on TPU workload.
 
 ### TPU workload sizing 
-- [link to easy HBM calculator colab]
+- The following calculator will tell you:
+    - KV cache size requirement per token and per request
+    - GPU memory consumed by the model weights
+    - GPU memory allocated for KV cache
+    - Maximum # of requests you can set (--max-num-seqs)
+
+[link to easy HBM calculator colab]
 
 ### Optimize based on your data
 - max model len
