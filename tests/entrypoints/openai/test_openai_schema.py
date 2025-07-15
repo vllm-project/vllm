@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 from typing import Final
 
 import pytest
@@ -29,7 +30,7 @@ def server():
         "--enforce-eager",
         "--trust-remote-code",
         "--limit-mm-per-prompt",
-        f"image={MAXIMUM_IMAGES}",
+        json.dumps({"image": MAXIMUM_IMAGES}),
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
