@@ -339,9 +339,17 @@ class EmbedModelInfo(NamedTuple):
     enable_test: bool = True
 
 
+class CLSEmbedModelInfo(EmbedModelInfo):
+    default_pooling_type: str = "CLS"
+
+
 class RerankModelInfo(NamedTuple):
     name: str
     architecture: str = ""
     dtype: str = "auto"
     default_pooling_type: str = "LAST"
     enable_test: bool = True
+
+
+class CLSRerankModelInfo(RerankModelInfo):
+    default_pooling_type: str = "CLS"
