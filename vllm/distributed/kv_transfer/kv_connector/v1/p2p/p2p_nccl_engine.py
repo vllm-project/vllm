@@ -469,7 +469,7 @@ class P2pNcclEngine:
         return True
 
     def get_finished(
-        self, finished_req_ids: set[str], forward_context: "ForwardContext"
+        self, finished_req_ids: set[str], no_compile_layers
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         """
         Notifies worker-side connector ids of requests that have
@@ -484,7 +484,7 @@ class P2pNcclEngine:
 
         # Clear the buffer upon request completion.
         for request_id in finished_req_ids:
-            for layer_name in forward_context.no_compile_layers:
+            for layer_name in no_compile_layers:
                 tensor_id = request_id + "#" + layer_name
                 if tensor_id in self.recv_store:
                     with self.recv_store_cv:
