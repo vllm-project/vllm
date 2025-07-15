@@ -94,7 +94,7 @@ def get_cross_encoder_activation_function(config: PretrainedConfig):
             "Loading of activation functions is restricted to "
             "torch.nn.modules for security reasons")
         fn = resolve_obj_by_qualname(function_name)()
-        return LambdaPoolerActivation(fn)
+        return PoolerActivation.wraps(fn)
 
     return PoolerScore()
 
@@ -279,6 +279,15 @@ class BasePoolerActivation(nn.Module, ABC):
 
 class PoolerActivation(BasePoolerActivation):
 
+    @staticmethod
+    def wraps(module: nn.Module):
+        if isinstance(module, nn.Identity):
+            return PoolerIdentity()
+        if isinstance(module, (nn.Sigmoid, nn.Softmax)):
+            return PoolerClassify()
+
+        return LambdaPoolerActivation(module)
+
     @abstractmethod
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
@@ -288,6 +297,12 @@ class PoolerActivation(BasePoolerActivation):
             return [self.forward_chunk(data) for data in pooled_data]
 
         return self.forward_chunk(pooled_data)
+
+
+class PoolerIdentity(PoolerActivation):
+
+    def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
+        return pooled_data
 
 
 class PoolerNormalize(PoolerActivation):
@@ -360,7 +375,7 @@ class PoolerHead(nn.Module):
         elif pooler_config.softmax:
             activation = PoolerClassify()
         else:
-            activation = LambdaPoolerActivation(nn.Identity())
+            activation = PoolerIdentity()
 
         return cls(activation)
 
