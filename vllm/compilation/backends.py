@@ -187,9 +187,10 @@ class CompilerManager:
         assert compiled_graph is not None, "Failed to compile the graph"
 
         # store the artifact in the cache
-        if handle is not None:
+        if not envs.VLLM_DISABLE_COMPILE_CACHE and handle is not None:
             self.cache[(runtime_shape, graph_index,
                         self.compiler.name)] = handle
+            compilation_counter.num_cache_entries_updated += 1
             self.is_cache_updated = True
             if graph_index == 0:
                 # adds some info logging for the first graph
