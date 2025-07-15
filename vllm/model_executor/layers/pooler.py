@@ -624,20 +624,14 @@ class ClassifierPooler(nn.Module):
         """Pools sentence pair scores from the hidden_states."""
         pooled_data = self.in_pool(hidden_states, pooling_metadata)
 
-        pooled_data_lst = []
-        for pooled_data_i in pooled_data:
-            if self.pooler is not None:
-                final_shape_tensor = self.pooler(pooled_data_i)
-            else:
-                final_shape_tensor = self.classifier(pooled_data_i)
-
-            pooled_data_lst.append(final_shape_tensor)
-
-        pooled_output = torch.stack(pooled_data_lst)
-
         if self.pooler is not None:
-            # apply classifier once on the full batch if possible
-            pooled_output = self.classifier(pooled_output)
+            pooled_data = [self.pooler(data) for data in pooled_data]
+
+        # apply classifier once on the full batch if possible
+        if len({data.shape for data in pooled_data}) <= 1:
+            pooled_output = self.classifier(torch.stack(pooled_data))
+        else:
+            pooled_output = [self.classifier(data) for data in pooled_data]
 
         if isinstance(pooling_metadata, V0PoolingMetadata):
             use_cross_encoder_list = [
