@@ -8,7 +8,7 @@ import torch
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
-from vllm.utils import GiB_bytes, sha256
+from vllm.utils import GiB_bytes, sha256, sha256_cbor_64bit
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 # disable yapf here as it formats differently than isort such that both fail
 # yapf: disable
@@ -16,7 +16,8 @@ from vllm.v1.core.kv_cache_utils import (
     FreeKVCacheBlockQueue, KVCacheBlock, PrefixCachingMetrics,
     estimate_max_model_len, generate_block_hash_extra_keys,
     get_kv_cache_config, get_max_concurrency_for_kv_cache_config,
-    hash_block_tokens, hash_request_tokens, unify_kv_cache_configs)
+    hash_block_tokens, hash_request_tokens, init_none_hash,
+    unify_kv_cache_configs)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor,
                                         SlidingWindowSpec)
@@ -78,24 +79,27 @@ def new_sliding_window_spec(block_size=16,
                              sliding_window=sliding_window)
 
 
-def test_none_hash(monkeypatch):
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
+def test_none_hash(monkeypatch, hash_fn):
     import vllm.v1.core.kv_cache_utils
 
     # case 1: PYTHONHASHSEED is not set, use random
     with monkeypatch.context() as m:
         m.delenv('PYTHONHASHSEED', raising=False)
         reloaded_kv_cache_utils = importlib.reload(vllm.v1.core.kv_cache_utils)
+        reloaded_kv_cache_utils.init_none_hash(hash_fn)
         assert reloaded_kv_cache_utils.NONE_HASH is not None
         assert isinstance(reloaded_kv_cache_utils.NONE_HASH, int)
         assert reloaded_kv_cache_utils.NONE_HASH != 0
 
-    # case 2: PYTHONHASHSEED is set, use the seed
+    # case 2: PYTHONHASHSEED is set, use the seed and hash_fn
     with monkeypatch.context() as m:
         m.setenv('PYTHONHASHSEED', 'python hash seed')
         reloaded_kv_cache_utils = importlib.reload(vllm.v1.core.kv_cache_utils)
+        reloaded_kv_cache_utils.init_none_hash(hash_fn)
         assert reloaded_kv_cache_utils.NONE_HASH is not None
         assert isinstance(reloaded_kv_cache_utils.NONE_HASH, int)
-        assert sha256('python hash seed') == reloaded_kv_cache_utils.NONE_HASH
+        assert hash_fn('python hash seed') == reloaded_kv_cache_utils.NONE_HASH
 
 
 def test_kv_cache_block():
@@ -287,9 +291,10 @@ def test_generate_block_hash_extra_keys_cache_salt():
     assert next_mm_idx == 1
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, hash])
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
 def test_hash_block_tokens(hash_fn):
     import vllm.v1.core.kv_cache_utils
+    init_none_hash(hash_fn)
     parent_block_hash = 123
     curr_block_token_ids = (1, 2, 3)
     extra_keys = ("key1", "key2")
@@ -303,9 +308,10 @@ def test_hash_block_tokens(hash_fn):
     assert block_hash.extra_keys == extra_keys
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, hash])
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
 def test_hash_request_tokens(hash_fn):
     import vllm.v1.core.kv_cache_utils
+    init_none_hash(hash_fn)
     request = make_request(
         request_id=0,
         prompt_token_ids=[_ for _ in range(6)],
@@ -332,8 +338,10 @@ def test_hash_request_tokens(hash_fn):
     assert block_hashes[1].extra_keys == ("hash2", )
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, hash])
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
 def test_hash_tokens_different_mm_input(hash_fn):
+    init_none_hash(hash_fn)
+
     request1 = make_request(
         request_id=0,
         prompt_token_ids=[_ for _ in range(6)],
@@ -359,8 +367,10 @@ def test_hash_tokens_different_mm_input(hash_fn):
     assert block_hashes1[1] != block_hashes2[1]
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, hash])
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
 def test_hash_request_tokens_no_mm_inputs(hash_fn):
+    init_none_hash(hash_fn)
+
     request = make_request(
         request_id=0,
         prompt_token_ids=[_ for _ in range(6)],

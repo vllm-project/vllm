@@ -5,10 +5,14 @@ from collections.abc import Iterable, MutableSequence
 from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
                     Union, overload, runtime_checkable)
 
+import numpy as np
 import torch
 from torch import Tensor
 from typing_extensions import Self, TypeIs
 
+from vllm.config import ModelConfig, SpeechToTextConfig
+from vllm.inputs import TokensPrompt
+from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -139,6 +143,62 @@ def supports_multimodal(
         return isinstance(model, _SupportsMultiModalType)
 
     return isinstance(model, SupportsMultiModal)
+
+
+@runtime_checkable
+class SupportsScoreTemplate(Protocol):
+    """The interface required for all models that support score template."""
+
+    supports_score_template: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports score template.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+    @classmethod
+    def get_score_template(cls, query: str, document: str) -> Optional[str]:
+        """
+        Generate a full prompt by populating the score template with query and document content.
+        """ # noqa: E501
+        ...
+
+    @classmethod
+    def post_process_tokens(cls, prompt: TokensPrompt) -> None:
+        """
+        Perform architecture-specific manipulations on the input tokens.
+        """
+        ...
+
+
+# We can't use runtime_checkable with ClassVar for issubclass checks
+# so we need to treat the class as an instance and use isinstance instead
+@runtime_checkable
+class _SupportsScoreTemplateType(Protocol):
+    supports_score_template: Literal[True]
+
+
+@overload
+def supports_score_template(
+        model: type[object]) -> TypeIs[type[SupportsScoreTemplate]]:
+    ...
+
+
+@overload
+def supports_score_template(model: object) -> TypeIs[SupportsScoreTemplate]:
+    ...
+
+
+def supports_score_template(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsScoreTemplate]], TypeIs[SupportsScoreTemplate]]:
+
+    if isinstance(model, type):
+        return isinstance(model, _SupportsScoreTemplateType)
+
+    return isinstance(model, SupportsScoreTemplate)
 
 
 @runtime_checkable
@@ -634,16 +694,45 @@ class SupportsTranscription(Protocol):
 
     supports_transcription: ClassVar[Literal[True]] = True
 
+    supports_transcription_only: ClassVar[bool] = False
+    """
+    Transcription models can opt out of text generation by setting this to
+    `True`.
+    """
+
     @classmethod
-    def get_decoder_prompt(cls, language: str, task_type: str,
-                           prompt: str) -> str:
-        """Get the decoder prompt for the ASR model."""
+    def get_generation_prompt(cls, audio: np.ndarray,
+                              stt_config: SpeechToTextConfig, language: str,
+                              task_type: str,
+                              request_prompt: str) -> PromptType:
+        """Get the prompt for the ASR model.
+        The model has control over the construction, as long as it
+        returns a valid PromptType."""
         ...
 
     @classmethod
     def validate_language(cls, language: str) -> bool:
         """Check if the model supports a specific ISO639_1 language."""
         ...
+
+    @classmethod
+    def get_speech_to_text_config(
+            cls, model_config: ModelConfig,
+            task_type: Literal["transcribe",
+                               "translate"]) -> SpeechToTextConfig:
+        """Get the speech to text config for the ASR model."""
+        ...
+
+    @classmethod
+    def get_num_audio_tokens(cls, audio_duration_s: float,
+                             stt_config: SpeechToTextConfig,
+                             model_config: ModelConfig) -> Optional[int]:
+        """
+        Map from audio duration to number of audio tokens produced by the ASR 
+        model, without running a forward pass.
+        This is used for estimating the amount of processing for this audio.
+        """
+        return None
 
 
 @overload

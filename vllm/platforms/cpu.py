@@ -7,7 +7,6 @@ import sys
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Optional
 
-import psutil
 import torch
 
 from vllm.logger import init_logger
@@ -73,7 +72,15 @@ class CpuPlatform(Platform):
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
+        import psutil
         return psutil.virtual_memory().total
+
+    @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.cpu.set_device(device)
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
@@ -89,7 +96,8 @@ class CpuPlatform(Platform):
         from vllm.utils import GiB_bytes
         model_config = vllm_config.model_config
 
-        model_config.disable_cascade_attn = True
+        if model_config is not None:
+            model_config.disable_cascade_attn = True
 
         cache_config = vllm_config.cache_config
 
@@ -116,7 +124,7 @@ class CpuPlatform(Platform):
                 "CPU backend doesn't support fp8_e4m3 KV cache type, "
                 "cast to fp8_e5m2.")
 
-        if (cache_config.cache_dtype != "auto"
+        if (cache_config.cache_dtype != "auto" and model_config is not None
                 and model_config.dtype == torch.half):
             logger.warning("FP8 KV cache on the CPU backend only does not"
                            " support fp16 for now, cast to bf16.")
@@ -222,7 +230,7 @@ class CpuPlatform(Platform):
         os.environ["LOCAL_WORLD_SIZE"] = str(
             vllm_config.parallel_config.tensor_parallel_size)
 
-        if vllm_config.model_config and vllm_config.model_config.use_mla:
+        if model_config is not None and model_config.use_mla:
             logger.info(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled.")
@@ -264,5 +272,6 @@ class CpuPlatform(Platform):
         """Returns whether the current platform can use v1 by default for the
         supplied model configuration.
         """
-        return cls.supports_v1(
-            model_config) and cls.get_cpu_architecture() == CpuArchEnum.X86
+        arch = cls.get_cpu_architecture()
+        return (cls.supports_v1(model_config) and arch
+                in (CpuArchEnum.X86, CpuArchEnum.POWERPC, CpuArchEnum.ARM))
