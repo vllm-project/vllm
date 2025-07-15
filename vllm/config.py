@@ -26,7 +26,7 @@ from pydantic import (ConfigDict, SkipValidation, TypeAdapter, field_validator,
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.distributed import ProcessGroup, ReduceOp
-from typing_extensions import Self, assert_never, deprecated, runtime_checkable
+from typing_extensions import Self, deprecated, runtime_checkable
 
 import vllm.envs as envs
 from vllm import version
@@ -759,8 +759,6 @@ class ModelConfig:
 
     def _init_pooler_config(self) -> Optional["PoolerConfig"]:
         if self.runner_type == "pooling":
-            assert self.task in _RUNNER_TASKS[self.runner_type]
-
             if isinstance(self.override_pooler_config, dict):
                 self.override_pooler_config = PoolerConfig(
                     **self.override_pooler_config)
@@ -784,14 +782,16 @@ class ModelConfig:
                 elif self.task == "embed":
                     pooler_config.normalize = True
                 else:
-                    assert_never(self.task)
+                    raise ValueError(f"Pooling runner does not "
+                                     f"support {self.task} task.")
             if pooler_config.softmax is None:
                 if self.task == "classify":
                     pooler_config.softmax = True
                 elif self.task in ["embed", "reward", "pooling"]:
                     pooler_config.softmax = False
                 else:
-                    assert_never(self.task)
+                    raise ValueError(f"Pooling runner does not "
+                                     f"support {self.task} task.")
 
             if self.is_matryoshka and not pooler_config.normalize:
                 raise ValueError("`normalize` must be enabled (set to True) "
