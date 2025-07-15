@@ -51,7 +51,6 @@ class OpenAIServingResponses(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
-        expand_tools_even_if_tool_choice_none: bool = False,
         tool_parser: Optional[str] = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
