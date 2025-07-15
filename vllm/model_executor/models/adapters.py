@@ -213,7 +213,7 @@ def as_seq_cls_model(cls: _T) -> _T:
 
             self._pooler = ClassifierPooler(
                 vllm_config.model_config,
-                self.score,
+                lambda x: self.score(x)[0],
                 act_fn=head.activation,
             )
 

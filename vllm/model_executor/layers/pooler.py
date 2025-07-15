@@ -578,6 +578,7 @@ class Pooler(nn.Module):
         return SimplePooler.from_config(resolved_config)
 
 
+ClassifierFn = Callable[[torch.Tensor], torch.Tensor]
 PoolerFn = Callable[[torch.Tensor], torch.Tensor]
 
 
@@ -596,7 +597,7 @@ class ClassifierPooler(nn.Module):
     def __init__(
         self,
         config: ModelConfig,
-        classifier: nn.Module,
+        classifier: ClassifierFn,
         pooler: Optional[PoolerFn] = None,
         act_fn: Optional[PoolerActivation] = None,
     ) -> None:
