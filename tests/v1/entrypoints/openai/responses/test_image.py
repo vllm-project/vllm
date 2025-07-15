@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import json
+
 import openai
 import pytest
 import pytest_asyncio
@@ -19,15 +22,12 @@ TEST_IMAGE_URLS = [
 ]
 
 
-@pytest.fixture()
+@pytest.fixture(scope="module")
 def default_image_server_args():
-    return [
-        "--limit-mm-per-prompt",
-        f"image={MAXIMUM_IMAGES}",
-    ]
+    return ["--limit-mm-per-prompt", json.dumps({"image": MAXIMUM_IMAGES})]
 
 
-@pytest.fixture()
+@pytest.fixture(scope="module")
 def image_server(default_image_server_args):
     with RemoteOpenAIServer(MODEL_NAME,
                             default_image_server_args) as remote_server:
