@@ -169,7 +169,8 @@ def as_seq_cls_model(cls: _T) -> _T:
     # Lazy import
     from vllm.model_executor.layers.linear import RowParallelLinear
     from vllm.model_executor.layers.pooler import (ClassifierPooler,
-                                                   PoolerOutput, PoolingType)
+                                                   PoolerHead, PoolerOutput,
+                                                   PoolingType)
     from vllm.model_executor.models.interfaces import SupportsCrossEncoding
     from vllm.model_executor.pooling_metadata import PoolingMetadata
     from vllm.sequence import IntermediateTensors
@@ -213,10 +214,17 @@ def as_seq_cls_model(cls: _T) -> _T:
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
 
+            head = PoolerHead.from_config_with_defaults(
+                pooler_config,
+                pooling_type=PoolingType.LAST,
+                normalize=False,
+                softmax=False,
+            )
+
             return ClassifierPooler(
                 vllm_config.model_config,
                 self.score,
-                act_fn=super()._init_pooler(vllm_config).head.activation,
+                act_fn=head.activation,
             )
 
         def forward(
