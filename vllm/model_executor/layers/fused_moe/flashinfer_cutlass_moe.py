@@ -135,6 +135,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
+        topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,
@@ -148,7 +149,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13: Optional[torch.Tensor],
         workspace2: Optional[torch.Tensor],
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-        topk_weights: torch.Tensor,
+        apply_router_weight_on_input: Optional[bool], # Not used
         g1_alphas: torch.Tensor,
         g2_alphas: torch.Tensor,
         a1_gscale: torch.Tensor,
