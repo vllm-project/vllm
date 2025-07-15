@@ -5,6 +5,10 @@ from typing import Optional
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+    compute_aligned_M)
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    ExpertTokensMetadata)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size)
 from vllm.model_executor.layers.fused_moe.utils import _fp8_perm
@@ -75,6 +79,7 @@ def _moe_unpermute_and_reduce(
 
 
 def moe_permute(
+    permuted_hidden_states: Optional[torch.Tensor],
     hidden_states: torch.Tensor,
     a1q_scale: Optional[torch.Tensor],
     topk_ids: torch.Tensor,
@@ -82,13 +87,16 @@ def moe_permute(
     n_local_expert: int = -1,
     expert_map: Optional[torch.Tensor] = None,
     align_block_size: Optional[int] = None,
-    fill_invalid_expert: int = -1
+    fill_invalid_expert: int = -1,
+    expert_tokens_meta: Optional[ExpertTokensMetadata] = None
 ) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor,
            torch.Tensor]:
     """
     This function expands and permutes activation to gather uncontinuous tokens
       for each expert.
     Parameters:
+    - permuted_hidden_states (Optional[torch.Tensor]): Optional output tensor.
+      If None, the output tensor will be created in this function.
     - hidden_states (torch.Tensor): The input tensor to the MoE layer.
     - a1q_scale (Optional[torch.Tensor]): quant scale for hidden_states
     - topk_ids (torch.Tensor): topk expert route id for each token.
@@ -100,6 +108,8 @@ def moe_permute(
     - align_block_size (Optional[int]): align group gemm block size for deepgemm
     - fill_invalid_expert(int): fill expert id in m_indices for invalid expert
       to workaround DeepGemm unsupported -1 in m_indices
+    - expert_tokens_metadata: Optional information on token-expert routing.
+      This is useful in sizing the output tensor appropriately.
     Returns:
     - permuted_hidden_states (torch.Tensor): permuted activation.
     - a1q_scale (Optional[torch.Tensor]): quant scale for hidden_states
@@ -115,18 +125,25 @@ def moe_permute(
     topk = topk_ids.size(1)
     assert (n_hidden * hidden_states.element_size()
             ) % 16 == 0, "permue kernel need hidden dim align to 16B"
-    permuted_row_size = n_token * topk
-    if align_block_size is not None:
-        permuted_row_size = (permuted_row_size + n_expert *
-                             (align_block_size - 1) + align_block_size -
-                             1) // align_block_size * align_block_size
+
     if n_local_expert == -1:
         n_local_expert = n_expert
-    permuted_hidden_states = torch.empty(
-        (permuted_row_size, n_hidden),
-        dtype=hidden_states.dtype,
-        device=hidden_states.device,
-    )
+
+    permuted_row_size = compute_aligned_M(
+        M=n_token,
+        num_topk=topk,
+        local_num_experts=n_local_expert,
+        alignment=align_block_size,
+        expert_tokens_meta=expert_tokens_meta)
+    if permuted_hidden_states is None:
+        permuted_hidden_states = torch.empty(
+            (permuted_row_size, n_hidden),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+    assert permuted_hidden_states.size() == (permuted_row_size, n_hidden), (
+        f"Expected permuted hidden states to be {(permuted_row_size, n_hidden)}"
+        f" but got {permuted_hidden_states.size()}")
     token_expert_indices = torch.arange(0,
                                         n_token * topk,
                                         dtype=torch.int32,
