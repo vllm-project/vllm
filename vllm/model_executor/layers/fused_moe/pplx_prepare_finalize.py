@@ -83,9 +83,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         return self.max_num_tokens
 
     def topk_indices_dtype(self) -> Optional[torch.dtype]:
-        # FIXME(rui): this needs to be int32,
-        # see https://github.com/vllm-project/vllm/pull/20166
-        return torch.uint32
+        return torch.int32
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_

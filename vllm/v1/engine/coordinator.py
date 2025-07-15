@@ -230,8 +230,6 @@ class CoordinatorProc:
                                 "engines", current_count, new_engine_count)
                         continue  # Skip normal engine notification processing
 
-                    logger.info("Received scale up notification: %s", decoded)
-
                     # We received a message on the front-end XPUB socket,
                     # from an API server sending a new request while the
                     # engines are paused, so that we can wake the other
