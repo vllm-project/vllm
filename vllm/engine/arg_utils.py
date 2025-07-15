@@ -395,6 +395,8 @@ class EngineArgs:
     enable_lora_bias: bool = LoRAConfig.bias_enabled
     max_loras: int = LoRAConfig.max_loras
     max_lora_rank: int = LoRAConfig.max_lora_rank
+    default_mm_loras: Optional[Dict[str, str]] = \
+        LoRAConfig.default_mm_loras
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
     max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
     lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
@@ -481,6 +483,8 @@ class EngineArgs:
 
     enable_multimodal_encoder_data_parallel: bool = \
         ParallelConfig.enable_multimodal_encoder_data_parallel
+
+    async_scheduling: bool = SchedulerConfig.async_scheduling
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -807,6 +811,8 @@ class EngineArgs:
                                 **lora_kwargs["max_cpu_loras"])
         lora_group.add_argument("--fully-sharded-loras",
                                 **lora_kwargs["fully_sharded_loras"])
+        lora_group.add_argument("--default-mm-loras",
+                                **lora_kwargs["default_mm_loras"])
 
         # PromptAdapter related configs
         prompt_adapter_kwargs = get_kwargs(PromptAdapterConfig)
@@ -917,6 +923,8 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
+        scheduler_group.add_argument("--async-scheduling",
+                                     **scheduler_kwargs["async_scheduling"])
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1202,6 +1210,26 @@ class EngineArgs:
             self.data_parallel_rpc_port
             is not None) else ParallelConfig.data_parallel_rpc_port
 
+        if self.async_scheduling:
+            # Async scheduling does not work with the uniprocess backend.
+            if self.distributed_executor_backend is None:
+                self.distributed_executor_backend = "mp"
+                logger.info("Using mp-based distributed executor backend "
+                            "for async scheduling.")
+            if self.distributed_executor_backend == "uni":
+                raise ValueError("Async scheduling is not supported with "
+                                 "uni-process backend.")
+            if self.pipeline_parallel_size > 1:
+                raise ValueError("Async scheduling is not supported with "
+                                 "pipeline-parallel-size > 1.")
+
+            # Currently, async scheduling does not support speculative decoding.
+            # TODO(woosuk): Support it.
+            if self.speculative_config is not None:
+                raise ValueError(
+                    "Currently, speculative decoding is not supported with "
+                    "async scheduling.")
+
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -1282,12 +1310,19 @@ class EngineArgs:
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             disable_hybrid_kv_cache_manager=self.
             disable_hybrid_kv_cache_manager,
+            async_scheduling=self.async_scheduling,
         )
+
+        if not model_config.is_multimodal_model and self.default_mm_loras:
+            raise ValueError(
+                "Default modality-specific LoRA(s) were provided for a "
+                "non multimodal model")
 
         lora_config = LoRAConfig(
             bias_enabled=self.enable_lora_bias,
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
+            default_mm_loras=self.default_mm_loras,
             fully_sharded_loras=self.fully_sharded_loras,
             lora_extra_vocab_size=self.lora_extra_vocab_size,
             long_lora_scaling_factors=self.long_lora_scaling_factors,
@@ -1408,12 +1443,15 @@ class EngineArgs:
                 and not envs.is_set("VLLM_ATTENTION_BACKEND")
             ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
             supported = False
-            if current_platform.is_rocm():
+            if current_platform.is_rocm() or (
+                    current_platform.is_cuda()
+                    and current_platform.is_device_capability(100)):
                 supported = True
             elif fp8_attention and will_use_fa:
                 from vllm.attention.utils.fa_utils import (
                     flash_attn_supports_fp8)
                 supported = flash_attn_supports_fp8()
+
             if not supported:
                 _raise_or_fallback(feature_name="--kv-cache-dtype",
                                    recommend_to_remove=False)

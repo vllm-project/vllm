@@ -8,10 +8,9 @@ from typing import Optional, Union
 
 import numpy as np
 import torch
-import triton
-import triton.language as tl
 
 from vllm.attention.backends.utils import PAD_SLOT_ID
+from vllm.triton_utils import tl, triton
 
 
 @triton.jit()
@@ -93,7 +92,8 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
 
     if IS_CONTINUOUS_BATCHING:
         # cache_idx
-        conv_state_batch_coord = tl.load(conv_state_indices_ptr + idx_seq)
+        conv_state_batch_coord = tl.load(conv_state_indices_ptr + idx_seq).to(
+            tl.int64)
     else:
         # cache_idx
         conv_state_batch_coord = idx_seq
