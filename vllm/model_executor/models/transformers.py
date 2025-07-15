@@ -164,8 +164,8 @@ def init_on_device_without_buffers(device: torch.device):
         yield
     finally:
         nn.Module.register_parameter = old_register_parameter
-        for torch_function_name, old_torch_function in tensor_constructors_to_patch.items(
-        ):
+        for torch_function_name, old_torch_function in (
+                tensor_constructors_to_patch.items()):
             setattr(torch, torch_function_name, old_torch_function)
 
 
@@ -197,7 +197,8 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         return 10_000, 10_000  # hardcode for arbitrary very large size
 
 
-class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder):
+class MultiModalDummyInputsBuilder(
+        BaseDummyInputsBuilder[MultiModalProcessingInfo]):
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
@@ -226,7 +227,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder):
         }
 
 
-class MultiModalProcessor(BaseMultiModalProcessor):
+class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
     def _get_prompt_updates(
         self,
@@ -337,7 +338,8 @@ class MultiModalProcessor(BaseMultiModalProcessor):
         # Below tested on Llava. Prompts and `mm_token_type_ids` are always bs=1
         mm_positions = torch.where(mm_token_type_ids == 1)[1]
         images = mm_items.get_items("image", ImageProcessorItems)
-        mm_processor_kwargs = self.info.ctx.model_config.mm_processor_kwargs or {}
+        mm_processor_kwargs = (self.info.ctx.model_config.mm_processor_kwargs
+                               or {})
         image_sizes = []
         for item_idx in range(len(images)):
             image_size = images.get_image_size(item_idx)
@@ -446,7 +448,7 @@ class TransformersModel(nn.Module):
 
         # Set correct attn and init on "meta" to delay allocating GPU tensors
         self.text_config._attn_implementation = "vllm"
-        with init_on_device_without_buffers("meta"):
+        with init_on_device_without_buffers("meta"), config_override:
             # FIXME(Isotr0py): We need to refactor this part in the future to
             # avoid registering an extra model layer, otherwise we will need a
             # weights mapper to rename weights.

@@ -37,7 +37,7 @@ If it is `TransformersForCausalLM` or `TransformersForMultimodalLM` then it mean
     vLLM may not fully optimise the Transformers implementation so you may see degraded performance if comparing a native model to a Transformers model in vLLM.
 
 !!! note
-    In case of vision language models if you are loading with `dtype="auto"`, vLLM loads the whole model with config's `dtype` if it exists. In contrast the native Trasnformers will respect the `dtype` attribute of each backbone in the model. That might cause a slight difference in performance.
+    In case of vision language models if you are loading with `dtype="auto"`, vLLM loads the whole model with config's `dtype` if it exists. In contrast the native Transformers will respect the `dtype` attribute of each backbone in the model. That might cause a slight difference in performance.
 
 #### Custom models
 
