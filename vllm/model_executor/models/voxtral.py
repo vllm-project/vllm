@@ -25,8 +25,9 @@ from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import SupportsPP
-from vllm.model_executor.models.whisper import (
-    WhisperEncoder, WhisperForConditionalGeneration)
+from vllm.model_executor.models.whisper import (WhisperEncoder,
+                                                WhisperForConditionalGeneration
+                                                )
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
