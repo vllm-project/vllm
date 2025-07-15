@@ -41,7 +41,7 @@ logger = init_logger(__name__)
 
 
 class OpenAISpeechToText(OpenAIServing):
-    """Base class for speech-to-text operations like transcription and 
+    """Base class for speech-to-text operations like transcription and
     translation."""
 
     def __init__(
@@ -54,6 +54,7 @@ class OpenAISpeechToText(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         task_type: Literal["transcribe", "translate"] = "transcribe",
         log_error_stack: bool = False,
+        enable_force_include_usage: bool = False,
     ):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
@@ -68,6 +69,8 @@ class OpenAISpeechToText(OpenAIServing):
 
         self.asr_config = self.model_cls.get_speech_to_text_config(
             model_config, task_type)
+
+        self.enable_force_include_usage = enable_force_include_usage
 
         self.max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
 
@@ -129,7 +132,7 @@ class OpenAISpeechToText(OpenAIServing):
         response_class: type[T],
         stream_generator_method: Callable[..., AsyncGenerator[str, None]],
     ) -> Union[T, AsyncGenerator[str, None], ErrorResponse]:
-        """Base method for speech-to-text operations like transcription and 
+        """Base method for speech-to-text operations like transcription and
         translation."""
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -230,18 +233,16 @@ class OpenAISpeechToText(OpenAIServing):
             return self.create_error_response(str(e))
 
     async def _speech_to_text_stream_generator(
-        self,
-        request: SpeechToTextRequest,
-        list_result_generator: list[AsyncGenerator[RequestOutput, None]],
-        request_id: str,
-        request_metadata: RequestResponseMetadata,
-        audio_duration_s: float,
+        self, request: SpeechToTextRequest,
+        list_result_generator: list[AsyncGenerator[RequestOutput,
+                                                   None]], request_id: str,
+        request_metadata: RequestResponseMetadata, audio_duration_s: float,
         chunk_object_type: Literal["translation.chunk", "transcription.chunk"],
         response_stream_choice_class: Union[
             type[TranscriptionResponseStreamChoice],
             type[TranslationResponseStreamChoice]],
         stream_response_class: Union[type[TranscriptionStreamResponse],
-                                     type[TranslationStreamResponse]],
+                                     type[TranslationStreamResponse]]
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         model_name = request.model
@@ -249,10 +250,10 @@ class OpenAISpeechToText(OpenAIServing):
         completion_tokens = 0
         num_prompt_tokens = 0
 
-        include_usage = request.stream_include_usage \
-            if request.stream_include_usage else False
-        include_continuous_usage = request.stream_continuous_usage_stats\
-            if include_usage and request.stream_continuous_usage_stats\
+        include_usage = self.enable_force_include_usage or \
+            request.stream_include_usage
+        include_continuous_usage = request.stream_continuous_usage_stats \
+            if include_usage and request.stream_continuous_usage_stats \
             else False
 
         try:
@@ -363,7 +364,7 @@ class OpenAISpeechToText(OpenAIServing):
 
     def _find_split_point(self, wav: np.ndarray, start_idx: int,
                           end_idx: int) -> int:
-        """Find the best point to split audio by 
+        """Find the best point to split audio by
         looking for silence or low amplitude.
         Args:
             wav: Audio tensor [1, T]
