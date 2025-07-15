@@ -167,6 +167,19 @@ void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
                         torch::Tensor const& seq_lens,
                         torch::Tensor const& page_table, double scale);
 
+void sm100_cutlass_mla_decode(
+    torch::Tensor const& out, torch::Tensor const& q_nope,
+    torch::Tensor const& q_pe, torch::Tensor const& kv_c_and_k_pe_cache,
+    torch::Tensor const& seq_lens, torch::Tensor const& page_table,
+    torch::Tensor const& workspace, double sm_scale,
+    int64_t num_kv_splits =
+        1 /* Set to 1 to avoid cuda_graph issue by default. */);
+
+int64_t sm100_cutlass_mla_get_workspace_size(
+    int64_t max_seq_len, int64_t num_batches, int64_t sm_count = 0,
+    int64_t num_kv_splits =
+        1 /* Set to 1 to avoid cuda_graph issue by default. */);
+
 torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
 #ifndef USE_ROCM
