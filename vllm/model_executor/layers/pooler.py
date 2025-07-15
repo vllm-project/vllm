@@ -109,10 +109,14 @@ class PoolingMethod(ABC):
 
     @abstractmethod
     def forward_one(
-            self,
-            hidden_states: torch.Tensor,
-            prompt_len: Optional[torch.Tensor] = None,  # len(hidden_states)
+        self,
+        hidden_states: torch.Tensor,
+        prompt_len: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """
+        Note:
+            `prompt_len=None` means `prompt_len=len(hidden_states)`.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -211,10 +215,10 @@ class MeanPool(PoolingMethod):
     def forward_one(
         self,
         hidden_states: torch.Tensor,
-        prompt_len: torch.Tensor,
+        prompt_len: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        assert prompt_len == hidden_states.shape[0], \
-            "partial prefill not supported with ALL pooling"
+        assert prompt_len is None or prompt_len == hidden_states.shape[0], \
+            "partial prefill not supported with MEAN pooling"
 
         return hidden_states.mean(dim=0, dtype=torch.float32)
 
