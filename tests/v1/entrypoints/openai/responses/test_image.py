@@ -24,7 +24,15 @@ TEST_IMAGE_URLS = [
 
 @pytest.fixture(scope="module")
 def default_image_server_args():
-    return ["--limit-mm-per-prompt", json.dumps({"image": MAXIMUM_IMAGES})]
+    return [
+        "--enforce-eager",
+        "--max-model-len",
+        "6000",
+        "--max-num-seqs",
+        "128",
+        "--limit-mm-per-prompt",
+        json.dumps({"image": MAXIMUM_IMAGES}),
+    ]
 
 
 @pytest.fixture(scope="module")
