@@ -180,8 +180,13 @@ class SpeculatorsEagleConfig(EAGLEConfig):
             transformer_config["skip_prenorm"] = False
             transformer_config["skip_output_norm"] = False
         
+        if speculators_config.get("fusion_bias", False):
+            # If fusion_bias is set, add it to the transformer config
+            transformer_config["fusion_bias"] = True
+        
+
+        
         # Map Eagle-1 specific fields
-        vllm_config["eagle_fc_bias"] = speculators_config.get("fusion_bias", False)
         vocab_size = transformer_config.get("vocab_size")
         vllm_config["truncated_vocab_size"] = vocab_size
         vllm_config["architectures"] = ["EAGLEModel"]
@@ -218,10 +223,8 @@ class SpeculatorsEagleConfig(EAGLEConfig):
             )
         
         if "norm_before_residual" in speculators_config:
-            norm_before_residual = speculators_config["norm_before_residual"]
-            vllm_config["norm_before_residual"] = norm_before_residual
-            # Also add to transformer config so it's accessible in model
-            transformer_config["norm_before_residual"] = norm_before_residual
+            # Add to transformer config which becomes the model config
+            transformer_config["norm_before_residual"] = speculators_config["norm_before_residual"]
         
         # Eagle-3 uses a different architecture
         vllm_config["architectures"] = ["Eagle3LlamaForCausalLM"]

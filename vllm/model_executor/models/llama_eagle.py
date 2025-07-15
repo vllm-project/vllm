@@ -35,13 +35,14 @@ SPECULATORS_WEIGHT_MAP = {
 def remap_speculators_weight_name(name: str) -> Optional[str]:
     """Remap speculators format weight names to vLLM names.
     
-    Returns None for transformer weights that should be skipped.
+    Maps speculators format weight names to vLLM format.
     """
     if name in SPECULATORS_WEIGHT_MAP:
         return SPECULATORS_WEIGHT_MAP[name]
     elif name.startswith("transformer."):
-        # Skip transformer weights - they're handled separately
-        return None
+        # Remove the "transformer." prefix to match vLLM's naming
+        # e.g., "transformer.mlp.down_proj.weight" -> "mlp.down_proj.weight"
+        return name[len("transformer."):]
     return name
 
 
@@ -92,7 +93,7 @@ class LlamaModel(nn.Module):
         ])
         self.fc = torch.nn.Linear(self.config.hidden_size * 2,
                                   self.config.hidden_size,
-                                  bias=False)
+                                  bias=getattr(self.config, "fusion_bias", False))
         
         # HASS variant support
         self.has_embedding_layernorms = getattr(self.config, "add_para_norm", False)
@@ -208,6 +209,11 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
             if remapped_name is None:
                 continue
             name = remapped_name
+            
+            # Handle transformer layer weights - they map to layer 0
+            if any(layer_component in name for layer_component in 
+                   ["mlp.", "self_attn.", "input_layernorm", "post_attention_layernorm"]):
+                name = f"layers.0.{name}"
             
             if "lm_head" not in name:
                 name = "model." + name
