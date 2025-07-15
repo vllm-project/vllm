@@ -900,12 +900,10 @@ def _get_kv_cache_config_optimal_block_size(vllm_config, kv_cache_spec, availabl
     # Update specs with optimal size
     updated_specs = {}
     for name, spec in kv_cache_spec.items():
-        if hasattr(spec, 'block_size'):  # AttentionSpec
-            new_spec = copy.deepcopy(spec)
-            new_spec.block_size = optimal_block_size
-            updated_specs[name] = new_spec
-        else:
-            updated_specs[name] = spec
+        # The optimal block size is applied to all specs to ensure uniformity.
+        new_spec = copy.deepcopy(spec)
+        new_spec.block_size = optimal_block_size
+        updated_specs[name] = new_spec
     
     # Use existing logic
     return _get_kv_cache_config_uniform_page_size(vllm_config, updated_specs, available_memory)
@@ -992,7 +990,6 @@ def get_kv_cache_config(
                                                       kv_cache_spec,
                                                       available_memory)
 
-    raise NotImplementedError
     else:
         return _get_kv_cache_config_optimal_block_size(vllm_config,
                                                        kv_cache_spec,

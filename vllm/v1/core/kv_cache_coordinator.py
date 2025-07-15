@@ -391,7 +391,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         if not (attention_specs and mamba_specs):
             return attention_specs[0].block_size if attention_specs else 16
         
-        max_mamba_state = max(s.state_size_bytes for s in mamba_specs)
+        max_mamba_state = max(s.page_size_bytes for s in mamba_specs)
         num_attention_layers = len(attention_specs)
         min_per_token_bytes = min(s.page_size_bytes / s.block_size for s in attention_specs)
         
