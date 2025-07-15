@@ -159,6 +159,7 @@ def make_mistral_chat_completion_request(
     for message in messages:
         # Remove reasoning_content as unsupported by Mistral
         _ = message.pop("reasoning_content", None)  # type: ignore
+        _ = message.pop("name", None)  # type: ignore
 
         # Convert list text content to string
         if message.get("role") in ("assistant", "tool"):
