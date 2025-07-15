@@ -29,6 +29,7 @@ from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.utils import LayerBlockType
 
@@ -578,8 +579,16 @@ class JambaForSequenceClassification(JambaForCausalLM):
         config = vllm_config.model_config.hf_config
         num_labels: int = config.num_labels
         score_bias: bool = getattr(config, 'score_bias', False)
-        self.score = nn.Linear(config.hidden_size, num_labels, bias=score_bias)
-        self.score.weight_loader = score_weight_loader
+
+        self.score = nn.Linear(
+            config.hidden_size,
+            num_labels,
+            bias=score_bias,
+            dtype=torch.float32,
+        )
+
+        for p in self.score.parameters():
+            set_weight_attrs(p, {"weight_loader": score_weight_loader})
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
