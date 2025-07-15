@@ -103,9 +103,7 @@ When tool_choice='required' is set, the model is guaranteed to generate one or m
 
 vLLM supports the `tool_choice='none'` option in the chat completion API. When this option is set, the model will not generate any tool calls and will respond with regular text content only, even if tools are defined in the request.
 
-By default, when `tool_choice='none'` is specified, vLLM excludes tool definitions from the prompt to optimize context usage. To include tool definitions even with `tool_choice='none'`, use the `--expand-tools-even-if-tool-choice-none` option.
-
-Note: This behavior will change in v0.10.0, where tool definitions will be included by default even with `tool_choice='none'`.
+However, when `tool_choice='none'` is specified, vLLM includes tool definitions from the prompt.
 
 ## Automatic Function Calling
 
