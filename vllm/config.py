@@ -2308,6 +2308,13 @@ class SchedulerConfig:
     like full attention and sliding window attention.
     """
 
+    async_scheduling: bool = False
+    """EXPERIMENTAL: If set to True, perform async scheduling. This may help
+    reduce the CPU overheads, leading to better latency and throughput. However,
+    async scheduling is currently not supported with some features such as
+    structured outputs, speculative decoding, and pipeline parallelism.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -2400,6 +2407,10 @@ class SchedulerConfig:
         # increase startup time with limited performance benefit.
         if not self.cuda_graph_sizes:
             self.cuda_graph_sizes = [min(self.max_num_seqs * 2, 512)]
+
+        if self.async_scheduling:
+            self.scheduler_cls = (
+                "vllm.v1.core.sched.async_scheduler.AsyncScheduler")
 
     @model_validator(mode='after')
     def _verify_args(self) -> Self:
