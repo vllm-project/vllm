@@ -182,13 +182,6 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     """If set to True, enable tracking server_load_metrics in the app state."""
     enable_force_include_usage: bool = False
     """If set to True, including usage on every request."""
-    expand_tools_even_if_tool_choice_none: bool = False
-    """Include tool definitions in prompts even when `tool_choice='none'`.
-
-    This is a transitional option that will be removed in v0.10.0. In
-    v0.10.0, tool definitions will always be included regardless of
-    `tool_choice` setting. Use this flag to test the upcoming behavior
-    before the breaking change."""
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -224,11 +217,6 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
         # Special case: Tool call parser shows built-in options.
         valid_tool_parsers = list(ToolParserManager.tool_parsers.keys())
         frontend_kwargs["tool_call_parser"]["choices"] = valid_tool_parsers
-
-        # Special case for expand-tools-even-if-tool-choice-none because of
-        # the deprecation field
-        frontend_kwargs["expand_tools_even_if_tool_choice_none"]\
-            ["deprecated"] = True
 
         frontend_group = parser.add_argument_group(
             title="Frontend",
