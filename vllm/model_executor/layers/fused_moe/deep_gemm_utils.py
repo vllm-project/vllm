@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Taken from https://github.com/ModelTC/lightllm/blob/main/lightllm/common/fused_moe/deepep_scatter_gather.py 
+Taken from https://github.com/ModelTC/LightLLM/blob/8ed97c74c18f11505b048b1ba00ba5c0cef8bff6/lightllm/common/fused_moe/deepep_scatter_gather.py
 and updated to fit vllm needs and terminology.
 """
 
@@ -24,13 +24,12 @@ def deep_gemm_block_shape() -> list[int]:
     return [block, block]
 
 
-def expert_num_tokens_round_up_and_sum(expert_num_tokens: torch.Tensor) -> int:
-
-    def round_up_128(x: int) -> int:
-        return round_up(x, 128)
-
-    # Round up expert_num_tokens to 128
-    ent = round_up_128(expert_num_tokens)
+def expert_num_tokens_round_up_and_sum(expert_num_tokens: torch.Tensor,
+                                       alignment: int) -> int:
+    # Round up each element in expert_num_tokens to the nearest multiple of
+    # alignment.
+    ent = (expert_num_tokens.to(torch.int64) +
+           (alignment - 1)) // alignment * alignment
     return torch.sum(ent).item()
 
 
@@ -41,7 +40,7 @@ def compute_aligned_M(M: int, num_topk: int, local_num_experts: int,
     if ((expert_tokens_meta is not None)
             and (expert_tokens_meta.expert_num_tokens_cpu is not None)):
         return expert_num_tokens_round_up_and_sum(
-            expert_tokens_meta.expert_num_tokens_cpu)
+            expert_tokens_meta.expert_num_tokens_cpu, alignment=alignment)
 
     # expert_num_tokens information is not available on the cpu.
     # compute the max required size.
@@ -183,8 +182,7 @@ def ep_scatter(
     BLOCK_E = 128  # token num of per expert is aligned to 128
     BLOCK_D = 128  # block size of quantization
     num_warps = 8
-    num_experts = num_recv_tokens_per_expert.shape[
-        0]  # 获取num_recv_tokens_per_expert的元素个数
+    num_experts = num_recv_tokens_per_expert.shape[0]
     hidden_size = recv_x.shape[1]
     # grid = (triton.cdiv(hidden_size, BLOCK_D), num_experts)
     grid = num_experts
