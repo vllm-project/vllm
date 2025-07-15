@@ -333,6 +333,9 @@ class MLACommonMetadata(Generic[D]):
     # |-------------------- seq_len ---------------------|
     #                                   |-- query_len ---|
 
+    num_reqs: int
+    max_query_len: int
+
     num_actual_tokens: int  # Number of tokens excluding padding.
     query_start_loc: torch.Tensor
     slot_mapping: torch.Tensor
@@ -716,6 +719,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             )
 
         attn_metadata = self.metadata_cls(
+            num_reqs=common_attn_metadata.num_reqs,
+            max_query_len=common_attn_metadata.max_query_len,
             num_actual_tokens=num_actual_tokens,
             query_start_loc=query_start_loc,
             slot_mapping=slot_mapping,
