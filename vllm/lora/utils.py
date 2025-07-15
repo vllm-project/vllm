@@ -30,7 +30,6 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
                               VocabParallelEmbeddingWithLoRA)
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
 # yapf: enable
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -96,17 +95,6 @@ def replace_submodule(model: nn.Module, module_name: str,
     target_name = module_name.split(".")[-1]
     setattr(parent, target_name, new_module)
     return new_module
-
-
-def is_moe_model(model: nn.Module) -> bool:
-    """Checks if the model contains FusedMoE layers and warns the user."""
-    if any(isinstance(module, FusedMoE) for module in model.modules()):
-        logger.warning_once(
-            "For MoE models, vLLM currently does not support fused MoE LoRA "
-            "inference. Please ensure that the loaded LoRA model does not "
-            "contain expert weights.")
-        return True
-    return False
 
 
 def parse_fine_tuned_lora_name(
