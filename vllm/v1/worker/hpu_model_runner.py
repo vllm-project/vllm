@@ -968,9 +968,8 @@ class HPUModelRunner:
         bs = len(seq_lens)
         seq = max(seq_lens)
         num_blocks = max(num_blocks) if len(num_blocks) > 0 else 0
-        bs, seq, _ = self.bucketing_manager.find_prompt_bucket(
+        bs, seq, num_blocks = self.bucketing_manager.find_prompt_bucket(
             bs, seq, num_blocks)
-        num_blocks = round_up(num_blocks, 32)
         return (bs, seq, num_blocks)
 
     def _get_prompt_bucketing_fn(self):
