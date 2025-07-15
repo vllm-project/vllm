@@ -17,7 +17,6 @@ from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
                                    HFValidationError, LocalEntryNotFoundError,
                                    RepositoryNotFoundError,
                                    RevisionNotFoundError)
-from torch import nn
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import (
     get_image_processor_config)
@@ -44,7 +43,6 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import resolve_obj_by_qualname
 
 if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -773,28 +771,6 @@ def try_get_generation_config(
             return GenerationConfig.from_model_config(config)
         except OSError:  # Not found
             return None
-
-
-def get_classification_activation_function(config: PretrainedConfig):
-    return nn.Sigmoid() if config.num_labels == 1 else nn.Softmax()
-
-
-def get_cross_encoder_activation_function(config: PretrainedConfig):
-    function_name: Optional[str] = None
-    if (hasattr(config, "sentence_transformers")
-            and "activation_fn" in config.sentence_transformers):
-        function_name = config.sentence_transformers["activation_fn"]
-    elif (hasattr(config, "sbert_ce_default_activation_function")
-          and config.sbert_ce_default_activation_function is not None):
-        function_name = config.sbert_ce_default_activation_function
-
-    if function_name is not None:
-        assert function_name.startswith("torch.nn.modules."), (
-            "Loading of activation functions is restricted to "
-            "torch.nn.modules for security reasons")
-        return resolve_obj_by_qualname(function_name)()
-
-    return nn.Sigmoid() if config.num_labels == 1 else nn.Identity()
 
 
 def try_get_safetensors_metadata(

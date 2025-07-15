@@ -8,15 +8,14 @@ from typing import Callable, Optional, TypeVar, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, PoolerConfig
 from vllm.model_executor.pooling_metadata import (  # noqa: E501
     PoolingMetadata as V0PoolingMetadata)
 from vllm.model_executor.pooling_metadata import PoolingTensors
 from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
-from vllm.transformers_utils.config import (
-    get_classification_activation_function,
-    get_cross_encoder_activation_function)
+from vllm.utils import resolve_obj_by_qualname
 from vllm.v1.pool.metadata import PoolingMetadata as V1PoolingMetadata
 
 PoolingMetadata = Union[V0PoolingMetadata, V1PoolingMetadata]
@@ -77,6 +76,29 @@ def get_prompt_lens(
         pooling_metadata, hidden_states.device).prompt_lens
 
 
+def get_classification_activation_function(config: PretrainedConfig):
+    return PoolerClassify()
+
+
+def get_cross_encoder_activation_function(config: PretrainedConfig):
+    function_name: Optional[str] = None
+    if (hasattr(config, "sentence_transformers")
+            and "activation_fn" in config.sentence_transformers):
+        function_name = config.sentence_transformers["activation_fn"]
+    elif (hasattr(config, "sbert_ce_default_activation_function")
+          and config.sbert_ce_default_activation_function is not None):
+        function_name = config.sbert_ce_default_activation_function
+
+    if function_name is not None:
+        assert function_name.startswith("torch.nn.modules."), (
+            "Loading of activation functions is restricted to "
+            "torch.nn.modules for security reasons")
+        fn = resolve_obj_by_qualname(function_name)()
+        return LambdaPoolerActivation(fn)
+
+    return PoolerScore()
+
+
 def build_output(all_data: torch.Tensor) -> PoolerOutput:
     all_outputs = [PoolingSequenceGroupOutput(data) for data in all_data]
     return PoolerOutput(outputs=all_outputs)
@@ -84,6 +106,7 @@ def build_output(all_data: torch.Tensor) -> PoolerOutput:
 
 class BasePooler(nn.Module):
 
+    @abstractmethod
     def forward(
         self,
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
@@ -240,6 +263,70 @@ class MeanPool(PoolingMethod):
                 hidden_states[start_indices]) / prompt_lens.unsqueeze(1)
 
 
+_T = TypeVar("_T", torch.Tensor, list[torch.Tensor])
+
+
+class BasePoolerActivation(nn.Module, ABC):
+
+    @abstractmethod
+    def forward(self, pooled_data: _T) -> _T:
+        # shape:
+        # classify (& score) -> (batch_size, num_classes)
+        # embed -> (batch_size, embedding_dim) or list(embedding_dim)
+        #          (batch_size, dimensions) or list(dimensions) if using MRL
+        raise NotImplementedError
+
+
+class PoolerActivation(BasePoolerActivation):
+
+    @abstractmethod
+    def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    def forward(self, pooled_data: _T) -> _T:
+        if isinstance(pooled_data, list):
+            return [self.forward_chunk(data) for data in pooled_data]
+
+        return self.forward_chunk(pooled_data)
+
+
+class PoolerNormalize(PoolerActivation):
+
+    def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
+        return F.normalize(pooled_data, p=2, dim=-1)
+
+
+class PoolerClassify(PoolerActivation):
+
+    def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
+        num_labels = pooled_data.shape[-1]
+        if num_labels < 2:
+            return F.sigmoid(pooled_data)
+
+        return F.softmax(pooled_data, dim=-1)
+
+
+class PoolerScore(PoolerActivation):
+
+    def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
+        num_labels = pooled_data.shape[-1]
+        if num_labels < 2:
+            return F.sigmoid(pooled_data)
+
+        return pooled_data
+
+
+class LambdaPoolerActivation(PoolerActivation):
+
+    def __init__(self, fn: Callable[[torch.Tensor], torch.Tensor]):
+        super().__init__()
+
+        self.fn = fn
+
+    def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
+        return self.fn(pooled_data)
+
+
 class PoolerHead(nn.Module):
 
     @classmethod
@@ -263,14 +350,24 @@ class PoolerHead(nn.Module):
 
     @classmethod
     def from_config(cls, pooler_config: ResolvedPoolingConfig) -> "PoolerHead":
-        return cls(normalize=pooler_config.normalize,
-                   softmax=pooler_config.softmax)
+        if pooler_config.normalize and pooler_config.softmax:
+            raise ValueError("`normalize=True` and `softmax=True` should not "
+                             "be set together")
 
-    def __init__(self, *, normalize: bool, softmax: bool) -> None:
+        activation: PoolerActivation
+        if pooler_config.normalize:
+            activation = PoolerNormalize()
+        elif pooler_config.softmax:
+            activation = PoolerClassify()
+        else:
+            activation = LambdaPoolerActivation(nn.Identity())
+
+        return cls(activation)
+
+    def __init__(self, activation: PoolerActivation) -> None:
         super().__init__()
 
-        self.normalize = normalize
-        self.softmax = softmax
+        self.activation = activation
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
@@ -310,34 +407,6 @@ class PoolerHead(nn.Module):
 
         return self.activation(pooled_data)
 
-    def activation(self, pooled_data: Union[list[torch.Tensor], torch.Tensor]):
-        if self.normalize:
-            if isinstance(pooled_data, list):
-                pooled_data = [
-                    F.normalize(data, p=2, dim=-1) for data in pooled_data
-                ]
-            else:
-                pooled_data = F.normalize(pooled_data, p=2, dim=-1)
-
-        if self.softmax:
-            if isinstance(pooled_data, list):
-                pooled_data = [
-                    F.softmax(data, dim=-1)
-                    if data.shape[-1] >= 2 else F.sigmoid(data)
-                    for data in pooled_data
-                ]
-            else:
-                if pooled_data.shape[-1] >= 2:
-                    pooled_data = F.softmax(pooled_data, dim=-1)
-                else:
-                    pooled_data = F.sigmoid(pooled_data)
-
-        # shape:
-        # classify (& score) -> (batch_size, num_classes)
-        # embed -> (batch_size, embedding_dim) or list(embedding_dim)
-        #          (batch_size, dimensions) or list(dimensions) if using MRL
-        return pooled_data
-
 
 class SimplePooler(BasePooler):
     """A layer that pools specific information from hidden states.
@@ -366,7 +435,7 @@ class SimplePooler(BasePooler):
             normalize=normalize,
             softmax=softmax,
         )
-        assert resolved_config.pooling_type != PoolingType.LAST
+        assert resolved_config.pooling_type != PoolingType.STEP
 
         return cls.from_config(resolved_config)
 
@@ -375,15 +444,15 @@ class SimplePooler(BasePooler):
         cls,
         pooler_config: ResolvedPoolingConfig,
     ) -> "SimplePooler":
-        method = PoolingMethod.from_pooling_type(pooler_config.pooling_type)
+        in_pool = PoolingMethod.from_pooling_type(pooler_config.pooling_type)
         head = PoolerHead.from_config(pooler_config)
 
-        return cls(method, head)
+        return cls(in_pool, head)
 
-    def __init__(self, method: PoolingMethod, head: PoolerHead) -> None:
+    def __init__(self, in_pool: PoolingMethod, head: PoolerHead) -> None:
         super().__init__()
 
-        self.method = method
+        self.in_pool = in_pool
         self.head = head
 
     def forward(
@@ -391,7 +460,7 @@ class SimplePooler(BasePooler):
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
-        pooled_data = self.method(hidden_states, pooling_metadata)
+        pooled_data = self.in_pool(hidden_states, pooling_metadata)
         pooled_data = self.head(pooled_data, pooling_metadata)
         return build_output(pooled_data)
 
@@ -417,7 +486,7 @@ class StepPooler(BasePooler):
     ) -> None:
         super().__init__()
 
-        self.method = AllPool()
+        self.in_pool = AllPool()
         self.head = head
         self.step_tag_id = step_tag_id
         self.returned_token_ids = returned_token_ids
@@ -441,7 +510,7 @@ class StepPooler(BasePooler):
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
-        pooled_data_lst = self.method(hidden_states, pooling_metadata)
+        pooled_data_lst = self.in_pool(hidden_states, pooling_metadata)
         prompt_token_ids = self.get_prompt_token_ids(pooling_metadata)
 
         pooled_data = list[torch.Tensor]()
@@ -496,9 +565,6 @@ class Pooler(nn.Module):
 
 PoolerFn = Callable[[torch.Tensor], torch.Tensor]
 
-_T = TypeVar("_T", bound=Union[torch.Tensor, list[torch.Tensor]])
-PoolerActivation = Callable[[_T], _T]
-
 
 class ClassifierPooler(nn.Module):
     """A pooling layer for classification tasks.
@@ -521,6 +587,7 @@ class ClassifierPooler(nn.Module):
     ) -> None:
         super().__init__()
 
+        self.in_pool = AllPool()
         self.classifier = classifier
         self.pooler = pooler
 
@@ -539,24 +606,10 @@ class ClassifierPooler(nn.Module):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         """Pools sentence pair scores from the hidden_states."""
-        prompt_lens = get_prompt_lens(hidden_states, pooling_metadata)
-
-        pooled_data = list[torch.Tensor]()
-        if isinstance(hidden_states, list):
-            for req_state, prompt_len in zip(hidden_states, prompt_lens):
-                assert prompt_len == req_state.shape[0], \
-                    "partial prefill not supported with classifier"
-            pooled_data = hidden_states
-        else:
-            offset = 0
-            for prompt_len in prompt_lens:
-                pooled_data_i = hidden_states[offset:offset + prompt_len]
-                offset += prompt_len
-                pooled_data.append(pooled_data_i)
+        pooled_data = self.in_pool(hidden_states, pooling_metadata)
 
         pooled_data_lst = []
         for pooled_data_i in pooled_data:
-
             if self.pooler is not None:
                 final_shape_tensor = self.pooler(pooled_data_i)
             else:

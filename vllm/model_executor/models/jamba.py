@@ -594,7 +594,7 @@ class JambaForSequenceClassification(JambaForCausalLM):
         self._pooler = ClassifierPooler(
             vllm_config.model_config,
             classifier=self.score,
-            pooler=pooler.method.forward_one,
+            pooler=pooler.in_pool.forward_one,
             act_fn=pooler.head.activation,
         )
 
