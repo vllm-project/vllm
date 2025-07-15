@@ -67,6 +67,8 @@ llm = LLM(
 )
 ```
 
+## Options for configuring Tensorizer
+
 `tensorizer`'s core objects that serialize and deserialize models are `TensorSerializer` and `TensorDeserializer` respectively. In order to pass arbitrary kwargs to these, which will configure the serialization and deserialization processes, you can provide them as keys to `model_loader_extra_config` with `serialization_kwargs` and `deserialization_kwargs` respectively. Full docstrings detailing all parameters for the aforementioned objects can be found in `tensorizer`'s [serialization.py](https://github.com/coreweave/tensorizer/blob/main/tensorizer/serialization.py) file.
 
 As an example, CPU concurrency can be limited when serializing with `tensorizer` via the `limit_cpu_concurrency` parameter in the initializer for `TensorSerializer`. To set `limit_cpu_concurrency` to some arbitrary value, you would do so like this when serializing:
