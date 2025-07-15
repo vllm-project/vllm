@@ -1738,35 +1738,6 @@ class CacheConfig:
             logger.warning("Possibly too large swap space. %s", msg)
 
 
-@config
-@dataclass
-class TokenizerPoolConfig:
-    """This config is deprecated and will be removed in a future release.
-
-    Passing these parameters will have no effect. Please remove them from your
-    configurations.
-    """
-
-    pool_size: int = 0
-    """This parameter is deprecated and will be removed in a future release.
-    Passing this parameter will have no effect. Please remove it from your
-    configurations."""
-    pool_type: str = "ray"
-    """This parameter is deprecated and will be removed in a future release.
-    Passing this parameter will have no effect. Please remove it from your
-    configurations."""
-    extra_config: dict = field(default_factory=dict)
-    """This parameter is deprecated and will be removed in a future release.
-    Passing this parameter will have no effect. Please remove it from your
-    configurations."""
-
-    def __post_init__(self) -> None:
-        logger.warning_once(
-            "TokenizerPoolConfig is deprecated and will be removed in a "
-            "future release. Passing this parameter will have no effect. "
-            "Please remove it from your configurations.")
-
-
 class LoadFormat(str, enum.Enum):
     AUTO = "auto"
     PT = "pt"
@@ -1929,10 +1900,6 @@ class ParallelConfig:
 
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
-
-    tokenizer_pool_config: Optional[TokenizerPoolConfig] = None
-    """This parameter is deprecated and will be removed in a future release.
-    Please remove it from your configs"""
 
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""

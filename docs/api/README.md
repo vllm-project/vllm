@@ -8,7 +8,6 @@ API documentation for vLLM's configuration classes.
 
 - [vllm.config.ModelConfig][]
 - [vllm.config.CacheConfig][]
-- [vllm.config.TokenizerPoolConfig][]
 - [vllm.config.LoadConfig][]
 - [vllm.config.ParallelConfig][]
 - [vllm.config.SchedulerConfig][]
