@@ -193,8 +193,8 @@ class ShortConv(CustomOp):
         if has_prefill:
             Bx_p = (B_p * x_p).transpose(0, 1)
             if conv_metadata.cu_seqlen is None:
-                conv_metadata = update_metadata(
-                    Bx_p, attn_metadata.query_start_loc, conv_metadata)
+                conv_metadata = update_metadata(Bx_p, query_start_loc_p,
+                                                conv_metadata)
             Bx = causal_conv1d_fn(
                 Bx_p,
                 conv_weights,
@@ -203,6 +203,7 @@ class ShortConv(CustomOp):
                 conv_states=conv_state,
                 has_initial_state=has_initial_states_p,
                 cache_indices=state_indices_tensor_p,
+                metadata=conv_metadata,
                 query_start_loc=query_start_loc_p).transpose(
                     0, 1)[:num_prefill_tokens]
 
