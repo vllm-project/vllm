@@ -78,9 +78,12 @@ class KVCacheManager:
     ) -> None:
         self.max_model_len = max_model_len
 
-        self.enable_caching = (enable_caching
-                               if len(kv_cache_config.kv_cache_groups) > 0
-                               else False)
+        if len(kv_cache_config.kv_cache_groups) == 0:
+            # Attention free models don't have kv cache,
+            # thus don't need prefix caching.
+            enable_caching = False
+        self.enable_caching = enable_caching
+
         self.caching_hash_fn = (
             sha256_cbor_64bit if caching_hash_algo == "sha256_cbor_64bit" else
             sha256 if caching_hash_algo == "sha256" else hash)
