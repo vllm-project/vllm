@@ -85,11 +85,17 @@ def unfused_fp8_impl(
 def fused_impl(
     rms_norm_layer: RMSNorm,  # this stores the weights
     x: torch.Tensor,
+    residual_out: Optional[torch.Tensor],
     residual: Optional[torch.Tensor],
     quant_dtype: torch.dtype,
 ):
     out, _ = ops.rms_norm_dynamic_per_token_quant(
-        x, rms_norm_layer.weight, 1e-6, quant_dtype, residual=residual
+        x,
+        rms_norm_layer.weight,
+        1e-6,
+        quant_dtype,
+        residual_out=residual_out,
+        residual=residual,
     )
 
 

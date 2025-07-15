@@ -16,6 +16,8 @@ from vllm.triton_utils import tl, triton
 
 from .prefix_prefill import context_attention_fwd
 
+float8_info = torch.finfo(current_platform.fp8_dtype())
+
 
 @triton.jit
 def cdiv_fn(x, y):
@@ -60,7 +62,9 @@ def kernel_paged_attention_2d(
         stride_v_cache_3: tl.int64,  # int
         filter_by_query_len: tl.constexpr,  # bool
         query_start_len_ptr,  # [num_seqs+1]
-        USE_FP8: tl.constexpr):
+        USE_FP8: tl.constexpr,
+        FP8_MIN: tl.constexpr = float8_info.min,
+        FP8_MAX: tl.constexpr = float8_info.max):
     seq_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
 
@@ -196,6 +200,7 @@ def kernel_paged_attention_2d(
     acc = acc / L[:, None]
     if USE_FP8:
         acc = acc / tl.load(out_scale)
+        acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
 
     output_offset = (cur_batch_in_all_start_index * output_stride_0 +
                      query_head_idx * output_stride_1)
@@ -226,7 +231,7 @@ def chunked_prefill_paged_decode(
     alibi_slopes=None,
     sliding_window=None,
     sm_scale=None,
-    fp8_out_scale=None,
+    output_scale=None,
 ):
 
     if sm_scale is None:
@@ -257,7 +262,7 @@ def chunked_prefill_paged_decode(
             sliding_window=sliding_window,
             sm_scale=sm_scale,
             skip_decode=True,
-            fp8_out_scale=fp8_out_scale,
+            fp8_out_scale=output_scale,
         )
 
     block_size = value_cache.shape[3]
@@ -329,7 +334,7 @@ def chunked_prefill_paged_decode(
             kv_cache_dtype=kv_cache_dtype,
             k_scale=k_scale,
             v_scale=v_scale,
-            fp8_out_scale=fp8_out_scale,
+            fp8_out_scale=output_scale,
         )
     else:
         kernel_paged_attention_2d[(
@@ -346,7 +351,7 @@ def chunked_prefill_paged_decode(
             scale=sm_scale,
             k_scale=k_scale,
             v_scale=v_scale,
-            out_scale=fp8_out_scale,
+            out_scale=output_scale,
             num_query_heads=num_query_heads,
             num_queries_per_kv=num_queries_per_kv,
             num_queries_per_kv_padded=num_queries_per_kv_padded,
@@ -372,5 +377,5 @@ def chunked_prefill_paged_decode(
             stride_v_cache_3=value_cache.stride(3),
             filter_by_query_len=True,
             query_start_len_ptr=query_start_loc,
-            USE_FP8=fp8_out_scale is not None,
+            USE_FP8=output_scale is not None,
         )

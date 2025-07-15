@@ -40,7 +40,7 @@ vLLM is flexible and easy to use with:
 - OpenAI-compatible API server
 - Support NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs, Gaudi® accelerators and GPUs, IBM Power CPUs, TPU, and AWS Trainium and Inferentia Accelerators.
 - Prefix caching support
-- Multi-lora support
+- Multi-LoRA support
 
 For more information, check out the following:
 

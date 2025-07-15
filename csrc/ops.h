@@ -89,7 +89,8 @@ void convert_vertical_slash_indexes_mergehead(
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
               double epsilon);
 
-void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
+void fused_add_rms_norm(torch::Tensor& out, torch::Tensor& input,
+                        torch::Tensor& residual_out, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
 void apply_repetition_penalties_(torch::Tensor& logits,
@@ -103,6 +104,7 @@ void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
 
 void fused_add_rms_norm_static_fp8_quant(torch::Tensor& out,
                                          torch::Tensor& input,
+                                         torch::Tensor& residual_out,
                                          torch::Tensor& residual,
                                          torch::Tensor& weight,
                                          torch::Tensor& scale, double epsilon);
@@ -113,6 +115,7 @@ void rms_norm_dynamic_per_token_quant(torch::Tensor& out,
                                       torch::Tensor& scales,
                                       double const epsilon,
                                       std::optional<torch::Tensor> scale_ub,
+                                      std::optional<torch::Tensor> residual_out,
                                       std::optional<torch::Tensor> residual);
 
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
@@ -239,7 +242,8 @@ void cutlass_moe_mm(
     torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
     torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
-    torch::Tensor const& b_strides, torch::Tensor const& c_strides);
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides,
+    bool per_act_token, bool per_out_ch);
 
 void cutlass_fp4_group_mm(
     torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
@@ -251,7 +255,16 @@ void get_cutlass_moe_mm_data(
     const torch::Tensor& topk_ids, torch::Tensor& expert_offsets,
     torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
-    const int64_t num_experts, const int64_t n, const int64_t k);
+    const int64_t num_experts, const int64_t n, const int64_t k,
+    const std::optional<torch::Tensor>& blockscale_offsets);
+
+void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
+                                  torch::Tensor& problem_sizes1,
+                                  torch::Tensor& problem_sizes2,
+                                  const torch::Tensor& expert_num_tokens,
+                                  const int64_t num_local_experts,
+                                  const int64_t padded_m, const int64_t n,
+                                  const int64_t k);
 
 void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            torch::Tensor const& b,
@@ -353,3 +366,14 @@ std::tuple<int64_t, torch::Tensor> allocate_shared_buffer_and_handle(
     int64_t size);
 int64_t open_mem_handle(torch::Tensor& mem_handle);
 void free_shared_buffer(int64_t buffer);
+
+#ifdef USE_ROCM
+fptr_t init_custom_qr(int64_t rank, int64_t world_size,
+                      std::optional<int64_t> qr_max_size = std::nullopt);
+void qr_destroy(fptr_t _fa);
+torch::Tensor qr_get_handle(fptr_t _fa);
+void qr_open_handles(fptr_t _fa, const std::vector<torch::Tensor>& handles);
+void qr_all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
+                   int64_t quant_level, bool cast_bf2half = false);
+int64_t qr_max_size();
+#endif

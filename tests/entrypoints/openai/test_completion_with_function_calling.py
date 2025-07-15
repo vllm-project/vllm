@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import NamedTuple
-
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
@@ -39,53 +37,14 @@ async def client(server):
         yield async_client
 
 
-class TestCase(NamedTuple):
-    model_name: str
-    stream: bool
-    tool_choice: str
-    enable_thinking: bool
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "test_case",
-    [
-        TestCase(model_name=MODEL_NAME,
-                 stream=True,
-                 tool_choice="auto",
-                 enable_thinking=False),
-        TestCase(model_name=MODEL_NAME,
-                 stream=False,
-                 tool_choice="auto",
-                 enable_thinking=False),
-        TestCase(model_name=MODEL_NAME,
-                 stream=True,
-                 tool_choice="required",
-                 enable_thinking=False),
-        TestCase(model_name=MODEL_NAME,
-                 stream=False,
-                 tool_choice="required",
-                 enable_thinking=False),
-        TestCase(model_name=MODEL_NAME,
-                 stream=True,
-                 tool_choice="auto",
-                 enable_thinking=True),
-        TestCase(model_name=MODEL_NAME,
-                 stream=False,
-                 tool_choice="auto",
-                 enable_thinking=True),
-        TestCase(model_name=MODEL_NAME,
-                 stream=True,
-                 tool_choice="required",
-                 enable_thinking=True),
-        TestCase(model_name=MODEL_NAME,
-                 stream=False,
-                 tool_choice="required",
-                 enable_thinking=True),
-    ],
-)
-async def test_function_tool_use(client: openai.AsyncOpenAI,
-                                 test_case: TestCase):
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("stream", [True, False])
+@pytest.mark.parametrize("tool_choice", ["auto", "required"])
+@pytest.mark.parametrize("enable_thinking", [True, False])
+async def test_function_tool_use(client: openai.AsyncOpenAI, model_name: str,
+                                 stream: bool, tool_choice: str,
+                                 enable_thinking: bool):
     tools = [
         {
             "type": "function",
@@ -174,16 +133,16 @@ async def test_function_tool_use(client: openai.AsyncOpenAI,
             "forecast for the next 5 days, in fahrenheit?",
         },
     ]
-    if not test_case.stream:
+    if not stream:
         # Non-streaming test
         chat_completion = await client.chat.completions.create(
             messages=messages,
-            model=test_case.model_name,
+            model=model_name,
             tools=tools,
-            tool_choice=test_case.tool_choice,
+            tool_choice=tool_choice,
             extra_body={
                 "chat_template_kwargs": {
-                    "enable_thinking": test_case.enable_thinking
+                    "enable_thinking": enable_thinking
                 }
             })
 
@@ -191,20 +150,20 @@ async def test_function_tool_use(client: openai.AsyncOpenAI,
         assert len(chat_completion.choices[0].message.tool_calls) > 0
     else:
         # Streaming test
-        stream = await client.chat.completions.create(
+        output_stream = await client.chat.completions.create(
             messages=messages,
-            model=test_case.model_name,
+            model=model_name,
             tools=tools,
-            tool_choice=test_case.tool_choice,
+            tool_choice=tool_choice,
             stream=True,
             extra_body={
                 "chat_template_kwargs": {
-                    "enable_thinking": test_case.enable_thinking
+                    "enable_thinking": enable_thinking
                 }
             })
 
         output = []
-        async for chunk in stream:
+        async for chunk in output_stream:
             if chunk.choices and chunk.choices[0].delta.tool_calls:
                 output.extend(chunk.choices[0].delta.tool_calls)
 

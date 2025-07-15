@@ -170,7 +170,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // In-place fused Add and RMS Normalization.
   ops.def(
-      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
+      "fused_add_rms_norm(Tensor! result,"
+      "Tensor input, Tensor! residual_out, Tensor residual, Tensor weight, "
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
 
@@ -193,7 +194,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // In-place fused Add and RMS Normalization.
   ops.def(
       "fused_add_rms_norm_static_fp8_quant(Tensor! result, Tensor input, "
-      "Tensor! residual, Tensor weight, "
+      "Tensor! residual_out, Tensor residual, Tensor weight, "
       "Tensor scale, float epsilon) -> ()");
   ops.impl("fused_add_rms_norm_static_fp8_quant", torch::kCUDA,
            &fused_add_rms_norm_static_fp8_quant);
@@ -202,7 +203,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "
       "Tensor weight, Tensor! scale, float epsilon, "
-      "Tensor? scale_ub, Tensor!? residual) -> ()");
+      "Tensor? scale_ub, Tensor!? residual_out, Tensor? residual) -> ()");
   ops.impl("rms_norm_dynamic_per_token_quant", torch::kCUDA,
            &rms_norm_dynamic_per_token_quant);
 
@@ -439,7 +440,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "cutlass_moe_mm(Tensor! out_tensors, Tensor a_tensors, Tensor b_tensors, "
       "               Tensor a_scales, Tensor b_scales, Tensor expert_offsets, "
       "               Tensor problem_sizes, Tensor a_strides, "
-      "               Tensor b_strides, Tensor c_strides) -> ()",
+      "               Tensor b_strides, Tensor c_strides, bool per_act_token, "
+      "               bool per_out_ch) -> ()",
       {stride_tag});
   ops.impl("cutlass_moe_mm", torch::kCUDA, &cutlass_moe_mm);
 
@@ -454,9 +456,25 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                        Tensor! problem_sizes1, Tensor! problem_sizes2, "
       "                        Tensor! input_permutation, "
       "                        Tensor! output_permutation, int num_experts, "
-      "                        int n, int k) -> ()",
+      "                        int n, int k, Tensor? blockscale_offsets) -> ()",
       {stride_tag});
   ops.impl("get_cutlass_moe_mm_data", torch::kCUDA, &get_cutlass_moe_mm_data);
+
+  // A function that computes data required to run fused MoE with w8a8 grouped
+  // GEMM and PPLX. It takes expert_num_tokens and non_zero_expert_idxs
+  // as an input, and computes expert_offsets (token start indices of each
+  // expert). In addition to this, it computes problem sizes for each expert's
+  // multiplication used by the two mms called from fused MoE operation.
+  ops.def(
+      "get_cutlass_pplx_moe_mm_data(Tensor! expert_offsets, "
+      "                             Tensor! problem_sizes1, "
+      "                             Tensor! problem_sizes2, "
+      "                             Tensor expert_num_tokens, "
+      "                             int num_local_experts, int padded_m, "
+      "                             int n, int k) -> ()",
+      {stride_tag});
+  ops.impl("get_cutlass_pplx_moe_mm_data", torch::kCUDA,
+           &get_cutlass_pplx_moe_mm_data);
 
   // Check if cutlass scaled_mm supports block quantization (used by DeepSeekV3)
   ops.def(
@@ -712,6 +730,24 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   custom_ar.impl("open_mem_handle", torch::kCPU, &open_mem_handle);
 
   custom_ar.def("free_shared_buffer", &free_shared_buffer);
+#ifdef USE_ROCM
+  // Quick Reduce all-reduce kernels
+  custom_ar.def(
+      "qr_all_reduce(int fa, Tensor inp, Tensor out, int quant_level, bool "
+      "cast_bf2half) -> ()");
+  custom_ar.impl("qr_all_reduce", torch::kCUDA, &qr_all_reduce);
+
+  custom_ar.def("init_custom_qr", &init_custom_qr);
+  custom_ar.def("qr_destroy", &qr_destroy);
+
+  custom_ar.def("qr_get_handle", &qr_get_handle);
+
+  custom_ar.def("qr_open_handles(int _fa, Tensor[](b!) handles) -> ()");
+  custom_ar.impl("qr_open_handles", torch::kCPU, &qr_open_handles);
+
+  // Max input size in bytes
+  custom_ar.def("qr_max_size", &qr_max_size);
+#endif
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

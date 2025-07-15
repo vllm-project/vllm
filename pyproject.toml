@@ -137,10 +137,6 @@ exclude = [
     'vllm/attention/ops/.*\.py$'
 ]
 
-[tool.codespell]
-ignore-words-list = "dout, te, indicies, subtile, ElementE"
-skip = "tests/models/fixtures/*,tests/prompts/*,benchmarks/sonnet.txt,tests/lora/data/*,build,csrc/rocm/*,vllm/third_party/*"
-
 [tool.isort]
 skip_glob = [
     ".buildkite/*",
@@ -154,6 +150,7 @@ skip_gitignore = true
 markers = [
     "skip_global_cleanup",
     "core_model: enable this model test in each PR instead of only nightly",
+    "hybrid_model: models that contain mamba layers (including pure SSM and hybrid architectures)",
     "cpu_model: enable this model test in CPU tests",
     "split: run this test as part of a split",
     "distributed: run this test only in distributed GPU tests",

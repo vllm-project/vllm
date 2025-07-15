@@ -60,7 +60,8 @@ class TestSharedStorageConnector(SharedStorageConnector):
                     if isinstance(arg, int):
                         to_log.append(str(arg))
                     elif isinstance(arg, KVCacheBlocks):
-                        to_log.append(f"num_blocks={len(arg.blocks)}")
+                        to_log.append(
+                            f"num_blocks={[len(b) for b in arg.blocks]}")
 
                 # Log the event as a line to the file
                 try:
@@ -176,7 +177,7 @@ def test_multi_shared_storage_connector_consistency():
     # on each connector in turn.
     assert events["storage1-SCHEDULER"][:3] == [
         'get_num_new_matched_tokens 0',
-        'update_state_after_alloc num_blocks=0 0', 'build_connector_meta'
+        'update_state_after_alloc num_blocks=[0] 0', 'build_connector_meta'
     ]
     assert events["storage1-WORKER"][:5] == [
         'register_kv_caches', 'bind_connector_metadata', 'start_load_kv',
@@ -184,7 +185,7 @@ def test_multi_shared_storage_connector_consistency():
     ]
     assert events["storage2-SCHEDULER"][:3] == [
         'get_num_new_matched_tokens 0',
-        'update_state_after_alloc num_blocks=0 0', 'build_connector_meta'
+        'update_state_after_alloc num_blocks=[0] 0', 'build_connector_meta'
     ]
     assert events["storage2-WORKER"][:5] == [
         'register_kv_caches', 'bind_connector_metadata', 'start_load_kv',
@@ -205,11 +206,11 @@ def test_multi_shared_storage_connector_consistency():
     # chosen).
     assert events["storage1-SCHEDULER"][:3] == [
         'get_num_new_matched_tokens 0',
-        'update_state_after_alloc num_blocks=7 96', 'build_connector_meta'
+        'update_state_after_alloc num_blocks=[7] 96', 'build_connector_meta'
     ]
     assert events["storage2-SCHEDULER"][:3] == [
         'get_num_new_matched_tokens 0',
-        'update_state_after_alloc num_blocks=0 0', 'build_connector_meta'
+        'update_state_after_alloc num_blocks=[0] 0', 'build_connector_meta'
     ]
 
     # Delete storage1 connector state
@@ -229,11 +230,11 @@ def test_multi_shared_storage_connector_consistency():
     # blocks for the second connector.
     assert events["storage1-SCHEDULER"][:3] == [
         'get_num_new_matched_tokens 0',
-        'update_state_after_alloc num_blocks=0 0', 'build_connector_meta'
+        'update_state_after_alloc num_blocks=[0] 0', 'build_connector_meta'
     ]
     assert events["storage2-SCHEDULER"][:3] == [
         'get_num_new_matched_tokens 0',
-        'update_state_after_alloc num_blocks=7 96', 'build_connector_meta'
+        'update_state_after_alloc num_blocks=[7] 96', 'build_connector_meta'
     ]
 
     # Clean up

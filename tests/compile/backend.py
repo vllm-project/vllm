@@ -1,15 +1,79 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import weakref
+from collections.abc import Sequence
 from copy import deepcopy
-from typing import Callable, Union
+from typing import Callable, Optional, Union
 
 from torch import fx
+from torch._ops import OpOverload
 
-from vllm.compilation.fx_utils import (find_specified_fn,
-                                       find_specified_fn_maybe)
+from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.inductor_pass import InductorPass
-from vllm.config import get_current_vllm_config
+from vllm.compilation.vllm_inductor_pass import VllmInductorPass
+from vllm.config import VllmConfig, get_current_vllm_config
+
+
+class LazyInitPass(InductorPass):
+    """
+    If there's a pass that we want to initialize lazily in a test,
+    we can wrap it in LazyInitPass, which will initialize the pass when invoked
+    and then immediately invoke it.
+    """
+
+    def __init__(self, pass_cls: type[VllmInductorPass],
+                 vllm_config: VllmConfig):
+        self.pass_cls = pass_cls
+        self.vllm_config = weakref.proxy(vllm_config)  # avoid cycle
+
+    def __call__(self, graph: fx.Graph) -> None:
+        self.pass_cls(self.vllm_config)(graph)
+
+
+class TestPassManager(InductorPass):
+    """
+    TODO clean this up more
+    """
+
+    def __init__(
+        self,
+        *passes: Union[InductorPass, Callable[[fx.Graph], None]],
+        check_fn: Optional[Callable[['TestPassManager'], None]] = None,
+    ):
+        self.custom_passes = list(passes)
+        self.check_fn = check_fn
+
+    def __call__(self, graph: fx.Graph):
+        print(f"TestPassManager: Before pass: {self}")
+        self.graph_pre_pass = deepcopy(graph)
+        for pass_ in self.custom_passes:
+            pass_(graph)
+
+        self.graph_post_pass = deepcopy(graph)
+        # assign by reference, will reflect the final state of the graph
+        self.final_graph = graph
+
+        # TestPassManager can get deepcopied,
+        # so pass the current instance to the check function
+        if self.check_fn:
+            self.check_fn(self)
+
+    def check_before_ops(self, ops: Sequence[OpOverload], fully_replaced=True):
+        for op in ops:
+            num_pre = len(list(find_op_nodes(op, self.graph_pre_pass)))
+            num_post = len(list(find_op_nodes(op, self.graph_post_pass)))
+            assert num_pre > 0, f"Op {op.name()} not found in pre-pass graph"
+            assert num_pre > num_post, f"All nodes remain for op {op.name()}"
+            if fully_replaced:
+                assert num_post == 0, \
+                    f"Unexpected op {op.name()} in post-pass graph"
+
+    def check_after_ops(self, ops: Sequence[OpOverload]):
+        for op in ops:
+            num_pre = len(list(find_op_nodes(op, self.graph_pre_pass)))
+            num_post = len(list(find_op_nodes(op, self.graph_post_pass)))
+            assert num_pre == 0, f"Unexpected op {op.name()} in pre-pass graph"
+            assert num_post > 0, f"Op {op.name()} not found in post-pass graph"
 
 
 class TestBackend:
@@ -24,13 +88,16 @@ class TestBackend:
     Inductor config is default-initialized from VllmConfig.CompilationConfig.
     """
 
-    def __init__(self, *passes: Union[InductorPass, Callable[[fx.Graph],
-                                                             None]]):
-        self.custom_passes = list(passes)
+    def __init__(
+        self,
+        *passes: Union[InductorPass, Callable[[fx.Graph], None]],
+        check_fn: Optional[Callable[['TestPassManager'], None]] = None,
+    ):
         compile_config = get_current_vllm_config().compilation_config
         self.inductor_config = compile_config.inductor_compile_config
         self.inductor_config['force_disable_caches'] = True
-        self.inductor_config['post_grad_custom_post_pass'] = self.post_pass
+        self.test_pass = TestPassManager(*passes, check_fn=check_fn)
+        self.inductor_config['post_grad_custom_post_pass'] = self.test_pass
 
     def __call__(self, graph: fx.GraphModule, example_inputs):
         self.graph_pre_compile = deepcopy(graph)
@@ -39,27 +106,14 @@ class TestBackend:
                           example_inputs,
                           config_patches=self.inductor_config)
 
-    def post_pass(self, graph: fx.Graph):
-        self.graph_pre_pass = deepcopy(graph)
-        for pass_ in self.custom_passes:
-            pass_(graph)
+    @property
+    def graph_post_pass(self):
+        return self.test_pass.graph_post_pass
 
-        self.graph_post_pass = deepcopy(graph)
-        # assign by reference, will reflect the final state of the graph
-        self.final_graph = graph
+    @property
+    def graph_pre_pass(self):
+        return self.test_pass.graph_pre_pass
 
-    def check_before_ops(self, ops,
-                         find_fn=find_specified_fn, \
-                         find_fn_maybe=find_specified_fn_maybe, \
-                        ops_fully_replaced=True):
-        for op in ops:
-            find_fn(self.graph_pre_pass.nodes, op)
-            if ops_fully_replaced:
-                assert find_fn_maybe(self.graph_post_pass.nodes, op) is None
-
-    def check_after_ops(self, ops,
-                        find_fn=find_specified_fn, \
-                        find_fn_maybe=find_specified_fn_maybe):
-        for op in ops:
-            find_fn(self.graph_post_pass.nodes, op)
-            assert find_fn_maybe(self.graph_pre_pass.nodes, op) is None
+    @property
+    def final_graph(self):
+        return self.test_pass.final_graph

@@ -20,6 +20,7 @@ from typing import Any, Callable, Optional, Union, cast
 
 import cloudpickle
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
@@ -35,11 +36,6 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
-
-POLLING_TIMEOUT_MS = 5000
-POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
-
-EXECUTE_MODEL_TIMEOUT_S = 300
 
 
 class MultiprocExecutor(Executor):
@@ -72,7 +68,10 @@ class MultiprocExecutor(Executor):
 
         # Initialize worker and set up message queues for SchedulerOutputs
         # and ModelRunnerOutputs
-        self.rpc_broadcast_mq = MessageQueue(self.world_size, self.world_size)
+        max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
+        self.rpc_broadcast_mq = MessageQueue(self.world_size,
+                                             self.world_size,
+                                             max_chunk_bytes=max_chunk_bytes)
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
         # Create workers
@@ -156,12 +155,12 @@ class MultiprocExecutor(Executor):
         self,
         scheduler_output,
     ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
-        (output, ) = self.collective_rpc("execute_model",
-                                         args=(scheduler_output, ),
-                                         unique_reply_rank=self.output_rank,
-                                         non_block=self.max_concurrent_batches
-                                         > 1,
-                                         timeout=EXECUTE_MODEL_TIMEOUT_S)
+        (output, ) = self.collective_rpc(
+            "execute_model",
+            args=(scheduler_output, ),
+            unique_reply_rank=self.output_rank,
+            non_block=self.max_concurrent_batches > 1,
+            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS)
         return output
 
     def collective_rpc(self,
