@@ -33,7 +33,7 @@ pyzmq >= 25.0.0
 msgspec
 gguf >= 0.13.0
 importlib_metadata; python_version < '3.10'
-mistral_common[opencv] >= 1.6.2
+mistral_common[opencv] >= 1.8.0
 opencv-python-headless >= 4.11.0    # required for video IO
 pyyaml
 six>=1.16.0; python_version > '3.11' # transitive dependency of pandas that needs to be the latest version for python 3.12
@@ -47,3 +47,4 @@ python-json-logger # Used by logging as per examples/others/logging_configuratio
 scipy # Required for phi-4-multimodal-instruct
 ninja # Required for xgrammar, rocm, tpu, xpu
 pybase64 # fast base64 implementation
+cbor2 # Required for cross-language serialization of hashable objects
