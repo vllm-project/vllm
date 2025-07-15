@@ -34,7 +34,6 @@ from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.utils import cuda_device_count_stateless
 
 logger = init_logger(__name__)
 
@@ -760,7 +759,8 @@ class VllmRunner:
     - `trust_remote_code`: Set to `True` instead of `False` for convenience.
     - `seed`: Set to `0` instead of `None` for test reproducibility.
     - `max_model_len`: Set to `1024` instead of `None` to reduce memory usage.
-    - `block_size`: Set to `16` instead of `None` to reduce memory usage.
+    - `block_size`: To reduce memory usage, set default to `64` if on XPU
+        devices, otherwise default to `16`.
     - `enable_chunked_prefill`: Set to `False` instead of `None` for
       test reproducibility.
     - `enforce_eager`: Set to `False` to test CUDA graph.
@@ -778,7 +778,7 @@ class VllmRunner:
         dtype: str = "auto",
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
-        block_size: int = 16,
+        block_size: int = 16 if not torch.xpu.is_available() else 64,
         enable_chunked_prefill: Optional[bool] = False,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = False,
@@ -1027,13 +1027,13 @@ class VllmRunner:
         req_outputs = self.model.classify(prompts)
         return [req_output.outputs.probs for req_output in req_outputs]
 
-    def encode(self,
-               prompts: list[str],
-               images: Optional[PromptImageInput] = None,
-               videos: Optional[PromptVideoInput] = None,
-               audios: Optional[PromptAudioInput] = None,
-               *args,
-               **kwargs) -> list[list[float]]:
+    def embed(self,
+              prompts: list[str],
+              images: Optional[PromptImageInput] = None,
+              videos: Optional[PromptVideoInput] = None,
+              audios: Optional[PromptAudioInput] = None,
+              *args,
+              **kwargs) -> list[list[float]]:
         inputs = self.get_inputs(prompts,
                                  images=images,
                                  videos=videos,
@@ -1041,6 +1041,10 @@ class VllmRunner:
 
         req_outputs = self.model.embed(inputs, *args, **kwargs)
         return [req_output.outputs.embedding for req_output in req_outputs]
+
+    def encode(self, prompts: list[str]) -> list[list[float]]:
+        req_outputs = self.model.encode(prompts)
+        return [req_output.outputs.data for req_output in req_outputs]
 
     def score(
         self,
@@ -1090,7 +1094,8 @@ def num_gpus_available():
     """Get number of GPUs without initializing the CUDA context
     in current process."""
 
-    return cuda_device_count_stateless()
+    from vllm.platforms import current_platform
+    return current_platform.device_count()
 
 
 temp_dir = tempfile.gettempdir()

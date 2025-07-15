@@ -67,13 +67,14 @@ def apply_penalties(logits: torch.Tensor, prompt_tokens_tensor: torch.Tensor,
 def rocm_unquantized_gemm_wrapper():
     """Creates a wrapper function with the signature (x, weight, bias)"""
     # Get configuration from environment variables
-    use_skinny = envs.VLLM_ROCM_USE_SKINNY_GEMM
-    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
-    ON_MI300 = any(arch in GPU_ARCH for arch in ["gfx942"])
+    from vllm.platforms.rocm import on_gfx9
+    ON_MI300 = on_gfx9()
+    use_skinny = envs.VLLM_ROCM_USE_SKINNY_GEMM and ON_MI300
     use_aiter = (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
                  and ON_MI300)
 
-    def inner_function(x: torch.Tensor,
+    def inner_function(layer: torch.nn.Module,
+                       x: torch.Tensor,
                        weight: torch.Tensor,
                        bias: Optional[torch.Tensor] = None):
         k = weight.shape[1]
@@ -101,24 +102,31 @@ def rocm_unquantized_gemm_wrapper():
         if use_aiter:
             return aiter_ops.rocm_aiter_tuned_gemm(x, weight, bias)
 
-        return torch.nn.functional.linear(x, weight, bias)
-
     return inner_function
+
+
+def default_unquantized_gemm(layer: torch.nn.Module,
+                             x: torch.Tensor,
+                             weight: torch.Tensor,
+                             bias: Optional[torch.Tensor] = None):
+    return torch.nn.functional.linear(x, weight, bias)
+
+
+def cpu_unquantized_gemm(layer: torch.nn.Module,
+                         x: torch.Tensor,
+                         weight: torch.Tensor,
+                         bias: Optional[torch.Tensor] = None):
+    if getattr(layer, "use_cpu_sgl", False):
+        return torch.ops._C.weight_packed_linear(x, weight, bias, True)
+    else:
+        return torch.nn.functional.linear(x, weight, bias)
 
 
 def dispatch_unquantized_gemm() -> Callable[
     [torch.Tensor, torch.Tensor, Optional[torch.Tensor]], torch.Tensor]:
-    """
-    Dispatcher function that returns a function with signature (x, weight, bias)
-    based on the current platform and environment variables.
-    """
     if current_platform.is_rocm():
         return rocm_unquantized_gemm_wrapper()
-
-    # Return a simple wrapper around linear to maintain the same signature
-    def linear_wrapper(x: torch.Tensor,
-                       weight: torch.Tensor,
-                       bias: Optional[torch.Tensor] = None):
-        return torch.nn.functional.linear(x, weight, bias)
-
-    return linear_wrapper
+    elif current_platform.is_cpu():
+        return cpu_unquantized_gemm
+    else:
+        return default_unquantized_gemm

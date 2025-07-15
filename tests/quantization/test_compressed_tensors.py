@@ -17,7 +17,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW4A4Fp4, CompressedTensorsW4A16Fp4,
     CompressedTensorsW4A16Sparse24, CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
-    CompressedTensorsWNA16)
+    CompressedTensorsWNA16, cutlass_fp4_supported)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     sparse_cutlass_supported)
 from vllm.platforms import current_platform
@@ -45,7 +45,8 @@ def use_v0_only(monkeypatch):
     """
     This module relies on V0 internals, so set VLLM_USE_V1=0.
     """
-    monkeypatch.setenv('VLLM_USE_V1', '0')
+    if not current_platform.is_cpu():
+        monkeypatch.setenv('VLLM_USE_V1', '0')
 
 
 @pytest.mark.parametrize(
@@ -668,8 +669,8 @@ def test_compressed_tensors_nvfp4(vllm_runner, args):
             assert isinstance(qkv_proj.quant_method,
                               CompressedTensorsLinearMethod)
             if isinstance(qkv_proj.scheme, scheme) or isinstance(
-                    qkv_proj.scheme, CompressedTensorsW4A16Fp4
-            ) and not CompressedTensorsW4A4Fp4.cutlass_fp4_supported():
+                    qkv_proj.scheme,
+                    CompressedTensorsW4A16Fp4) and not cutlass_fp4_supported():
                 assert True
             else:
                 raise AssertionError("FP4 Scheme Mismatch")

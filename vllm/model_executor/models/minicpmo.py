@@ -30,8 +30,10 @@ import torch
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.models.whisper.modeling_whisper import (
-    ACT2FN, WHISPER_ATTENTION_CLASSES, WhisperConfig, WhisperEncoder)
+from transformers.models.whisper.modeling_whisper import (ACT2FN,
+                                                          WhisperAttention,
+                                                          WhisperConfig,
+                                                          WhisperEncoder)
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -260,6 +262,7 @@ class MiniCPMOMultiModalProcessor(
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         if (audios := mm_data.get("audios")) is None:
             return {}
@@ -276,9 +279,9 @@ class MiniCPMOMultiModalProcessor(
                 prompts=[self.info.audio_pattern] * len(parsed_audios),
                 mm_data={"audios": [[audio] for audio in parsed_audios]},
                 mm_kwargs={
-                    **mm_kwargs,
-                    "chunk_input": True,
+                    **mm_kwargs, "chunk_input": True
                 },
+                tok_kwargs=tok_kwargs,
                 out_keys={"audio_features", "audio_feature_lens"},
             )
 
@@ -302,10 +305,11 @@ class MiniCPMOMultiModalProcessor(
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         return {
-            **super().process_mm_inputs(mm_data, mm_kwargs),
-            **self.process_audios(mm_data, mm_kwargs),
+            **super().process_mm_inputs(mm_data, mm_kwargs, tok_kwargs),
+            **self.process_audios(mm_data, mm_kwargs, tok_kwargs),
         }
 
     def _get_prompt_updates(
@@ -376,14 +380,13 @@ class MiniCPMWhisperEncoderLayer(nn.Module):
     def __init__(self, config: WhisperConfig, layer_idx: int):
         super().__init__()
         self.embed_dim = config.d_model
-        self.self_attn = WHISPER_ATTENTION_CLASSES[
-            config._attn_implementation](
-                embed_dim=self.embed_dim,
-                num_heads=config.encoder_attention_heads,
-                dropout=config.attention_dropout,
-                config=config,
-                layer_idx=layer_idx,
-            )
+        self.self_attn = WhisperAttention(
+            embed_dim=self.embed_dim,
+            num_heads=config.encoder_attention_heads,
+            dropout=config.attention_dropout,
+            config=config,
+            layer_idx=layer_idx,
+        )
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.dropout = config.dropout
         self.activation_fn = ACT2FN[config.activation_function]
@@ -508,6 +511,17 @@ class MiniCPMO(MiniCPMV2_6):
             "up_proj",
         ],
     }
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "(<image>./</image>)"
+        if modality.startswith("video"):
+            return "(<video>./</video>)"
+        if modality.startswith("audio"):
+            return "(<audio>./</audio>)"
+
+        raise ValueError("Only image, video or audio modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)

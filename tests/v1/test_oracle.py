@@ -13,7 +13,6 @@ UNSUPPORTED_MODELS_V1 = [
     "openai/whisper-large-v3",  # transcription
     "facebook/bart-large-cnn",  # encoder decoder
     "state-spaces/mamba-130m-hf",  # mamba1
-    "hmellor/tiny-random-BambaForCausalLM",  # hybrid
     "BAAI/bge-m3",  # embedding
 ]
 
@@ -72,12 +71,6 @@ def test_unsupported_configs(monkeypatch):
             AsyncEngineArgs(
                 model=MODEL,
                 disable_async_output_proc=True,
-            ).create_engine_config()
-
-        with pytest.raises(NotImplementedError):
-            AsyncEngineArgs(
-                model=MODEL,
-                scheduling_policy="priority",
             ).create_engine_config()
 
         with pytest.raises(NotImplementedError):

@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.logger import RequestLogger, logger
+from vllm.entrypoints.logger import RequestLogger
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchRequestOutput,
@@ -29,9 +29,12 @@ from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.entrypoints.openai.serving_score import ServingScores
+from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
+
+logger = init_logger(__name__)
 
 
 def make_arg_parser(parser: FlexibleArgumentParser):
@@ -201,13 +204,16 @@ async def upload_data(output_url: str, data_or_file: str,
         except Exception as e:
             if attempt < max_retries:
                 logger.error(
-                    f"Failed to upload data (attempt {attempt}). "
-                    f"Error message: {str(e)}.\nRetrying in {delay} seconds..."
+                    "Failed to upload data (attempt %d). Error message: %s.\nRetrying in %d seconds...",  # noqa: E501
+                    attempt,
+                    e,
+                    delay,
                 )
                 await asyncio.sleep(delay)
             else:
-                raise Exception(f"Failed to upload data (attempt {attempt}). "
-                                f"Error message: {str(e)}.") from e
+                raise Exception(
+                    f"Failed to upload data (attempt {attempt}). Error message: {str(e)}."  # noqa: E501
+                ) from e
 
 
 async def write_file(path_or_url: str, batch_outputs: list[BatchRequestOutput],
@@ -342,7 +348,7 @@ async def main(args):
         chat_template=None,
         chat_template_content_format="auto",
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-    ) if model_config.runner_type == "generate" else None
+    ) if "generate" in model_config.supported_tasks else None
     openai_serving_embedding = OpenAIServingEmbedding(
         engine,
         model_config,
@@ -350,13 +356,19 @@ async def main(args):
         request_logger=request_logger,
         chat_template=None,
         chat_template_content_format="auto",
-    ) if model_config.task == "embed" else None
-    openai_serving_scores = (ServingScores(
+    ) if "embed" in model_config.supported_tasks else None
+
+    enable_serving_reranking = ("classify" in model_config.supported_tasks
+                                and getattr(model_config.hf_config,
+                                            "num_labels", 0) == 1)
+
+    openai_serving_scores = ServingScores(
         engine,
         model_config,
         openai_serving_models,
         request_logger=request_logger,
-    ) if model_config.task == "score" else None)
+    ) if ("embed" in model_config.supported_tasks
+          or enable_serving_reranking) else None
 
     tracker = BatchProgressTracker()
     logger.info("Reading batch from %s...", args.input_file)

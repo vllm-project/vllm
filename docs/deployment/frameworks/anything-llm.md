@@ -1,7 +1,4 @@
----
-title: Anything LLM
----
-[](){ #deployment-anything-llm }
+# Anything LLM
 
 [Anything LLM](https://github.com/Mintplex-Labs/anything-llm) is a full-stack application that enables you to turn any document, resource, or piece of content into context that any LLM can use as references during chatting.
 
@@ -15,7 +12,7 @@ It allows you to deploy a large language model (LLM) server with vLLM as the bac
 
 - Start the vLLM server with the supported chat completion model, e.g.
 
-```console
+```bash
 vllm serve Qwen/Qwen1.5-32B-Chat-AWQ --max-model-len 4096
 ```
 

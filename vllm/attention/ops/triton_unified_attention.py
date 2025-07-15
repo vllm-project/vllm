@@ -8,11 +8,10 @@
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
 import torch
-import triton
-import triton.language as tl
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
 float8_info = torch.finfo(current_platform.fp8_dtype())
@@ -151,7 +150,19 @@ def kernel_unified_attention_2d(
                               mask=query_mask_1,
                               other=0.0)
 
-    num_blocks = cdiv_fn(seq_len, BLOCK_SIZE)
+    # compute the length of the longest sequence prefix spanned by any
+    # query token in the current q_block (q_block_local_idx)
+    max_seq_prefix_len = context_len + q_block_local_idx * BLOCK_Q + (
+        BLOCK_M - 1) // num_queries_per_kv + 1
+
+    # adjust for potential padding in the last q_block by considering the
+    # actual sequence length
+    max_seq_prefix_len = tl.minimum(max_seq_prefix_len, seq_len)
+
+    # calculate the number of tiles (blocks) that need to be processed to
+    # cover the longest sequence prefix (due to causal masking, blocks beyond
+    # this prefix can be skipped)
+    num_blocks = cdiv_fn(max_seq_prefix_len, BLOCK_SIZE)
 
     # iterate through tiles
     for j in range(0, num_blocks):
