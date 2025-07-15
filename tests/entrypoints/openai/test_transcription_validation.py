@@ -33,8 +33,8 @@ def winning_call():
 
 
 @pytest.mark.asyncio
-async def test_basic_audio(mary_had_lamb):
-    model_name = "openai/whisper-large-v3-turbo"
+@pytest.parametrize("model_name", ["openai/whisper-large-v3-turbo", "mistralai/Voxtral-Mini-3B-2507"])
+async def test_basic_audio(mary_had_lamb, model_name):
     server_args = ["--enforce-eager"]
     # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
