@@ -813,6 +813,33 @@ def get_ip() -> str:
     return "0.0.0.0"
 
 
+def test_loopback_bind(address, family):
+    try:
+        s = socket.socket(family, socket.SOCK_DGRAM)
+        s.bind((address, 0))  # Port 0 = auto assign
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def get_loopback_ip() -> str:
+    loopback_ip = envs.VLLM_LOOPBACK_IP
+    if loopback_ip:
+        return loopback_ip
+
+    # VLLM_LOOPBACK_IP is not set, try to get it based on network interface
+
+    if test_loopback_bind("127.0.0.1", socket.AF_INET):
+        return "127.0.0.1"
+    elif test_loopback_bind("::1", socket.AF_INET6):
+        return "::1"
+    else:
+        raise RuntimeError(
+            "Neither 127.0.0.1 nor ::1 are bound to a local interface. "
+            "Set the VLLM_LOOPBACK_IP environment variable explicitly.")
+
+
 def is_valid_ipv6_address(address: str) -> bool:
     try:
         ipaddress.IPv6Address(address)
