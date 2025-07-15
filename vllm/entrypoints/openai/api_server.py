@@ -1540,6 +1540,7 @@ async def init_app_state(
         state.openai_serving_models,
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
     ) if "generate" in model_config.supported_tasks else None
     state.openai_serving_pooling = OpenAIServingPooling(
