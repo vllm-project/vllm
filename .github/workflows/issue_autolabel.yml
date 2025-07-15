@@ -121,10 +121,9 @@ jobs:
             }
 
             // Process all configured labels
-            let labelsAdded = 0;
-            for (const [labelName, config] of Object.entries(labelConfig)) {
-              const added = await processLabel(labelName, config);
-              if (added) labelsAdded++;
-            }
-            
-            core.notice(`Processing complete. ${labelsAdded} label(s) added.`);
+            const processLabels = Object.entries(labelConfig)
+              .map(([labelName, config]) => processLabel(labelName, config));
+            const labelsAdded = await Promise.all(processLabels);
+            const numLabelsAdded = labelsAdded.reduce((x, y) => x + y, 0);
+  
+            core.notice(`Processing complete. ${numLabelsAdded} label(s) added.`);
