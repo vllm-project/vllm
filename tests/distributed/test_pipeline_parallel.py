@@ -14,8 +14,9 @@ from typing import Literal, NamedTuple, Optional
 
 import pytest
 
-from vllm.config import TaskOption
+from vllm.config import _FLOAT16_NOT_SUPPORTED_MODELS, TaskOption
 from vllm.logger import init_logger
+from vllm.transformers_utils.config import get_config
 
 from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import compare_two_settings, create_new_process_for_each_test
@@ -288,6 +289,11 @@ def _compare_tp(
     trust_remote_code = model_info.trust_remote_code
     tokenizer_mode = model_info.tokenizer_mode
     hf_overrides = model_info.hf_overrides
+    hf_config = get_config(model_id, trust_remote_code)
+
+    dtype = "float16"
+    if hf_config.model_type in _FLOAT16_NOT_SUPPORTED_MODELS:
+        dtype = "bfloat16"
 
     if load_format == "dummy":
         # Avoid OOM
@@ -317,7 +323,7 @@ def _compare_tp(
     common_args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
-        "float16",
+        dtype,
         "--max-model-len",
         "2048",
         "--max-num-seqs",
