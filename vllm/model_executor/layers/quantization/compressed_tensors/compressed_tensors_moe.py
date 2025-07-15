@@ -860,20 +860,17 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
                                                         requires_grad=False)
 
         device = layer.w13_weight.device
-        self.ab_strides1 = torch.full((layer.local_num_experts, ),
-                                      layer.hidden_size,
-                                      device=device,
-                                      dtype=torch.int64)
+        # ab_strides1 and c_strides2 are the same
+        self.ab_strides1_c_strides2 = torch.full((layer.local_num_experts, ),
+                                                 layer.hidden_size,
+                                                 device=device,
+                                                 dtype=torch.int64)
         self.ab_strides2 = torch.full((layer.local_num_experts, ),
                                       layer.intermediate_size_per_partition,
                                       device=device,
                                       dtype=torch.int64)
         self.c_strides1 = torch.full((layer.local_num_experts, ),
                                      2 * layer.intermediate_size_per_partition,
-                                     device=device,
-                                     dtype=torch.int64)
-        self.c_strides2 = torch.full((layer.local_num_experts, ),
-                                     layer.hidden_size,
                                      device=device,
                                      dtype=torch.int64)
 
@@ -899,10 +896,10 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             moe.in_dtype,
             self.input_quant.strategy == QuantizationStrategy.TOKEN,
             self.weight_quant.strategy == QuantizationStrategy.CHANNEL,
-            ab_strides1=self.ab_strides1,
+            ab_strides1=self.ab_strides1_c_strides2,
             ab_strides2=self.ab_strides2,
             c_strides1=self.c_strides1,
-            c_strides2=self.c_strides2,
+            c_strides2=self.ab_strides1_c_strides2,
             num_dispatchers=num_dispatchers,
             use_batched_format=use_batched_format,
         )
@@ -973,10 +970,10 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
                 expert_map=None if self.disable_expert_map else expert_map,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
-                ab_strides1=self.ab_strides1,
+                ab_strides1=self.ab_strides1_c_strides2,
                 ab_strides2=self.ab_strides2,
                 c_strides1=self.c_strides1,
-                c_strides2=self.c_strides2,
+                c_strides2=self.ab_strides1_c_strides2,
                 a1_scale=a1_scale,
                 a2_scale=a2_scale,
             )
