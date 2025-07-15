@@ -4,6 +4,7 @@
 import multiprocessing
 import os
 
+import numpy as np
 import pytest
 import torch
 import torch.distributed
@@ -178,6 +179,38 @@ def test_pynccl_all_gather():
 
 
 @worker_fn_wrapper
+def all_gatherv_worker_fn():
+    pynccl_comm = PyNcclCommunicator(get_world_group().cpu_group,
+                                     device=get_world_group().device)
+
+    rank = pynccl_comm.rank
+    world_size = pynccl_comm.world_size
+    device = f'cuda:{pynccl_comm.rank}'
+
+    assert world_size <= 8
+    sizes = [81, 20, 57, 52, 81, 5, 49, 49][:world_size]
+    num_elems = sizes[rank]
+    tensor = torch.arange(num_elems, dtype=torch.float32,
+                          device=device) + rank * 100
+    result = torch.zeros(sum(sizes), dtype=torch.float32, device=device)
+
+    expected = torch.cat([
+        torch.arange(sizes[r], dtype=torch.float32) + r * 100
+        for r in range(world_size)
+    ]).to(device)
+
+    pynccl_comm.all_gatherv(result, tensor, sizes=sizes)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-8)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason="Need at least 2 GPUs to run the test.")
+def test_pynccl_all_gatherv():
+    distributed_run(all_gatherv_worker_fn, 2)
+
+
+@worker_fn_wrapper
 def reduce_scatter_worker_fn():
     pynccl_comm = PyNcclCommunicator(get_world_group().cpu_group,
                                      device=get_world_group().device)
@@ -212,6 +245,43 @@ def reduce_scatter_worker_fn():
                     reason="Need at least 2 GPUs to run the test.")
 def test_pynccl_reduce_scatter():
     distributed_run(reduce_scatter_worker_fn, 2)
+
+
+@worker_fn_wrapper
+def reduce_scatterv_worker_fn():
+    pynccl_comm = PyNcclCommunicator(get_world_group().cpu_group,
+                                     device=get_world_group().device)
+
+    rank = pynccl_comm.rank
+    world_size = pynccl_comm.world_size
+    device = f'cuda:{pynccl_comm.rank}'
+
+    assert world_size <= 8
+    sizes = [81, 20, 57, 52, 81, 5, 49, 49][:world_size]
+    num_elems = sum(sizes)
+    tensor = torch.arange(num_elems, dtype=torch.float32,
+                          device=device) + rank * 100
+    result = torch.zeros(sizes[rank], dtype=torch.float32, device=device)
+
+    # Calculate expected result for this rank's chunk
+    all_tensors = [
+        torch.arange(num_elems, dtype=torch.float32) + r * 100
+        for r in range(world_size)
+    ]
+    sizes_cumsum = np.cumsum(sizes)
+    start = 0 if rank == 0 else sizes_cumsum[rank - 1]
+    end = sizes_cumsum[rank]
+    expected = sum(tensor[start:end] for tensor in all_tensors).to(device)
+
+    pynccl_comm.reduce_scatterv(result, tensor, sizes=sizes)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-8)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason="Need at least 2 GPUs to run the test.")
+def test_pynccl_reduce_scatterv():
+    distributed_run(reduce_scatterv_worker_fn, 2)
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
