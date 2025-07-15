@@ -200,6 +200,29 @@ async def test_stream_options(winning_call, client):
 
 
 @pytest.mark.asyncio
+async def test_transcription_with_enable_force_include_usage(winning_call):
+    model_name = "openai/whisper-small"
+    server_args = ["--enforce-eager", "--enable-force-include-usage"]
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        res = await client.audio.transcriptions.create(model=model_name,
+                                                       file=winning_call,
+                                                       language="en",
+                                                       temperature=0.0,
+                                                       stream=True,
+                                                       timeout=30)
+        final = False
+        continuous = True
+        async for chunk in res:
+            if not len(chunk.choices):
+                # final usage sent
+                final = True
+            else:
+                continuous = continuous and hasattr(chunk, 'usage')
+        assert final and continuous
+
+
+@pytest.mark.asyncio
 async def test_sampling_params(mary_had_lamb, client):
     """
     Compare sampling with params and greedy sampling to assert results

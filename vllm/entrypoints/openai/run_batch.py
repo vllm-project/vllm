@@ -102,8 +102,12 @@ def make_arg_parser(parser: FlexibleArgumentParser):
         "--enable-prompt-tokens-details",
         action="store_true",
         default=False,
-        help="If set to True, enable prompt_tokens_details in usage.",
-    )
+        help="If set to True, enable prompt_tokens_details in usage.")
+    parser.add_argument("--enable-force-include-usage",
+                        action='store_true',
+                        default=False,
+                        help="If set to True, include usage on every request "
+                        "(even when stream_options is not specified)")
 
     return parser
 
@@ -352,30 +356,25 @@ async def run_batch(
         base_model_paths=base_model_paths,
         lora_modules=None,
     )
-    openai_serving_chat = (
-        OpenAIServingChat(
-            engine_client,
-            openai_serving_models,
-            args.response_role,
-            request_logger=request_logger,
-            chat_template=None,
-            chat_template_content_format="auto",
-            enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-        )
-        if "generate" in supported_tasks
-        else None
-    )
-    openai_serving_embedding = (
-        OpenAIServingEmbedding(
-            engine_client,
-            openai_serving_models,
-            request_logger=request_logger,
-            chat_template=None,
-            chat_template_content_format="auto",
-        )
-        if "embed" in supported_tasks
-        else None
-    )
+    openai_serving_chat = OpenAIServingChat(
+        engine_client,
+        model_config,
+        openai_serving_models,
+        args.response_role,
+        request_logger=request_logger,
+        chat_template=None,
+        chat_template_content_format="auto",
+        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+        enable_force_include_usage=args.enable_force_include_usage,
+    ) if "generate" in supported_tasks else None
+    openai_serving_embedding = OpenAIServingEmbedding(
+        engine_client,
+        model_config,
+        openai_serving_models,
+        request_logger=request_logger,
+        chat_template=None,
+        chat_template_content_format="auto",
+    ) if "embed" in supported_tasks else None
 
     enable_serving_reranking = (
         "classify" in supported_tasks

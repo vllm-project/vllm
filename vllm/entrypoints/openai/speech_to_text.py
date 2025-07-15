@@ -58,6 +58,7 @@ class OpenAISpeechToText(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         task_type: Literal["transcribe", "translate"] = "transcribe",
         log_error_stack: bool = False,
+        enable_force_include_usage: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -73,6 +74,8 @@ class OpenAISpeechToText(OpenAIServing):
         self.asr_config = self.model_cls.get_speech_to_text_config(
             self.model_config, task_type
         )
+
+        self.enable_force_include_usage = enable_force_include_usage
 
         self.max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
 
@@ -243,12 +246,10 @@ class OpenAISpeechToText(OpenAIServing):
             return self.create_error_response(str(e))
 
     async def _speech_to_text_stream_generator(
-        self,
-        request: SpeechToTextRequest,
-        list_result_generator: list[AsyncGenerator[RequestOutput, None]],
-        request_id: str,
-        request_metadata: RequestResponseMetadata,
-        audio_duration_s: float,
+        self, request: SpeechToTextRequest,
+        list_result_generator: list[AsyncGenerator[RequestOutput,
+                                                   None]], request_id: str,
+        request_metadata: RequestResponseMetadata, audio_duration_s: float,
         chunk_object_type: Literal["translation.chunk", "transcription.chunk"],
         response_stream_choice_class: type[TranscriptionResponseStreamChoice]
         | type[TranslationResponseStreamChoice],
@@ -261,14 +262,11 @@ class OpenAISpeechToText(OpenAIServing):
         completion_tokens = 0
         num_prompt_tokens = 0
 
-        include_usage = (
-            request.stream_include_usage if request.stream_include_usage else False
-        )
-        include_continuous_usage = (
-            request.stream_continuous_usage_stats
-            if include_usage and request.stream_continuous_usage_stats
+        include_usage = self.enable_force_include_usage or \
+            request.stream_include_usage
+        include_continuous_usage = request.stream_continuous_usage_stats \
+            if include_usage and request.stream_continuous_usage_stats \
             else False
-        )
 
         try:
             for result_generator in list_result_generator:
