@@ -13,7 +13,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
     P2pNcclEngine)
 from vllm.distributed.parallel_state import get_world_group
-from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -270,8 +269,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         assert self.p2p_nccl_engine is not None
 
-        no_compile_layers = (self._vllm_config.compilation_config.
-                             static_forward_context)
+        no_compile_layers = (
+            self._vllm_config.compilation_config.static_forward_context)
         return self.p2p_nccl_engine.get_finished(finished_req_ids,
                                                  no_compile_layers)
 

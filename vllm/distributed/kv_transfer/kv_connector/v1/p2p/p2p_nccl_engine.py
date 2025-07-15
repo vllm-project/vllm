@@ -9,7 +9,7 @@ import typing
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Optional
 
 import msgpack
 import torch
@@ -21,9 +21,6 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import (  # noqa: E501
     TensorMemoryPool)
 from vllm.utils import current_stream, get_ip
-
-if TYPE_CHECKING:
-    from vllm.forward_context import ForwardContext
 
 logger = logging.getLogger(__name__)
 
@@ -469,7 +466,7 @@ class P2pNcclEngine:
         return True
 
     def get_finished(
-        self, finished_req_ids: set[str], no_compile_layers
+            self, finished_req_ids: set[str], no_compile_layers
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         """
         Notifies worker-side connector ids of requests that have
