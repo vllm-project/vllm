@@ -9,7 +9,6 @@ import functools
 import json
 import sys
 import threading
-import warnings
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
 from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, List,
@@ -19,7 +18,7 @@ from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, List,
 import regex as re
 import torch
 from pydantic import TypeAdapter, ValidationError
-from typing_extensions import TypeIs, deprecated
+from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
@@ -32,8 +31,8 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
                          PrefixCachingHashAlgo, PromptAdapterConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         TaskOption, TokenizerMode, TokenizerPoolConfig,
-                         VllmConfig, get_attr_docs, get_field)
+                         TaskOption, TokenizerMode, VllmConfig, get_attr_docs,
+                         get_field)
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -66,9 +65,6 @@ def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
 
     def _parse_type(val: str) -> T:
         try:
-            if return_type is json.loads and not re.match(
-                    r"(?s)^\s*{.*}\s*$", val):
-                return cast(T, nullable_kvs(val))
             return return_type(val)
         except ValueError as e:
             raise argparse.ArgumentTypeError(
@@ -92,42 +88,6 @@ def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
     if not re.match(r"(?s)^\s*{.*}\s*$", val):
         return str(val)
     return optional_type(json.loads)(val)
-
-
-@deprecated(
-    "Passing a JSON argument as a string containing comma separated key=value "
-    "pairs is deprecated. This will be removed in v0.10.0. Please use a JSON "
-    "string instead.")
-def nullable_kvs(val: str) -> dict[str, int]:
-    """Parses a string containing comma separate key [str] to value [int]
-    pairs into a dictionary.
-
-    Args:
-        val: String value to be parsed.
-
-    Returns:
-        Dictionary with parsed values.
-    """
-    out_dict: dict[str, int] = {}
-    for item in val.split(","):
-        kv_parts = [part.lower().strip() for part in item.split("=")]
-        if len(kv_parts) != 2:
-            raise argparse.ArgumentTypeError(
-                "Each item should be in the form KEY=VALUE")
-        key, value = kv_parts
-
-        try:
-            parsed_value = int(value)
-        except ValueError as exc:
-            msg = f"Failed to parse value of item {key}={value}"
-            raise argparse.ArgumentTypeError(msg) from exc
-
-        if key in out_dict and out_dict[key] != parsed_value:
-            raise argparse.ArgumentTypeError(
-                f"Conflicting values specified for key: {key}")
-        out_dict[key] = parsed_value
-
-    return out_dict
 
 
 def is_type(type_hint: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
@@ -373,13 +333,6 @@ class EngineArgs:
     enforce_eager: bool = ModelConfig.enforce_eager
     max_seq_len_to_capture: int = ModelConfig.max_seq_len_to_capture
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
-    # The following three fields are deprecated and will be removed in a future
-    # release. Setting them will have no effect. Please remove them from your
-    # configurations.
-    tokenizer_pool_size: int = TokenizerPoolConfig.pool_size
-    tokenizer_pool_type: str = TokenizerPoolConfig.pool_type
-    tokenizer_pool_extra_config: dict = \
-        get_field(TokenizerPoolConfig, "extra_config")
     limit_mm_per_prompt: dict[str, int] = \
         get_field(MultiModalConfig, "limit_per_prompt")
     interleave_mm_strings: bool = MultiModalConfig.interleave_mm_strings
@@ -441,7 +394,6 @@ class EngineArgs:
 
     speculative_config: Optional[Dict[str, Any]] = None
 
-    qlora_adapter_name_or_path: Optional[str] = None
     show_hidden_metrics_for_version: Optional[str] = \
         ObservabilityConfig.show_hidden_metrics_for_version
     otlp_traces_endpoint: Optional[str] = \
@@ -475,7 +427,6 @@ class EngineArgs:
 
     additional_config: dict[str, Any] = \
         get_field(VllmConfig, "additional_config")
-    enable_reasoning: Optional[bool] = None  # DEPRECATED
     reasoning_parser: str = DecodingConfig.reasoning_backend
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
@@ -493,13 +444,6 @@ class EngineArgs:
         if isinstance(self.compilation_config, (int, dict)):
             self.compilation_config = CompilationConfig.from_cli(
                 str(self.compilation_config))
-        if self.qlora_adapter_name_or_path is not None:
-            warnings.warn(
-                "The `qlora_adapter_name_or_path` is deprecated "
-                "and will be removed in v0.10.0. ",
-                DeprecationWarning,
-                stacklevel=2,
-            )
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
@@ -612,14 +556,6 @@ class EngineArgs:
                                 **load_kwargs["ignore_patterns"])
         load_group.add_argument("--use-tqdm-on-load",
                                 **load_kwargs["use_tqdm_on_load"])
-        load_group.add_argument(
-            "--qlora-adapter-name-or-path",
-            type=str,
-            default=None,
-            help="The `--qlora-adapter-name-or-path` has no effect, do not set"
-            " it, and it  will be removed in v0.10.0.",
-            deprecated=True,
-        )
         load_group.add_argument('--pt-load-map-location',
                                 **load_kwargs["pt_load_map_location"])
 
@@ -640,15 +576,6 @@ class EngineArgs:
         guided_decoding_group.add_argument(
             "--guided-decoding-disable-additional-properties",
             **guided_decoding_kwargs["disable_additional_properties"])
-        guided_decoding_group.add_argument(
-            "--enable-reasoning",
-            action=argparse.BooleanOptionalAction,
-            deprecated=True,
-            help="[DEPRECATED] The `--enable-reasoning` flag is deprecated as "
-            "of v0.9.0. Use `--reasoning-parser` to specify the reasoning "
-            "parser backend instead. This flag (`--enable-reasoning`) will be "
-            "removed in v0.10.0. When `--reasoning-parser` is specified, "
-            "reasoning mode is automatically enabled.")
         guided_decoding_group.add_argument(
             "--reasoning-parser",
             # This choices is a special case because it's not static
@@ -750,19 +677,6 @@ class EngineArgs:
                                  **cache_kwargs["cpu_offload_gb"])
         cache_group.add_argument("--calculate-kv-scales",
                                  **cache_kwargs["calculate_kv_scales"])
-
-        # Tokenizer arguments
-        tokenizer_kwargs = get_kwargs(TokenizerPoolConfig)
-        tokenizer_group = parser.add_argument_group(
-            title="TokenizerPoolConfig",
-            description=TokenizerPoolConfig.__doc__,
-        )
-        tokenizer_group.add_argument("--tokenizer-pool-size",
-                                     **tokenizer_kwargs["pool_size"])
-        tokenizer_group.add_argument("--tokenizer-pool-type",
-                                     **tokenizer_kwargs["pool_type"])
-        tokenizer_group.add_argument("--tokenizer-pool-extra-config",
-                                     **tokenizer_kwargs["extra_config"])
 
         # Multimodal related configs
         multimodal_kwargs = get_kwargs(MultiModalConfig)
