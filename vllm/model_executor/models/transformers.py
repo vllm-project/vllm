@@ -46,7 +46,7 @@ from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputs, PlaceholderRange)
 from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, ProcessingCache)
+                                        BaseProcessingInfo)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_get_processor
@@ -228,26 +228,6 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder):
 
 class MultiModalProcessor(BaseMultiModalProcessor):
 
-    def __init__(self,
-                 info: MultiModalProcessingInfo,
-                 dummy_inputs: "BaseDummyInputsBuilder[MultiModalProcessingInfo]",
-                 *,
-                 cache: Optional[ProcessingCache] = None,
-    ) -> None:
-        super().__init__(
-            info=info,
-            dummy_inputs=dummy_inputs,
-            cache=cache,
-        )
-
-        if self.cache is not None:
-            logger.warning_once(
-                "TransformersForMultimodalLM doesn't support mm cache yet! "
-                "But mm_preprocessor_cache is enabled. Disable it due to the "
-                "compatibility issue for now."
-            )
-            self.cache = None
-
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -325,7 +305,7 @@ class MultiModalProcessor(BaseMultiModalProcessor):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        return_mm_hashes: bool=False,
+        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -334,11 +314,9 @@ class MultiModalProcessor(BaseMultiModalProcessor):
         outputting token IDs and processed tensors.
         """
         if return_mm_hashes:
-            logger.warning_once(
+            raise ValueError(
                 "TransformersForMultimodalLM doesn't support mm hashing yet! "
-                "But mm_preprocessor_cache is enabled. Disable it due to the "
-                "compatibility issue for now.")
-            return_mm_hashes = False
+                "Probably you didn't set `disable_mm_preprocessor_cache=True`")
 
         if tokenization_kwargs is None:
             tokenization_kwargs = {}
@@ -859,7 +837,8 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
         if inputs_embeds is None:
             multimodal_embeds = self.get_multimodal_embeddings(**kwargs)
             if multimodal_embeds is not None:
-                inputs_embeds = self.get_input_embeddings(input_ids, multimodal_embeds)
+                inputs_embeds = self.get_input_embeddings(
+                    input_ids, multimodal_embeds)
                 input_ids = None
 
         model_output = self.model(input_ids, positions, intermediate_tensors,
