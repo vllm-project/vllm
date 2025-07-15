@@ -1567,7 +1567,7 @@ class ModelConfig:
     @property
     def is_small_model(self) -> bool:
         """Models under 1B parameters have different performance characteristics."""
-        # Check if explicitly disabled via environment variable
+        # Environment override takes precedence
         if os.environ.get("VLLM_DISABLE_SMALL_MODEL_OPTIMIZATIONS", "").lower() in ("1", "true"):
             return False
         
@@ -1576,30 +1576,33 @@ class ModelConfig:
             return num_params < SMALL_MODEL_THRESHOLD
         except Exception as e:
             logger.debug("Could not determine model size: %s", e)
-            return False  # Conservative: assume large model
+            # Conservative fallback: assume large model to avoid incorrect optimizations
+            return False
 
     def get_num_parameters(self) -> int:
-        """Estimate total parameters based on model architecture."""
-        try:
-            # Some configs store the exact count.
-            if hasattr(self.hf_config, 'num_parameters') and \
-                    self.hf_config.num_parameters is not None:
-                return int(self.hf_config.num_parameters)
+        """Estimate total parameters based on model architecture.
+        
+        Returns:
+            Estimated parameter count. Falls back to 2B if estimation fails.
+        """
+        # Use exact count if available in config
+        if hasattr(self.hf_config, 'num_parameters') and self.hf_config.num_parameters is not None:
+            return int(self.hf_config.num_parameters)
 
-            # Rough estimation for standard Transformer architectures
+        # Fallback to architectural estimation for standard Transformers
+        try:
             hidden = getattr(self.hf_config, 'hidden_size', 768)
             layers = getattr(self.hf_config, 'num_hidden_layers', 12)
             vocab = getattr(self.hf_config, 'vocab_size', 50_000)
 
-            # Parameter breakdown (very coarse):
+            # Coarse parameter estimation for Transformer blocks:
             embeddings = vocab * hidden                       # token embeddings
             attention = layers * (4 * hidden * hidden)        # Q, K, V, O projections
             mlp = layers * (8 * hidden * hidden)              # two linear layers per block
 
             return embeddings + attention + mlp
         except Exception:
-            # If anything goes wrong fall back to a large value so that we do
-            # NOT enable small-model optimisations erroneously.
+            # Conservative fallback: large value prevents incorrect small-model optimizations
             return 2_000_000_000
 
 BlockSize = Literal[1, 8, 16, 32, 64, 128]
@@ -2442,7 +2445,7 @@ class SchedulerConfig:
                 "must be greater than or equal to 1 and less than or equal to "
                 f"max_num_partial_prefills ({self.max_num_partial_prefills}).")
 
-        # Small model optimizations with hardware awareness
+        # Apply hardware-specific optimizations for small models
         try:
             # Safe lookup of current ModelConfig (may be unset during early init)
             from vllm.config import get_current_vllm_config  # circular-safe import
@@ -2450,69 +2453,71 @@ class SchedulerConfig:
         except Exception:  # pragma: no cover – fallback if not yet available
             _mc = None
 
-        if _mc and getattr(_mc, "is_small_model", False):
-            import os
-            from vllm.platforms import current_platform
-            from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
+        if not (_mc and getattr(_mc, "is_small_model", False)):
+            return
 
-            device_cap = current_platform.get_device_capability()
-            major = device_cap.major if device_cap else None
+        import os
+        from vllm.platforms import current_platform
+        from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
-            is_datacenter = bool(major and major >= 8)  # A100 (8.0+) or newer
-            is_hopper = bool(major and major >= 9)      # H100 (9.0+) or newer
+        device_cap = current_platform.get_device_capability()
+        major = device_cap.major if device_cap else None
 
-            if is_datacenter:
-                # ---- Datacenter GPU optimizations ----
-                default_tokens = 4096 if is_hopper else 3072
-                env_var_name = (
-                    "VLLM_SMALL_MODEL_H100_BATCH_TOKENS" if is_hopper else
-                    "VLLM_SMALL_MODEL_A100_BATCH_TOKENS")
+        is_datacenter = bool(major and major >= 8)  # A100 (8.0+) or newer
+        is_hopper = bool(major and major >= 9)      # H100 (9.0+) or newer
 
-                if self.max_num_batched_tokens == DEFAULT_MAX_NUM_BATCHED_TOKENS:
-                    self.max_num_batched_tokens = int(
-                        os.getenv(env_var_name, str(default_tokens)))
+        if is_datacenter:
+            # Datacenter GPUs: higher memory bandwidth enables larger batches
+            default_tokens = 4096 if is_hopper else 3072
+            env_var_name = (
+                "VLLM_SMALL_MODEL_H100_BATCH_TOKENS" if is_hopper else
+                "VLLM_SMALL_MODEL_A100_BATCH_TOKENS")
+
+            if self.max_num_batched_tokens == DEFAULT_MAX_NUM_BATCHED_TOKENS:
+                self.max_num_batched_tokens = int(
+                    os.getenv(env_var_name, str(default_tokens)))
+            logger.info(
+                "Small model on %s: max_num_batched_tokens=%d",
+                "H100" if is_hopper else "A100",
+                self.max_num_batched_tokens,
+            )
+
+            if self.max_num_seqs == 128:  # Only adjust if default
+                self.max_num_seqs = 64
                 logger.info(
-                    "Small model on %s: max_num_batched_tokens=%d",
-                    "H100" if is_hopper else "A100",
-                    self.max_num_batched_tokens,
+                    "Small model on datacenter GPU: max_num_seqs=%d",
+                    self.max_num_seqs,
                 )
 
-                if self.max_num_seqs == 128:  # Only adjust if default
-                    self.max_num_seqs = 64
-                    logger.info(
-                        "Small model on datacenter GPU: max_num_seqs=%d",
-                        self.max_num_seqs,
-                    )
-
-                if self.enable_chunked_prefill is None:
-                    self.enable_chunked_prefill = True
-                    self.chunked_prefill_enabled = True
-                    logger.info(
-                        "Small model on datacenter GPU: enabled chunked prefill"
-                    )
-            else:
-                # ---- Consumer GPU optimizations ----
-                if self.max_num_batched_tokens == DEFAULT_MAX_NUM_BATCHED_TOKENS:
-                    self.max_num_batched_tokens = int(
-                        os.getenv("VLLM_SMALL_MODEL_CONSUMER_BATCH_TOKENS", "512"))
+            if self.enable_chunked_prefill is None:
+                self.enable_chunked_prefill = True
+                self.chunked_prefill_enabled = True
                 logger.info(
-                    "Small model on consumer GPU: max_num_batched_tokens=%d",
-                    self.max_num_batched_tokens,
+                    "Small model on datacenter GPU: enabled chunked prefill"
+                )
+        else:
+            # Consumer GPUs: memory constraints require smaller batches
+            if self.max_num_batched_tokens == DEFAULT_MAX_NUM_BATCHED_TOKENS:
+                self.max_num_batched_tokens = int(
+                    os.getenv("VLLM_SMALL_MODEL_CONSUMER_BATCH_TOKENS", "512"))
+            logger.info(
+                "Small model on consumer GPU: max_num_batched_tokens=%d",
+                self.max_num_batched_tokens,
+            )
+
+            if self.max_num_seqs == 128:
+                self.max_num_seqs = 32
+                logger.info(
+                    "Small model on consumer GPU: max_num_seqs=%d",
+                    self.max_num_seqs,
                 )
 
-                if self.max_num_seqs == 128:
-                    self.max_num_seqs = 32
-                    logger.info(
-                        "Small model on consumer GPU: max_num_seqs=%d",
-                        self.max_num_seqs,
-                    )
-
-                if self.enable_chunked_prefill is None:
-                    self.enable_chunked_prefill = False
-                    self.chunked_prefill_enabled = False
-                    logger.info(
-                        "Small model on consumer GPU: disabled chunked prefill"
-                    )
+            if self.enable_chunked_prefill is None:
+                self.enable_chunked_prefill = False
+                self.chunked_prefill_enabled = False
+                logger.info(
+                    "Small model on consumer GPU: disabled chunked prefill"
+                )
 
         # NOTE: Default set cuda_graph_sizes to [min(max_num_seqs * 2, 512)].
         # This avoids OOM in tight memory scenarios with small max_num_seqs,
@@ -5029,9 +5034,9 @@ class VllmConfig:
             f"seed={self.model_config.seed}, "
             f"served_model_name={self.model_config.served_model_name}, "
             f"num_scheduler_steps={self.scheduler_config.num_scheduler_steps}, "
-            f"multi_step_stream_outputs={self.scheduler_config.multi_step_stream_outputs}, "  # noqa
+            f"multi_step_stream_outputs={self.scheduler_config.multi_step_stream_outputs},  # noqa
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
-            f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
+            f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled},  # noqa
             f"use_async_output_proc={self.model_config.use_async_output_proc}, "
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}")
