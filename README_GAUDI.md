@@ -8,6 +8,10 @@ To set up the execution environment, please follow the instructions in the [Gaud
 To achieve the best performance on HPU, please follow the methods outlined in the
 [Optimizing Training Platform Guide](https://docs.habana.ai/en/latest/PyTorch/Model_Optimization_PyTorch/Optimization_in_Training_Platform.html).
 
+## Prerequisites
+
+For setups using an L3 switch, the `gaudinet.json` file must be mapped as described in the [Generating a gaudinet.json Example](https://docs.habana.ai/en/latest/Management_and_Monitoring/Network_Configuration/Configure_E2E_Test_in_L3.html#generating-a-gaudinet-json-example).
+
 ## Requirements
 
 - Python 3.10
