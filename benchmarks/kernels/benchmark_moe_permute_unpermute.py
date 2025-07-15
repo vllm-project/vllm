@@ -318,15 +318,14 @@ def main(args: argparse.Namespace):
     elif (
         config.architectures[0] == "DeepseekV3ForCausalLM"
         or config.architectures[0] == "DeepseekV2ForCausalLM"
+        or config.architectures[0] == "Glm4MoeForCausalLM"
     ):
         E = config.n_routed_experts
         topk = config.num_experts_per_tok
-    elif (
-        config.architectures[0] in ["Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"]
-        or config.architectures[0] == "Glm4MoeForCausalLM"
-    ):
+    elif config.architectures[0] in ["Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"]:
         E = config.num_experts
         topk = config.num_experts_per_tok
+
     else:
         # Support for llama4
         config = config.get_text_config()
