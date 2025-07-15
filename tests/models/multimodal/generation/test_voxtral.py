@@ -73,7 +73,6 @@ def _get_prompt(audio_assets, question):
 def test_models_with_multiple_audios(vllm_runner,
                                      audio_assets: AudioTestAssets, dtype: str,
                                      max_tokens: int, num_logprobs: int) -> None:
-
     vllm_prompt = _get_prompt(audio_assets, MULTI_AUDIO_PROMPT)
     run_multi_audio_test(
         vllm_runner,
