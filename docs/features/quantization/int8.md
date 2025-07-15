@@ -114,7 +114,8 @@ After quantization, you can load and run the model in vLLM:
 
 ```python
 from vllm import LLM
-model = LLM("./Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token")
+
+llm = LLM("./Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token")
 ```
 
 To evaluate accuracy, you can use `lm_eval`:
