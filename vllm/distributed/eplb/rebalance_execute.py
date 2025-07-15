@@ -266,6 +266,7 @@ def rearrange_expert_weights_inplace(
         is_profile (bool): If `True`, do not perform any actual weight copy.
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
+        rank_mapping: A dictionary mapping old rank to new rank.
     """
     if rank_mapping is not None:
         if len(rank_mapping) == ep_group.size():
@@ -353,10 +354,7 @@ def _map_old_expert_indices_with_rank_mapping(
         (num_layers, new_ep_size * num_local_physical_experts).
     """
     num_layers, old_num_physical_experts = old_global_expert_indices.shape
-
-    if not rank_mapping:
-        # If no rank mapping, return the original tensor
-        return old_global_expert_indices
+    assert rank_mapping, "Rank mapping is required"
 
     # Get sizes from parameters and rank_mapping
     old_ep_size = len(rank_mapping)
@@ -375,7 +373,7 @@ def _map_old_expert_indices_with_rank_mapping(
     for old_rank in range(old_ep_size):
         new_rank = rank_mapping.get(old_rank)
         if new_rank is not None and new_rank >= 0 and new_rank < new_ep_size:
-            # This old rank exists in the new world
+            # This old rank exists in the new configuration
             old_start_idx = old_rank * num_local_physical_experts
             old_end_idx = (old_rank + 1) * num_local_physical_experts
             new_start_idx = new_rank * num_local_physical_experts
@@ -394,10 +392,7 @@ def _map_new_expert_indices_with_rank_mapping(
     rank_mapping: dict[int, int],
 ) -> torch.Tensor:
     num_layers, new_num_physical_experts = new_global_expert_indices.shape
-
-    if not rank_mapping:
-        # If no rank mapping, return the original tensor
-        return new_global_expert_indices
+    assert rank_mapping, "Rank mapping is required"
 
     # Get sizes from parameters and rank_mapping
     old_ep_size = len(rank_mapping)
