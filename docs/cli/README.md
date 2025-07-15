@@ -46,7 +46,7 @@ Start the vLLM OpenAI Compatible API server.
     vllm serve --help=page
     ```
 
-### help
+### Options
 
 --8<-- "docs/argparse/serve.md"
 
