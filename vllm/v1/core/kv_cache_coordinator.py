@@ -383,6 +383,20 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             hit_blocks = hit_blocks_other_attn + hit_blocks_full_attn
         return hit_blocks, hit_length
 
+    def calculate_optimal_block_size(kv_cache_spec: dict[str, KVCacheSpec]) -> int:
+        """Calculate optimal block_size using aggregate constraint."""
+        attention_specs = [s for s in kv_cache_spec.values() if isinstance(s, AttentionSpec)]
+        mamba_specs = [s for s in kv_cache_spec.values() if isinstance(s, MambaSpec)]
+        
+        if not (attention_specs and mamba_specs):
+            return attention_specs[0].block_size if attention_specs else 16
+        
+        max_mamba_state = max(s.state_size_bytes for s in mamba_specs)
+        num_attention_layers = len(attention_specs)
+        min_per_token_bytes = min(s.page_size_bytes / s.block_size for s in attention_specs)
+        
+        required = max_mamba_state / (min_per_token_bytes * num_attention_layers)
+        return max(16, int(math.ceil(required / 16) * 16))  # Align to 16
 
 def get_kv_cache_coordinator(
         kv_cache_config: KVCacheConfig, max_model_len: int, use_eagle: bool,
