@@ -17,8 +17,11 @@ from vllm.assets.audio import AudioAsset
 
 from ...utils import RemoteOpenAIServer
 
+MISTRAL_FORMAT_ARGS = [
+    "--tokenizer_mode", "mistral", "--config_format", "mistral",
+    "--load_format", "mistral"
+]
 
-MISTRAL_FORMAT_ARGS = ["--tokenizer_mode", "mistral", "--config_format", "mistral", "--load_format", "mistral"]
 
 @pytest.fixture
 def mary_had_lamb():
@@ -34,9 +37,10 @@ def winning_call():
         yield f
 
 
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", ["openai/whisper-large-v3-turbo", "mistralai/Voxtral-Mini-3B-2507"])
+@pytest.mark.parametrize(
+    "model_name",
+    ["openai/whisper-large-v3-turbo", "mistralai/Voxtral-Mini-3B-2507"])
 async def test_basic_audio(mary_had_lamb, model_name):
     server_args = ["--enforce-eager"]
 
@@ -103,7 +107,7 @@ async def test_long_audio_request(mary_had_lamb, model_name):
             response_format="text",
             temperature=0.0)
         out = json.loads(transcription)['text']
-        counts = out.count("Mary had a little lamb") 
+        counts = out.count("Mary had a little lamb")
         assert counts == 10, counts
 
 
