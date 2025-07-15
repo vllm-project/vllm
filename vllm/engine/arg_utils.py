@@ -9,7 +9,6 @@ import functools
 import json
 import sys
 import threading
-import warnings
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
 from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, List,
@@ -434,7 +433,6 @@ class EngineArgs:
 
     speculative_config: Optional[Dict[str, Any]] = None
 
-    qlora_adapter_name_or_path: Optional[str] = None
     show_hidden_metrics_for_version: Optional[str] = \
         ObservabilityConfig.show_hidden_metrics_for_version
     otlp_traces_endpoint: Optional[str] = \
@@ -468,7 +466,6 @@ class EngineArgs:
 
     additional_config: dict[str, Any] = \
         get_field(VllmConfig, "additional_config")
-    enable_reasoning: Optional[bool] = None  # DEPRECATED
     reasoning_parser: str = DecodingConfig.reasoning_backend
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
@@ -486,13 +483,6 @@ class EngineArgs:
         if isinstance(self.compilation_config, (int, dict)):
             self.compilation_config = CompilationConfig.from_cli(
                 str(self.compilation_config))
-        if self.qlora_adapter_name_or_path is not None:
-            warnings.warn(
-                "The `qlora_adapter_name_or_path` is deprecated "
-                "and will be removed in v0.10.0. ",
-                DeprecationWarning,
-                stacklevel=2,
-            )
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
@@ -605,14 +595,6 @@ class EngineArgs:
                                 **load_kwargs["ignore_patterns"])
         load_group.add_argument("--use-tqdm-on-load",
                                 **load_kwargs["use_tqdm_on_load"])
-        load_group.add_argument(
-            "--qlora-adapter-name-or-path",
-            type=str,
-            default=None,
-            help="The `--qlora-adapter-name-or-path` has no effect, do not set"
-            " it, and it  will be removed in v0.10.0.",
-            deprecated=True,
-        )
         load_group.add_argument('--pt-load-map-location',
                                 **load_kwargs["pt_load_map_location"])
 
@@ -633,15 +615,6 @@ class EngineArgs:
         guided_decoding_group.add_argument(
             "--guided-decoding-disable-additional-properties",
             **guided_decoding_kwargs["disable_additional_properties"])
-        guided_decoding_group.add_argument(
-            "--enable-reasoning",
-            action=argparse.BooleanOptionalAction,
-            deprecated=True,
-            help="[DEPRECATED] The `--enable-reasoning` flag is deprecated as "
-            "of v0.9.0. Use `--reasoning-parser` to specify the reasoning "
-            "parser backend instead. This flag (`--enable-reasoning`) will be "
-            "removed in v0.10.0. When `--reasoning-parser` is specified, "
-            "reasoning mode is automatically enabled.")
         guided_decoding_group.add_argument(
             "--reasoning-parser",
             # This choices is a special case because it's not static
