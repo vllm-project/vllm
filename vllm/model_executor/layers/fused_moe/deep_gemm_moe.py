@@ -55,11 +55,8 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     if (w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn):
         return False
 
-    if (not hidden_states.is_contiguous() or not w1.is_contiguous()
-            or not w2.is_contiguous()):
-        return False
-
-    return True
+    return (hidden_states.is_contiguous() and w1.is_contiguous()
+            and w2.is_contiguous())
 
 
 class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
