@@ -1,4 +1,4 @@
-name: Label ROCm-related issues
+name: Label issues based on keywords
 
 on:
   issues:
