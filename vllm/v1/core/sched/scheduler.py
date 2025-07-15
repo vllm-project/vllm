@@ -551,7 +551,6 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens,
         )
 
-        # COHERE START
         # dictionary of all request that require forcing of thinking token
         # # to be scheduled in this step.
         requests_with_remaining_budget: dict[str, int] = {}
@@ -567,8 +566,7 @@ class Scheduler(SchedulerInterface):
                     current_remaining_budget = request.sampling_params.thinking_budget\
                     - thinking_budget_used
                     requests_with_remaining_budget[request_id] = current_remaining_budget
-                
-        #COHERE END
+
 
 
         # Construct the scheduler output.
