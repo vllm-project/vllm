@@ -143,12 +143,17 @@ async def test_multi_image_input(
         # the server should still work afterwards
         response = await client.responses.create(
             model=model_name,
-            prompt=[0, 0, 0, 0, 0],
+            input=[
+                {
+                    "role": "user",
+                    "content": "What's the weather like in Paris today?",
+                }
+            ],
         )
         assert len(response.output_text) > 0
     else:
         response = await client.responses.create(
             model=model_name,
-            messages=messages,
+            input=messages,
         )
         assert len(response.output_text) > 0
