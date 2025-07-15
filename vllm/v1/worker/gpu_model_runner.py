@@ -42,7 +42,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        GiB_bytes, LazyLoader, async_tensor_h2d, cdiv,
+                        GiB_bytes, LazyLoader, async_tensor_h2d,
                         check_use_alibi, get_dtype_size,
                         is_pin_memory_available, round_up)
 from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionBackend
@@ -2649,9 +2649,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     "Prefix caching is not supported for Mamba yet.")
             max_model_len = self.vllm_config.model_config.max_model_len
 
-            page_size_padded = self._maybe_pad_fixed_state_page_size(
-                attn_layers, mamba_layers, kv_cache_spec, MambaSpec,
-                max_model_len, block_size)
+            page_size_padded = (
+                self.vllm_config.cache_config.mamba_page_size_padded)
 
             # Set block_size to max_model_len, so that mamba model will always
             # have only one block in the KV cache.
@@ -2688,56 +2687,3 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     page_size_padded=page_size_padded)
 
         return kv_cache_spec
-
-    def _maybe_pad_fixed_state_page_size(
-        self,
-        attn_layers: dict[str, Attention],
-        mamba_layers: dict[str, MambaBase],
-        kv_cache_spec: dict[str, KVCacheSpec],
-        state_spec: type[MambaSpec | ShortConvSpec],
-        max_model_len: int,
-        block_size: int,
-    ) -> Optional[int]:
-        """
-        Ensure that page size of attention KV cache groups is greater than or
-        equal to the Mamba/ShortConv KV cache groups. If not, we suggest to the user
-        how to set the attention block size to ensure that it is.
-
-        If the attention page size is strictly greater than the fixed state page size,
-        we pad the fixed state page size to make them equal.
-
-        Args:
-            attn_layers: Attention layers
-            state_layers: Mamba or ShortConv layers
-            kv_cache_spec: KV cache spec (populated with attention layers)
-            state_spec: MambaSpec or ShortConvSpec
-
-        Returns:
-            Optional[int]: State page size with padding (None if no padding).
-        """
-
-        if len(attn_layers) == 0:
-            return None
-
-        attn_layer_name = next(iter(attn_layers))
-        attn_page_size = kv_cache_spec[attn_layer_name].page_size_bytes
-        state_layer_name = next(iter(state_layers))
-        state_page_size = state_spec(
-            shapes=state_layers[state_layer_name].get_state_shape(),
-            dtype=self.kv_cache_dtype,
-            block_size=max_model_len).page_size_bytes
-        if attn_page_size < state_page_size:
-            # attention page size (for 16 tokens)
-            attn_page_size_16 = 16 * attn_page_size // block_size
-            # some attention backends (e.g. FA) only support setting
-            # block size to multiple of 16, so let's suggest a value
-            # that would work (note: FA is currently not compatible
-            # with mamba or short-conv layers, use FlashInfer instead).
-            suggest_attn_block_size = 16 * cdiv(state_page_size,
-                                                attn_page_size_16)
-            raise ValueError(
-                "Attention block size should be increased to at least "
-                f"{suggest_attn_block_size} in order to match "
-                "the state page size")
-
-        return attn_page_size
