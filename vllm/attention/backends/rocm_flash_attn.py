@@ -991,7 +991,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     self.kv_cache_dtype,
                     layer._k_scale,
                     layer._v_scale,
-                    layer._out_scale,
+                    output_scale,
                 )
             elif is_rocm_aiter_paged_attn_enabled():
                 paged_attn.forward_decode(

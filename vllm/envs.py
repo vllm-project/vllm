@@ -16,7 +16,6 @@ if TYPE_CHECKING:
     VLLM_NCCL_SO_PATH: Optional[str] = None
     LD_LIBRARY_PATH: Optional[str] = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
-    VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT: bool = True
     VLLM_USE_ROCM_FP8_FLASH_ATTN: bool = True
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
@@ -327,12 +326,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
     lambda: bool(
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
-
-    # have custom paged attention implemented for MI3* cards write out fp8
-    "VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT":
-    lambda:
-    (os.getenv("VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT", "True").lower() in
-     ("true", "1")),
 
     # use quantized q,k,v,softmax(qk^T), attn output during prefill
     "VLLM_USE_ROCM_FP8_FLASH_ATTN":

@@ -7,10 +7,6 @@
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
 
-#ifdef USE_ROCM
-  #include "quantization/fp8/amd/quant_utils.cuh"
-#endif
-
 namespace vllm {
 
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
@@ -34,27 +30,6 @@ __global__ void act_and_mul_kernel(
     out[token_idx * d + idx] = compute<scalar_t, ACT_FN, act_first>(x, y);
   }
 }
-
-// Scaled activation and gating kernel template.
-#ifdef USE_ROCM
-template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&)>
-__global__ void scaled_act_and_mul_kernel(
-    c10::Float8_e4m3fnuz* __restrict__ out,  // [..., d]
-    const scalar_t* __restrict__ input,      // [..., 2, d]
-    const int d, const float scale) {
-  const int64_t token_idx = blockIdx.x;
-  for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
-    const scalar_t x = VLLM_LDG(&input[token_idx * 2 * d + idx]);
-    const scalar_t y = VLLM_LDG(&input[token_idx * 2 * d + d + idx]);
-    float r = ACT_FN(x) * y * scale;
-    out[token_idx * d + idx] = c10::Float8_e4m3fnuz(
-        __hip_cvt_float_to_fp8(__bfloat162float(r),
-                               fp8::fp8_type::__default_saturation,
-                               fp8::fp8_type::__default_interpret),
-        c10::Float8_e4m3fnuz::from_bits());
-  }
-}
-#endif
 
 template <typename T>
 __device__ __forceinline__ T silu_kernel(const T& x) {
@@ -107,25 +82,6 @@ __device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
                                          input.data_ptr<scalar_t>(), d); \
       });
 
-// Launch activation and gating kernel.
-#ifdef USE_ROCM
-  #define LAUNCH_SCALED_ACTIVATION_GATE_KERNEL(KERNEL)                \
-    int d = input.size(-1) / 2;                                       \
-    int64_t num_tokens = input.numel() / input.size(-1);              \
-    dim3 grid(num_tokens);                                            \
-    dim3 block(std::min(d, 1024));                                    \
-    const at::cuda::OptionalCUDAGuard device_guard(device_of(input)); \
-    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();     \
-    VLLM_DISPATCH_FLOATING_TYPES(                                     \
-        input.scalar_type(), "scaled_act_and_mul_kernel", [&] {       \
-          vllm::scaled_act_and_mul_kernel<scalar_t, KERNEL<scalar_t>> \
-              <<<grid, block, 0, stream>>>(                           \
-                  out.data_ptr<c10::Float8_e4m3fnuz>(),               \
-                  input.data_ptr<scalar_t>(), d,                      \
-                  1.0 / (*scale.data_ptr<float>()));                  \
-        });
-#endif
-
 void silu_and_mul(torch::Tensor& out,    // [..., d]
                   torch::Tensor& input)  // [..., 2 * d]
 {
@@ -138,14 +94,6 @@ void mul_and_silu(torch::Tensor& out,    // [..., d]
   // The difference between mul_and_silu and silu_and_mul is that mul_and_silu
   // applies the silu to the latter half of the input.
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel, false);
-}
-
-void scaled_silu_and_mul(torch::Tensor& out,    // [..., d]
-                         torch::Tensor& input,  // [..., 2 * d]
-                         torch::Tensor& scale) {
-#ifdef USE_ROCM
-  LAUNCH_SCALED_ACTIVATION_GATE_KERNEL(vllm::silu_kernel);
-#endif
 }
 
 void gelu_and_mul(torch::Tensor& out,    // [..., d]

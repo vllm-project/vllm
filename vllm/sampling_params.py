@@ -25,7 +25,6 @@ class SamplingType(IntEnum):
     GREEDY = 0
     RANDOM = 1
     RANDOM_SEED = 2
-    FORCED = 3
 
 
 # maybe make msgspec?
@@ -155,8 +154,6 @@ class SamplingParams(
         min_p: Float that represents the minimum probability for a token to be
             considered, relative to the probability of the most likely token.
             Must be in [0, 1]. Set to 0 to disable this.
-        ppl_measurement: Measure perplexity towards the deterministic string 
-            instead of probabilistic regressing.
         seed: Random seed to use for the generation.
         stop: list of strings that stop the generation when they are generated.
             The returned output will not contain the stop strings.
@@ -215,9 +212,6 @@ class SamplingParams(
     top_p: float = 1.0
     top_k: int = 0
     min_p: float = 0.0
-    ppl_measurement: bool = False
-    future_context: Optional[list[int]] = None
-    cntr: Optional[list[int]] = None
     seed: Optional[int] = None
     stop: Optional[Union[str, list[str]]] = None
     stop_token_ids: Optional[list[int]] = None
@@ -265,9 +259,6 @@ class SamplingParams(
         top_p: Optional[float] = 1.0,
         top_k: int = 0,
         min_p: float = 0.0,
-        ppl_measurement: bool = False,
-        future_context: Optional[list[int]] = None,
-        cntr: Optional[int] = None,
         seed: Optional[int] = None,
         stop: Optional[Union[str, list[str]]] = None,
         stop_token_ids: Optional[list[int]] = None,
@@ -311,9 +302,6 @@ class SamplingParams(
             top_p=1.0 if top_p is None else top_p,
             top_k=top_k,
             min_p=min_p,
-            ppl_measurement=ppl_measurement,
-            future_context=future_context,
-            cntr=cntr,
             seed=seed,
             stop=stop,
             stop_token_ids=stop_token_ids,
@@ -542,8 +530,6 @@ class SamplingParams(
 
     @cached_property
     def sampling_type(self) -> SamplingType:
-        if self.ppl_measurement:
-            return SamplingType.FORCED
         if self.temperature < _SAMPLING_EPS:
             return SamplingType.GREEDY
         if self.seed is not None:
@@ -584,7 +570,6 @@ class SamplingParams(
             f"top_p={self.top_p}, "
             f"top_k={self.top_k}, "
             f"min_p={self.min_p}, "
-            f"ppl_measurement={self.ppl_measurement}, "
             f"seed={self.seed}, "
             f"stop={self.stop}, "
             f"stop_token_ids={self.stop_token_ids}, "

@@ -13,10 +13,6 @@
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   // vLLM custom ops for rocm
-  rocm_ops.def(
-      "LLMM_Silu(Tensor in_a, Tensor in_b, Tensor! out_c, int rows_per_block) "
-      "-> ()");
-  rocm_ops.impl("LLMM_Silu", torch::kCUDA, &LLMM_Silu);
 
   // Custom gemm op for matrix-vector multiplication
   rocm_ops.def(

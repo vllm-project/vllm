@@ -10,76 +10,19 @@
   #include <hipcub/hipcub.hpp>
 #endif
 
-#ifdef USE_ROCM
-  #include "quantization/fp8/amd/quant_utils.cuh"
-#else
-  #include "quantization/fp8/nvidia/quant_utils.cuh"
-#endif
-
 namespace vllm {
 
-// This kernel uses the _f16Vec to represent vectorized data.
-// A conversion to/from float should exist
-template <typename scalar_t, int width>
-__global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>
-rms_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
-                const scalar_t* __restrict__ input,   // [..., hidden_size]
-                const scalar_t* __restrict__ weight,  // [hidden_size]
-                const float epsilon, const int num_tokens,
-                const size_t hidden_size, const size_t vec_hidden_size) {
-  __shared__ float s_variance;
-  float v8_variance_sum = 0.0f;
-
-  const int64_t tx = threadIdx.x;
-  const int64_t bx = blockIdx.x;
-  const int64_t num_threads = blockDim.x;
-
-  auto* __restrict__ out_v = reinterpret_cast<_f16Vec<scalar_t, width>*>(out);
-  auto* __restrict__ input_v =
-      reinterpret_cast<const _f16Vec<scalar_t, width>*>(
-          input + bx * static_cast<int64_t>(hidden_size));
-  auto* __restrict__ weight_v =
-      reinterpret_cast<const _f16Vec<scalar_t, width>*>(weight);
-
-  // Compute variance. Be careful, hidden_size should multiple of 4.
-  for (size_t idx = tx; idx < vec_hidden_size; idx += num_threads) {
-    _f16Vec<scalar_t, width> temp = input_v[idx];
-    v8_variance_sum += temp.sum_squares();
-  }
-
-  using BlockReduce = cub::BlockReduce<float, 1024>;
-  __shared__ typename BlockReduce::TempStorage reduceStore;
-
-  float variance =
-      BlockReduce(reduceStore).Reduce(v8_variance_sum, cub::Sum{}, num_threads);
-
-  if (threadIdx.x == 0) {
-    s_variance = rsqrtf(variance / hidden_size + epsilon);
-  }
-  __syncthreads();
-
-  variance = s_variance;
-
-  for (size_t idx = tx; idx < vec_hidden_size; idx += num_threads) {
-    _f16Vec<scalar_t, width> temp = input_v[idx];
-    temp *= variance;
-    temp *= weight_v[idx];
-    out_v[bx * static_cast<int64_t>(vec_hidden_size) + idx] = temp;
-  }
-}
-
-// Non vectorized kernel for unusual shapes/types without conversion
-template <typename scalar_t, int width>
-__global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
-rms_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
-                const scalar_t* __restrict__ input,   // [..., hidden_size]
-                const scalar_t* __restrict__ weight,  // [hidden_size]
-                const float epsilon, const int num_tokens,
-                const size_t hidden_size, const size_t) {
+// TODO(woosuk): Further optimize this kernel.
+template <typename scalar_t>
+__global__ void rms_norm_kernel(
+    scalar_t* __restrict__ out,           // [..., hidden_size]
+    const scalar_t* __restrict__ input,   // [..., hidden_size]
+    const scalar_t* __restrict__ weight,  // [hidden_size]
+    const float epsilon, const int num_tokens, const int hidden_size) {
   __shared__ float s_variance;
   float variance = 0.0f;
 
-  for (size_t idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
+  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     const float x = (float)input[blockIdx.x * hidden_size + idx];
     variance += x * x;
   }
@@ -93,7 +36,7 @@ rms_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
   }
   __syncthreads();
 
-  for (size_t idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
+  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float x = (float)input[blockIdx.x * hidden_size + idx];
     out[blockIdx.x * hidden_size + idx] =
         ((scalar_t)(x * s_variance)) * weight[idx];
@@ -199,35 +142,7 @@ fused_add_rms_norm_kernel(
   }
 }
 
-/* Function specialization in the case of FP16/BF16 tensors.
-   Additional optimizations we can make in this case are
-   packed and vectorized operations, which help with the
-   memory latency bottleneck. */
-
-template <>
-struct Vec<c10::Float8_e4m3fnuz, 8> {
-  using Type = uint2;
-};
-
-template <>
-struct Vec<c10::Half, 8> {
-  using Type = uint4;
-};
-
-template <>
-struct Vec<c10::BFloat16, 8> {
-  using Type = bf16_8_t;
-};
-
 }  // namespace vllm
-
-#define LAUNCH_RMS_NORM(width)                                               \
-  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel", [&] { \
-    vllm::rms_norm_kernel<scalar_t, width><<<grid, block, 0, stream>>>(      \
-        out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),                \
-        weight.data_ptr<scalar_t>(), epsilon, num_tokens, hidden_size,       \
-        vec_hidden_size);                                                    \
-  });
 
 void rms_norm(torch::Tensor& out,     // [..., hidden_size]
               torch::Tensor& input,   // [..., hidden_size]
@@ -239,20 +154,16 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
 
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
-  int vec_size = 16 / input.element_size();
-  int vec_hidden_size = hidden_size / vec_size;
-  bool can_run_vectorize = (hidden_size % vec_size) == 0;
 
   dim3 grid(num_tokens);
+  dim3 block(std::min(hidden_size, 1024));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  if (vec_size % 8 == 0 && can_run_vectorize) {
-    dim3 block(std::min(vec_hidden_size, 1024));
-    LAUNCH_RMS_NORM(8);
-  } else {
-    dim3 block(std::min(hidden_size, 1024));
-    LAUNCH_RMS_NORM(0);
-  }
+  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel", [&] {
+    vllm::rms_norm_kernel<scalar_t><<<grid, block, 0, stream>>>(
+        out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
+        weight.data_ptr<scalar_t>(), epsilon, num_tokens, hidden_size);
+  });
 }
 
 #define LAUNCH_FUSED_ADD_RMS_NORM(width)                                    \
