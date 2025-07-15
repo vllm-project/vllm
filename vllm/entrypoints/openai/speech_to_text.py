@@ -112,6 +112,7 @@ class OpenAISpeechToText(OpenAIServing):
             prompt = self.model_cls.get_generation_prompt(
                 audio=chunk,
                 stt_config=self.asr_config,
+                model_config=self.model_config,
                 language=lang,
                 task_type=self.task_type,
                 request_prompt=request.prompt)
