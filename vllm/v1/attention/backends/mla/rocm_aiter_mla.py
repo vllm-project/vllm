@@ -75,12 +75,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         self.compilation_config = vllm_config.compilation_config
         max_num_pages_per_req = cdiv(vllm_config.model_config.max_model_len,
                                      self.kv_cache_spec.block_size)
-        max_num_req = vllm_config.scheduler_config.max_num_seqs
-        max_num_pages = max_num_req * max_num_pages_per_req
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        max_num_pages = max_num_reqs * max_num_pages_per_req
 
         # Preparing persistent buffers
         if vllm_config.compilation_config.full_cuda_graph:
-            max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+
             self.paged_kv_indptr = torch.zeros(max_num_reqs + 1,
                                                dtype=torch.int32,
                                                device=device)
