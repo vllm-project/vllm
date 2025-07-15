@@ -555,7 +555,7 @@ def _valid_cutlass_block_scaled_grouped_gemm(
     _, K, N = w2.size()
     if not _valid_cutlass_block_scaled_grouped_gemm_shape(N, K):
         logger.debug(
-            "CutlassBlockScaledGroupedGemm disabled: unalinged problem size. "
+            "CutlassBlockScaledGroupedGemm disabled: unaligned problem size. "
             "N: %s, K: %s",
             N,
             K,
