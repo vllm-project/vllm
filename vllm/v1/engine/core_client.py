@@ -923,15 +923,19 @@ class DPAsyncMPClient(AsyncMPClient):
                             flags=zmq.NOBLOCK).result()
 
                         # Check if this is a scale up notification
-                        if len(buf) > 4 and buf[4:].startswith(b"SCALE_UP"):
-                            # Extract new engine count from the first 4 bytes
-                            new_engine_count = int.from_bytes(
-                                buf[:4], "little")
+                        decoded = msgspec.msgpack.decode(buf)
+                        if isinstance(decoded, (list, tuple)) and len(
+                                decoded) == 2 and decoded[0] == "SCALE_DP":
+                            # Extract new engine count from the decoded message
+                            new_engine_count = decoded[1]
                             # Send scale up notification to coordinator
                             scale_msg = msgspec.msgpack.encode(
-                                ("SCALE_UP", new_engine_count))
+                                ("SCALE_DP", new_engine_count))
                             await socket.send(scale_msg)
                             continue
+                        logger.error(
+                            "Received invalid scale up notification: %s",
+                            decoded)
 
                         # Regular request notification - send a message to
                         # notify the coordinator that
@@ -1148,8 +1152,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # Notify coordinator about scale up through existing
         # stats_update_task connection
         self._ensure_stats_update_task()
-        scale_up_marker = (new_data_parallel_size).to_bytes(
-            4, "little") + b"SCALE_UP"
+        scale_up_marker = msgspec.msgpack.encode(
+            ("SCALE_DP", new_data_parallel_size))
         await self.first_req_send_socket.send(scale_up_marker)
 
         # Update the parallel config
@@ -1200,8 +1204,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                                                  new_data_parallel_size)
 
         self._ensure_stats_update_task()
-        scale_up_marker = (new_data_parallel_size).to_bytes(
-            4, "little") + b"SCALE_UP"
+        scale_up_marker = msgspec.msgpack.encode(
+            ("SCALE_DP", new_data_parallel_size))
         await self.first_req_send_socket.send(scale_up_marker)
 
         self.vllm_config.parallel_config.data_parallel_size = \

@@ -201,8 +201,8 @@ class CoordinatorProc:
                         continue
 
                     decoded = msgspec.msgpack.decode(buffer)
-                    if isinstance(decoded, list) and len(
-                            decoded) == 2 and decoded[0] == "SCALE_UP":
+                    if isinstance(decoded, (list, tuple)) and len(
+                            decoded) == 2 and decoded[0] == "SCALE_EP":
                         # Handle scale up notification
                         new_engine_count = decoded[1]
                         current_count = len(self.engines)
@@ -229,6 +229,8 @@ class CoordinatorProc:
                                 "DPCoordinator scaled down from %s to %s "
                                 "engines", current_count, new_engine_count)
                         continue  # Skip normal engine notification processing
+
+                    logger.info("Received scale up notification: %s", decoded)
 
                     # We received a message on the front-end XPUB socket,
                     # from an API server sending a new request while the
