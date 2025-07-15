@@ -73,11 +73,6 @@ IMAGE_TOKEN = "<image>"
 IMAGE_ATOM_ID = -300
 IMAGE_INDICATOR_IDS = [-301, -302, -303, -304, -305]
 
-try:
-    AutoConfig.register("aimv2", AIMv2Config)
-except Exception as e:
-    pass
-
 
 # ----------------------------------------------------------------------
 #                     Visual Tokenizer Configuration
@@ -108,9 +103,11 @@ class BaseVisualTokenizerConfig(PretrainedConfig):
                 f"expect `backbone_config` to be instance of PretrainedConfig or dict, but got {type(backbone_config)} type"
             if not isinstance(backbone_config, PretrainedConfig):
                 model_type = backbone_config['model_type']
-                backbone_config.pop('model_type')
-                backbone_config = AutoConfig.for_model(model_type,
-                                                       **backbone_config)
+                if model_type != "aimv2":
+                    backbone_config.pop('model_type')
+                    backbone_config = AutoConfig.for_model(model_type, **backbone_config)
+                else:
+                    backbone_config = AIMv2Config(**backbone_config)
         self.backbone_config = backbone_config
         self.hidden_stride = hidden_stride
 
