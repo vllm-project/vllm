@@ -663,7 +663,8 @@ def _causal_conv1d_update_kernel(
 
     if IS_CONTINUOUS_BATCHING:
         # mask = idx_seq < batch
-        conv_state_batch_coord = tl.load(conv_state_indices_ptr + idx_seq)
+        conv_state_batch_coord = tl.load(conv_state_indices_ptr + idx_seq).to(
+            tl.int64)
     else:
         conv_state_batch_coord = idx_seq
     if USE_PAD_SLOT:  # noqa
