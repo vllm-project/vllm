@@ -1053,12 +1053,12 @@ class OpenAIServing:
 
     def _get_tool_parser(
         self,
-        tool_parser_name: str,
+        tool_parser_name: Optional[str] = None,
         enable_auto_tools: bool = False
     ) -> Optional[Callable[[AnyTokenizer], ToolParser]]:
         """Get the tool parser based on the name."""
         parser = None
-        if not enable_auto_tools:
+        if not enable_auto_tools or tool_parser_name is None:
             return parser
         logger.info(
             "\"auto\" tool choice has been enabled please note that while"
