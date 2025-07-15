@@ -8,6 +8,8 @@ import torch
 
 import vllm.envs as envs
 from vllm.compilation.collective_fusion import AllReduceFusionPass
+from vllm.compilation.fusion import FusionPass
+from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.config import (CompilationConfig, CompilationLevel, DeviceConfig,
                          ModelConfig, PassConfig, VllmConfig)
 from vllm.distributed import tensor_model_parallel_all_reduce
@@ -178,12 +180,12 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
     init_distributed_environment()
     initialize_model_parallel(tensor_model_parallel_size=world_size)
 
-    vllm_config = VllmConfig(
-        compilation_config=CompilationConfig(level=CompilationLevel.PIECEWISE,
-                                             custom_ops=["+rms_norm"],
-                                             compile_sizes=[2, 4, 8]))
+    vllm_config = VllmConfig(compilation_config=CompilationConfig(
+        level=CompilationLevel.PIECEWISE,
+        custom_ops=["+rms_norm", "+quant_fp8"],
+        compile_sizes=[2, 4, 8]))
     vllm_config.compilation_config.pass_config = PassConfig(
-        enable_fi_allreduce_fusion=True)
+        enable_fi_allreduce_fusion=True, enable_noop=True, enable_fusion=True)
     vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
 
     # this is a fake model name to construct the model config
@@ -198,7 +200,14 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
                                            seed=42)
 
     all_reduce_fusion_pass = AllReduceFusionPass(vllm_config)
-    backend = TestBackend(all_reduce_fusion_pass)
+
+    # Reshape pass is needed for the fusion pass to work
+    noop_pass = NoOpEliminationPass(vllm_config)
+
+    # Fuses RMS+Quant, so we can fuse AR+(RMS+Quant)
+    fusion_pass = FusionPass(vllm_config)
+
+    backend = TestBackend(noop_pass, fusion_pass, all_reduce_fusion_pass)
 
     model = test_model_cls(hidden_size, quant=quant)
 
@@ -208,7 +217,12 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
                            requires_grad=False)
 
     compiled_model = torch.compile(model, backend=backend)
-    compiled_model(hidden_states, residual)
+
+    # residual is updated in-place by rms+add, so clone it
+    ref = model(hidden_states, residual.clone())
+    res = compiled_model(hidden_states, residual)
+
+    torch.testing.assert_close(res, ref, atol=1e-3, rtol=1e-3)
 
     backend.check_before_ops(model.ops_in_model_before(), fully_replaced=True)
     backend.check_after_ops(model.ops_in_model_after())
