@@ -624,7 +624,6 @@ class FusedMoEModularKernel(torch.nn.Module):
                 expert_num_tokens=c_expert_num_tokens,
                 expert_num_tokens_cpu=c_expert_num_tokens_cpu)
 
-        # topk_weights = extra_expert_kwargs.get('topk_weights')
         m = extra_expert_kwargs.get('m')
 
         chunked_extra_expert_kwargs = extra_expert_kwargs
@@ -643,9 +642,6 @@ class FusedMoEModularKernel(torch.nn.Module):
 
             if m is not None:
                 chunked_extra_expert_kwargs['m'] = e - s
-            # if topk_weights is not None:
-            #     chunked_extra_expert_kwargs['topk_weights'] = topk_weights[s:e]
-
             self._do_fused_experts(
                 fused_out=slice_output_tensor(chunk_idx),
                 a1=a1,

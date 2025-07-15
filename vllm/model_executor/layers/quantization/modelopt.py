@@ -1070,7 +1070,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 x, layer.w13_weight, layer.w2_weight), (
                     "Flashinfer CUTLASS Fused MoE not applicable!")
             extra_expert_args = {
-                # 'topk_weights': None,  # placeholder topk_weights,
                 'g1_alphas': layer.g1_alphas,
                 'g2_alphas': layer.g2_alphas,
                 'out_dtype': x.dtype,
