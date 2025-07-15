@@ -380,30 +380,28 @@ ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
 ARG FLASHINFER_GIT_REF="v0.2.8rc1"
 RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
   . /etc/environment
-
-git clone --depth 1 --recursive --shallow-submodules \
-    --branch ${FLASHINFER_GIT_REF} \
-    ${FLASHINFER_GIT_REPO} flashinfer
-# Exclude CUDA arches for older versions (11.x and 12.0-12.7)
-# TODO: Update this to allow setting TORCH_CUDA_ARCH_LIST as a build arg.
-if [[ "${CUDA_VERSION}" == 11.* ]]; then
-    FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
-elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then
-    FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
-else
-    # CUDA 12.8+ supports 10.0a and 12.0
-    FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"
-fi
-echo "🏗️  Building FlashInfer for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
-# Needed to build AOT kernels
-pushd flashinfer
-    TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-        python3 -m flashinfer.aot
-    TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-        uv pip install --system --no-build-isolation .
-popd
-rm -rf flashinfer
-
+    git clone --depth 1 --recursive --shallow-submodules \
+        --branch ${FLASHINFER_GIT_REF} \
+        ${FLASHINFER_GIT_REPO} flashinfer
+    # Exclude CUDA arches for older versions (11.x and 12.0-12.7)
+    # TODO: Update this to allow setting TORCH_CUDA_ARCH_LIST as a build arg.
+    if [[ "${CUDA_VERSION}" == 11.* ]]; then
+        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
+    elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then
+        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
+    else
+        # CUDA 12.8+ supports 10.0a and 12.0
+        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"
+    fi
+    echo "🏗️  Building FlashInfer for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
+    # Needed to build AOT kernels
+    pushd flashinfer
+        TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
+            python3 -m flashinfer.aot
+        TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
+            uv pip install --system --no-build-isolation .
+    popd
+    rm -rf flashinfer
 BASH
 COPY examples examples
 COPY benchmarks benchmarks
