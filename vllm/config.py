@@ -80,7 +80,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
     ConfigType = type[DataclassInstance]
-    HfOverrides = Union[dict, Callable[[type], type]]
+    HfOverrides = Union[dict, Callable[[Any], Any]]
 else:
     DataclassInstance = Any
     PlacementGroup = Any
@@ -91,7 +91,7 @@ else:
     BaseModelLoader = Any
     TensorizerConfig = Any
     ConfigType = type
-    HfOverrides = Union[dict[str, Any], Callable[[type], type]]
+    HfOverrides = Union[dict[str, Any], Callable[[Any], Any]]
 
     me_quant = LazyLoader("model_executor", globals(),
                           "vllm.model_executor.layers.quantization")
@@ -232,7 +232,6 @@ TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 
 
-@config
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class ModelConfig:
     """Configuration for the model."""
