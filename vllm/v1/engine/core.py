@@ -140,19 +140,26 @@ class EngineCore:
         # Get all kv cache needed by the model
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
 
-        if os.environ.get("VLLM_EEP_SCALE_UP_LAUNCH") == "1":
-            dp_group = getattr(self, "dp_group", None)
-            assert dp_group is not None
-            self.available_gpu_memory_for_kv_cache = \
-                ParallelConfig.sync_kv_cache_memory_size(dp_group, -1)
-            available_gpu_memory = [self.available_gpu_memory_for_kv_cache
-                                    ] * len(kv_cache_specs)
+        has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
+        if has_kv_cache:
+            if os.environ.get("VLLM_EEP_SCALE_UP_LAUNCH") == "1":
+                dp_group = getattr(self, "dp_group", None)
+                assert dp_group is not None
+                self.available_gpu_memory_for_kv_cache = \
+                    ParallelConfig.sync_kv_cache_memory_size(dp_group, -1)
+                available_gpu_memory = [
+                    self.available_gpu_memory_for_kv_cache
+                ] * len(kv_cache_specs)
+            else:
+                # Profiles the peak memory usage of the model to determine how
+                # much memory can be allocated for kv cache.
+                available_gpu_memory = (
+                    self.model_executor.determine_available_memory())
+                self.available_gpu_memory_for_kv_cache = \
+                    available_gpu_memory[0]
         else:
-            # Profiles the peak memory usage of the model to determine how much
-            # memory can be allocated for kv cache.
-            available_gpu_memory = (
-                self.model_executor.determine_available_memory())
-            self.available_gpu_memory_for_kv_cache = available_gpu_memory[0]
+            # Attention free models don't need memory for kv cache
+            available_gpu_memory = [0] * len(kv_cache_specs)
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
         # Get the kv cache tensor size
