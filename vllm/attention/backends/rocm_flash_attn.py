@@ -958,7 +958,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 tmp_output = torch.empty(
                     size=(num_seqs, num_heads, max_num_partitions, head_size),
                     dtype=query.dtype,
-                    dtype=query.dtype,
                     device=output.device,
                 )
                 exp_sums = torch.empty(
