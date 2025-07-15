@@ -188,8 +188,35 @@ class EmbeddingMixin(OpenAIServing):
         if pooling_type:
             pooling_type_upper = pooling_type.upper()
 
-            # Warn about non-MEAN pooling types
-            if pooling_type_upper not in ['MEAN', 'AVG']:
+            # For LAST and CLS pooling, chunked processing doesn't make
+            # semantic sense because only the last/first chunk
+            # contains the relevant token position
+            if pooling_type_upper in ['LAST', 'CLS']:
+                # Check if user explicitly allowed non-mean chunking
+                allow_non_mean = getattr(pooler_config,
+                                         'allow_non_mean_chunking', False)
+                if not allow_non_mean:
+                    logger.warning(
+                        "Chunked processing with pooling type '%s' "
+                        "is not recommended as it may produce semantically "
+                        "incorrect results. %s pooling relies on specific "
+                        "token positions that lose their meaning when the "
+                        "sequence is chunked. Consider using MEAN pooling "
+                        "or disable chunked processing. Set "
+                        "'allow_non_mean_chunking: true' ",
+                        "to override this warning.", pooling_type,
+                        pooling_type_upper)
+                    return False  # Disable chunked processing by default
+                else:
+                    logger.info(
+                        "Using chunked processing with %s pooling "
+                        "(explicitly enabled). Note: only the %s chunk "
+                        "will be processed to avoid computational waste.",
+                        pooling_type_upper,
+                        "last" if pooling_type_upper == "LAST" else "first")
+
+            # Warn about non-MEAN pooling types (for other pooling types)
+            elif pooling_type_upper != 'MEAN':
                 # Check if user explicitly allowed non-mean chunking
                 allow_non_mean = getattr(pooler_config,
                                          'allow_non_mean_chunking', False)
@@ -240,12 +267,39 @@ class EmbeddingMixin(OpenAIServing):
         max_pos_embeddings = self._get_max_position_embeddings()
         chunks = self._chunk_token_ids(token_ids, max_pos_embeddings)
 
-        logger.info(
-            "Split input of %s tokens into %s chunks "
-            "(max_chunk_size: %s)", len(token_ids), len(chunks),
-            max_pos_embeddings)
+        # Check pooling type to optimize chunk processing
+        pooler_config = getattr(self.model_config, 'pooler_config', None)
+        pooling_type = getattr(pooler_config, 'pooling_type', 'MEAN')
+        if pooling_type:
+            pooling_type = pooling_type.upper()
 
-        for chunk_idx, chunk_tokens in enumerate(chunks):
+        # For LAST pooling, only process the last chunk
+        # For CLS pooling, only process the first chunk
+        if pooling_type == 'LAST':
+            chunks_to_process = [chunks[-1]]
+            chunk_indices = [len(chunks) - 1]
+            logger.info(
+                "LAST pooling: processing only the last chunk (%d tokens) "
+                "out of %d total chunks to avoid computational waste",
+                len(chunks[-1]), len(chunks))
+        elif pooling_type == 'CLS':
+            chunks_to_process = [chunks[0]]
+            chunk_indices = [0]
+            logger.info(
+                "CLS pooling: processing only the first chunk (%d tokens) "
+                "out of %d total chunks to avoid computational waste",
+                len(chunks[0]), len(chunks))
+        else:
+            # For MEAN and other pooling types, process all chunks
+            chunks_to_process = chunks
+            chunk_indices = list(range(len(chunks)))
+            logger.info(
+                "Split input of %s tokens into %s chunks "
+                "(max_chunk_size: %s)", len(token_ids), len(chunks),
+                max_pos_embeddings)
+
+        for i, (chunk_idx, chunk_tokens) in enumerate(
+                zip(chunk_indices, chunks_to_process)):
             # Create a request ID for this chunk
             chunk_request_id = (f"{ctx.request_id}-prompt-{prompt_idx}-"
                                 f"chunk-{chunk_idx}")
@@ -299,7 +353,7 @@ class EmbeddingMixin(OpenAIServing):
             pooling_type = pooling_type.upper()
 
         # Route to appropriate aggregation method based on pooling type
-        if pooling_type in ['MEAN', 'AVG']:
+        if pooling_type == 'MEAN':
             return await self._aggregate_mean_pooling(
                 chunk_results, original_token_count, original_prompt_token_ids)
         elif pooling_type == 'LAST':
@@ -397,12 +451,19 @@ class EmbeddingMixin(OpenAIServing):
         chunk_results: list[PoolingRequestOutput],
         original_prompt_token_ids: Optional[list[int]] = None,
     ) -> PoolingRequestOutput:
-        """Aggregate results for LAST pooling by using the last chunk.
+        """Aggregate results for LAST pooling.
         
-        For LAST pooling, we use the embedding from the last chunk since
-        it contains the final token's representation, which is what LAST
-        pooling extracts from the full sequence.
+        For LAST pooling, when chunked processing is enabled, we only process
+        the last chunk to avoid computational waste, since only the last token's
+        representation is needed. This result is returned directly.
         """
+        # When LAST pooling chunked processing is enabled, we only process
+        # the last chunk, so chunk_results should contain only one result
+        if len(chunk_results) != 1:
+            logger.warning(
+                "Expected exactly 1 chunk result for LAST pooling, "
+                "got %d. Using the last result.", len(chunk_results))
+
         last_result = chunk_results[-1]
 
         # Preserve original prompt token ids for consistency
@@ -423,12 +484,19 @@ class EmbeddingMixin(OpenAIServing):
         chunk_results: list[PoolingRequestOutput],
         original_prompt_token_ids: Optional[list[int]] = None,
     ) -> PoolingRequestOutput:
-        """Aggregate results for CLS pooling by using the first chunk.
+        """Aggregate results for CLS pooling.
         
-        For CLS pooling, we use the embedding from the first chunk since
-        it contains the CLS token's representation, which is what CLS
-        pooling extracts (typically the first token).
+        For CLS pooling, when chunked processing is enabled, we only process
+        the first chunk to avoid computational waste, since only the CLS token's
+        representation (typically the first token) is needed.
         """
+        # When CLS pooling chunked processing is enabled, we only process
+        # the first chunk, so chunk_results should contain only one result
+        if len(chunk_results) != 1:
+            logger.warning(
+                "Expected exactly 1 chunk result for CLS pooling, "
+                "got %d. Using the first result.", len(chunk_results))
+
         first_result = chunk_results[0]
 
         # Preserve original prompt token ids for consistency
