@@ -4828,13 +4828,13 @@ class VllmConfig:
             return
 
         from vllm.model_executor.models.config import (
-            MODELS_CONFIG_MAP, HybridAttentionMambaModelConfig)
+            MODELS_CONFIG_MAP, HybridAttentionStaticCacheModelConfig)
         cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_config(self)
 
         if self.model_config.is_hybrid:
-            HybridAttentionMambaModelConfig.verify_and_update_config(self)
+            HybridAttentionStaticCacheModelConfig.verify_and_update_config(self)
 
         if self.model_config.task == "classify":
             # Maybe convert ForCausalLM into ForSequenceClassification model.
