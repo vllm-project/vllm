@@ -248,10 +248,7 @@ def get_model_architecture(
 
             assert model_config.task in ["auto", "classify"]
             model_config.task = "classify"
-
-            old_arch = arch
             new_arch = arch.replace("ForSequenceClassification", "ForCausalLM")
-            logger.info("Automatic conversion %s -> %s", new_arch, old_arch)
             vllm_supported = not any(arch in vllm_supported_archs
                                      for arch in architectures)
             if vllm_supported:
@@ -262,6 +259,7 @@ def get_model_architecture(
     if (model_config.model_impl == ModelImpl.TRANSFORMERS or
             model_config.model_impl != ModelImpl.VLLM and vllm_not_supported):
         architectures = resolve_transformers_arch(model_config, architectures)
+        logger.debug_once("Resolve transformers arch %s", str(architectures))
     elif (model_config.quantization is not None
           and model_config.quantization not in mixtral_supported
           and "MixtralForCausalLM" in architectures):
@@ -269,10 +267,13 @@ def get_model_architecture(
 
     model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
     if model_config.task == "embed":
+        logger.debug_once("Automatic conversion using `as_embedding_model`.")
         model_cls = as_embedding_model(model_cls)
     elif model_config.task == "classify":
+        logger.debug_once("Automatic conversion using `as_seq_cls_model`.")
         model_cls = as_seq_cls_model(model_cls)
     elif model_config.task == "reward":
+        logger.debug_once("Automatic conversion using `as_reward_model`.")
         model_cls = as_reward_model(model_cls)
 
     return model_cls, arch
