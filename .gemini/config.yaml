@@ -1,4 +1,4 @@
-# Enables fun features such as a poem in the initial pull request summary.
+# https://developers.google.com/gemini-code-assist/docs/customize-gemini-behavior-github
 have_fun: false
 code_review:
   comment_severity_threshold: HIGH
