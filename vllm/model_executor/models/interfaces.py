@@ -703,8 +703,7 @@ class SupportsTranscription(Protocol):
     @classmethod
     def get_generation_prompt(cls, audio: np.ndarray,
                               stt_config: SpeechToTextConfig,
-                              model_config: ModelConfig,
-                              language: str,
+                              model_config: ModelConfig, language: str,
                               task_type: str,
                               request_prompt: str) -> PromptType:
         """Get the prompt for the ASR model.
