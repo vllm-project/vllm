@@ -51,7 +51,7 @@ jobs:
                   'rdna4', 'rdna3', 'rdna2',
                   
                   // Libraries and tools
-                  'composable kernel', 'aiter', 'rccl', 'migraphx'
+                  'composable kernel', 'aiter', 'rccl', 'migraphx', 'hipgraph'
                 ],
                 exclusions: [
                   // More flexible patterns to match the original exclusion logic
