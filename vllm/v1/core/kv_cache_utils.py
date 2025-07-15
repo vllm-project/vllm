@@ -245,7 +245,9 @@ class FreeKVCacheBlockQueue:
         Returns:
             The first free block.
         """
-        if self.fake_free_list_head.next_free_block is self.fake_free_list_tail or self.fake_free_list_head.next_free_block is None:
+        if (self.fake_free_list_head.next_free_block
+                is self.fake_free_list_tail
+                or self.fake_free_list_head.next_free_block is None):
             assert self.num_free_blocks == 0, (
                 f"num_free_blocks ({self.num_free_blocks}) is out of sync "
                 "with the free list.")
@@ -256,9 +258,8 @@ class FreeKVCacheBlockQueue:
         if first_block.next_free_block is None:
             # This should not happen if the block is from the free list.
             # It indicates a bug in the caller's logic.
-            raise RuntimeError(
-                "Invalid block found in popleft() which doesn't have a valid next_free_block"
-            )
+            raise RuntimeError("Invalid block found in popleft() "
+                               "which doesn't have a valid next_free_block")
 
         # Connect fake_head and the next block of first_block (i.e. second block
         # or fake tail).
@@ -298,6 +299,9 @@ class FreeKVCacheBlockQueue:
         Args:
             block: The block to append.
         """
+        if self.fake_free_list_tail.prev_free_block is None:
+            raise RuntimeError(
+                "prev_free_block of fake_free_list_tail should always exist")
         last_block: KVCacheBlock = self.fake_free_list_tail.prev_free_block
 
         # Connect the new block after the last block.
@@ -317,8 +321,11 @@ class FreeKVCacheBlockQueue:
             A list of free blocks.
         """
         ret = []
+        if self.fake_free_list_head.next_free_block is None:
+            raise RuntimeError(
+                "next_free_block of fake_free_list_head should always exist")
         # Start from the first block
-        curr_block = self.fake_free_list_head.next_free_block
+        curr_block: KVCacheBlock = self.fake_free_list_head.next_free_block
         # As long as next_free_block is available, we haven't reached to
         # the fake tail yet.
         while curr_block.next_free_block is not None:
