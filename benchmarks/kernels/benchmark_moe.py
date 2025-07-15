@@ -566,14 +566,26 @@ def main(args: argparse.Namespace):
     if args.model_prefix:
         config = getattr(config, args.model_prefix)
 
-    if config.architectures[0] in (
-        "DbrxForCausalLM",
-        "JambaForCausalLM",
+    if config.architectures[0] == "DbrxForCausalLM":
+        E = config.ffn_config.moe_num_experts
+        topk = config.ffn_config.moe_top_k
+        intermediate_size = config.ffn_config.ffn_hidden_size
+        shard_intermediate_size = 2 * intermediate_size // args.tp_size
+    elif config.architectures[0] == "JambaForCausalLM":
+        E = config.num_experts
+        topk = config.num_experts_per_tok
+        intermediate_size = config.intermediate_size
+        shard_intermediate_size = 2 * intermediate_size // args.tp_size
+    elif config.architectures[0] in (
         "DeepseekV3ForCausalLM",
-        "DeepseekV2ForCausalLMQwen2MoeForCausalLM",
-        "Qwen3MoeForCausalLM",
+        "DeepseekV2ForCausalLM",
         "Glm4MoeForCausalLM",
     ):
+        E = config.n_routed_experts
+        topk = config.num_experts_per_tok
+        intermediate_size = config.moe_intermediate_size
+        shard_intermediate_size = 2 * intermediate_size // args.tp_size
+    elif config.architectures[0] in ("Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"):
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
