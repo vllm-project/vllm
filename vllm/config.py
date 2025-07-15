@@ -26,7 +26,7 @@ from pydantic import (ConfigDict, SkipValidation, TypeAdapter, field_validator,
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.distributed import ProcessGroup, ReduceOp
-from typing_extensions import Self, deprecated, runtime_checkable
+from typing_extensions import Self, assert_never, deprecated, runtime_checkable
 
 import vllm.envs as envs
 from vllm import version
@@ -771,6 +771,25 @@ class ModelConfig:
                 for k, v in base_config.items():
                     if getattr(pooler_config, k) is None:
                         setattr(pooler_config, k, v)
+
+            # set default pooler config
+            if pooler_config.pooling_type is None:
+                default_pooling_type = self.model_info.default_pooling_type
+                pooler_config.pooling_type = default_pooling_type
+
+            if pooler_config.normalize is None:
+                if self.task in ["classify", "reward"]:
+                    pooler_config.normalize = False
+                elif self.task == "embed":
+                    pooler_config.normalize = True
+                assert_never(self.task)
+
+            if pooler_config.softmax is None:
+                if self.task == "classify":
+                    pooler_config.softmax = True
+                elif self.task == "embed":
+                    pooler_config.normalize = False
+                assert_never(self.task)
 
             if self.is_matryoshka:
                 if pooler_config.normalize is None:

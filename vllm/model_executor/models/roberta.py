@@ -124,6 +124,7 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
        model: An instance of BertModel used for forward operations.
        _pooler: An instance of Pooler used for pooling operations.
    """
+    default_pooling_type = "CLS"
 
     def _build_model(self,
                      vllm_config: VllmConfig,
@@ -164,7 +165,7 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
        roberta: An instance of BertModel used for forward operations.
        _pooler: An instance of Pooler used for pooling operations.
    """
-
+    default_pooling_type = "CLS"
     jina_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             'emb_ln': "embeddings.LayerNorm",

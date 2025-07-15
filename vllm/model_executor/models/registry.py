@@ -273,6 +273,7 @@ class _ModelInfo:
     architecture: str
     is_text_generation_model: bool
     is_pooling_model: bool
+    default_pooling_type: str
     supports_cross_encoding: bool
     supports_multimodal: bool
     supports_pp: bool
@@ -290,6 +291,8 @@ class _ModelInfo:
             architecture=model.__name__,
             is_text_generation_model=is_text_generation_model(model),
             is_pooling_model=True,  # Can convert any model into a pooling model
+            default_pooling_type=getattr(model, "default_pooling_type",
+                                         "LAST"),
             supports_cross_encoding=supports_cross_encoding(model),
             supports_multimodal=supports_multimodal(model),
             supports_pp=supports_pp(model),

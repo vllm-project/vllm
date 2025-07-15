@@ -399,6 +399,7 @@ class BertWithRopeEncoder(nn.Module):
 
 
 class BertWithRope(nn.Module, SupportsV0Only, SupportsQuant):
+    default_pooling_type = "CLS"
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

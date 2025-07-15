@@ -335,6 +335,7 @@ class EmbedModelInfo(NamedTuple):
     matryoshka_dimensions: Optional[list[int]] = None
     architecture: str = ""
     dtype: str = "auto"
+    default_pooling_type: str = "LAST"
     enable_test: bool = True
 
 
@@ -342,4 +343,5 @@ class RerankModelInfo(NamedTuple):
     name: str
     architecture: str = ""
     dtype: str = "auto"
+    default_pooling_type: str = "LAST"
     enable_test: bool = True

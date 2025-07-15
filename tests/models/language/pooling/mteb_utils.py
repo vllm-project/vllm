@@ -176,9 +176,12 @@ def mteb_test_embed_models(hf_runner,
                      max_model_len=None,
                      **vllm_extra_kwargs) as vllm_model:
 
+        model_config = vllm_model.model.llm_engine.model_config
+
         if model_info.architecture:
-            assert (model_info.architecture
-                    in vllm_model.model.llm_engine.model_config.architectures)
+            assert model_info.architecture in model_config.architectures
+        assert (model_config.default_pooling_type ==
+                model_info.default_pooling_type)
 
         vllm_main_score = run_mteb_embed_task(VllmMtebEncoder(vllm_model),
                                               MTEB_EMBED_TASKS)
