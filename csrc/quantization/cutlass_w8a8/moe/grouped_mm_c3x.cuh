@@ -32,6 +32,13 @@ using LayoutD_Transpose =
 using LayoutC = LayoutD;
 using LayoutC_Transpose = LayoutD_Transpose;
 
+using LayoutA_Transpose =
+    typename cutlass::layout::LayoutTranspose<LayoutA>::type;
+using LayoutB_Transpose =
+    typename cutlass::layout::LayoutTranspose<LayoutB>::type;
+using LayoutC_Transpose =
+    typename cutlass::layout::LayoutTranspose<LayoutC>::type;
+
 template <typename ElementAB_, typename ElementC_, typename ArchTag_,
           template <typename, typename, typename> typename Epilogue_,
           typename TileShape, typename ClusterShape, typename KernelSchedule,
@@ -92,7 +99,6 @@ void cutlass_group_gemm_caller(
     torch::Tensor const& b_strides, torch::Tensor const& c_strides,
     bool per_act_token, bool per_out_ch) {
   static constexpr bool swap_ab = Gemm::swap_ab;
-
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
 
@@ -114,13 +120,44 @@ void cutlass_group_gemm_caller(
                             out_tensors, a_scales, b_scales);
 
   using GemmKernel = typename Gemm::GemmKernel;
-  using StrideA = Stride<int64_t, Int<1>, Int<0>>;
-  using StrideB = Stride<int64_t, Int<1>, Int<0>>;
-  using StrideC = typename GemmKernel::InternalStrideC;
+  
+  // Define stride types based on swap_ab
+  using StrideA = cute::conditional_t<swap_ab,
+      Stride<int64_t, Int<1>, Int<0>>,  // B->A: ColumnMajor transposed
+      Stride<int64_t, Int<1>, Int<0>>   // A: RowMajor
+  >;
+  using StrideB = cute::conditional_t<swap_ab,
+      Stride<int64_t, Int<1>, Int<0>>,  // A->B: RowMajor transposed  
+      Stride<int64_t, Int<1>, Int<0>>   // B: ColumnMajor
+  >;
+  using StrideC = cute::conditional_t<swap_ab, 
+      typename Gemm::StrideC_Transpose, 
+      typename Gemm::StrideC>;
+
+  // Handle problem shape for swapped case
+  torch::Tensor effective_problem_sizes = problem_sizes;
+  if constexpr (swap_ab) {
+    // When swapping A and B, problem dimensions need to be adjusted
+    // Original: (M, N, K) -> Swapped: (N, M, K)
+    effective_problem_sizes = torch::empty_like(problem_sizes);
+    auto* orig_sizes = static_cast<int32_t*>(problem_sizes.data_ptr());
+    auto* new_sizes = static_cast<int32_t*>(effective_problem_sizes.data_ptr());
+    
+    for (int i = 0; i < num_experts; ++i) {
+      int32_t m = orig_sizes[i * 3 + 0];
+      int32_t n = orig_sizes[i * 3 + 1];
+      int32_t k = orig_sizes[i * 3 + 2];
+      
+      // Swap M and N for the kernel
+      new_sizes[i * 3 + 0] = n;  // new M = original N
+      new_sizes[i * 3 + 1] = m;  // new N = original M
+      new_sizes[i * 3 + 2] = k;  // K unchanged
+    }
+  }
 
   ProblemShape::UnderlyingProblemShape* problem_sizes_as_shapes =
       static_cast<ProblemShape::UnderlyingProblemShape*>(
-          problem_sizes.data_ptr());
+          effective_problem_sizes.data_ptr());
   ProblemShape prob_shape{num_experts, problem_sizes_as_shapes, nullptr};
 
   typename GemmKernel::MainloopArguments mainloop_args;

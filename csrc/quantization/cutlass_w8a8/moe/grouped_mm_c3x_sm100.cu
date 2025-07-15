@@ -13,6 +13,24 @@ namespace {
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue>
 struct sm100_fp8_config_default {
+  // M in [1, 16)
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  using KernelSchedule =
+      cutlass::gemm::KernelPtrArrayTmaWarpSpecialized1SmSm100;
+  using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecialized1Sm;
+  using TileShape = cute::Shape<cute::_64, cute::_128, cute::_128>;
+  using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
+  using ArchTag = cutlass::arch::Sm100;
+
+  using Cutlass3xGemm =
+      cutlass_3x_group_gemm<InType, OutType, ArchTag, Epilogue, TileShape,
+                            ClusterShape, KernelSchedule, EpilogueSchedule>;
+};
+
+template <typename InType, typename OutType,
+          template <typename, typename, typename> typename Epilogue>
+struct sm100_fp8_config_M32 {
+  // M in [32,inf)
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule =
       cutlass::gemm::KernelPtrArrayTmaWarpSpecialized1SmSm100;
@@ -24,6 +42,40 @@ struct sm100_fp8_config_default {
   using Cutlass3xGemm =
       cutlass_3x_group_gemm<InType, OutType, ArchTag, Epilogue, TileShape,
                             ClusterShape, KernelSchedule, EpilogueSchedule>;
+};
+
+template <typename InType, typename OutType,
+          template <typename, typename, typename> typename Epilogue>
+struct sm100_fp8_config_N4096 {
+  // N in [4096, inf)
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  using KernelSchedule =
+      cutlass::gemm::KernelPtrArrayTmaWarpSpecialized2SmSm100;
+  using EpilogueSchedule =
+      cutlass::epilogue::PtrArrayTmaWarpSpecialized2Sm;
+  using TileShape = cute::Shape<cute::_128, cute::_256, cute::_128>;
+  using ClusterShape = cute::Shape<cute::_2, cute::_1, cute::_1>;
+  using ArchTag = cutlass::arch::Sm100;
+
+  using Cutlass3xGemm =
+      cutlass_3x_group_gemm<InType, OutType, ArchTag, Epilogue, TileShape,
+                            ClusterShape, KernelSchedule, EpilogueSchedule>;
+};
+
+template <typename InType, typename OutType,
+          template <typename, typename, typename> typename Epilogue>
+struct sm100_fp8_config_SwapAB {
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  using KernelSchedule =
+      cutlass::gemm::KernelPtrArrayTmaWarpSpecialized1SmSm100;
+  using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecialized1Sm;
+  using TileShape = cute::Shape<cute::_128, cute::_16, cute::_128>;
+  using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
+  using ArchTag = cutlass::arch::Sm100;
+
+  using Cutlass3xGemm =
+      cutlass_3x_group_gemm<InType, OutType, ArchTag, Epilogue, TileShape,
+                            ClusterShape, KernelSchedule, EpilogueSchedule, true>;
 };
 
 template <typename InType, typename OutType>
@@ -45,11 +97,40 @@ void run_cutlass_moe_mm_sm100(
 
   using Cutlass3xGemmDefault = typename sm100_fp8_config_default<
       InType, OutType, vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
-
-  cutlass_group_gemm_caller<Cutlass3xGemmDefault>(
-      out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-      problem_sizes, a_strides, b_strides, c_strides, per_act_token,
-      per_out_ch);
+  using Cutlass3xGemmN4096 = typename sm100_fp8_config_N4096<
+      InType, OutType, vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
+  using Cutlass3xGemmM32 = typename sm100_fp8_config_M32<
+      InType, OutType, vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
+  using Cutlass3xGemmSwapAB = typename sm100_fp8_config_SwapAB<
+      InType, OutType, vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
+  uint32_t const m = a_tensors.size(0);
+  uint32_t const n = out_tensors.size(1);
+  uint32_t const k = a_tensors.size(1);
+  bool swap_ab = m < 32;
+  if (swap_ab) {
+    cutlass_group_gemm_caller<Cutlass3xGemmSwapAB>(
+        out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+        per_out_ch);
+  }
+  else{
+    if (n >= 4096) {
+    cutlass_group_gemm_caller<Cutlass3xGemmN4096>(
+        out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+        per_out_ch);
+  } else if (m >= 32) {
+    cutlass_group_gemm_caller<Cutlass3xGemmM32>(
+        out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+        per_out_ch);
+  } else {
+    cutlass_group_gemm_caller<Cutlass3xGemmDefault>(
+        out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+            problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+            per_out_ch);
+  }
+  }
 }
 
 void dispatch_moe_mm_sm100(
