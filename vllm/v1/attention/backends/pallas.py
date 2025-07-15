@@ -368,10 +368,12 @@ def get_page_size_bytes(block_size: int, num_kv_heads: int, head_size: int,
     """Returns the size in bytes of one page of the KV cache."""
     padded_head_size = cdiv(head_size,
                             TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
-    packing = get_dtype_packing(kv_cache_dtype)
-    # for the implicit padding in XLA
-    padded_head_size = max(padded_head_size, packing)
-    kv_cache_dtype_bits = dtype_bits(kv_cache_dtype)
     num_combined_kv_heads = num_kv_heads * 2
+
+    # NOTE: for the implicit padding in XLA
+    packing = get_dtype_packing(kv_cache_dtype)
+    num_combined_kv_heads = cdiv(num_combined_kv_heads, packing) * packing
+
+    kv_cache_dtype_bits = dtype_bits(kv_cache_dtype)
     return (block_size * num_combined_kv_heads * padded_head_size *
             kv_cache_dtype_bits // 8)
