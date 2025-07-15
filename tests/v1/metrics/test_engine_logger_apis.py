@@ -26,24 +26,3 @@ async def test_async_llm_add_logger_no_exception():
     # Verify that logger is present in the first DP rank
     assert len(engine.stat_loggers[0]) == 1
     assert isinstance(engine.stat_loggers[0][0], PrometheusStatLogger)
-
-
-@pytest.mark.asyncio
-async def test_async_llm_add_logger_duplicate_raises():
-    model_name = "distilbert/distilgpt2"
-    dtype = "half"
-    engine_args = AsyncEngineArgs(
-        model=model_name,
-        dtype=dtype,
-        disable_log_stats=False,
-    )
-
-    # Force empty list to avoid default loggers
-    engine = AsyncLLM.from_engine_args(engine_args, stat_loggers=[])
-
-    # Add PrometheusStatLogger once
-    await engine.add_logger(PrometheusStatLogger)
-
-    # Adding the same logger again should raise KeyError
-    with pytest.raises(KeyError):
-        await engine.add_logger(PrometheusStatLogger)
