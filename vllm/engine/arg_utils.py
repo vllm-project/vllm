@@ -179,6 +179,10 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
     return type_hints
 
 
+def is_online_quantization(quantization: Any) -> bool:
+    return quantization in ["inc"]
+
+
 @functools.lru_cache(maxsize=30)
 def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
     cls_docs = get_attr_docs(cls)
@@ -1448,8 +1452,8 @@ class EngineArgs:
             if current_platform.is_rocm() or (
                     current_platform.is_cuda()
                     and current_platform.is_device_capability(100)) or (
-                    current_platform.device_name
-                    == "hpu"):  # handle hpu also for OOT platform
+                        current_platform.device_name
+                        == "hpu"):  # handle hpu also for OOT platform
                 supported = True
             elif fp8_attention and will_use_fa:
                 from vllm.attention.utils.fa_utils import (
