@@ -563,8 +563,8 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
         ValueError: If there is not enough memory available for the KV cache.
     """
 
-    # No need to check for available memory if the model is attention free
-    if vllm_config.model_config.is_attention_free:
+    # No need to check for available memory if the kv_cache_spec is empty
+    if not kv_cache_spec:
         return
 
     if available_memory <= 0:
@@ -973,7 +973,7 @@ def get_kv_cache_config(
         unify_hybrid_kv_cache_specs(kv_cache_spec)
 
     if is_kv_cache_type_attention_free(kv_cache_spec):
-        # This returns a kv_cahce config with 0 kv_cache groups and 1 block
+        # This returns a kv_cache config with 0 kv_cache groups and 1 block
         # to allow for the KVCache manager to handle attention free models.
         return _get_kv_cache_config_attention_free()
     elif is_kv_cache_type_uniform(kv_cache_spec):

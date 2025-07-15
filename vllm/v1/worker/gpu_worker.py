@@ -209,8 +209,6 @@ class Worker(WorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
-        if self.vllm_config.model_config.is_attention_free:
-            return 0
 
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
