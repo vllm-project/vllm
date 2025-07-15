@@ -54,8 +54,12 @@ jobs:
                   'composable kernel', 'aiter', 'rccl', 'migraphx'
                 ],
                 exclusions: [
-                  // Exclude false positives like environment info
-                  'roc used to build pytorch\\s*:\\s*(n/a|none|0\\.0\\.0|not available)'
+                  // More flexible patterns to match the original exclusion logic
+                  'rocm used to build pytorch',
+                  'rocm used to build pytorch: n/a',
+                  'rocm used to build pytorch: none', 
+                  'rocm used to build pytorch: 0.0.0',
+                  'rocm used to build pytorch: not available'
                 ]
               }
               
@@ -72,20 +76,20 @@ jobs:
 
             // Helper function to create regex from keywords and exclusions
             function createRegex(keywords, exclusions = []) {
-              // Create positive lookbehind for word boundaries and keywords
-              const keywordPattern = keywords
-                .map(keyword => keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) // Escape special chars
-                .join('|');
+              // Escape both keywords and exclusions for literal matching
+              const escapedKeywords = keywords
+                .map(keyword => keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+              const escapedExclusions = exclusions
+                .map(exclusion => exclusion.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
               
-              let pattern = `\\b(${keywordPattern})\\b`;
+              const keywordPattern = escapedKeywords.join('|');
               
-              // Add negative lookahead for exclusions
-              if (exclusions.length > 0) {
-                const exclusionPattern = exclusions.join('|');
-                pattern = `\\b(?!.*(?:${exclusionPattern}))(${keywordPattern})\\b`;
+              if (escapedExclusions.length > 0) {
+                const exclusionPattern = escapedExclusions.join('|');
+                return new RegExp(`\\b(?!.*(?:${exclusionPattern}))(${keywordPattern})\\b`, 'i');
               }
               
-              return new RegExp(pattern, 'i');
+              return new RegExp(`\\b(${keywordPattern})\\b`, 'i');
             }
 
             // Helper function to check if label should be added
