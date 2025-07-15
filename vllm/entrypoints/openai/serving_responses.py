@@ -73,8 +73,6 @@ class OpenAIServingResponses(OpenAIServing):
             enable_force_include_usage=enable_force_include_usage,
         )
         self.enable_auto_tools = enable_auto_tools
-        self.expand_tools_even_if_tool_choice_none = (
-            expand_tools_even_if_tool_choice_none)
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
 
@@ -141,20 +139,6 @@ class OpenAIServingResponses(OpenAIServing):
             model_name = self._get_model_name(request.model, lora_request)
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
             if request.tools is None:
-                tool_dicts = None
-            elif (request.tool_choice == "none"
-                  and not self.expand_tools_even_if_tool_choice_none):
-                if len(request.tools) > 0:
-                    logger.warning_once(
-                        "Tools are specified but tool_choice is set to 'none' "
-                        "and --expand-tools-even-if-tool-choice-none is not "
-                        "enabled. Tool definitions will be excluded from the "
-                        "prompt. This behavior will change in vLLM v0.10 where "
-                        "tool definitions will be included by default even "
-                        "with tool_choice='none'. To adopt the new behavior "
-                        "now, use --expand-tools-even-if-tool-choice-none. "
-                        "To suppress this warning, either remove tools from "
-                        "the request or set tool_choice to a different value.")
                 tool_dicts = None
             else:
                 tool_dicts = [tool.model_dump() for tool in request.tools]
@@ -326,15 +310,13 @@ class OpenAIServingResponses(OpenAIServing):
             )
         outputs = []
         function_calls: list[FunctionCall] = []
-        if (not self.enable_auto_tools or not self.tool_parser):
+        if not self.enable_auto_tools or not self.tool_parser:
             # Tools are not enabled
             if reasoning_item:
                 outputs.append(reasoning_item)
             if message_item:
                 outputs.append(message_item)
-        elif (request.tool_choice == "none" and \
-            not self.expand_tools_even_if_tool_choice_none) or \
-                request.tool_choice is None:
+        elif request.tool_choice is None:
             # No tool calls.
             if reasoning_item:
                 outputs.append(reasoning_item)
