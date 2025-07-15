@@ -762,7 +762,7 @@ tomli==2.2.1
     # via schemathesis
 tomli-w==1.2.0
     # via schemathesis
-torch==2.7.0+cu128
+torch==2.7.1+cu128
     # via
     #   -r requirements/test.in
     #   accelerate
@@ -781,12 +781,12 @@ torch==2.7.0+cu128
     #   torchvision
     #   vector-quantize-pytorch
     #   vocos
-torchaudio==2.7.0+cu128
+torchaudio==2.7.1+cu128
     # via
     #   -r requirements/test.in
     #   encodec
     #   vocos
-torchvision==0.22.0+cu128
+torchvision==0.22.1+cu128
     # via
     #   -r requirements/test.in
     #   timm
@@ -816,7 +816,7 @@ transformers==4.53.2
     #   transformers-stream-generator
 transformers-stream-generator==0.0.5
     # via -r requirements/test.in
-triton==3.3.0
+triton==3.3.1
     # via torch
 tritonclient==2.51.0
     # via
