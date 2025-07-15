@@ -86,9 +86,6 @@ async def test_long_audio_request(mary_had_lamb, model_name):
     if model_name.startswith("openai"):
         return
 
-    if model_name.startswith("mistralai"):
-        server_args += MISTRAL_FORMAT_ARGS
-
     mary_had_lamb.seek(0)
     audio, sr = librosa.load(mary_had_lamb)
     # Add small silence after each audio for repeatability in the split process
