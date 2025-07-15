@@ -132,9 +132,7 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
                                            dtype=dtype,
                                            seed=42)
 
-    all_reduce_fusion_pass = AllReduceFusionPass(
-        vllm_config, vllm_config.compilation_config.pass_config.
-        fi_allreduce_fusion_max_token_num)
+    all_reduce_fusion_pass = AllReduceFusionPass(vllm_config)
     backend = TestBackend(all_reduce_fusion_pass)
 
     model = test_model_cls(hidden_size)
