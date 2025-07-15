@@ -1,5 +1,5 @@
 ---
-toc_depth: 3
+toc_depth: 4
 ---
 
 # vLLM CLI Guide
