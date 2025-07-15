@@ -44,11 +44,10 @@ def test_engine_log_metrics_ray(
             # variables from pytest fixtures don't propagate to Ray actors
             os.environ['VLLM_USE_V1'] = '1'
 
-            engine_args = AsyncEngineArgs(
-                model=model,
-                dtype=dtype,
-                disable_log_stats=False,
-            )
+            engine_args = AsyncEngineArgs(model=model,
+                                          dtype=dtype,
+                                          disable_log_stats=False,
+                                          enforce_eager=True)
 
             engine = AsyncLLM.from_engine_args(
                 engine_args, stat_loggers=[RayPrometheusStatLogger])
