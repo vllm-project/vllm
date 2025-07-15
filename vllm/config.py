@@ -759,6 +759,8 @@ class ModelConfig:
 
     def _init_pooler_config(self) -> Optional["PoolerConfig"]:
         if self.runner_type == "pooling":
+            assert self.task in _RUNNER_TASKS[self.runner_type]
+
             if isinstance(self.override_pooler_config, dict):
                 self.override_pooler_config = PoolerConfig(
                     **self.override_pooler_config)
@@ -777,7 +779,7 @@ class ModelConfig:
                 default_pooling_type = self.model_info.default_pooling_type
                 pooler_config.pooling_type = default_pooling_type
             if pooler_config.normalize is None:
-                if self.task in ["classify", "reward"]:
+                if self.task in ["classify", "reward", "pooling"]:
                     pooler_config.normalize = False
                 elif self.task == "embed":
                     pooler_config.normalize = True
@@ -786,7 +788,7 @@ class ModelConfig:
             if pooler_config.softmax is None:
                 if self.task == "classify":
                     pooler_config.softmax = True
-                elif self.task in ["embed", "reward"]:
+                elif self.task in ["embed", "reward", "pooling"]:
                     pooler_config.softmax = False
                 else:
                     assert_never(self.task)
