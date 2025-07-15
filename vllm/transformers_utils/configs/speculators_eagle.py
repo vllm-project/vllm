@@ -50,21 +50,27 @@ class SpeculatorsEagleConfig(EAGLEConfig):
         
         Supports both Eagle and Eagle-3 models based on speculators_model_type.
         """
-        speculators_type = speculators_config.get("speculators_model_type", "eagle")
-        
-        # Extract transformer config
+        speculators_model_type = speculators_config.get("speculators_model_type")
+        assert speculators_model_type, "`speculators_model_type` must be specified in the config"
+
         transformer_config = speculators_config.get("transformer_layer_config", {})
         
-        # Build base vLLM config
+        # Extract num_lookahead_tokens from proposal_methods
+        proposal_methods = speculators_config.get("speculators_config", {}).get("proposal_methods", [])
+        assert proposal_methods, "speculators_config must have at least one proposal method"
+        
+        # Only one proposal method is supported for now
+        proposal_method: dict = proposal_methods[0]
+        num_lookahead_tokens = proposal_method.get("speculative_tokens")
+        assert num_lookahead_tokens, "speculative_tokens must be specified in proposal_methods[0]"
+        
         vllm_config = {
-            "model_type": "eagle",
             "model": transformer_config,
-            "method": speculators_type,  # Use speculators_model_type as method
-            "num_lookahead_tokens": 5,  # Default number of speculative tokens
+            "method": speculators_model_type,
+            "num_lookahead_tokens": num_lookahead_tokens,
         }
         
-        # Handle version-specific config
-        if speculators_type == "eagle":
+        if speculators_model_type == "eagle":
             # Eagle-1 specific handling
             # Handle layernorms flag
             if speculators_config.get("layernorms", False):
@@ -78,15 +84,15 @@ class SpeculatorsEagleConfig(EAGLEConfig):
             vllm_config["truncated_vocab_size"] = transformer_config.get("vocab_size")
             vllm_config["architectures"] = ["EAGLEModel"]
             
-        elif speculators_type == "eagle3":
+        elif speculators_model_type == "eagle3":
             # Eagle-3 specific handling
             # Copy Eagle-3 specific fields from speculators config
-            if "draft_vocab_size" in speculators_config:
+            if speculators_config.get("draft_vocab_size") is not None:
                 vllm_config["draft_vocab_size"] = speculators_config["draft_vocab_size"]
             
             # Handle target_hidden_size - if not provided, it should be set by vLLM
             # based on the target model, but we can try to infer from transformer config
-            if "target_hidden_size" in speculators_config and speculators_config["target_hidden_size"] is not None:
+            if speculators_config.get("target_hidden_size") is not None:
                 vllm_config["target_hidden_size"] = speculators_config["target_hidden_size"]
             else:
                 # Use the draft model's hidden size as target_hidden_size
@@ -108,13 +114,14 @@ class SpeculatorsEagleConfig(EAGLEConfig):
             else:
                 transformer_config["architectures"] = [arch]
         
+        speculators_specific_fields: set = {"speculators_model_type", "transformer_layer_config", 
+                          "layernorms", "fusion_bias", "architectures",
+                          "draft_vocab_size", "target_hidden_size", "norm_before_residual"}
+        
         # Preserve any additional fields that might be needed
         for key, value in speculators_config.items():
-            if key not in ["speculators_model_type", "transformer_layer_config", 
-                          "layernorms", "fusion_bias", "architectures",
-                          "draft_vocab_size", "target_hidden_size", "norm_before_residual"]:
+            if key not in speculators_specific_fields:
                 vllm_config[key] = value
-        
         return vllm_config
 
 
@@ -122,11 +129,6 @@ def is_speculators_eagle_config(config_path: Union[str, os.PathLike]) -> bool:
     """
     Check if a config file is in speculators Eagle format.
     """
-    try:
-        # Use PretrainedConfig to load from both local and HF paths
-        config_dict, _ = PretrainedConfig.get_config_dict(config_path)
-        # Check for speculators format by looking for speculators_model_type key
-        return "speculators_model_type" in config_dict and \
-               config_dict.get("speculators_model_type") in ["eagle", "eagle3"]
-    except:
-        return False
+    supported_model_types = ["eagle", "eagle3"]
+    config_dict, _ = PretrainedConfig.get_config_dict(config_path)
+    return config_dict.get("speculators_model_type") in supported_model_types
