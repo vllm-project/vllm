@@ -6,7 +6,6 @@ from collections.abc import AsyncGenerator
 from typing import Final, Literal, Optional, Union, cast
 
 import numpy as np
-import torch
 from fastapi import Request
 from typing_extensions import assert_never, override
 
@@ -32,7 +31,7 @@ from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
-                          PoolingOutput, PoolingRequestOutput, RequestOutput)
+                          PoolingRequestOutput, RequestOutput)
 
 logger = init_logger(__name__)
 
@@ -273,30 +272,21 @@ class EmbeddingMixin(OpenAIServing):
         if pooling_type:
             pooling_type = pooling_type.upper()
 
-        # For LAST pooling, only process the last chunk
+            # For LAST pooling, only process the last chunk
         # For CLS pooling, only process the first chunk
         if pooling_type == 'LAST':
             chunks_to_process = [chunks[-1]]
             chunk_indices = [len(chunks) - 1]
-            logger.info(
-                "LAST pooling: processing only the last chunk (%d tokens) "
-                "out of %d total chunks to avoid computational waste",
-                len(chunks[-1]), len(chunks))
+            logger.info("LAST pooling: processing only the last chunk")
         elif pooling_type == 'CLS':
             chunks_to_process = [chunks[0]]
             chunk_indices = [0]
-            logger.info(
-                "CLS pooling: processing only the first chunk (%d tokens) "
-                "out of %d total chunks to avoid computational waste",
-                len(chunks[0]), len(chunks))
+            logger.info("CLS pooling: processing only the first chunk")
         else:
             # For MEAN and other pooling types, process all chunks
             chunks_to_process = chunks
             chunk_indices = list(range(len(chunks)))
-            logger.info(
-                "Split input of %s tokens into %s chunks "
-                "(max_chunk_size: %s)", len(token_ids), len(chunks),
-                max_pos_embeddings)
+            logger.info("Using chunked processing for MEAN pooling")
 
         for i, (chunk_idx, chunk_tokens) in enumerate(
                 zip(chunk_indices, chunks_to_process)):
@@ -333,184 +323,6 @@ class EmbeddingMixin(OpenAIServing):
             generators.append(generator)
 
         return generators
-
-    async def _aggregate_chunked_results(
-        self,
-        ctx: EmbeddingServeContext,
-        chunk_results: list[PoolingRequestOutput],
-        original_token_count: int,
-        original_prompt_token_ids: Optional[list[int]] = None,
-    ) -> PoolingRequestOutput:
-        """Aggregate results from multiple chunks using 
-        pooling-type-specific strategies."""
-        if len(chunk_results) == 1:
-            return chunk_results[0]
-
-        # Get pooling type to determine aggregation strategy
-        pooler_config = getattr(self.model_config, 'pooler_config', None)
-        pooling_type = getattr(pooler_config, 'pooling_type', 'MEAN')
-        if pooling_type:
-            pooling_type = pooling_type.upper()
-
-        # Route to appropriate aggregation method based on pooling type
-        if pooling_type == 'MEAN':
-            return await self._aggregate_mean_pooling(
-                chunk_results, original_token_count, original_prompt_token_ids)
-        elif pooling_type == 'LAST':
-            return await self._aggregate_last_pooling(
-                chunk_results, original_prompt_token_ids)
-        elif pooling_type == 'CLS':
-            return await self._aggregate_cls_pooling(
-                chunk_results, original_prompt_token_ids)
-        else:
-            # For unsupported pooling types,
-            # fall back to mean aggregation with warning
-            logger.warning(
-                "Chunked aggregation for pooling type '%s' is not "
-                "specifically implemented. Falling back to weighted "
-                "averaging which may produce incorrect results.", pooling_type)
-            return await self._aggregate_mean_pooling(
-                chunk_results, original_token_count, original_prompt_token_ids)
-
-    async def _aggregate_mean_pooling(
-        self,
-        chunk_results: list[PoolingRequestOutput],
-        original_token_count: int,
-        original_prompt_token_ids: Optional[list[int]] = None,
-    ) -> PoolingRequestOutput:
-        """Aggregate results using weighted averaging for MEAN pooling."""
-        # Extract embeddings and use vLLM's token counting approach
-        chunk_embeddings = []
-        chunk_weights = []
-
-        for result in chunk_results:
-            # PoolingRequestOutput.outputs is a PoolingOutput object
-            if hasattr(result, 'outputs') and hasattr(result.outputs, 'data'):
-                # Get the embedding tensor from PoolingOutput.data
-                embedding_data = result.outputs.data
-                if not isinstance(embedding_data, torch.Tensor):
-                    embedding_data = torch.tensor(embedding_data,
-                                                  dtype=torch.float32)
-                chunk_embeddings.append(embedding_data)
-
-                # Use actual effective token count
-                # this is what vLLM uses internally
-                effective_token_count = len(result.prompt_token_ids)
-                chunk_weights.append(effective_token_count)
-
-        if not chunk_embeddings:
-            raise ValueError("No valid embeddings found in chunk results")
-
-        # Simple weighted averaging compatible with vLLM's approach
-        # This is similar to what MeanPool does for multiple sequences
-        device = chunk_embeddings[0].device
-        # Use float32 for precision, as done in vLLM's PoolerHead
-        dtype = torch.float32
-
-        # Weighted sum following vLLM's internal logic
-        weighted_sum = torch.zeros_like(chunk_embeddings[0],
-                                        dtype=dtype,
-                                        device=device)
-        total_weight = 0
-
-        for embedding, weight in zip(chunk_embeddings, chunk_weights):
-            embedding = embedding.to(dtype=dtype, device=device)
-            weighted_sum += embedding * weight
-            total_weight += weight
-
-        # Final averaged embedding - let vLLM handle the rest
-        aggregated_embedding = weighted_sum / total_weight
-
-        # NOTE: Don't manually normalize here
-        # let vLLM's PoolerHead handle normalization
-        # based on the model's pooler_config.normalize setting.
-        # This ensures consistency with vLLM's standard pooling behavior.
-
-        # Create aggregated result using vLLM's standard output structure
-        first_result = chunk_results[0]
-
-        # Create new PoolingOutput with aggregated embedding
-        aggregated_output = PoolingOutput(data=aggregated_embedding)
-
-        # Preserve original prompt token ids for consistency
-        result_prompt_token_ids = (original_prompt_token_ids
-                                   if original_prompt_token_ids is not None
-                                   else first_result.prompt_token_ids)
-
-        aggregated_result = PoolingRequestOutput(
-            request_id=first_result.request_id,
-            outputs=aggregated_output,
-            prompt_token_ids=result_prompt_token_ids,
-            finished=True,
-        )
-
-        return aggregated_result
-
-    async def _aggregate_last_pooling(
-        self,
-        chunk_results: list[PoolingRequestOutput],
-        original_prompt_token_ids: Optional[list[int]] = None,
-    ) -> PoolingRequestOutput:
-        """Aggregate results for LAST pooling.
-        
-        For LAST pooling, when chunked processing is enabled, we only process
-        the last chunk to avoid computational waste, since only the last token's
-        representation is needed. This result is returned directly.
-        """
-        # When LAST pooling chunked processing is enabled, we only process
-        # the last chunk, so chunk_results should contain only one result
-        if len(chunk_results) != 1:
-            logger.warning(
-                "Expected exactly 1 chunk result for LAST pooling, "
-                "got %d. Using the last result.", len(chunk_results))
-
-        last_result = chunk_results[-1]
-
-        # Preserve original prompt token ids for consistency
-        if original_prompt_token_ids is not None:
-            # Create a new result with updated prompt_token_ids
-            aggregated_result = PoolingRequestOutput(
-                request_id=last_result.request_id,
-                outputs=last_result.outputs,
-                prompt_token_ids=original_prompt_token_ids,
-                finished=True,
-            )
-            return aggregated_result
-
-        return last_result
-
-    async def _aggregate_cls_pooling(
-        self,
-        chunk_results: list[PoolingRequestOutput],
-        original_prompt_token_ids: Optional[list[int]] = None,
-    ) -> PoolingRequestOutput:
-        """Aggregate results for CLS pooling.
-        
-        For CLS pooling, when chunked processing is enabled, we only process
-        the first chunk to avoid computational waste, since only the CLS token's
-        representation (typically the first token) is needed.
-        """
-        # When CLS pooling chunked processing is enabled, we only process
-        # the first chunk, so chunk_results should contain only one result
-        if len(chunk_results) != 1:
-            logger.warning(
-                "Expected exactly 1 chunk result for CLS pooling, "
-                "got %d. Using the first result.", len(chunk_results))
-
-        first_result = chunk_results[0]
-
-        # Preserve original prompt token ids for consistency
-        if original_prompt_token_ids is not None:
-            # Create a new result with updated prompt_token_ids
-            aggregated_result = PoolingRequestOutput(
-                request_id=first_result.request_id,
-                outputs=first_result.outputs,
-                prompt_token_ids=original_prompt_token_ids,
-                finished=True,
-            )
-            return aggregated_result
-
-        return first_result
 
     def _validate_input(
         self,
@@ -676,7 +488,13 @@ class EmbeddingMixin(OpenAIServing):
         self,
         ctx: ServeContext,
     ) -> Optional[ErrorResponse]:
-        """Override to support chunked processing."""
+        """Collect and aggregate batch results
+        with support for chunked processing.
+        
+        For chunked requests, performs online aggregation to 
+        minimize memory usage.
+        For regular requests, collects results normally.
+        """
         ctx = cast(EmbeddingServeContext, ctx)
         try:
             if ctx.engine_prompts is None:
@@ -695,29 +513,103 @@ class EmbeddingMixin(OpenAIServing):
             use_chunked = self._should_use_chunked_processing(ctx.request)
 
             if use_chunked:
-                # Efficient single-pass processing for chunked requests
-                from collections import defaultdict
+                # Online aggregation for chunked requests to
+                # minimize memory usage
+                import torch
 
-                # Group results by original prompt index
-                grouped_results = defaultdict(list)
+                # Track aggregation state for each prompt
+                prompt_aggregators = {}
                 short_prompts_results = {}
 
                 async for result_idx, result in ctx.result_generator:
                     if "-chunk-" in result.request_id:
                         # Extract prompt_idx from chunked request_id
-                        # e.g., from "req-id-prompt-2-chunk-0" -> 2
                         parts = result.request_id.split("-")
                         try:
                             prompt_idx = int(parts[parts.index("prompt") + 1])
-                            grouped_results[prompt_idx].append(
-                                cast(PoolingRequestOutput, result))
+
+                            # Initialize aggregator for this prompt if needed
+                            if prompt_idx not in prompt_aggregators:
+                                # Get pooling type to determine
+                                # aggregation strategy
+                                pooler_config = getattr(
+                                    self.model_config, 'pooler_config', None)
+                                pooling_type = getattr(pooler_config,
+                                                       'pooling_type', 'MEAN')
+                                if pooling_type:
+                                    pooling_type = pooling_type.upper()
+
+                                prompt_aggregators[prompt_idx] = {
+                                    'pooling_type':
+                                    pooling_type,
+                                    'weighted_sum':
+                                    None,
+                                    'total_weight':
+                                    0,
+                                    'first_result':
+                                    None,
+                                    'last_result':
+                                    None,
+                                    'chunk_count':
+                                    0,
+                                    'request_id':
+                                    result.request_id.split("-chunk-")[0]
+                                }
+
+                            aggregator = prompt_aggregators[prompt_idx]
+                            pooling_type = aggregator['pooling_type']
+
+                            # Handle different pooling types with
+                            # online aggregation
+                            if pooling_type == 'MEAN':
+                                # Online weighted averaging
+                                embedding_data = result.outputs.data
+                                if not isinstance(embedding_data,
+                                                  torch.Tensor):
+                                    embedding_data = torch.tensor(
+                                        embedding_data, dtype=torch.float32)
+
+                                weight = len(result.prompt_token_ids)
+
+                                if aggregator['weighted_sum'] is None:
+                                    # First chunk
+                                    aggregator[
+                                        'weighted_sum'] = embedding_data.to(
+                                            dtype=torch.float32) * weight
+                                else:
+                                    # Accumulate
+                                    aggregator[
+                                        'weighted_sum'] += embedding_data.to(
+                                            dtype=torch.float32) * weight
+
+                                aggregator['total_weight'] += weight
+
+                            elif pooling_type == 'LAST':
+                                # Keep only the
+                                # last result (highest chunk index)
+                                chunk_idx = int(parts[parts.index("chunk") +
+                                                      1])
+                                if (aggregator['last_result'] is None
+                                        or chunk_idx > aggregator.get(
+                                            'last_chunk_idx', -1)):
+                                    aggregator['last_result'] = result
+                                    aggregator['last_chunk_idx'] = chunk_idx
+
+                            elif pooling_type == 'CLS':
+                                # Keep only the first result (chunk index 0)
+                                chunk_idx = int(parts[parts.index("chunk") +
+                                                      1])
+                                if chunk_idx == 0:
+                                    aggregator['first_result'] = result
+
+                            aggregator['chunk_count'] += 1
+
                         except (ValueError, IndexError):
                             return self.create_error_response(
                                 f"Invalid chunk request ID format: "
                                 f"{result.request_id}")
                     else:
-                        # Extract prompt_idx from non-chunked request_id
-                        # e.g., from "req-id-2" -> 2
+                        # Non-chunked result
                         try:
                             prompt_idx = int(result.request_id.split("-")[-1])
                             short_prompts_results[prompt_idx] = cast(
@@ -727,28 +619,108 @@ class EmbeddingMixin(OpenAIServing):
                                 f"Invalid request ID format: "
                                 f"{result.request_id}")
 
-                # Build final result batch in prompt order
+                # Build final result batch
                 final_res_batch = []
 
                 for prompt_idx, request_prompt in enumerate(
                         ctx.request_prompts):
-                    if prompt_idx in grouped_results:
-                        # This was a chunked prompt - aggregate results
-                        chunk_results = grouped_results[prompt_idx]
-                        if self._is_text_tokens_prompt(request_prompt):
-                            text_tokens_prompt = cast(TextTokensPrompt,
-                                                      request_prompt)
-                            original_token_count = len(
-                                text_tokens_prompt["prompt_token_ids"])
-                            aggregated_result = await \
-                                self._aggregate_chunked_results(
-                                    ctx, chunk_results, original_token_count,
-                                    text_tokens_prompt["prompt_token_ids"])
-                            final_res_batch.append(aggregated_result)
+                    if prompt_idx in prompt_aggregators:
+                        # Finalize aggregation for this chunked prompt
+                        aggregator = prompt_aggregators[prompt_idx]
+                        pooling_type = aggregator['pooling_type']
+
+                        if pooling_type == 'MEAN':
+                            # Finalize weighted average
+                            if aggregator[
+                                    'weighted_sum'] is not None and aggregator[
+                                        'total_weight'] > 0:
+                                final_embedding = aggregator[
+                                    'weighted_sum'] / aggregator['total_weight']
+
+                                # Create aggregated result
+                                from vllm.outputs import PoolingOutput
+                                aggregated_output = PoolingOutput(
+                                    data=final_embedding)
+
+                                # Get original prompt token ids
+                                if self._is_text_tokens_prompt(request_prompt):
+                                    text_tokens_prompt = cast(
+                                        TextTokensPrompt, request_prompt)
+                                    original_token_ids = text_tokens_prompt[
+                                        "prompt_token_ids"]
+                                else:
+                                    return self.create_error_response(
+                                        f"Chunked prompt {prompt_idx} is not a "
+                                        f"text tokens prompt")
+
+                                aggregated_result = PoolingRequestOutput(
+                                    request_id=aggregator['request_id'],
+                                    outputs=aggregated_output,
+                                    prompt_token_ids=original_token_ids,
+                                    finished=True,
+                                )
+                                final_res_batch.append(aggregated_result)
+                            else:
+                                return self.create_error_response(
+                                    f"No valid aggregation data for prompt "
+                                    f"{prompt_idx}")
+
+                        elif pooling_type == 'LAST':
+                            if aggregator['last_result'] is not None:
+                                # Use the last chunk result
+                                last_result = aggregator['last_result']
+                                if self._is_text_tokens_prompt(request_prompt):
+                                    text_tokens_prompt = cast(
+                                        TextTokensPrompt, request_prompt)
+                                    original_token_ids = text_tokens_prompt[
+                                        "prompt_token_ids"]
+
+                                    aggregated_result = PoolingRequestOutput(
+                                        request_id=aggregator['request_id'],
+                                        outputs=last_result.outputs,
+                                        prompt_token_ids=original_token_ids,
+                                        finished=True,
+                                    )
+                                    final_res_batch.append(aggregated_result)
+                                else:
+                                    return self.create_error_response(
+                                        f"Chunked prompt {prompt_idx} is not a "
+                                        f"text tokens prompt")
+                            else:
+                                return self.create_error_response(
+                                    f"No LAST result found for prompt "
+                                    f"{prompt_idx}")
+
+                        elif pooling_type == 'CLS':
+                            if aggregator['first_result'] is not None:
+                                # Use the first chunk result
+                                first_result = aggregator['first_result']
+                                if self._is_text_tokens_prompt(request_prompt):
+                                    text_tokens_prompt = cast(
+                                        TextTokensPrompt, request_prompt)
+                                    original_token_ids = text_tokens_prompt[
+                                        "prompt_token_ids"]
+
+                                    aggregated_result = PoolingRequestOutput(
+                                        request_id=aggregator['request_id'],
+                                        outputs=first_result.outputs,
+                                        prompt_token_ids=original_token_ids,
+                                        finished=True,
+                                    )
+                                    final_res_batch.append(aggregated_result)
+                                else:
+                                    return self.create_error_response(
+                                        f"Chunked prompt {prompt_idx} is not a "
+                                        f"text tokens prompt")
+                            else:
+                                return self.create_error_response(
+                                    f"No CLS result found for prompt "
+                                    f"{prompt_idx}")
                         else:
                             return self.create_error_response(
-                                f"Chunked prompt {prompt_idx} is not a "
-                                f"text tokens prompt")
+                                f"Unsupported pooling type for chunked "
+                                f"processing: {pooling_type}")
+
                     elif prompt_idx in short_prompts_results:
                         # This was a short prompt
                         final_res_batch.append(
