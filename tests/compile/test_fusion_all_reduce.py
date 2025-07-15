@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from functools import partial
 from importlib.util import find_spec
 
 import pytest
@@ -13,6 +14,10 @@ from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (init_distributed_environment,
                                              initialize_model_parallel)
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    Fp8LinearOp)
 from vllm.platforms import current_platform
 from vllm.utils import update_environment_variables
 
@@ -22,20 +27,48 @@ from .backend import TestBackend
 
 class TestAllReduceRMSNormModel(torch.nn.Module):
 
-    def __init__(self, hidden_size=16, eps=1e-6):
+    def __init__(self,
+                 hidden_size=16,
+                 eps=1e-6,
+                 intermediate_size=32,
+                 quant: bool = False):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
         self.norm = RMSNorm(hidden_size, eps)
+        self.quant = quant
+
+        if self.quant:
+            w = torch.randn(intermediate_size,
+                            hidden_size).to(current_platform.fp8_dtype()).t()
+            scale = torch.rand(1, dtype=torch.float32)
+            wscale = torch.rand(1, dtype=torch.float32)
+
+            self.linear_op = partial(Fp8LinearOp(
+                act_quant_static=True,
+                act_quant_group_shape=GroupShape.PER_TENSOR).apply,
+                                     weight=w,
+                                     weight_scale=wscale,
+                                     input_scale=scale)
+        else:
+            w = torch.randn(hidden_size, intermediate_size).t()
+            self.linear_op = partial(torch.nn.functional.linear, weight=w)
 
     def forward(self, hidden_states, residual):
         view = hidden_states.reshape(-1, self.hidden_size)
         all_reduce = tensor_model_parallel_all_reduce(view)
         norm = self.norm(all_reduce)
-        return norm
+        out = self.linear_op(norm)
+        return out
 
     def ops_in_model_before(self):
-        return [torch.ops.vllm.all_reduce.default]
+        ops_to_replace = [
+            torch.ops.vllm.all_reduce.default, torch.ops._C.rms_norm.default
+        ]
+        if self.quant:
+            ops_to_replace.append(torch.ops._C.static_scaled_fp8_quant.default)
+
+        return ops_to_replace
 
     def ops_in_model_after(self):
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
@@ -43,20 +76,49 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
 
 class TestAllReduceFusedAddRMSNormModel(torch.nn.Module):
 
-    def __init__(self, hidden_size=16, eps=1e-6):
+    def __init__(self,
+                 hidden_size=16,
+                 eps=1e-6,
+                 intermediate_size=32,
+                 quant: bool = False):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
         self.norm = RMSNorm(hidden_size, eps)
+        self.quant = quant
+
+        if self.quant:
+            w = torch.randn(intermediate_size,
+                            hidden_size).to(current_platform.fp8_dtype()).t()
+            scale = torch.rand(1, dtype=torch.float32)
+            wscale = torch.rand(1, dtype=torch.float32)
+
+            self.linear_op = partial(Fp8LinearOp(
+                act_quant_static=True,
+                act_quant_group_shape=GroupShape.PER_TENSOR).apply,
+                                     weight=w,
+                                     weight_scale=wscale,
+                                     input_scale=scale)
+        else:
+            w = torch.randn(hidden_size, intermediate_size).t()
+            self.linear_op = partial(torch.nn.functional.linear, weight=w)
 
     def forward(self, hidden_states, residual):
         view = hidden_states.reshape(-1, self.hidden_size)
         all_reduce = tensor_model_parallel_all_reduce(view)
         norm, _ = self.norm(all_reduce, residual)
-        return norm
+        out = self.linear_op(norm)
+        return out
 
     def ops_in_model_before(self):
-        return [torch.ops.vllm.all_reduce.default]
+        ops_to_replace = [
+            torch.ops.vllm.all_reduce.default,
+            torch.ops._C.fused_add_rms_norm.default
+        ]
+        if self.quant:
+            ops_to_replace.append(torch.ops._C.static_scaled_fp8_quant.default)
+
+        return ops_to_replace
 
     def ops_in_model_after(self):
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
@@ -70,6 +132,7 @@ class TestAllReduceFusedAddRMSNormModel(torch.nn.Module):
 @pytest.mark.parametrize("seq_len", [8])
 @pytest.mark.parametrize("hidden_size", [4096])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("quant", [False, True])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"],
                     reason="Only test on CUDA")
 @pytest.mark.skipif(not find_spec("flashinfer"),
@@ -78,14 +141,15 @@ class TestAllReduceFusedAddRMSNormModel(torch.nn.Module):
                     reason="Only test on SM100")
 def test_all_reduce_fusion_pass_replace(test_model: torch.nn.Module,
                                         batch_size: int, seq_len: int,
-                                        hidden_size: int, dtype: torch.dtype):
+                                        hidden_size: int, dtype: torch.dtype,
+                                        quant: bool):
     num_processes = 2
 
     def run_torch_spawn(fn, nprocs):
         torch.multiprocessing.spawn(fn,
                                     args=(num_processes, test_model,
                                           batch_size, seq_len, hidden_size,
-                                          dtype),
+                                          dtype, quant),
                                     nprocs=nprocs)
 
     run_torch_spawn(all_reduce_fusion_pass_on_test_model, num_processes)
@@ -94,7 +158,8 @@ def test_all_reduce_fusion_pass_replace(test_model: torch.nn.Module,
 def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
                                          test_model_cls: torch.nn.Module,
                                          batch_size: int, seq_len: int,
-                                         hidden_size: int, dtype: torch.dtype):
+                                         hidden_size: int, dtype: torch.dtype,
+                                         quant: bool):
     current_platform.seed_everything(0)
 
     device = torch.device(f"cuda:{local_rank}")
@@ -135,7 +200,7 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
     all_reduce_fusion_pass = AllReduceFusionPass(vllm_config)
     backend = TestBackend(all_reduce_fusion_pass)
 
-    model = test_model_cls(hidden_size)
+    model = test_model_cls(hidden_size, quant=quant)
 
     hidden_states = torch.randn((batch_size * seq_len, hidden_size),
                                 requires_grad=False)
@@ -145,6 +210,6 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
     compiled_model = torch.compile(model, backend=backend)
     compiled_model(hidden_states, residual)
 
-    backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
+    backend.check_before_ops(model.ops_in_model_before(), fully_replaced=True)
     backend.check_after_ops(model.ops_in_model_after())
     del all_reduce_fusion_pass
