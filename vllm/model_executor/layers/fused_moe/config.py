@@ -193,13 +193,12 @@ class FusedMoEParallelConfig:
              vllm_parallel_config: ParallelConfig) -> "FusedMoEParallelConfig":
         """
         Determine MoE parallel configuration. Based on the input tp_size_,
-        dp_size_, ep_size_ and vllm's parallel config, determine what
+        dp_size_ and vllm's parallel config, determine what
         level's of parallelism to use in the fused moe layer.
 
         Args:
             tp_size_ (int): tp_size passed into the FusedMoE constructor.
             dp_size_ (int): dp_size passed into the FusedMoE constructor.
-            ep_size_ (int): ep_size passed into the FusedMoE constructor.
             vllm_parallel_config (ParallelConfig): vllm's parallel config
             object.
 
