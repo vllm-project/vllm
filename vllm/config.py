@@ -1595,12 +1595,13 @@ class ModelConfig:
             layers = getattr(self.hf_config, 'num_hidden_layers', 12)
             vocab = getattr(self.hf_config, 'vocab_size', 50_000)
 
-            # Coarse parameter estimation for Transformer blocks:
+            # Improved parameter estimation for Transformer blocks:
             embeddings = vocab * hidden                       # token embeddings
             attention = layers * (4 * hidden * hidden)        # Q, K, V, O projections
             mlp = layers * (8 * hidden * hidden)              # two linear layers per block
+            layer_norm = layers * (2 * hidden)                # layer norms per block
 
-            return embeddings + attention + mlp
+            return embeddings + attention + mlp + layer_norm
         except Exception:
             # Conservative fallback: large value prevents incorrect small-model optimizations
             return 2_000_000_000
