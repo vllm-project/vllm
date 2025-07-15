@@ -397,7 +397,7 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
 
 class AllReduceFusionPass(VllmInductorPass):
 
-    def __init__(self, config: VllmConfig, max_token_num: int):
+    def __init__(self, config: VllmConfig):
         super().__init__(config)
         self.disabled = True
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -429,7 +429,8 @@ class AllReduceFusionPass(VllmInductorPass):
             flashinfer_comm.trtllm_create_ipc_workspace_for_all_reduce_fusion(
                 tp_rank=rank,
                 tp_size=self.tp_size,
-                max_token_num=max_token_num,
+                max_token_num=config.compilation_config.pass_config.
+                fi_allreduce_fusion_max_token_num,
                 hidden_dim=self.hidden_dim,
                 group=self.group,
                 use_fp32_lamport=use_fp32_lamport,
@@ -441,7 +442,8 @@ class AllReduceFusionPass(VllmInductorPass):
             rank=rank,
             world_size=self.tp_size,
             use_fp32_lamport=use_fp32_lamport,
-            max_token_num=max_token_num,
+            max_token_num=config.compilation_config.pass_config.
+            fi_allreduce_fusion_max_token_num,
         )
 
         for epsilon in [1e-5, 1e-6]:
