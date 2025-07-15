@@ -425,8 +425,9 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_speech_to_text_config(cls, model_config: ModelConfig,
                                   task_type: str) -> SpeechToTextConfig:
         tokenizer = cached_tokenizer_from_config(model_config)
-        max_audio_clip_s = tokenizer.instruct.audio_encoder.audio_config.chunk_length_s
-        sample_rate = tokenizer.instruct.audio_encoder.audio_config.sampling_rate
+        audio_config = tokenizer.instruct.audio_encoder.audio_config
+        max_audio_clip_s = audio_config.chunk_length_s
+        sample_rate = audio_config.sampling_rate
         return SpeechToTextConfig(
             max_audio_clip_s=max_audio_clip_s,
             sample_rate=sample_rate,
@@ -522,10 +523,10 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
             loaded_weights.add(f"language_model.{name}")
 
         # potentially manually add position embeddings
-        sin_pos_embed_key = "whisper_encoder.whisper_encoder.embed_positions.weight"
-        if sin_pos_embed_key not in loaded_weights:
+        sin_key = "whisper_encoder.whisper_encoder.embed_positions.weight"
+        if sin_key not in loaded_weights:
             # make sure we don't hit an error here
-            loaded_weights.add(sin_pos_embed_key)
+            loaded_weights.add(sin_key)
 
         return loaded_weights
 
