@@ -92,7 +92,7 @@ class BasePooler(nn.Module):
         raise NotImplementedError
 
 
-class PoolingMethod(ABC):
+class PoolingMethod(nn.Module, ABC):
 
     @staticmethod
     def from_pooling_type(pooling_type: PoolingType) -> "PoolingMethod":
@@ -127,7 +127,7 @@ class PoolingMethod(ABC):
     ) -> Union[list[torch.Tensor], torch.Tensor]:
         raise NotImplementedError
 
-    def extract_states(
+    def forward(
         self,
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
@@ -391,8 +391,7 @@ class SimplePooler(BasePooler):
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
-        pooled_data = self.method.extract_states(hidden_states,
-                                                 pooling_metadata)
+        pooled_data = self.method(hidden_states, pooling_metadata)
         pooled_data = self.head(pooled_data, pooling_metadata)
         return build_output(pooled_data)
 
@@ -442,8 +441,7 @@ class StepPooler(BasePooler):
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
-        pooled_data_lst = self.method.extract_states(hidden_states,
-                                                     pooling_metadata)
+        pooled_data_lst = self.method(hidden_states, pooling_metadata)
         prompt_token_ids = self.get_prompt_token_ids(pooling_metadata)
 
         pooled_data = list[torch.Tensor]()
