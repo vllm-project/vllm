@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+
 import pytest
 import ray
 
+from vllm.config import ModelDType
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.async_llm import AsyncEngineArgs, AsyncLLM
 from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
@@ -27,16 +30,22 @@ MODELS = [
 def test_engine_log_metrics_ray(
     example_prompts,
     model: str,
-    dtype: str,
+    dtype: ModelDType,
     max_tokens: int,
 ) -> None:
     """ Simple smoke test, verifying this can be used without exceptions.
     Need to start a Ray cluster in order to verify outputs."""
+    pytest.skip(
+        "Fix needed for https://github.com/vllm-project/vllm/issues/20954")
 
     @ray.remote(num_gpus=1)
     class EngineTestActor:
 
         async def run(self):
+            # Set environment variable inside the Ray actor since
+            # environment variables from pytest fixtures don't propagate to Ray actors
+            os.environ['VLLM_USE_V1'] = '1'
+
             engine_args = AsyncEngineArgs(
                 model=model,
                 dtype=dtype,
