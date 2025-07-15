@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-import re
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
 from math import ceil
 from typing import Optional, Union, cast
 
 import numpy as np
+import regex as re
 import torch
 import torch.nn as nn
 from mistral_common.audio import mel_filter_bank
