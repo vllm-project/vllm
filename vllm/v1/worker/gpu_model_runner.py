@@ -2661,7 +2661,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     block_size=max_model_len,
                     page_size_padded=page_size_padded)
 
-        elif has_conv_layer:
+        elif len(short_conv_layers) > 0:
             if self.vllm_config.speculative_config is not None:
                 raise NotImplementedError(
                     "ShortConv's with speculative decoding is not supported yet.")

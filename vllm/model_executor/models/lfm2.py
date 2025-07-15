@@ -470,6 +470,37 @@ class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
     }
     embedding_padding_modules = ["lm_head"]
 
+    @classmethod
+    def get_conv_cache_shape_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+        use_v1: bool = True,
+    ) -> tuple[tuple[int, int]]:
+        """ Calculate shapes for LFM2's convolutional cache.
+
+        Args:
+            vllm_config: vLLM config
+            use_v1: Get shapes for V1 (or V0)
+
+        Returns:
+            Tuple containing:
+            - conv_state_shape: Shape for convolutional state cache
+        """
+        parallel_config = vllm_config.parallel_config
+        hf_config = vllm_config.model_config.hf_config
+
+        world_size = parallel_config.tensor_parallel_size
+        hidden_size = hf_config.conv_dim
+        conv_L_cache = hf_config.conv_L_cache
+        conv_state_shape = (
+            conv_L_cache - 1,
+            hidden_size // world_size,
+        )
+        if not use_v1:
+            conv_state_shape = (conv_state_shape[1], conv_state_shape[0])
+
+        return (conv_state_shape,)
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -532,11 +563,13 @@ class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             if self.lfm2_cache is None:
                 num_conv_layers = self.model_config.get_num_layers_by_block_type(
                     self.vllm_config.parallel_config, LayerBlockType.conv)
+                conv_shape = self.get_conv_cache_shape_from_config(
+                    self.vllm_config, use_v1=False)
                 self.lfm2_cache = ConvCacheManager(
                     vllm_config=self.vllm_config,
                     dtype=self.lm_head.weight.dtype,
                     num_conv_layers=num_conv_layers,
-                    conv_state_shape=self._get_conv_cache_shape(),
+                    conv_state_shape=conv_shape[0],
                 )
 
             conv_cache_params = self.lfm2_cache.current_run_tensors(**kwargs)
@@ -551,15 +584,6 @@ class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         return self.lfm2_cache.get_seqlen_agnostic_capture_inputs(batch_size)
-
-    def _get_conv_cache_shape(self) -> tuple[tuple[int, int]]:
-        world_size = get_tensor_model_parallel_world_size()
-        hidden_size = self.config.conv_dim
-        conv_state_shape = (
-            hidden_size // world_size,
-            self.config.conv_L_cache - 1,
-        )
-        return conv_state_shape
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
