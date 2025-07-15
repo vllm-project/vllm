@@ -412,8 +412,6 @@ nvidia-nvjitlink-cu12==12.8.93
     #   nvidia-cusolver-cu12
     #   nvidia-cusparse-cu12
     #   torch
-nvidia-nvshmem-cu12==3.2.5
-    # via torch
 nvidia-nvtx-cu12==12.8.90
     # via torch
 opencensus==0.11.4
