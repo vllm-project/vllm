@@ -44,9 +44,9 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputs, PlaceholderRange)
-from vllm.multimodal.parse import ImageProcessorItems
+from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo)
+                                        BaseProcessingInfo, ProcessingCache)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_get_processor
@@ -228,11 +228,31 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder):
 
 class MultiModalProcessor(BaseMultiModalProcessor):
 
+    def __init__(self,
+                 info: MultiModalProcessingInfo,
+                 dummy_inputs: "BaseDummyInputsBuilder[MultiModalProcessingInfo]",
+                 *,
+                 cache: Optional[ProcessingCache] = None,
+    ) -> None:
+        super().__init__(
+            info=info,
+            dummy_inputs=dummy_inputs,
+            cache=cache,
+        )
+
+        if self.cache is not None:
+            logger.warning_once(
+                "TransformersForMultimodalLM doesn't support mm cache yet! "
+                "But mm_preprocessor_cache is enabled. Disable it due to the "
+                "compatibility issue for now."
+            )
+            self.cache = None
+
     def _get_prompt_updates(
         self,
-        mm_items,
-        hf_processor_mm_kwargs,
-        out_mm_kwargs,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargs,
     ):
         """
         Given the original multi-modal items for this modality
@@ -269,9 +289,10 @@ class MultiModalProcessor(BaseMultiModalProcessor):
 
     def _apply_hf_processor_text_mm(
         self,
-        prompt_text,
-        mm_items,
-        hf_processor_mm_kwargs,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
     ):
         """
         Apply the HF processor on the prompt text and multi-modal data
@@ -286,6 +307,7 @@ class MultiModalProcessor(BaseMultiModalProcessor):
             prompt=prompt_text,
             mm_data=processor_data,
             mm_kwargs=hf_processor_mm_kwargs,
+            tok_kwargs=tokenization_kwargs,
         )
         processed_data.update(passthrough_data)
 
@@ -299,10 +321,11 @@ class MultiModalProcessor(BaseMultiModalProcessor):
 
     def apply(
         self,
-        prompt,
-        mm_data,
-        hf_processor_mm_kwargs,
-        return_mm_hashes=False,
+        prompt: Union[str, list[int]],
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Optional[Mapping[str, object]] = None,
+        return_mm_hashes: bool=False,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -311,9 +334,14 @@ class MultiModalProcessor(BaseMultiModalProcessor):
         outputting token IDs and processed tensors.
         """
         if return_mm_hashes:
-            raise ValueError(
+            logger.warning_once(
                 "TransformersForMultimodalLM doesn't support mm hashing yet! "
-                "Probably you didn't set `disable_mm_preprocessor_cache=True`")
+                "But mm_preprocessor_cache is enabled. Disable it due to the "
+                "compatibility issue for now.")
+            return_mm_hashes = False
+
+        if tokenization_kwargs is None:
+            tokenization_kwargs = {}
 
         mm_items = self._to_mm_items(mm_data)
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
@@ -323,6 +351,7 @@ class MultiModalProcessor(BaseMultiModalProcessor):
              prompt_text=prompt,
              mm_items=mm_items,
              hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+             tokenization_kwargs=tokenization_kwargs,
          )
 
         # HF processor will return `mm_token_type_ids` from which
