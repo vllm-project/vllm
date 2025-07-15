@@ -48,11 +48,18 @@ class TopKWeightAndReduceNoOP(mk.TopKWeightAndReduce):
               fused_expert_output: torch.Tensor, topk_weights: torch.Tensor,
               topk_ids: torch.Tensor,
               apply_router_weight_on_input: bool) -> torch.Tensor:
-        # Relax this if an explicit copy is necessary. Note that,
-        # if a copy is employed we have to make sure that the
-        # tensors don't overlap
-        assert output is None
-        return fused_expert_output
+        # Weight application and reduction operations are already done.
+        if output is None:
+            return fused_expert_output
+
+        # MoEPrepareAndFinalizeNoEP needs the output to be in the `output`
+        # tensor.
+        assert output.size() == fused_expert_output.size(), (
+            "output shape is expected to match the fused_expert_output shape. "
+            f"But got output={output.size()}, "
+            f"used_expert_output={fused_expert_output.size()}")
+        output.copy_(fused_expert_output, non_blocking=True)
+        return output
 
 
 class TopKWeightAndReduceContiguous(mk.TopKWeightAndReduce):
