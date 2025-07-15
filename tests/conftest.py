@@ -826,9 +826,7 @@ class VllmRunner:
             if audios is not None and (audio := audios[i]) is not None:
                 multi_modal_data["audio"] = audio
 
-            text_prompt_kwargs = {
-                "multi_modal_data": multi_modal_data or None
-            }
+            text_prompt_kwargs = {"multi_modal_data": multi_modal_data or None}
             if isinstance(prompt, str):
                 text_prompt_kwargs["prompt"] = prompt
             elif isinstance(prompt, list) and isinstance(prompt[0], int):

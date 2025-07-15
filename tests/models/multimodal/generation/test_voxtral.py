@@ -2,26 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from typing import Any
 
-import numpy as np
-import torch
 import pytest
 import pytest_asyncio
-from vllm.transformers_utils.tokenizer import MistralTokenizer
 from mistral_common.audio import Audio
-from mistral_common.protocol.instruct.request import ChatCompletionRequest
-from mistral_common.protocol.instruct.messages import (
-    AudioChunk,
-    RawAudio,
-    TextChunk,
-    UserMessage,
-)
+from mistral_common.protocol.instruct.messages import (AudioChunk, RawAudio,
+                                                       TextChunk, UserMessage)
 
+from vllm.transformers_utils.tokenizer import MistralTokenizer
 
-from .test_ultravox import run_multi_audio_test, params_kwargs_to_cli_args, AUDIO_PROMPTS, MULTI_AUDIO_PROMPT, AudioTuple, CHUNKED_PREFILL_KWARGS
-from ....conftest import AUDIO_ASSETS, AudioTestAssets
+from ....conftest import AudioTestAssets
 from ....utils import RemoteOpenAIServer
+from .test_ultravox import MULTI_AUDIO_PROMPT, run_multi_audio_test
 
 MODEL_NAME = "mistralai/Voxtral-Mini-3B-2507"
 MISTRAL_FORMAT_ARGS = [
@@ -29,10 +21,12 @@ MISTRAL_FORMAT_ARGS = [
     "--load_format", "mistral"
 ]
 
+
 @pytest.fixture()
 def server(request, audio_assets: AudioTestAssets):
     args = [
-        "--enforce-eager", "--limit-mm-per-prompt",
+        "--enforce-eager",
+        "--limit-mm-per-prompt",
         json.dumps({"audio": len(audio_assets)}),
     ] + MISTRAL_FORMAT_ARGS
 
@@ -72,7 +66,8 @@ def _get_prompt(audio_assets, question):
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models_with_multiple_audios(vllm_runner,
                                      audio_assets: AudioTestAssets, dtype: str,
-                                     max_tokens: int, num_logprobs: int) -> None:
+                                     max_tokens: int,
+                                     num_logprobs: int) -> None:
     vllm_prompt = _get_prompt(audio_assets, MULTI_AUDIO_PROMPT)
     run_multi_audio_test(
         vllm_runner,
@@ -89,15 +84,14 @@ def test_models_with_multiple_audios(vllm_runner,
 @pytest.mark.asyncio
 async def test_online_serving(client, audio_assets: AudioTestAssets):
     """Exercises online serving with/without chunked prefill enabled."""
+
     def asset_to_chunk(asset):
         audio = Audio.from_file(str(asset.get_local_path()), strict=False)
         audio.format = "wav"
         audio_dict = AudioChunk.from_audio(audio).to_openai()
         return audio_dict
 
-    audio_chunks = [
-        asset_to_chunk(asset) for asset in audio_assets
-    ]
+    audio_chunks = [asset_to_chunk(asset) for asset in audio_assets]
     messages = [{
         "role":
         "user",
