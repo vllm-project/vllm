@@ -11,6 +11,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -71,6 +72,15 @@ class LlamaModel(nn.Module):
         self.fc = torch.nn.Linear(self.config.hidden_size * 2,
                                   self.config.hidden_size,
                                   bias=False)
+        
+        # Support for additional layernorms (HASS variant)
+        self.add_para_norm = False
+        if hasattr(self.config, "add_para_norm") and self.config.add_para_norm:
+            self.enorm = RMSNorm(self.config.hidden_size, 
+                               eps=self.config.rms_norm_eps)
+            self.hnorm = RMSNorm(self.config.hidden_size,
+                               eps=self.config.rms_norm_eps)
+            self.add_para_norm = True
 
     def forward(
         self,
@@ -79,6 +89,12 @@ class LlamaModel(nn.Module):
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_embeds = self.embed_tokens(input_ids)
+        
+        # Apply layernorms if enabled (HASS variant)
+        if self.add_para_norm:
+            input_embeds = self.enorm(input_embeds)
+            hidden_states = self.hnorm(hidden_states)
+        
         hidden_states = self.fc(
             torch.cat((input_embeds, hidden_states), dim=-1))
         residual = None
@@ -177,8 +193,23 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
             skip_prefixes=None,
         )
 
+        # Support for speculators format weights
+        speculators_name_map = {
+            "fusion_fc.weight": "fc.weight",
+            "fusion_fc.bias": "fc.bias",
+            "embedding_layernorm.weight": "enorm.weight",
+            "pre_lm_head_layernorm.weight": "hnorm.weight",
+        }
+
         model_weights = {}
         for name, loaded_weight in weights:
+            # Handle speculators format weight names
+            if name in speculators_name_map:
+                name = speculators_name_map[name]
+            elif name.startswith("transformer."):
+                # Skip transformer weights - they're loaded separately
+                continue
+                
             if "lm_head" not in name:
                 name = "model." + name
             model_weights[name] = loaded_weight
