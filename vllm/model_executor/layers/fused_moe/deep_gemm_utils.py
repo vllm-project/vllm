@@ -21,26 +21,16 @@ def deep_gemm_block_shape() -> list[int]:
 
 def expert_num_tokens_round_up_and_sum(expert_num_tokens: torch.Tensor,
                                        alignment: int) -> int:
-    # Round up each element in expert_num_tokens to the nearest multiple of 128.
+    # Round up each element in expert_num_tokens to the nearest multiple of
+    # alignment.
     ent = (expert_num_tokens.to(torch.int64) +
            (alignment - 1)) // alignment * alignment
     return torch.sum(ent).item()
 
 
 def compute_aligned_M(
-        M: int, num_topk: int, local_num_experts: int,
-        alignment: Optional[int],
+        M: int, num_topk: int, local_num_experts: int, alignment: int,
         expert_tokens_meta: Optional[ExpertTokensMetadata]) -> int:
-
-    has_expert_num_tokens = ((expert_tokens_meta is not None)
-                             and (expert_tokens_meta.expert_num_tokens_cpu
-                                  is not None))
-
-    if alignment is None:
-        if has_expert_num_tokens:
-            return expert_num_tokens_round_up_and_sum(
-                expert_tokens_meta.expert_num_tokens_cpu, alignment=1)
-        return M * num_topk
 
     if ((expert_tokens_meta is not None)
             and (expert_tokens_meta.expert_num_tokens_cpu is not None)):

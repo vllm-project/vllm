@@ -133,7 +133,7 @@ def moe_permute(
         M=n_token,
         num_topk=topk,
         local_num_experts=n_local_expert,
-        alignment=align_block_size,
+        alignment=align_block_size or 1,
         expert_tokens_meta=expert_tokens_meta)
     if permuted_hidden_states is None:
         permuted_hidden_states = torch.empty(
