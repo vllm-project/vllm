@@ -50,6 +50,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         )
 
         self.hidden_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm_before_residual = getattr(config, "norm_before_residual", False)
 
     def forward(
         self,
@@ -59,9 +60,14 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         residual: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
-        residual = hidden_states
         embeds = self.input_layernorm(embeds)
-        hidden_states = self.hidden_norm(hidden_states)
+
+        if self.norm_before_residual:
+            hidden_states = self.hidden_norm(hidden_states)
+            residual = hidden_states
+        else:
+            residual = hidden_states
+            hidden_states = self.hidden_norm(hidden_states)
 
         hidden_states = torch.cat([embeds, hidden_states], dim=-1)
         # Self Attention

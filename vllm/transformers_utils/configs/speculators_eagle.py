@@ -220,6 +220,8 @@ class SpeculatorsEagleConfig(EAGLEConfig):
         if "norm_before_residual" in speculators_config:
             norm_before_residual = speculators_config["norm_before_residual"]
             vllm_config["norm_before_residual"] = norm_before_residual
+            # Also add to transformer config so it's accessible in model
+            transformer_config["norm_before_residual"] = norm_before_residual
         
         # Eagle-3 uses a different architecture
         vllm_config["architectures"] = ["Eagle3LlamaForCausalLM"]
