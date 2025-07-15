@@ -1303,7 +1303,7 @@ class ScalingMiddleware:
     """
     Middleware that checks if the model is currently scaling and
     returns a 503 Service Unavailable response if it is.
-    
+
     This middleware applies to all HTTP requests and prevents
     processing when the model is in a scaling state.
     """
@@ -1727,12 +1727,14 @@ async def init_app_state(
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
+        enable_force_include_usage=args.enable_force_include_usage,
     ) if "transcription" in supported_tasks else None
     state.openai_serving_translation = OpenAIServingTranslation(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
+        enable_force_include_usage=args.enable_force_include_usage,
     ) if "transcription" in supported_tasks else None
 
     state.enable_server_load_tracking = args.enable_server_load_tracking

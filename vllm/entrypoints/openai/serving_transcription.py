@@ -32,6 +32,7 @@ class OpenAIServingTranscription(OpenAISpeechToText):
         *,
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
+        enable_force_include_usage: bool,
     ):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
@@ -71,8 +72,7 @@ class OpenAIServingTranscription(OpenAISpeechToText):
             audio_duration_s=audio_duration_s,
             chunk_object_type="transcription.chunk",
             response_stream_choice_class=TranscriptionResponseStreamChoice,
-            stream_response_class=TranscriptionStreamResponse,
-        )
+            stream_response_class=TranscriptionStreamResponse)
         async for chunk in generator:
             yield chunk
 
@@ -88,13 +88,15 @@ class OpenAIServingTranslation(OpenAISpeechToText):
         *,
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
+        enable_force_include_usage: bool,
     ):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids,
-                         task_type="translate")
+                         task_type="translate",
+                         enable_force_include_usage=enable_force_include_usage)
 
     async def create_translation(
         self, audio_data: bytes, request: TranslationRequest,
@@ -126,7 +128,6 @@ class OpenAIServingTranslation(OpenAISpeechToText):
             audio_duration_s=audio_duration_s,
             chunk_object_type="translation.chunk",
             response_stream_choice_class=TranslationResponseStreamChoice,
-            stream_response_class=TranslationStreamResponse,
-        )
+            stream_response_class=TranslationStreamResponse)
         async for chunk in generator:
             yield chunk

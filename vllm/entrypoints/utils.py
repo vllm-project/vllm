@@ -324,3 +324,8 @@ def log_non_default_args(args: Union[argparse.Namespace, EngineArgs]):
         "Must be argparse.Namespace or EngineArgs instance.")
 
     logger.info("non-default args: %s", non_default_args)
+
+
+def should_include_usage(stream_options_include_usage: Optional[bool],
+                         enable_force_include_usage: bool) -> bool:
+    return stream_options_include_usage or enable_force_include_usage
