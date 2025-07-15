@@ -32,8 +32,8 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
                          PrefixCachingHashAlgo, PromptAdapterConfig,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         TaskOption, TokenizerMode, TokenizerPoolConfig,
-                         VllmConfig, get_attr_docs, get_field)
+                         TaskOption, TokenizerMode, VllmConfig, get_attr_docs,
+                         get_field)
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -373,13 +373,6 @@ class EngineArgs:
     enforce_eager: bool = ModelConfig.enforce_eager
     max_seq_len_to_capture: int = ModelConfig.max_seq_len_to_capture
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
-    # The following three fields are deprecated and will be removed in a future
-    # release. Setting them will have no effect. Please remove them from your
-    # configurations.
-    tokenizer_pool_size: int = TokenizerPoolConfig.pool_size
-    tokenizer_pool_type: str = TokenizerPoolConfig.pool_type
-    tokenizer_pool_extra_config: dict = \
-        get_field(TokenizerPoolConfig, "extra_config")
     limit_mm_per_prompt: dict[str, int] = \
         get_field(MultiModalConfig, "limit_per_prompt")
     interleave_mm_strings: bool = MultiModalConfig.interleave_mm_strings
@@ -750,19 +743,6 @@ class EngineArgs:
                                  **cache_kwargs["cpu_offload_gb"])
         cache_group.add_argument("--calculate-kv-scales",
                                  **cache_kwargs["calculate_kv_scales"])
-
-        # Tokenizer arguments
-        tokenizer_kwargs = get_kwargs(TokenizerPoolConfig)
-        tokenizer_group = parser.add_argument_group(
-            title="TokenizerPoolConfig",
-            description=TokenizerPoolConfig.__doc__,
-        )
-        tokenizer_group.add_argument("--tokenizer-pool-size",
-                                     **tokenizer_kwargs["pool_size"])
-        tokenizer_group.add_argument("--tokenizer-pool-type",
-                                     **tokenizer_kwargs["pool_type"])
-        tokenizer_group.add_argument("--tokenizer-pool-extra-config",
-                                     **tokenizer_kwargs["extra_config"])
 
         # Multimodal related configs
         multimodal_kwargs = get_kwargs(MultiModalConfig)
