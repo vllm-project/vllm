@@ -2471,8 +2471,8 @@ class SchedulerConfig:
             # Datacenter GPUs: higher memory bandwidth enables larger batches
             default_tokens = 4096 if is_hopper else 3072
             env_var_name = (
-                "VLLM_SMALL_MODEL_H100_BATCH_TOKENS" if is_hopper else
-                "VLLM_SMALL_MODEL_A100_BATCH_TOKENS")
+                "VLLM_OPTIMIZATION_PROFILE" if is_hopper else
+                "VLLM_BATCH_SIZE_MULTIPLIER")
 
             if self.max_num_batched_tokens == DEFAULT_MAX_NUM_BATCHED_TOKENS:
                 self.max_num_batched_tokens = int(
