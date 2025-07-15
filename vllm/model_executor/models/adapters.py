@@ -65,13 +65,13 @@ def _create_pooling_model_cls(
 
             # If the model already defines a pooler instance, don't overwrite it
             if not getattr(self, "_pooler", None):
-                self._pooler = self._init_pooler(vllm_config)
+                self._init_pooler(vllm_config, prefix=prefix)
 
-        def _init_pooler(self, vllm_config: "VllmConfig"):
+        def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
 
-            return Pooler.from_config_with_defaults(
+            self._pooler = Pooler.from_config_with_defaults(
                 pooler_config,
                 pooling_type=default_pooling_type,
                 normalize=default_normalize,
@@ -187,20 +187,9 @@ def as_seq_cls_model(cls: _T) -> _T:
     class ModelForSequenceClassification(ModelForPooling,
                                          SupportsCrossEncoding):
 
-        def __init__(
-            self,
-            *,
-            vllm_config: "VllmConfig",
-            prefix: str = "",
-            **kwargs: Any,
-        ) -> None:
-            super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
-
+        def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
             config = vllm_config.model_config.hf_config
             quant_config = vllm_config.quant_config
-
-            self.vllm_config = vllm_config
-            self.task = vllm_config.model_config.task
 
             self.score = RowParallelLinear(config.hidden_size,
                                            config.num_labels,
@@ -210,7 +199,6 @@ def as_seq_cls_model(cls: _T) -> _T:
                                            prefix=maybe_prefix(
                                                prefix, "score"))
 
-        def _init_pooler(self, vllm_config: "VllmConfig"):
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
 
@@ -221,7 +209,7 @@ def as_seq_cls_model(cls: _T) -> _T:
                 softmax=False,
             )
 
-            return ClassifierPooler(
+            self._pooler = ClassifierPooler(
                 vllm_config.model_config,
                 self.score,
                 act_fn=head.activation,
