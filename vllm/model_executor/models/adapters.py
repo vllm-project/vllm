@@ -58,6 +58,8 @@ def _create_pooling_model_cls(
         ) -> None:
             super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
+            self.vllm_config = vllm_config
+
             # These are not used in pooling models
             for attr in ("lm_head", "logits_processor"):
                 if hasattr(self, attr):
