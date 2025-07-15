@@ -1,11 +1,8 @@
----
-title: OpenAI-Compatible Server
----
-[](){ #serving-openai-compatible-server }
+# OpenAI-Compatible Server
 
 vLLM provides an HTTP server that implements OpenAI's [Completions API](https://platform.openai.com/docs/api-reference/completions), [Chat API](https://platform.openai.com/docs/api-reference/chat), and more! This functionality lets you serve models and interact with them using an HTTP client.
 
-In your terminal, you can [install](../getting_started/installation/README.md) vLLM, then start the server with the [`vllm serve`][serve-args] command. (You can also use our [Docker][deployment-docker] image.)
+In your terminal, you can [install](../getting_started/installation/README.md) vLLM, then start the server with the [`vllm serve`](../configuration/serve_args.md) command. (You can also use our [Docker](../deployment/docker.md) image.)
 
 ```bash
 vllm serve NousResearch/Meta-Llama-3-8B-Instruct \
@@ -208,7 +205,7 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 
 We support both [Vision](https://platform.openai.com/docs/guides/vision)- and
 [Audio](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in)-related parameters;
-see our [Multimodal Inputs][multimodal-inputs] guide for more information.
+see our [Multimodal Inputs](../features/multimodal_inputs.md) guide for more information.
 - *Note: `image_url.detail` parameter is not supported.*
 
 Code example: <gh-file:examples/online_serving/openai_chat_completion_client.py>
@@ -540,7 +537,7 @@ The following extra parameters are supported:
 
 ### Score API
 
-Our Score API can apply a cross-encoder model or an embedding model to predict scores for sentence pairs. When using an embedding model the score corresponds to the cosine similarity between each embedding pair.
+Our Score API can apply a cross-encoder model or an embedding model to predict scores for sentence or multimodal pairs. When using an embedding model the score corresponds to the cosine similarity between each embedding pair.
 Usually, the score for a sentence pair refers to the similarity between two sentences, on a scale of 0 to 1.
 
 You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
@@ -679,6 +676,55 @@ The total number of pairs is `len(text_2)`.
     }
     ```
 
+#### Multi-modal inputs
+
+You can pass multi-modal inputs to scoring models by passing `content` including a list of multi-modal input (image, etc.) in the request. Refer to the examples below for illustration.
+
+=== "JinaVL-Reranker"
+
+    To serve the model:
+
+    ```bash
+    vllm serve jinaai/jina-reranker-m0
+    ```
+
+    Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
+
+    ??? Code
+
+        ```python
+        import requests
+
+        response = requests.post(
+            "http://localhost:8000/v1/score",
+            json={
+                "model": "jinaai/jina-reranker-m0",
+                "text_1": "slm markdown",
+                "text_2": {
+                  "content": [
+                          {
+                              "type": "image_url",
+                              "image_url": {
+                                  "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
+                              },
+                          },
+                          {
+                              "type": "image_url",
+                              "image_url": {
+                                  "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
+                              },
+                          },
+                      ]
+                  }
+                },
+        )
+        response.raise_for_status()
+        response_json = response.json()
+        print("Scoring output:", response_json["data"][0]["score"])
+        print("Scoring output:", response_json["data"][1]["score"])
+        ```
+Full example: <gh-file:examples/online_serving/openai_cross_encoder_score_for_multimodal.py>
+
 #### Extra parameters
 
 The following [pooling parameters][pooling-params] are supported.
@@ -698,8 +744,7 @@ The following extra parameters are supported:
 ### Re-rank API
 
 Our Re-rank API can apply an embedding model or a cross-encoder model to predict relevant scores between a single query, and
-each of a list of documents. Usually, the score for a sentence pair refers to the similarity between two sentences, on
-a scale of 0 to 1.
+each of a list of documents. Usually, the score for a sentence pair refers to the similarity between two sentences or multi-modal inputs (image, etc.), on a scale of 0 to 1.
 
 You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
 

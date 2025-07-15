@@ -1,7 +1,4 @@
----
-title: Generative Models
----
-[](){ #generative-models }
+# Generative Models
 
 vLLM provides first-class support for generative models, which covers most of LLMs.
 
@@ -134,7 +131,7 @@ outputs = llm.chat(conversation, chat_template=custom_template)
 
 ## Online Serving
 
-Our [OpenAI-Compatible Server][serving-openai-compatible-server] provides endpoints that correspond to the offline APIs:
+Our [OpenAI-Compatible Server](../serving/openai_compatible_server.md) provides endpoints that correspond to the offline APIs:
 
 - [Completions API][completions-api] is similar to `LLM.generate` but only accepts text.
-- [Chat API][chat-api]  is similar to `LLM.chat`, accepting both text and [multi-modal inputs][multimodal-inputs] for models with a chat template.
+- [Chat API][chat-api]  is similar to `LLM.chat`, accepting both text and [multi-modal inputs](../features/multimodal_inputs.md) for models with a chat template.

@@ -1,7 +1,4 @@
----
-title: Production stack
----
-[](){ #deployment-production-stack }
+# Production stack
 
 Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine learning models. This guide walks you through deploying vLLM using the [vLLM production stack](https://github.com/vllm-project/production-stack). Born out of a Berkeley-UChicago collaboration, [vLLM production stack](https://github.com/vllm-project/production-stack) is an officially released, production-optimized codebase under the [vLLM project](https://github.com/vllm-project), designed for LLM deployment with:
 
@@ -44,7 +41,8 @@ vllm-deployment-router-859d8fb668-2x2b7        1/1     Running   0          2m38
 vllm-opt125m-deployment-vllm-84dfc9bd7-vb9bs   1/1     Running   0          2m38s
 ```
 
-**NOTE**: It may take some time for the containers to download the Docker images and LLM weights.
+!!! note
+    It may take some time for the containers to download the Docker images and LLM weights.
 
 ### Send a Query to the Stack
 
@@ -152,6 +150,8 @@ In this YAML configuration:
 * **`requestGPU`**: Specifies the number of GPUs required.
 * **`pvcStorage`**: Allocates persistent storage for the model.
 
-**NOTE:** If you intend to set up two pods, please refer to this [YAML file](https://github.com/vllm-project/production-stack/blob/main/tutorials/assets/values-01-2pods-minimal-example.yaml).
+!!! note
+    If you intend to set up two pods, please refer to this [YAML file](https://github.com/vllm-project/production-stack/blob/main/tutorials/assets/values-01-2pods-minimal-example.yaml).
 
-**NOTE:** vLLM production stack offers many more features (*e.g.* CPU offloading and a wide range of routing algorithms). Please check out these [examples and tutorials](https://github.com/vllm-project/production-stack/tree/main/tutorials) and our [repo](https://github.com/vllm-project/production-stack) for more details!
+!!! tip
+    vLLM production stack offers many more features (*e.g.* CPU offloading and a wide range of routing algorithms). Please check out these [examples and tutorials](https://github.com/vllm-project/production-stack/tree/main/tutorials) and our [repo](https://github.com/vllm-project/production-stack) for more details!

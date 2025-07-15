@@ -1,7 +1,4 @@
----
-title: Speculative Decoding
----
-[](){ #spec-decode }
+# Speculative Decoding
 
 !!! warning
     Please note that speculative decoding in vLLM is not yet optimized and does
@@ -259,17 +256,17 @@ speculative decoding, breaking down the guarantees into three key areas:
 2. **Algorithmic Losslessness**
    \- vLLM’s implementation of speculative decoding is algorithmically validated to be lossless. Key validation tests include:
 
-   > - **Rejection Sampler Convergence**: Ensures that samples from vLLM’s rejection sampler align with the target
-   >   distribution. [View Test Code](https://github.com/vllm-project/vllm/blob/47b65a550866c7ffbd076ecb74106714838ce7da/tests/samplers/test_rejection_sampler.py#L252)
-   > - **Greedy Sampling Equality**: Confirms that greedy sampling with speculative decoding matches greedy sampling
-   >   without it. This verifies that vLLM's speculative decoding framework, when integrated with the vLLM forward pass and the vLLM rejection sampler,
-   >   provides a lossless guarantee. Almost all of the tests in <gh-dir:tests/spec_decode/e2e>.
-   >   verify this property using [this assertion implementation](https://github.com/vllm-project/vllm/blob/b67ae00cdbbe1a58ffc8ff170f0c8d79044a684a/tests/spec_decode/e2e/conftest.py#L291)
+    > - **Rejection Sampler Convergence**: Ensures that samples from vLLM’s rejection sampler align with the target
+    >   distribution. [View Test Code](https://github.com/vllm-project/vllm/blob/47b65a550866c7ffbd076ecb74106714838ce7da/tests/samplers/test_rejection_sampler.py#L252)
+    > - **Greedy Sampling Equality**: Confirms that greedy sampling with speculative decoding matches greedy sampling
+    >   without it. This verifies that vLLM's speculative decoding framework, when integrated with the vLLM forward pass and the vLLM rejection sampler,
+    >   provides a lossless guarantee. Almost all of the tests in <gh-dir:tests/spec_decode/e2e>.
+    >   verify this property using [this assertion implementation](https://github.com/vllm-project/vllm/blob/b67ae00cdbbe1a58ffc8ff170f0c8d79044a684a/tests/spec_decode/e2e/conftest.py#L291)
 
 3. **vLLM Logprob Stability**
    \- vLLM does not currently guarantee stable token log probabilities (logprobs). This can result in different outputs for the
    same request across runs. For more details, see the FAQ section
-   titled *Can the output of a prompt vary across runs in vLLM?* in the [FAQs][faq].
+   titled *Can the output of a prompt vary across runs in vLLM?* in the [FAQs](../usage/faq.md).
 
 While vLLM strives to ensure losslessness in speculative decoding, variations in generated outputs with and without speculative decoding
 can occur due to following factors:
@@ -278,7 +275,7 @@ can occur due to following factors:
 - **Batch Size and Numerical Stability**: Changes in batch size may cause variations in logprobs and output probabilities, potentially
   due to non-deterministic behavior in batched operations or numerical instability.
 
-For mitigation strategies, please refer to the FAQ entry *Can the output of a prompt vary across runs in vLLM?* in the [FAQs][faq].
+For mitigation strategies, please refer to the FAQ entry *Can the output of a prompt vary across runs in vLLM?* in the [FAQs](../usage/faq.md).
 
 ## Resources for vLLM contributors
 
