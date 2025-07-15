@@ -112,8 +112,7 @@ enforcing eager mode and disabling prefix caching in V1.
 Models that combine Mamba-2 layers with standard attention layers are also supported (e.g., `BambaForCausalLM`,
 `Zamba2ForCausalLM`, `NemotronHForCausalLM`, `FalconH1ForCausalLM` and `GraniteMoeHybridForCausalLM`). Please note that
 these models currently require enforcing eager mode, disabling prefix caching, and using the FlashInfer attention
-backend in V1. It is also necessary to pass a non-standard block size for attention layers (this is not possible
-using the `vllm serve` CLI yet).
+backend in V1.
 
 #### Encoder-Decoder Models
 
