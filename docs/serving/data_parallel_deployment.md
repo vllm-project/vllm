@@ -57,11 +57,19 @@ vllm serve $MODEL --headless --data-parallel-size 4 --data-parallel-size-local 4
                   --data-parallel-address 10.99.48.128 --data-parallel-rpc-port 13345
 ```
 
-This DP mode can also be used with Ray, in which case only a single launch command is needed irrespective of the number of nodes:
+This DP mode can also be used with Ray by specifying `--data-parallel-backend=ray`:
 
 ```bash
-vllm serve $MODEL --data-parallel-size 16 --tensor-parallel-size 2 --data-parallel-backend=ray
+vllm serve $MODEL --data-parallel-size 4 --data-parallel-size-local 2 \
+                  --data-parallel-backend=ray
 ```
+
+There are several notable differences when using Ray:
+
+- A single launch command (on any node) is needed to start all local and remote DP ranks, therefore it is more convenient compared to launching on each node
+- There is no need to specify `--data-parallel-address`, and the node where the command is run is used as `--data-parallel-address`
+- There is no need to specify `--data-parallel-rpc-port`
+- Remote DP ranks will be allocated based on node resources of the Ray cluster
 
 Currently, the internal DP load balancing is done within the API server process(es) and is based on the running and waiting queues in each of the engines. This could be made more sophisticated in future by incorporating KV cache aware logic.
 
