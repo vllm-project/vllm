@@ -35,7 +35,7 @@ struct sm100_fp8_config_M32 {
   using KernelSchedule =
       cutlass::gemm::KernelPtrArrayTmaWarpSpecialized1SmSm100;
   using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecialized1Sm;
-  using TileShape = cute::Shape<cute::_128, cute::_128, cute::_128>;
+  using TileShape = cute::Shape<cute::_128, cute::_256, cute::_128>;
   using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
   using ArchTag = cutlass::arch::Sm100;
 
@@ -106,31 +106,47 @@ void run_cutlass_moe_mm_sm100(
   uint32_t const m = a_tensors.size(0);
   uint32_t const n = out_tensors.size(1);
   uint32_t const k = a_tensors.size(1);
-  bool swap_ab = m < 32;
-  if (swap_ab) {
-    cutlass_group_gemm_caller<Cutlass3xGemmSwapAB>(
-        out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
-        per_out_ch);
-  }
-  else{
+//   bool swap_ab = false;
+//   if (swap_ab) {
+//     cutlass_group_gemm_caller<Cutlass3xGemmSwapAB>(
+//         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+//         problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+//         per_out_ch);
+//   }
+//   else{
+//     if (n >= 4096) {
+//     cutlass_group_gemm_caller<Cutlass3xGemmN4096>(
+//         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+//         problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+//         per_out_ch);
+//   } else if (m >= 32) {
+//     cutlass_group_gemm_caller<Cutlass3xGemmM32>(
+//         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+//         problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+//         per_out_ch);
+//   } else {
+//     cutlass_group_gemm_caller<Cutlass3xGemmDefault>(
+//         out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+//             problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+//             per_out_ch);
+//   }
+//   }
     if (n >= 4096) {
-    cutlass_group_gemm_caller<Cutlass3xGemmN4096>(
-        out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
-        per_out_ch);
-  } else if (m >= 32) {
-    cutlass_group_gemm_caller<Cutlass3xGemmM32>(
-        out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
-        problem_sizes, a_strides, b_strides, c_strides, per_act_token,
-        per_out_ch);
-  } else {
-    cutlass_group_gemm_caller<Cutlass3xGemmDefault>(
-        out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+        cutlass_group_gemm_caller<Cutlass3xGemmN4096>(
+            out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
             problem_sizes, a_strides, b_strides, c_strides, per_act_token,
             per_out_ch);
-  }
-  }
+    } else if (m >= 32) {
+        cutlass_group_gemm_caller<Cutlass3xGemmM32>(
+            out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+            problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+            per_out_ch);
+    } else {
+        cutlass_group_gemm_caller<Cutlass3xGemmDefault>(
+            out_tensors, a_tensors, b_tensors, a_scales, b_scales, expert_offsets,
+                problem_sizes, a_strides, b_strides, c_strides, per_act_token,
+                per_out_ch);
+    }
 }
 
 void dispatch_moe_mm_sm100(
