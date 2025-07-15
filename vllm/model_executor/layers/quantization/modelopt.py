@@ -482,7 +482,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
         if envs.VLLM_USE_FLASHINFER_MOE:
             if self.cutlass_nvfp4_supported and current_platform.is_cuda() \
-               and current_platform.has_device_capability(10, 0):
+               and current_platform.is_device_capability(100):
                 logger.info_once(
                     "Using FlashInfer kernels for ModelOptNvFp4FusedMoE.")
                 self.allow_flashinfer_cutlass = True
@@ -510,9 +510,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def select_experts_impl(self, moe_parallel_config):
         if not self.allow_flashinfer_cutlass:
-            # if moe_parallel_config.dp_size > 1:
-            #     raise ValueError("CutlassExpertsFp4 Doesn't support DP. "
-            #                 "Use flashinfer CUTLASS FusedMoE backend instead.")
             return
 
         logger.debug("FlashInferExperts")
@@ -853,7 +850,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 extra_finalize_args=extra_finalize_args,
             )
         else:
-
             # cutlass_moe_fp4, TP case only(no EP)
             out = self.fused_experts(
                 a=x,
@@ -873,5 +869,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 e=layer.w13_weight.shape[0],
                 device=x.device,
                 expert_map=expert_map,
+				apply_router_weight_on_input=apply_router_weight_on_input
             )
         return out

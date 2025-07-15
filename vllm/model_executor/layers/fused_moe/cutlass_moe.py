@@ -652,6 +652,7 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         k: int,
         e: int,
         device: torch.device,
+		apply_router_weight_on_input,
     ):
         assert expert_map is None, ("Expert Parallelism / expert_map "
                                     "is currently not supported for "
@@ -677,6 +678,7 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
             k,
             e,
             device,
+			apply_router_weight_on_input,
         )
 
 
@@ -698,6 +700,7 @@ def cutlass_moe_fp4(
     e: int,
     device: torch.device,
     expert_map: Optional[torch.Tensor] = None,
+	apply_router_weight_on_input: bool = False
 ) -> torch.Tensor:
     assert expert_map is None, ("Expert Parallelism / expert_map "
                                 "is currently not supported for "
@@ -749,7 +752,7 @@ def cutlass_moe_fp4(
         w2_scale=w2_blockscale,
         a1_scale=None,
         a2_scale=None,
-        apply_router_weight_on_input=False,
+        apply_router_weight_on_input=apply_router_weight_on_input,
         extra_expert_args=extra_expert_args,
         extra_prepare_args=extra_prepare_args,
         extra_finalize_args=extra_finalize_args,
