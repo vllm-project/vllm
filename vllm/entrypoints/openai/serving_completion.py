@@ -23,6 +23,7 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
                                               ErrorResponse,
+                                              PromptTokenUsageInfo,
                                               RequestResponseMetadata,
                                               UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (
@@ -56,6 +57,7 @@ class OpenAIServingCompletion(OpenAIServing):
         *,
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
+        enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
     ):
         super().__init__(engine_client=engine_client,
@@ -64,6 +66,7 @@ class OpenAIServingCompletion(OpenAIServing):
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids,
                          enable_force_include_usage=enable_force_include_usage)
+        self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.default_sampling_params = (
             self.model_config.get_diff_sampling_param())
         if self.default_sampling_params:
@@ -313,6 +316,8 @@ class OpenAIServingCompletion(OpenAIServing):
         previous_num_tokens = [0] * num_choices * num_prompts
         has_echoed = [False] * num_choices * num_prompts
         num_prompt_tokens = [0] * num_prompts
+        num_cached_tokens = None
+        first_iteration = True
 
         stream_options = request.stream_options
         if stream_options:
@@ -327,6 +332,10 @@ class OpenAIServingCompletion(OpenAIServing):
             async for prompt_idx, res in result_generator:
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
+
+                if first_iteration:
+                    num_cached_tokens = res.num_cached_tokens
+                    first_iteration = False
 
                 if res.prompt is not None:
                     prompt_text = res.prompt
@@ -431,6 +440,10 @@ class OpenAIServingCompletion(OpenAIServing):
                 completion_tokens=total_completion_tokens,
                 total_tokens=total_prompt_tokens + total_completion_tokens)
 
+            if self.enable_prompt_tokens_details and num_cached_tokens:
+                final_usage_info.prompt_tokens_details = PromptTokenUsageInfo(
+                    cached_tokens=num_cached_tokens)
+
             if include_usage:
                 final_usage_chunk = CompletionStreamResponse(
                     id=request_id,
@@ -534,6 +547,10 @@ class OpenAIServingCompletion(OpenAIServing):
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
+
+        if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
+            usage.prompt_tokens_details = PromptTokenUsageInfo(
+                cached_tokens=final_res.num_cached_tokens)
 
         request_metadata.final_usage_info = usage
 
