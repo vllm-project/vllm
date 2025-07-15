@@ -501,6 +501,14 @@ class IsHybrid(Protocol):
         """
         ...
 
+    @classmethod
+    def get_conv_cache_shape_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+        use_v1: bool = True,
+    ) -> tuple[tuple[int, int]]:
+        ...
+
 
 @runtime_checkable
 class _IsHybridType(Protocol):

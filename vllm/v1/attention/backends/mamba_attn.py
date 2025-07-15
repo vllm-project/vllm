@@ -92,8 +92,12 @@ class Mamba2AttentionMetadataBuilder(
         self.runner = runner
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
-        self.chunk_size = runner.vllm_config.model_config.get_mamba_chunk_size(
-        )
+        if isinstance(kv_cache_spec, MambaSpec):
+            self.chunk_size = runner.vllm_config.model_config.get_mamba_chunk_size(
+            )
+        elif isinstance(kv_cache_spec, ShortConvSpec):
+            self.chunk_size = 1
+
         assert self.chunk_size is not None, (
             "chunk_size needs to be set in the model config for Mamba2 models")
 
