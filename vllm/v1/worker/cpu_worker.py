@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import os
-from importlib import util
+import platform
+import subprocess
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
@@ -19,13 +22,6 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_worker import (Worker,
                                        init_worker_distributed_environment)
-
-try:
-    import psutil
-    from numa import info
-except ImportError:
-    psutil = PlaceholderModule("psutil")  # type: ignore[assignment]
-    numa = PlaceholderModule("numa")  # type: ignore[assignment]
 
 logger = init_logger(__name__)
 
@@ -54,11 +50,9 @@ class CPUWorker(Worker):
         self.local_omp_cpuid = "all"
         if omp_cpuids == "auto":
             if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
-                self.local_omp_cpuid = (
-                    self.get_cpus_id_binding_based_on_numa_nodes_ppc64le())
+                self.local_omp_cpuid = self._get_autobind_cpu_ids(4)
             else:
-                self.local_omp_cpuid = (
-                    self.get_cpus_id_binding_based_on_numa_nodes())
+                self.local_omp_cpuid = self._get_autobind_cpu_ids(1)
         else:
             self.local_omp_cpuid = omp_cpuids.split("|")[self.rank]
 
@@ -122,126 +116,76 @@ class CPUWorker(Worker):
         assert isinstance(output, ModelRunnerOutput)
         return output if self.is_driver_worker else None
 
-    def warn_inability_to_detect_numa(self) -> None:
-        logger.warning(
-            "Auto thread-binding failed due to the "
-            "inability to detect numa nodes. %s",
-            self.manually_bind_threads_suggestion)
-
-    def warn_lack_of_numa_and_psutil(self) -> None:
-        logger.warning(
-            "Auto thread-binding failed due to "
-            "the lack of package numa and psutil. %s",
-            self.manually_bind_threads_suggestion)
-
-    def warn_world_size_too_large(self, world_size: int,
-                                  node_to_cpus_len: int) -> None:
-        logger.warning(
-            "Auto thread-binding failed due to "
-            "world size: %d being larger than "
-            "allowed NUMA nodes number: %d. %s", world_size, node_to_cpus_len,
-            self.manually_bind_threads_suggestion)
-
-    def get_cpus_allow_list_and_numa_size(self):
-        cpus_allow_list = psutil.Process().cpu_affinity()
-        numa_size = info.get_num_configured_nodes()
-        return cpus_allow_list, numa_size
-
-    def auto_thread_binding_based_on_numa_nodes(self, world_size: int,
-                                                rank_to_cpus: str) -> str:
-        cpu_count = psutil.cpu_count(logical=False)
-        cpus_allow_list, numa_size = self.get_cpus_allow_list_and_numa_size()
-        if not numa_size:
-            self.warn_inability_to_detect_numa()
-            return rank_to_cpus
-
-        cpu_count_per_numa = cpu_count // numa_size
-        num_of_reserved_cpu = min(envs.VLLM_CPU_NUM_OF_RESERVED_CPU,
-                                  cpu_count_per_numa // 2)
-
-        node_to_cpus = []
-        for i in range(numa_size):
-            node_intersect = set(
-                info.node_to_cpus(i)).intersection(cpus_allow_list)
-            if bool(node_intersect):
-                node_to_cpus.append(list(node_intersect))
-
-        node_to_cpus_len = len(node_to_cpus)
-        if world_size > node_to_cpus_len:
-            self.warn_world_size_too_large(world_size, node_to_cpus_len)
-        else:
-            end = cpu_count_per_numa - num_of_reserved_cpu
-            rank_to_cpus_list = node_to_cpus[self.rank][:end]
-            rank_to_cpus = ','.join(str(x) for x in rank_to_cpus_list)
-            logger.info("auto thread-binding list: %s", rank_to_cpus)
-        return rank_to_cpus
-
-    def libnuma_and_psutil_found(self) -> bool:
-        libnuma_found = util.find_spec("numa") is not None
-        psutil_found = util.find_spec("psutil") is not None
-
-        return libnuma_found and psutil_found
-
-    def get_cpus_id_binding_based_on_numa_nodes(self) -> str:
-        """Return CPUs id binding based on NUMA nodes.
+    def _get_autobind_cpu_ids(self, cpu_num_per_core: int) -> str:
         """
-        rank_to_cpus = self.local_omp_cpuid
-        # Setup OpenMP thread affinity based on NUMA nodes automatically
-        world_size = self.vllm_config.parallel_config.world_size
-        if self.libnuma_and_psutil_found():
-            rank_to_cpus = self.auto_thread_binding_based_on_numa_nodes(
-                world_size, rank_to_cpus)
-        else:
-            self.warn_lack_of_numa_and_psutil()
-        return rank_to_cpus
-
-    def select_threads_per_power_core(self,
-                                      node_cpu_ids: list[int]) -> list[int]:
-        return [cpu for cpu in node_cpu_ids if cpu % 8 < 4]
-
-    def auto_thread_binding_based_on_numa_nodes_ppc64le(
-            self, world_size: int, rank_to_cpus: str) -> str:
-        cpus_allow_list, numa_size = self.get_cpus_allow_list_and_numa_size()
-        if not numa_size:
-            self.warn_inability_to_detect_numa()
-            return rank_to_cpus
-
-        node_to_cpus = []
-        for i in range(numa_size):
-            node_intersect = set(
-                info.node_to_cpus(i)).intersection(cpus_allow_list)
-            if bool(node_intersect):
-                node_to_cpus.append(sorted(list(node_intersect)))
-
-        node_to_cpus_len = len(node_to_cpus)
-        if world_size > node_to_cpus_len:
-            self.warn_world_size_too_large(world_size, node_to_cpus_len)
-        else:
-            node_cpus_this_rank = node_to_cpus[self.rank]
-            node_cpus_this_rank = self.select_threads_per_power_core(
-                node_cpus_this_rank)
-            cpu_count_per_numa = len(node_cpus_this_rank)
-            num_of_reserved_cpu = min(envs.VLLM_CPU_NUM_OF_RESERVED_CPU,
-                                      cpu_count_per_numa // 2)
-            end = cpu_count_per_numa - num_of_reserved_cpu
-            rank_to_cpus_list = node_cpus_this_rank[:end]
-            rank_to_cpus = ','.join(str(x) for x in rank_to_cpus_list)
-            logger.info("ppc64le thread-binding list: %s", rank_to_cpus)
-        return rank_to_cpus
-
-    def get_cpus_id_binding_based_on_numa_nodes_ppc64le(self) -> str:
-        """
-        Power (ppc64le) specific: Selects a subset of threads per core for 
-        each NUMA node.This is robust to SMT mode (SMT-8, SMT-4, etc) 
-        because the OS only exposes available threads.This maximizes 
-        performance by avoiding oversubscription of logical CPUs on Power.
+        Return CPU ids to bind based on NUMA nodes. 
+        Currently for rank N, only CPU ids on NUMA node N will be selected.
+        Args:
+            cpu_num_per_core: max number of CPUs to be used per physical core. 
         """
 
-        rank_to_cpus = self.local_omp_cpuid
-        world_size = self.vllm_config.parallel_config.world_size
-        if self.libnuma_and_psutil_found():
-            rank_to_cpus = self.auto_thread_binding_based_on_numa_nodes_ppc64le(
-                world_size, rank_to_cpus)
-        else:
-            self.warn_lack_of_numa_and_psutil()
-        return rank_to_cpus
+        @dataclass
+        class LogicalCPUInfo:
+            id: int = -1
+            physical_core: int = -1
+            numa_node: int = -1
+
+            @staticmethod
+            def json_decoder(obj_dict: dict):
+                id = obj_dict.get("cpu")
+                physical_core = obj_dict.get("core")
+                numa_node = obj_dict.get("node")
+
+                if not (id is None or physical_core is None
+                        or numa_node is None):
+                    return LogicalCPUInfo(id=int(id),
+                                          physical_core=int(physical_core),
+                                          numa_node=int(numa_node))
+                else:
+                    return obj_dict
+
+        assert platform.system() == "Linux"
+
+        # Init LogicalCPUInfo from lscpu
+        lscpu_output = subprocess.check_output("lscpu -J -e=CPU,CORE,NODE",
+                                               shell=True,
+                                               text=True)
+        logical_cpu_list: list[LogicalCPUInfo] = json.loads(
+            lscpu_output, object_hook=LogicalCPUInfo.json_decoder)['cpus']
+        # Filter allowed CPUs
+        allowed_cpu_id_list = os.sched_getaffinity(0)
+        logical_cpu_list = [
+            x for x in logical_cpu_list if x.id in allowed_cpu_id_list
+        ]
+        # Get CPUs on NUMA node `local_rank`
+        logical_cpu_list = [
+            x for x in logical_cpu_list if x.numa_node == self.local_rank
+        ]
+        assert len(logical_cpu_list) != 0, (
+            f"No allowed CPU on NUMA node {self.local_rank}. "
+            f"Allowed CPU ids are {allowed_cpu_id_list}, "
+            "Their NUMA nodes can be got via `lscpu`. "
+            "Please try to bind threads manually.")
+        # Select at most cpu_num_per_core CPUs from each physical core
+        core_to_cpus: dict[int, list[LogicalCPUInfo]] = {}
+        for cpu_info in logical_cpu_list:
+            if cpu_info.physical_core not in core_to_cpus:
+                core_to_cpus[cpu_info.physical_core] = []
+            core_to_cpus[cpu_info.physical_core].append(cpu_info)
+        logical_cpu_list = []
+        for cpu_list in core_to_cpus.values():
+            cpu_list = sorted(cpu_list, key=lambda x: x.id)
+            logical_cpu_list.extend(cpu_list[-cpu_num_per_core:])
+        logical_cpu_list = sorted(logical_cpu_list, key=lambda x: x.id)
+        # Reserve CPUs for other processes
+        reserve_cpu_num = envs.VLLM_CPU_NUM_OF_RESERVED_CPU
+        if reserve_cpu_num is None:
+            reserve_cpu_num = 1 if self.parallel_config.world_size > 1 else 0
+        assert len(logical_cpu_list) > reserve_cpu_num, (
+            f"VLLM_CPU_NUM_OF_RESERVED_CPU ({reserve_cpu_num}) "
+            f"should less than {len(logical_cpu_list)}.")
+        if reserve_cpu_num != 0:
+            logical_cpu_list = logical_cpu_list[:-reserve_cpu_num]
+        logger.info("auto thread-binding list (id, physical core): %s",
+                    [(x.id, x.physical_core) for x in logical_cpu_list])
+        return ",".join([str(x.id) for x in logical_cpu_list])
