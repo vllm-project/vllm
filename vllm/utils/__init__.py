@@ -948,6 +948,13 @@ def next_power_of_2(n) -> int:
     return 1 << (n - 1).bit_length()
 
 
+def prev_power_of_2(n: int) -> int:
+    """The previous power of 2 (inclusive)"""
+    if n <= 0:
+        return 0
+    return 1 << (n.bit_length() - 1)
+
+
 def round_up(x: int, y: int) -> int:
     return ((x + y - 1) // y) * y
 
