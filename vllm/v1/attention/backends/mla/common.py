@@ -263,6 +263,10 @@ class MLACommonBackend(AttentionBackend):
         return (num_blocks, block_size, head_size)
 
     @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [576]
 
@@ -328,6 +332,9 @@ class MLACommonMetadata(Generic[D]):
     # |---------- context_len ----------|
     # |-------------------- seq_len ---------------------|
     #                                   |-- query_len ---|
+
+    num_reqs: int
+    max_query_len: int
 
     num_actual_tokens: int  # Number of tokens excluding padding.
     query_start_loc: torch.Tensor
@@ -712,6 +719,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             )
 
         attn_metadata = self.metadata_cls(
+            num_reqs=common_attn_metadata.num_reqs,
+            max_query_len=common_attn_metadata.max_query_len,
             num_actual_tokens=num_actual_tokens,
             query_start_loc=query_start_loc,
             slot_mapping=slot_mapping,

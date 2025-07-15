@@ -13,13 +13,14 @@ from typing import TYPE_CHECKING
 import torch
 from regex import escape as regex_escape
 
-from vllm.model_executor.guided_decoding.outlines_logits_processors import (
-    OutlinesVocabulary, get_cache, get_vocabulary)
 from vllm.sampling_params import SamplingParams
 from vllm.utils import LazyLoader
 from vllm.v1.structured_output.backend_types import (StructuredOutputBackend,
                                                      StructuredOutputGrammar,
                                                      StructuredOutputOptions)
+from vllm.v1.structured_output.utils import (OutlinesVocabulary,
+                                             get_outlines_cache,
+                                             get_outlines_vocabulary)
 
 if TYPE_CHECKING:
     import outlines_core as oc
@@ -47,8 +48,8 @@ else:
 class OutlinesBackend(StructuredOutputBackend):
 
     def __post_init__(self):
-        self.vocabulary = get_vocabulary(self.tokenizer)
-        self.cache = get_cache()
+        self.vocabulary = get_outlines_vocabulary(self.tokenizer)
+        self.cache = get_outlines_cache()
 
     def _compile_index(self, regex_string: str,
                        vocabulary: OutlinesVocabulary) -> oc.Index:

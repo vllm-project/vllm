@@ -696,15 +696,16 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
             return t.to(f32) * group_broadcast(scale, t.shape)
 
     def apply(self, output: torch.Tensor, hidden_states: torch.Tensor,
-              w1: torch.Tensor, w2: torch.Tensor, topk_ids: torch.Tensor,
-              activation: str, global_num_experts: int,
+              w1: torch.Tensor, w2: torch.Tensor, topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor, activation: str, global_num_experts: int,
               expert_map: Optional[torch.Tensor],
               w1_scale: Optional[torch.Tensor],
               w2_scale: Optional[torch.Tensor], w1_zp: Optional[torch.Tensor],
               w2_zp: Optional[torch.Tensor], a1q_scale: Optional[torch.Tensor],
               a2_scale: Optional[torch.Tensor], workspace13: torch.Tensor,
               workspace2: torch.Tensor,
-              expert_tokens_meta: Optional[mk.ExpertTokensMetadata]):
+              expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+              apply_router_weight_on_input: bool):
         assert hidden_states.dim() == 3
         assert expert_tokens_meta is not None
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
@@ -899,15 +900,16 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return (workspace13, workspace2, output, a.dtype)
 
     def apply(self, output: torch.Tensor, hidden_states: torch.Tensor,
-              w1: torch.Tensor, w2: torch.Tensor, topk_ids: torch.Tensor,
-              activation: str, global_num_experts: int,
+              w1: torch.Tensor, w2: torch.Tensor, topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor, activation: str, global_num_experts: int,
               expert_map: Optional[torch.Tensor],
               w1_scale: Optional[torch.Tensor],
               w2_scale: Optional[torch.Tensor], w1_zp: Optional[torch.Tensor],
               w2_zp: Optional[torch.Tensor], a1q_scale: Optional[torch.Tensor],
               a2_scale: Optional[torch.Tensor], workspace13: torch.Tensor,
               workspace2: torch.Tensor,
-              expert_tokens_meta: Optional[mk.ExpertTokensMetadata]):
+              expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+              apply_router_weight_on_input: bool):
         # Check constraints.
         if self.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), (
