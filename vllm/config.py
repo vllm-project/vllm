@@ -782,14 +782,16 @@ class ModelConfig:
                     pooler_config.normalize = False
                 elif self.task == "embed":
                     pooler_config.normalize = True
-                assert_never(self.task)
+                else:
+                    assert_never(self.task)
 
             if pooler_config.softmax is None:
                 if self.task == "classify":
                     pooler_config.softmax = True
                 elif self.task == "embed":
                     pooler_config.normalize = False
-                assert_never(self.task)
+                else:
+                    assert_never(self.task)
 
             if self.is_matryoshka:
                 if pooler_config.normalize is None:
