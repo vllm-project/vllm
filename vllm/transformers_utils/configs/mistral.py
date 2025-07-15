@@ -22,13 +22,12 @@ def adapt_config_dict(config_dict: dict[str, Any],
     else:
         config_dict["architectures"] = ["MistralForCausalLM"]
 
-
-
     if bool(config_dict.get("yarn")):
         config_dict = _remap_mistral_yarn_args(config_dict)
 
-    is_vision = ((config_dict.get("multimodal") or {}).get("vision_encoder_args")
-            or config_dict.get("vision_encoder"))
+    is_vision = ((config_dict.get("multimodal")
+                  or {}).get("vision_encoder_args")
+                 or config_dict.get("vision_encoder"))
     is_audio = bool(
         ((config_dict.get("multimodal") or {}).get("whisper_model_args")
          or {}).get("encoder_args"))

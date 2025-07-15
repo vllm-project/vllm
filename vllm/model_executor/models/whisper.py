@@ -369,7 +369,11 @@ class WhisperMLP(nn.Module):
 
 class WhisperEncoderLayer(nn.Module):
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", is_standalone_encoder: bool = False):
+    def __init__(self,
+                 *,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 is_standalone_encoder: bool = False):
         super().__init__()
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
@@ -475,7 +479,12 @@ class WhisperDecoderLayer(nn.Module):
 
 class WhisperEncoder(nn.Module):
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", is_standalone_encoder: bool = False, init_in_fp32: bool = False):
+    def __init__(self,
+                 *,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 is_standalone_encoder: bool = False,
+                 init_in_fp32: bool = False):
         super().__init__()
         config = vllm_config.model_config.hf_config
         embed_dim = config.d_model
@@ -497,16 +506,19 @@ class WhisperEncoder(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.encoder_layers,
             lambda prefix: WhisperEncoderLayer(vllm_config=vllm_config,
-                                               prefix=f"{prefix}.layers", is_standalone_encoder=is_standalone_encoder),
+                                               prefix=f"{prefix}.layers",
+                                               is_standalone_encoder=
+                                               is_standalone_encoder),
             prefix=f"{prefix}.layers",
         )
         self.layer_norm = nn.LayerNorm(config.d_model)
 
-        maybe_fp32_init_ctx = set_default_torch_dtype(torch.float32) if init_in_fp32 else nullcontext()
+        maybe_fp32_init_ctx = set_default_torch_dtype(
+            torch.float32) if init_in_fp32 else nullcontext()
 
         with (
-            torch.no_grad(),
-            maybe_fp32_init_ctx, 
+                torch.no_grad(),
+                maybe_fp32_init_ctx,
         ):
             self.embed_positions = nn.Embedding(self.max_source_positions,
                                                 embed_dim)
@@ -813,11 +825,14 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
                              f"or {list(ISO639_1_OTHER_LANGS.values())}")
 
     @classmethod
-    def get_generation_prompt(cls, audio: np.ndarray,
-                              model_config: ModelConfig,  # not needed here
-                              stt_config: SpeechToTextConfig, language: str,
-                              task_type: str,
-                              request_prompt: str) -> PromptType:
+    def get_generation_prompt(
+            cls,
+            audio: np.ndarray,
+            model_config: ModelConfig,  # not needed here
+            stt_config: SpeechToTextConfig,
+            language: str,
+            task_type: str,
+            request_prompt: str) -> PromptType:
         prompt = {
             "encoder_prompt": {
                 # Whisper does not support encoder prompt.

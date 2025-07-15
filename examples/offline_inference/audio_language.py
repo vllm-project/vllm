@@ -9,9 +9,8 @@ on HuggingFace model repository.
 """
 
 import os
-from pathlib import Path
 from dataclasses import asdict
-from typing import NamedTuple, Optional, Any
+from typing import Any, NamedTuple, Optional
 
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
@@ -42,12 +41,18 @@ class ModelRequestData(NamedTuple):
 # lower-end GPUs.
 # Unless specified, these settings have been tested to work on a single L4.
 
+
 # Voxtral
 def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
-    from mistral_common.protocol.instruct.messages import TextChunk, AudioChunk, UserMessage, RawAudio
     from mistral_common.audio import Audio
-    from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
+    from mistral_common.protocol.instruct.messages import (
+        AudioChunk,
+        RawAudio,
+        TextChunk,
+        UserMessage,
+    )
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
+    from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 
     model_name = "mistralai/voxtral-mini"
     tokenizer = MistralTokenizer.from_hf_hub(model_name)
@@ -65,8 +70,13 @@ def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
     )
 
     text_chunk = TextChunk(text=question)
-    audios = [Audio.from_file(str(audio_assets[i].get_local_path()), strict=False) for i in range(audio_count)]
-    audio_chunks = [AudioChunk(input_audio=RawAudio.from_audio(audio)) for audio in audios]
+    audios = [
+        Audio.from_file(str(audio_assets[i].get_local_path()), strict=False)
+        for i in range(audio_count)
+    ]
+    audio_chunks = [
+        AudioChunk(input_audio=RawAudio.from_audio(audio)) for audio in audios
+    ]
 
     messages = [UserMessage(content=[*audio_chunks, text_chunk])]
 
@@ -84,6 +94,7 @@ def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
         prompt_token_ids=prompt_ids,
         multi_modal_data=multi_modal_data,
     )
+
 
 # Granite Speech
 def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
@@ -371,7 +382,7 @@ def main(args):
     inputs = {"multi_modal_data": mm_data}
 
     if req_data.prompt:
-        inputs["prompt"] = req_data.prompt 
+        inputs["prompt"] = req_data.prompt
     else:
         inputs["prompt_token_ids"] = req_data.prompt_token_ids
 
