@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 
+import os
 import time
 import pplx_kernels as pplx
 import torch
@@ -210,7 +211,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             bound_m=bound_m,
         )
         end = time.perf_counter()
-        logger.info("dispatch took %.3f ms", (end - start) * 1000)
+        if os.getenv("LOG_TIME") == "1":
+            logger.info("dispatch took %.3f ms", (end - start) * 1000)
 
         if expert_x_scale is not None:
             expert_x_scale = expert_x_scale[:, :, :orig_a_scale_block_shape]
@@ -259,4 +261,5 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                          expert_y=fused_expert_output,
                          bound_m=bound_m)
         end = time.perf_counter()
-        logger.info("combine took %.3f ms", (end - start) * 1000)
+        if os.getenv("LOG_TIME") == "1":
+            logger.info("combine took %.3f ms", (end - start) * 1000)
