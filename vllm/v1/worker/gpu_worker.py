@@ -209,7 +209,6 @@ class Worker(WorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
-
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         GiB = lambda b: b / GiB_bytes
