@@ -563,6 +563,10 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
         ValueError: If there is not enough memory available for the KV cache.
     """
 
+    # No need to check for available memory if the kv_cache_spec is empty
+    if not kv_cache_spec:
+        return
+
     if available_memory <= 0:
         raise ValueError("No available memory for the cache blocks. "
                          "Try increasing `gpu_memory_utilization` when "
@@ -749,6 +753,13 @@ def is_kv_cache_page_size_uniform(
     return len(page_sizes) == 1
 
 
+def is_kv_cache_type_attention_free(
+        kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
+
+    # kv_cache_spec is an empty dict for attention free models
+    return not kv_cache_spec
+
+
 def _get_kv_cache_config_uniform_page_size(
         vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec],
         available_memory: int) -> KVCacheConfig:
@@ -891,6 +902,10 @@ def _get_kv_cache_config_uniform_page_size(
     return kv_cache_config
 
 
+def _get_kv_cache_config_attention_free() -> KVCacheConfig:
+    return KVCacheConfig(num_blocks=1, kv_cache_tensors=[], kv_cache_groups=[])
+
+
 def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
     """
     This function tries to convert the KV cache specs to one type if the model
@@ -957,7 +972,11 @@ def get_kv_cache_config(
     if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
         unify_hybrid_kv_cache_specs(kv_cache_spec)
 
-    if is_kv_cache_type_uniform(kv_cache_spec):
+    if is_kv_cache_type_attention_free(kv_cache_spec):
+        # This returns a kv_cache config with 0 kv_cache groups and 1 block
+        # to allow for the KVCache manager to handle attention free models.
+        return _get_kv_cache_config_attention_free()
+    elif is_kv_cache_type_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for
         # most models. Allocate the same amount of memory for
         # each layer.
