@@ -61,6 +61,7 @@ plugins:
   - search
   - autorefs
   - awesome-nav
+  - glightbox
   # For API reference generation
   - api-autonav:
       modules: ["vllm"]
