@@ -35,15 +35,13 @@ def test_engine_log_metrics_ray(
 ) -> None:
     """ Simple smoke test, verifying this can be used without exceptions.
     Need to start a Ray cluster in order to verify outputs."""
-    pytest.skip(
-        "Fix needed for https://github.com/vllm-project/vllm/issues/20954")
 
     @ray.remote(num_gpus=1)
     class EngineTestActor:
 
         async def run(self):
-            # Set environment variable inside the Ray actor since
-            # environment variables from pytest fixtures don't propagate to Ray actors
+            # Set environment variable inside the Ray actor since environment
+            # variables from pytest fixtures don't propagate to Ray actors
             os.environ['VLLM_USE_V1'] = '1'
 
             engine_args = AsyncEngineArgs(
