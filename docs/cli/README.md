@@ -37,6 +37,9 @@ Start the vLLM OpenAI Compatible API server.
 
     # To search by keyword
     vllm serve --help=max
+
+    # To view full help with pager (less/more)
+    vllm serve --help=page
     ```
 
 ## chat
