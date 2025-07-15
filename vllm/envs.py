@@ -745,10 +745,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.environ.get("VLLM_HPU_CONVERT_TO_FP8UZ", "false").lower() in
     ("1", "true"),
 
-    # Convert block fp8 to channel fp8 for HPU
+    # Convert block fp8 to channel fp8 for HPU without INC
+    # If `QUANT_CONFIG` is set, this will be forced to false.
     "VLLM_HPU_FORCE_CHANNEL_FP8":
     lambda: os.environ.get("VLLM_HPU_FORCE_CHANNEL_FP8", "true").lower() in
-    ("1", "true"),
+    ("1", "true") and os.environ.get("QUANT_CONFIG", None) is None,
+
     # Rank of the process in the data parallel setting
     "VLLM_DP_RANK":
     lambda: int(os.getenv("VLLM_DP_RANK", "0")),
