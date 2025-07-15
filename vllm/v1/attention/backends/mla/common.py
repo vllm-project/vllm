@@ -300,9 +300,7 @@ class MLACommonPrefillMetadata:
 
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
-    query_seq_lens: torch.Tensor
     max_query_len: int
-    cudnn_workspace: Optional[torch.Tensor] = None
     chunked_context: Optional[ChunkedContextMetadata] = None
 
 
@@ -311,6 +309,17 @@ class FlashInferPrefillMetadata(MLACommonPrefillMetadata):
     prefill_main: Optional['BatchPrefillWithRaggedKVCacheWrapper'] = None
     prefill_chunks: list['BatchPrefillWithRaggedKVCacheWrapper'] = field(
         default_factory=list)
+
+
+@dataclass
+class CudnnPrefillMetadata(MLACommonPrefillMetadata):
+
+    class ChunkedContextMetadata(
+            MLACommonPrefillMetadata.ChunkedContextMetadata):
+        seq_lens: torch.Tensor
+
+    query_seq_lens: Optional[torch.Tensor] = None
+    cudnn_workspace: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -352,7 +361,8 @@ class MLACommonMetadata(Generic[D]):
 
     decode: Optional[D] = None
     prefill: Optional[Union[MLACommonPrefillMetadata,
-                            FlashInferPrefillMetadata]] = None
+                            FlashInferPrefillMetadata,
+                            CudnnPrefillMetadata]] = None
 
     def __post_init__(self):
         if self.head_dim is not None:
@@ -434,18 +444,15 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 dtype=model_config.dtype,
                 device=runner.device,
             )
-            if use_cudnn_prefill():
-                self.cudnn_workspace = torch.empty(
-                    CUDNN_WORKSPACE_SIZE * scheduler_config.max_num_seqs,
-                    dtype=torch.int8,
-                    device=runner.device,
-                )
 
         self.block_table = block_table
 
+        self._use_cudnn_prefill = use_cudnn_prefill()
         self._use_fi_prefill = use_flashinfer_prefill()
-        self.prefill_metadata_cls = FlashInferPrefillMetadata \
-            if self._use_fi_prefill else MLACommonPrefillMetadata
+        self.prefill_metadata_cls = (
+            FlashInferPrefillMetadata
+            if self._use_fi_prefill else CudnnPrefillMetadata
+            if self._use_cudnn_prefill else MLACommonPrefillMetadata)
 
         if self._use_fi_prefill:
             self._workspace_buffer = torch.empty(
@@ -460,6 +467,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
             self._global_hyperparameters = infer_global_hyperparameters(
                 get_per_layer_parameters(runner.vllm_config, MLACommonImpl))
+
+        if self._use_cudnn_prefill:
+            self.cudnn_workspace = torch.empty(
+                CUDNN_WORKSPACE_SIZE * scheduler_config.max_num_seqs,
+                dtype=torch.int8,
+                device=runner.device,
+            )
 
     def _build_fi_prefill_wrappers(self, prefill: FlashInferPrefillMetadata):
         qo_indptr = prefill.query_start_loc
@@ -706,8 +720,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                              out=cu_seq_lens_cpu[:, 1:],
                              dtype=torch.int32)
 
+                chunked_context_metadata_cls = \
+                    CudnnPrefillMetadata.ChunkedContextMetadata \
+                    if self._use_cudnn_prefill else \
+                        MLACommonPrefillMetadata.ChunkedContextMetadata
+
                 chunked_context_metadata = \
-                    MLACommonPrefillMetadata.ChunkedContextMetadata(
+                    chunked_context_metadata_cls(
                     cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
                     starts=chunk_starts.to(device, non_blocking=True),
                     seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
@@ -716,6 +735,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     workspace=self.chunked_prefill_workspace,
                 )
 
+                if self._use_cudnn_prefill:
+                    chunked_context_metadata.seq_lens = chunk_seq_lens
+
                 assert max(chunked_context_metadata.max_seq_lens) <= \
                     self.chunked_prefill_workspace_size
 
@@ -723,11 +745,14 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 block_table=block_table_tensor[reqs_start:, ...],
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=max_query_len,
-                cudnn_workspace=self.cudnn_workspace,
-                query_seq_lens=prefill_query_start_loc[1:] -
-                prefill_query_start_loc[:-1],
                 chunked_context=chunked_context_metadata,
             )
+
+            if self._use_cudnn_prefill:
+                assert isinstance(prefill_metadata, CudnnPrefillMetadata)
+                prefill_metadata.query_seq_lens = prefill_query_start_loc[1:] \
+                    - prefill_query_start_loc[:-1]
+                prefill_metadata.cudnn_workspace = self.cudnn_workspace
 
         decode_metadata = None
         if self._num_decodes > 0:
@@ -906,6 +931,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
     def _run_prefill_new_tokens_cudnn(self, prefill: MLACommonPrefillMetadata,
                                       q, k, v, return_softmax_lse):
+        assert isinstance(prefill, CudnnPrefillMetadata)
+        assert prefill.query_seq_lens is not None
         output, lse = cudnn_batch_prefill_with_kv_cache(
             q=q,
             k_cache=k,
@@ -954,7 +981,10 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
     def _run_prefill_context_chunk_cudnn(self,
                                          prefill: MLACommonPrefillMetadata,
                                          chunk_idx: int, q, k, v):
+        assert isinstance(prefill, CudnnPrefillMetadata)
         assert prefill.chunked_context is not None
+        assert prefill.chunked_context.seq_lens[chunk_idx] is not None
+        assert prefill.query_seq_lens is not None
         return cudnn_batch_prefill_with_kv_cache(
             q=q,
             k_cache=k,
