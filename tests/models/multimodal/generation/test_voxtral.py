@@ -1,0 +1,126 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import json
+from typing import Any
+
+import numpy as np
+import torch
+import pytest
+import pytest_asyncio
+from vllm.transformers_utils.tokenizer import MistralTokenizer
+from mistral_common.audio import Audio
+from mistral_common.protocol.instruct.request import ChatCompletionRequest
+from mistral_common.protocol.instruct.messages import (
+    AudioChunk,
+    RawAudio,
+    TextChunk,
+    UserMessage,
+)
+
+
+from .test_ultravox import run_multi_audio_test, params_kwargs_to_cli_args, AUDIO_PROMPTS, MULTI_AUDIO_PROMPT, AudioTuple, CHUNKED_PREFILL_KWARGS
+from ....conftest import AUDIO_ASSETS, AudioTestAssets
+from ....utils import RemoteOpenAIServer
+
+MODEL_NAME = "mistralai/Voxtral-Mini-3B-2507"
+
+@pytest.fixture(params=[
+    pytest.param({}, marks=pytest.mark.cpu_model),
+    pytest.param(CHUNKED_PREFILL_KWARGS),
+])
+def server(request, audio_assets: AudioTestAssets):
+    args = [
+        "--dtype", "bfloat16", "--max-model-len", "4096", "--enforce-eager",
+        "--limit-mm-per-prompt",
+        json.dumps({"audio": len(audio_assets)}), "--trust-remote-code"
+    ] + params_kwargs_to_cli_args(request.param)
+
+    with RemoteOpenAIServer(MODEL_NAME,
+                            args,
+                            env_dict={"VLLM_AUDIO_FETCH_TIMEOUT":
+                                      "30"}) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def client(server):
+    async with server.get_async_client() as async_client:
+        yield async_client
+
+
+def _get_prompt(audio_assets, question):
+    tokenizer = MistralTokenizer.from_pretrained(MODEL_NAME)
+
+    audios = [
+        Audio.from_file(str(audio_assets[i].get_local_path()), strict=False)
+        for i in range(len(audio_assets))
+    ]
+    audio_chunks = [
+        AudioChunk(input_audio=RawAudio.from_audio(audio)) for audio in audios
+    ]
+
+    text_chunk = TextChunk(text=question)
+    messages = [UserMessage(content=[*audio_chunks, text_chunk]).to_openai()]
+
+    return tokenizer.apply_chat_template(messages=messages)
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.parametrize("vllm_kwargs", [
+    pytest.param({}, marks=pytest.mark.cpu_model),
+    pytest.param(CHUNKED_PREFILL_KWARGS),
+])
+def test_models_with_multiple_audios(vllm_runner,
+                                     audio_assets: AudioTestAssets, dtype: str,
+                                     max_tokens: int, num_logprobs: int,
+                                     vllm_kwargs: dict) -> None:
+
+    vllm_prompt = _get_prompt(audio_assets, MULTI_AUDIO_PROMPT)
+    run_multi_audio_test(
+        vllm_runner,
+        [(vllm_prompt, [audio.audio_and_sample_rate
+                        for audio in audio_assets])],
+        MODEL_NAME,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        tokenizer_mode="mistral",
+        **vllm_kwargs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_online_serving(client, audio_assets: AudioTestAssets):
+    """Exercises online serving with/without chunked prefill enabled."""
+    def asset_to_chunk(asset):
+        audio = Audio.from_file(str(asset.get_local_path()), strict=False)
+        return AudioChunk.from_audio(audio)
+
+    audio_chunks = [
+        asset_to_chunk(asset).to_openai() for asset in audio_assets
+    ]
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            *audio_chunks,
+            {
+                "type":
+                "text",
+                "text":
+                f"What's happening in these {len(audio_assets)} audio clips?"
+            },
+        ],
+    }]
+
+    chat_completion = await client.chat.completions.create(model=MODEL_NAME,
+                                                           messages=messages,
+                                                           max_tokens=10)
+
+    assert len(chat_completion.choices) == 1
+    choice = chat_completion.choices[0]
+    assert choice.finish_reason == "length"

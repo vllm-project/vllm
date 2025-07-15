@@ -804,7 +804,7 @@ class VllmRunner:
 
     def get_inputs(
         self,
-        prompts: Union[list[str], list[torch.Tensor]],
+        prompts: Union[list[str], list[torch.Tensor], list[int]],
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
@@ -827,10 +827,15 @@ class VllmRunner:
                 multi_modal_data["audio"] = audio
 
             text_prompt_kwargs = {
-                ("prompt" if isinstance(prompt, str) else "prompt_embeds"):
-                prompt,
                 "multi_modal_data": multi_modal_data or None
             }
+            if isinstance(prompt, str):
+                text_prompt_kwargs["prompt"] = prompt
+            elif isinstance(prompt, list) and isinstance(prompt[0], int):
+                text_prompt_kwargs["prompt_token_ids"] = prompt
+            else:
+                text_prompt_kwargs["prompt_embeds"] = prompt
+
             inputs.append(TextPrompt(**text_prompt_kwargs))
 
         return inputs
