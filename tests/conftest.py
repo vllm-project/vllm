@@ -829,7 +829,7 @@ class VllmRunner:
             text_prompt_kwargs = {"multi_modal_data": multi_modal_data or None}
             if isinstance(prompt, str):
                 text_prompt_kwargs["prompt"] = prompt
-            elif isinstance(prompt, list) and isinstance(prompt[0], int):
+            elif isinstance(prompt, list):
                 text_prompt_kwargs["prompt_token_ids"] = prompt
             else:
                 text_prompt_kwargs["prompt_embeds"] = prompt
