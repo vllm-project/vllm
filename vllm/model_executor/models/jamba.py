@@ -29,7 +29,6 @@ from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.utils import LayerBlockType
 
@@ -562,15 +561,6 @@ def _is_moe_layer(name: str):
         ]])
 
 
-def score_weight_loader(
-    param: nn.Parameter,
-    loaded_weight: torch.Tensor,
-) -> None:
-    # The reward weights themselves have float32 accuracy data, we
-    # would like to load them in fp32 to get that extra precision.
-    return default_weight_loader(param, loaded_weight.float())
-
-
 class JambaForSequenceClassification(JambaForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -580,15 +570,15 @@ class JambaForSequenceClassification(JambaForCausalLM):
         num_labels: int = config.num_labels
         score_bias: bool = getattr(config, 'score_bias', False)
 
+        # TODO: The original reward weights have float32 accuracy data, we
+        # would like to load them in fp32 to get that extra precision.
+        # Currently weight_loader passes the weight which is already in bf16
         self.score = nn.Linear(
             config.hidden_size,
             num_labels,
             bias=score_bias,
             dtype=torch.float32,
         )
-
-        for p in self.score.parameters():
-            set_weight_attrs(p, {"weight_loader": score_weight_loader})
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
