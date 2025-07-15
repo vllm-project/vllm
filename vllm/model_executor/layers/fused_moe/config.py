@@ -60,9 +60,9 @@ def get_config_quant_dtype(
         return torch.int8
     elif ocp_mx_scheme == "w_fp4_a_fp4":
         return "fp4"
-    elif ocp_mx_scheme in ["w_fp4_a_fp6_e3m2", "w_fp4_a_fp6_e2m3", "w_fp6_e3m2_a_fp6_e3m2"]:
+    elif ocp_mx_scheme in {"w_fp4_a_fp6_e3m2", "w_fp6_e3m2_a_fp6_e3m2"}:
         return "fp6_e3m2"
-    elif ocp_mx_scheme == "w_fp6_e2m3_a_fp6_e2m3":
+    elif ocp_mx_scheme in {"w_fp4_a_fp6_e2m3", "w_fp6_e2m3_a_fp6_e2m3"}:
         return "fp6_e2m3"
     return None
 
