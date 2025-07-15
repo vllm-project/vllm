@@ -6,10 +6,15 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from http import HTTPStatus
-from typing import Callable, Final, Optional, Union
+from typing import Final, Optional, Union
 
 import jinja2
 from fastapi import Request
+from openai.types.chat import (ChatCompletionAssistantMessageParam,
+                               ChatCompletionMessageToolCallParam,
+                               ChatCompletionToolMessageParam)
+from openai.types.chat.chat_completion_message_tool_call_param import (
+    Function as FunctionCallTool)
 from openai.types.responses import (ResponseFunctionToolCall,
                                     ResponseOutputMessage, ResponseOutputText,
                                     ToolChoiceFunction)
@@ -32,10 +37,8 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse, FunctionCall,
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_fc_uuid, random_uuid
@@ -72,30 +75,14 @@ class OpenAIServingResponses(OpenAIServing):
         self.enable_auto_tools = enable_auto_tools
         self.expand_tools_even_if_tool_choice_none = (
             expand_tools_even_if_tool_choice_none)
-        self.tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None
-        if self.enable_auto_tools:
-            try:
-                self.tool_parser = ToolParserManager.get_tool_parser(
-                    tool_parser)
-            except Exception as e:
-                raise TypeError("Error: --enable-auto-tool-choice requires "
-                                f"tool_parser:'{tool_parser}' which has not "
-                                "been registered") from e
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
 
-        self.reasoning_parser: Optional[Callable[[AnyTokenizer],
-                                                 ReasoningParser]] = None
-        if reasoning_parser:
-            try:
-                self.reasoning_parser = (
-                    ReasoningParserManager.get_reasoning_parser(
-                        reasoning_parser))
-                assert self.reasoning_parser is not None
-            except Exception as e:
-                raise TypeError(
-                    f"{reasoning_parser=} has not been registered") from e
+        self.reasoning_parser = self._get_reasoning_parser(
+            reasoning_parser_name=reasoning_parser)
 
+        self.tool_parser = self._get_tool_parser(
+            tool_parser_name=tool_parser, enable_auto_tools=enable_auto_tools)
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = (
@@ -475,25 +462,28 @@ class OpenAIServingResponses(OpenAIServing):
             for item in request.input:
                 if item.get("type") == "function_call":
                     # Append the function call as a tool call.
-                    messages.append({
-                        "role":
-                        "assistant",
-                        "tool_calls": [{
-                            "id": item.get("call_id"),
-                            "function": {
-                                "name": item.get("name"),
-                                "arguments": item.get("arguments", "{}"),
-                            },
-                            "type": "function",
-                        }]
-                    })
+                    messages.append(
+                        ChatCompletionAssistantMessageParam(
+                            role="assistant",
+                            tool_calls=[
+                                ChatCompletionMessageToolCallParam(
+                                    id=item.get("call_id"),
+                                    function=FunctionCallTool(
+                                        name=item.get("name"),
+                                        arguments=item.get("arguments", "{}"),
+                                    ),
+                                    type="function",
+                                )
+                            ],
+                        ))
                 elif item.get("type") == "function_call_output":
                     # Append the function call output as a tool message.
-                    messages.append({
-                        "role": "tool",
-                        "content": item.get("output", ""),
-                        "tool_call_id": item.get("call_id"),
-                    })
+                    messages.append(
+                        ChatCompletionToolMessageParam(
+                            role="tool",
+                            content=item.get("output", ""),
+                            tool_call_id=item.get("call_id"),
+                        ))
                 else:
                     messages.append(item)  # type: ignore
         return messages
