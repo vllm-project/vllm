@@ -16,6 +16,7 @@ sys.modules["blake3"] = MagicMock()
 sys.modules["vllm._C"] = MagicMock()
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs  # noqa: E402
+from vllm.entrypoints.openai.cli_args import make_arg_parser  # noqa: E402
 from vllm.utils import FlexibleArgumentParser  # noqa: E402
 
 logger = logging.getLogger("mkdocs")
@@ -24,15 +25,18 @@ logger = logging.getLogger("mkdocs")
 class MarkdownFormatter(HelpFormatter):
     """Custom formatter that generates markdown for argument groups."""
 
-    def __init__(self, prog):
+    def __init__(self, prog, starting_heading_level=3):
         super().__init__(prog,
                          max_help_position=float('inf'),
                          width=float('inf'))
+        self._section_heading_prefix = "#" * starting_heading_level
+        self._argument_heading_prefix = "#" * (starting_heading_level + 1)
         self._markdown_output = []
 
     def start_section(self, heading):
         if heading not in {"positional arguments", "options"}:
-            self._markdown_output.append(f"\n### {heading}\n\n")
+            heading_md = f"\n{self._section_heading_prefix} {heading}\n\n"
+            self._markdown_output.append(heading_md)
 
     def end_section(self):
         pass
@@ -46,9 +50,13 @@ class MarkdownFormatter(HelpFormatter):
 
     def add_arguments(self, actions):
         for action in actions:
+            if (len(action.option_strings) == 0
+                    or "--help" in action.option_strings):
+                continue
 
             option_strings = f'`{"`, `".join(action.option_strings)}`'
-            self._markdown_output.append(f"#### {option_strings}\n\n")
+            heading_md = f"{self._argument_heading_prefix} {option_strings}\n\n"
+            self._markdown_output.append(heading_md)
 
             if choices := action.choices:
                 choices = f'`{"`, `".join(str(c) for c in choices)}`'
@@ -81,6 +89,14 @@ def create_parser(cls, **kwargs) -> FlexibleArgumentParser:
         return cls.add_cli_args(parser, **kwargs)
 
 
+def create_serve_parser() -> FlexibleArgumentParser:
+    """Create a parser for the serve command with markdown formatting."""
+    parser = FlexibleArgumentParser()
+    parser.formatter_class = lambda prog: MarkdownFormatter(
+        prog, starting_heading_level=4)
+    return make_arg_parser(parser)
+
+
 def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
     logger.info("Generating argparse documentation")
     logger.debug("Root directory: %s", ROOT_DIR.resolve())
@@ -95,6 +111,7 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
         "engine_args": create_parser(EngineArgs),
         "async_engine_args": create_parser(AsyncEngineArgs,
                                            async_args_only=True),
+        "serve": create_serve_parser(),
     }
 
     # Generate documentation for each parser
