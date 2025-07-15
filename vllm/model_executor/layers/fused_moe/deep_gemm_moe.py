@@ -31,6 +31,30 @@ def deep_gemm_block_shape() -> list[int]:
     return [block, block]
 
 
+def expert_num_tokens_round_up_and_sum(expert_num_tokens: torch.Tensor,
+                                       alignment: int) -> int:
+    # Round up each element in expert_num_tokens to the nearest multiple of 128.
+    ent = (expert_num_tokens.to(torch.int64) +
+           (alignment - 1)) // alignment * alignment
+    return torch.sum(ent).item()
+
+
+def compute_aligned_M(
+        M: int, num_topk: int, local_num_experts: int, alignment: int,
+        expert_tokens_meta: Optional[mk.ExpertTokensMetadata]) -> int:
+
+    if ((expert_tokens_meta is not None)
+            and (expert_tokens_meta.expert_num_tokens_cpu is not None)):
+        return expert_num_tokens_round_up_and_sum(
+            expert_tokens_meta.expert_num_tokens_cpu, alignment)
+
+    # expert_num_tokens information is not available on the cpu.
+    # compute the max required size.
+    M_sum = (M * num_topk) + local_num_experts * (alignment - 1)
+    M_sum = round_up(M_sum, alignment)
+    return M_sum
+
+
 def _valid_deep_gemm_shape(M: int, N: int, K: int):
     align = deep_gemm_block_shape()[0]
     return align <= M and N % align == 0 and K % align == 0
@@ -105,14 +129,12 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert self.block_shape is not None
-        # We use global_num_experts due to how moe_align_block_size handles
-        # expert_maps.
-        num_experts = global_num_experts
         block_m = self.block_shape[0]
-        M_sum = (M * topk) + num_experts * (block_m - 1)
-        M_sum = round_up(M_sum, block_m)
-        workspace1 = (M_sum, max(N // 2, K))
-        workspace2 = (M_sum, max(N, K))
+        M_sum = compute_aligned_M(M, topk, local_num_experts, block_m,
+                                  expert_tokens_meta)
+        assert M_sum % block_m == 0
+        workspace1 = (M_sum, max(N, K))
+        workspace2 = (M_sum, max(N // 2, K))
         output = (M, K)
         return (workspace1, workspace2, output, a.dtype)
 
