@@ -204,24 +204,8 @@ class EAGLE(nn.Module):
         # https://huggingface.co/abhigoyal/EAGLE-LLaMA3-Instruct-8B-vllm
         # Also, here's an example script for converting trained EAGLE
         # checkpoint to vLLM compatible version: https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d
-        
-        # Support for speculators format weights
-        speculators_name_map = {
-            "fusion_fc.weight": "fc.weight",
-            "fusion_fc.bias": "fc.bias",
-            "embedding_layernorm.weight": "enorm.weight",
-            "pre_lm_head_layernorm.weight": "hnorm.weight",
-        }
-        
         model_weights = {}
         for name, loaded_weight in weights:
-            # Handle speculators format weight names
-            if name in speculators_name_map:
-                name = speculators_name_map[name]
-            elif name.startswith("transformer."):
-                # transformer.* -> model.model.layers.0.*
-                suffix = name[len("transformer."):]
-                name = f"model.model.layers.0.{suffix}"
             if name == "token_map":
                 if self.config.truncated_vocab_size < self.config.vocab_size:
                     self.token_map = nn.Parameter(loaded_weight,
