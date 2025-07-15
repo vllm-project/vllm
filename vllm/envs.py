@@ -97,7 +97,6 @@ if TYPE_CHECKING:
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
-    VLLM_COMPILE_DEPYF: bool = False
     Q_SCALE_CONSTANT: int = 200
     K_SCALE_CONSTANT: int = 200
     V_SCALE_CONSTANT: int = 100
@@ -741,11 +740,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: float(os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")),
     "VLLM_DISABLE_COMPILE_CACHE":
     lambda: bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0"))),
-
-    # If set, vllm will decompile the torch compiled code and dump to
-    # transformed_code.py. This is useful for debugging.
-    "VLLM_COMPILE_DEPYF":
-    lambda: bool(int(os.getenv("VLLM_COMPILE_DEPYF", "0"))),
 
     # If set, vllm will run in development mode, which will enable
     # some additional endpoints for developing and debugging,
