@@ -57,6 +57,14 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
 
 SMALL_MODEL_THRESHOLD = 1_000_000_000
 
+# Hardware-specific optimization constants
+_H100_DEFAULT_TOKENS = 4096
+_A100_DEFAULT_TOKENS = 3072
+_CONSUMER_GPU_DEFAULT_TOKENS = 512
+_DEFAULT_MAX_SEQS_TO_ADJUST = 128
+_DATACENTER_GPU_ADJUSTED_SEQS = 64
+_CONSUMER_GPU_ADJUSTED_SEQS = 32
+
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
     from ray.util.placement_group import PlacementGroup
@@ -1566,45 +1574,47 @@ class ModelConfig:
 
     @property
     def is_small_model(self) -> bool:
-        """Models under 1B parameters have different performance characteristics."""
+        """Check if model is under 1B parameters for performance optimizations."""
         # Environment override takes precedence
         if os.environ.get("VLLM_DISABLE_SMALL_MODEL_OPTIMIZATIONS", "").lower() in ("1", "true"):
             return False
         
         try:
-            num_params = self.get_num_parameters()
-            return num_params < SMALL_MODEL_THRESHOLD
+            return self.get_num_parameters() < SMALL_MODEL_THRESHOLD
         except Exception as e:
-            logger.debug("Could not determine model size: %s", e)
-            # Conservative fallback: assume large model to avoid incorrect optimizations
-            return False
+            logger.warning(
+                "Could not determine model size. Falling back to default (large model) behavior. "
+                "This may lead to suboptimal performance. Reason: %s", e)
+            return False  # Conservative fallback
 
     def get_num_parameters(self) -> int:
-        """Estimate total parameters based on model architecture.
+        """Estimate model parameters efficiently.
         
         Returns:
-            Estimated parameter count. Falls back to 2B if estimation fails.
+            Parameter count. Falls back to 2B if estimation fails.
         """
-        # Use exact count if available in config
+        # Use exact count if available
         if hasattr(self.hf_config, 'num_parameters') and self.hf_config.num_parameters is not None:
             return int(self.hf_config.num_parameters)
 
-        # Fallback to architectural estimation for standard Transformers
+        # Architectural estimation for standard Transformers
         try:
             hidden = getattr(self.hf_config, 'hidden_size', 768)
             layers = getattr(self.hf_config, 'num_hidden_layers', 12)
             vocab = getattr(self.hf_config, 'vocab_size', 50_000)
+            intermediate_size = getattr(self.hf_config, 'intermediate_size', hidden * 4)
 
-            # Improved parameter estimation for Transformer blocks:
-            embeddings = vocab * hidden                       # token embeddings
-            attention = layers * (4 * hidden * hidden)        # Q, K, V, O projections
-            mlp = layers * (8 * hidden * hidden)              # two linear layers per block
-            layer_norm = layers * 2 * (2 * hidden)            # Two layer norms per block (pre-attention and pre-mlp)
+            # Efficient parameter calculation
+            embeddings = vocab * hidden
+            attention = layers * (4 * hidden * hidden)  # Q, K, V, O projections
+            mlp = layers * 2 * hidden * intermediate_size  # FFN up/down projections
+            layer_norm = layers * 4 * hidden  # Two layer norms per block
 
             return embeddings + attention + mlp + layer_norm
-        except (AttributeError, TypeError, KeyError):
-            # Conservative fallback: large value prevents incorrect small-model optimizations
-            return 2 * SMALL_MODEL_THRESHOLD
+        except (AttributeError, TypeError, KeyError) as e:
+            logger.debug("Could not estimate model size from architecture, "
+                         "falling back to conservative default. Reason: %s", e)
+            return 2 * SMALL_MODEL_THRESHOLD  # Conservative fallback
 
 BlockSize = Literal[1, 8, 16, 32, 64, 128]
 CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
@@ -2458,72 +2468,53 @@ class SchedulerConfig:
 
         from vllm.platforms import current_platform
 
-        # Hardware-specific optimization constants
-        _H100_DEFAULT_TOKENS = 4096
-        _A100_DEFAULT_TOKENS = 3072
-        _CONSUMER_GPU_DEFAULT_TOKENS = 512
-        _DEFAULT_MAX_SEQS_TO_ADJUST = 128
-        _DATACENTER_GPU_ADJUSTED_SEQS = 64
-        _CONSUMER_GPU_ADJUSTED_SEQS = 32
-
+        # Efficient platform-aware GPU detection
         device_cap = current_platform.get_device_capability()
         major = device_cap.major if device_cap else None
 
-        is_datacenter = bool(major and major >= 8)  # A100 (8.0+) or newer
-        is_hopper = bool(major and major >= 9)      # H100 (9.0+) or newer
-
-        if is_datacenter:
-            # Datacenter GPUs: higher memory bandwidth enables larger batches
-            default_tokens = _H100_DEFAULT_TOKENS if is_hopper else _A100_DEFAULT_TOKENS
-            env_var_name = (
-                "VLLM_OPTIMIZATION_PROFILE" if is_hopper else
-                "VLLM_BATCH_SIZE_MULTIPLIER")
-
-            if self.max_num_batched_tokens == DEFAULT_MAX_NUM_BATCHED_TOKENS:
-                self.max_num_batched_tokens = int(
-                    os.getenv(env_var_name, str(default_tokens)))
-            logger.info(
-                "Small model on %s: max_num_batched_tokens=%d",
-                "H100" if is_hopper else "A100",
-                self.max_num_batched_tokens,
+        if current_platform.is_rocm():
+            # AMD GPU detection via device name
+            device_name = current_platform.get_device_name()
+            is_datacenter = device_name and any(
+                gpu in device_name.lower() for gpu in ["mi200", "mi300", "instinct"]
             )
-
-            if self.max_num_seqs == _DEFAULT_MAX_SEQS_TO_ADJUST:  # Only adjust if default
-                self.max_num_seqs = _DATACENTER_GPU_ADJUSTED_SEQS
-                logger.info(
-                    "Small model on datacenter GPU: max_num_seqs=%d",
-                    self.max_num_seqs,
-                )
-
-            if self.enable_chunked_prefill is None:
-                self.enable_chunked_prefill = True
-                self.chunked_prefill_enabled = True
-                logger.info(
-                    "Small model on datacenter GPU: enabled chunked prefill"
-                )
+            is_hopper = device_name and "mi300" in device_name.lower()
         else:
-            # Consumer GPUs: memory constraints require smaller batches
-            if self.max_num_batched_tokens == DEFAULT_MAX_NUM_BATCHED_TOKENS:
-                self.max_num_batched_tokens = int(
-                    os.getenv("VLLM_SMALL_MODEL_CONSUMER_BATCH_TOKENS", str(_CONSUMER_GPU_DEFAULT_TOKENS)))
-            logger.info(
-                "Small model on consumer GPU: max_num_batched_tokens=%d",
-                self.max_num_batched_tokens,
-            )
+            # NVIDIA GPU detection via compute capability
+            is_datacenter = bool(major and major >= 8)  # A100+ or newer
+            is_hopper = bool(major and major >= 9)      # H100+ or newer
 
-            if self.max_num_seqs == _DEFAULT_MAX_SEQS_TO_ADJUST:
-                self.max_num_seqs = _CONSUMER_GPU_ADJUSTED_SEQS
-                logger.info(
-                    "Small model on consumer GPU: max_num_seqs=%d",
-                    self.max_num_seqs,
-                )
+        # Efficient configuration mapping
+        if is_datacenter:
+            default_tokens = _H100_DEFAULT_TOKENS if is_hopper else _A100_DEFAULT_TOKENS
+            env_var_name = "VLLM_OPTIMIZATION_PROFILE" if is_hopper else "VLLM_BATCH_SIZE_MULTIPLIER"
+            adjusted_seqs = _DATACENTER_GPU_ADJUSTED_SEQS
+            chunked_prefill_setting = True
+            gpu_type = "H100" if is_hopper else "A100"
+        else:
+            default_tokens = _CONSUMER_GPU_DEFAULT_TOKENS
+            env_var_name = "VLLM_SMALL_MODEL_CONSUMER_BATCH_TOKENS"
+            adjusted_seqs = _CONSUMER_GPU_ADJUSTED_SEQS
+            chunked_prefill_setting = False
+            gpu_type = "consumer"
 
-            if self.enable_chunked_prefill is None:
-                self.enable_chunked_prefill = False
-                self.chunked_prefill_enabled = False
-                logger.info(
-                    "Small model on consumer GPU: disabled chunked prefill"
-                )
+        # Apply optimizations efficiently
+        if self.max_num_batched_tokens == DEFAULT_MAX_NUM_BATCHED_TOKENS:
+            self.max_num_batched_tokens = int(os.getenv(env_var_name, str(default_tokens)))
+        
+        if self.max_num_seqs == _DEFAULT_MAX_SEQS_TO_ADJUST:
+            self.max_num_seqs = adjusted_seqs
+        
+        if self.enable_chunked_prefill is None:
+            self.enable_chunked_prefill = chunked_prefill_setting
+            self.chunked_prefill_enabled = chunked_prefill_setting
+
+        # Log optimizations once
+        logger.info(
+            "Small model optimizations applied: %s GPU, tokens=%d, seqs=%d, prefill=%s",
+            gpu_type, self.max_num_batched_tokens, self.max_num_seqs,
+            "enabled" if chunked_prefill_setting else "disabled"
+        )
 
         # NOTE: Default set cuda_graph_sizes to [min(max_num_seqs * 2, 512)].
         # This avoids OOM in tight memory scenarios with small max_num_seqs,
