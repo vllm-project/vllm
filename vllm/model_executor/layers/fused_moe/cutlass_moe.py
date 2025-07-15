@@ -643,7 +643,7 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         k: int,
         e: int,
         device: torch.device,
-		apply_router_weight_on_input,
+        apply_router_weight_on_input,
     ):
         assert expert_map is None, ("Expert Parallelism / expert_map "
                                     "is currently not supported for "
@@ -669,30 +669,29 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
             k,
             e,
             device,
-			apply_router_weight_on_input,
+            apply_router_weight_on_input,
         )
 
 
 def cutlass_moe_fp4(
-    a: torch.Tensor,
-    w1_fp4: torch.Tensor,
-    w2_fp4: torch.Tensor,
-    w1_blockscale: torch.Tensor,
-    w2_blockscale: torch.Tensor,
-    g1_alphas: torch.Tensor,
-    g2_alphas: torch.Tensor,
-    a1_gscale: torch.Tensor,
-    a2_gscale: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    m: int,
-    n: int,
-    k: int,
-    e: int,
-    device: torch.device,
-    expert_map: Optional[torch.Tensor] = None,
-	apply_router_weight_on_input: bool = False
-) -> torch.Tensor:
+        a: torch.Tensor,
+        w1_fp4: torch.Tensor,
+        w2_fp4: torch.Tensor,
+        w1_blockscale: torch.Tensor,
+        w2_blockscale: torch.Tensor,
+        g1_alphas: torch.Tensor,
+        g2_alphas: torch.Tensor,
+        a1_gscale: torch.Tensor,
+        a2_gscale: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        m: int,
+        n: int,
+        k: int,
+        e: int,
+        device: torch.device,
+        expert_map: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False) -> torch.Tensor:
     assert expert_map is None, ("Expert Parallelism / expert_map "
                                 "is currently not supported for "
                                 "ModelOptNvFp4FusedMoE's cutlass_moe_fp4.")

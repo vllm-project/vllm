@@ -1124,6 +1124,5 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 e=layer.w13_weight.shape[0],
                 device=x.device,
                 expert_map=expert_map,
-				apply_router_weight_on_input=apply_router_weight_on_input
-            )
+                apply_router_weight_on_input=apply_router_weight_on_input)
         return out

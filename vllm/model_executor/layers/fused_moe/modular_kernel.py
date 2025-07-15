@@ -459,22 +459,28 @@ class FusedMoEModularKernel(torch.nn.Module):
                 f"{fused_experts.__class__.__name__}."
                 f"{fused_experts.activation_formats[0]}")
 
-    def _do_fused_experts(self, fused_out: Optional[torch.Tensor],
-                          a1: torch.Tensor, a1q: torch.Tensor,
-                          w1: torch.Tensor, w2: torch.Tensor,
-                          topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                          activation: str, global_num_experts: int,
-                          local_num_experts: int,
-                          expert_map: Optional[torch.Tensor],
-                          w1_scale: Optional[torch.Tensor],
-                          w2_scale: Optional[torch.Tensor],
-                          w1_zp: Optional[torch.Tensor],
-                          w2_zp: Optional[torch.Tensor],
-                          a1q_scale: Optional[torch.Tensor],
-                          a2_scale: Optional[torch.Tensor],
-                          expert_tokens_meta: Optional[ExpertTokensMetadata],
-                          apply_router_weight_on_input: bool,
-                          extra_expert_kwargs: Optional[dict] = None) -> torch.Tensor:
+    def _do_fused_experts(
+            self,
+            fused_out: Optional[torch.Tensor],
+            a1: torch.Tensor,
+            a1q: torch.Tensor,
+            w1: torch.Tensor,
+            w2: torch.Tensor,
+            topk_weights: torch.Tensor,
+            topk_ids: torch.Tensor,
+            activation: str,
+            global_num_experts: int,
+            local_num_experts: int,
+            expert_map: Optional[torch.Tensor],
+            w1_scale: Optional[torch.Tensor],
+            w2_scale: Optional[torch.Tensor],
+            w1_zp: Optional[torch.Tensor],
+            w2_zp: Optional[torch.Tensor],
+            a1q_scale: Optional[torch.Tensor],
+            a2_scale: Optional[torch.Tensor],
+            expert_tokens_meta: Optional[ExpertTokensMetadata],
+            apply_router_weight_on_input: bool,
+            extra_expert_kwargs: Optional[dict] = None) -> torch.Tensor:
 
         _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
 

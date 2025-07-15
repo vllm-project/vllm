@@ -149,7 +149,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13: Optional[torch.Tensor],
         workspace2: Optional[torch.Tensor],
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-        apply_router_weight_on_input: Optional[bool], # Not used
+        apply_router_weight_on_input: Optional[bool],  # Not used
         g1_alphas: torch.Tensor,
         g2_alphas: torch.Tensor,
         a1_gscale: torch.Tensor,
