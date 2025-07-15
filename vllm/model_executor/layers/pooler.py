@@ -418,6 +418,7 @@ class StepPooler(BasePooler):
     ) -> None:
         super().__init__()
 
+        self.method = AllPool()
         self.head = head
         self.step_tag_id = step_tag_id
         self.returned_token_ids = returned_token_ids
@@ -441,21 +442,9 @@ class StepPooler(BasePooler):
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
-        prompt_lens = get_prompt_lens(hidden_states, pooling_metadata)
+        pooled_data_lst = self.method.extract_states(hidden_states,
+                                                     pooling_metadata)
         prompt_token_ids = self.get_prompt_token_ids(pooling_metadata)
-
-        pooled_data_lst = list[torch.Tensor]()
-        if isinstance(hidden_states, list):
-            for req_state, prompt_len in zip(hidden_states, prompt_lens):
-                assert prompt_len == req_state.shape[0], \
-                    "partial prefill not supported with step pooling"
-            pooled_data_lst = hidden_states
-        else:
-            offset = 0
-            for prompt_len in prompt_lens:
-                pooled_data_i = hidden_states[offset:offset + prompt_len]
-                offset += prompt_len
-                pooled_data_lst.append(pooled_data_i)
 
         pooled_data = list[torch.Tensor]()
         returned_token_ids = self.returned_token_ids
