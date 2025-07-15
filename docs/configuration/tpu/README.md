@@ -17,6 +17,5 @@ This doc serves as a collection of handy tips for optimizing your vLLM on TPU wo
 ### Don't set TP to be less than the number of chips on the host
 - If you need 1 or 4 chips, just create an instance with 1 or 4 chips, don't try to fragment 2 different workloads across 8 chips.
 
-
-
-
+### Tune your workloads!
+- Although we try to have great default configs, we strongly recommend you checkout our auto-tuner and optimize for your workload[LINK]. 
