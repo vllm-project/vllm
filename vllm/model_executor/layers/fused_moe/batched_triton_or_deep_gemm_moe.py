@@ -129,30 +129,22 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             return self.batched_triton_experts.workspace_shapes(
                 a, aq, M, N, K, topk, global_num_experts, local_num_experts)
 
-    def apply(
-        self,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: str,
-        global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ):
+    def apply(self, output: torch.Tensor, hidden_states: torch.Tensor,
+              w1: torch.Tensor, w2: torch.Tensor, topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor, activation: str, global_num_experts: int,
+              expert_map: Optional[torch.Tensor],
+              w1_scale: Optional[torch.Tensor],
+              w2_scale: Optional[torch.Tensor], w1_zp: Optional[torch.Tensor],
+              w2_zp: Optional[torch.Tensor], a1q_scale: Optional[torch.Tensor],
+              a2_scale: Optional[torch.Tensor], workspace13: torch.Tensor,
+              workspace2: torch.Tensor,
+              expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+              apply_router_weight_on_input: bool):
         experts = (self.batched_deep_gemm_experts
                    if self.allow_deep_gemm else self.batched_triton_experts)
         assert experts is not None
-        experts.apply(output, hidden_states, w1, w2, topk_ids, activation,
-                      global_num_experts, expert_map, w1_scale, w2_scale,
-                      w1_zp, w2_zp, a1q_scale, a2_scale, workspace13,
-                      workspace2, expert_tokens_meta)
+        experts.apply(output, hidden_states, w1, w2, topk_weights, topk_ids,
+                      activation, global_num_experts, expert_map, w1_scale,
+                      w2_scale, w1_zp, w2_zp, a1q_scale, a2_scale, workspace13,
+                      workspace2, expert_tokens_meta,
+                      apply_router_weight_on_input)
