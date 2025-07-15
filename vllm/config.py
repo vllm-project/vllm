@@ -2545,7 +2545,8 @@ class DeviceConfig:
 
 
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
-                            "mlp_speculator", "draft_model", "deepseek_mtp"]
+                            "mlp_speculator", "draft_model", "deepseek_mtp",
+                            "glm4_moe_mtp"]
 SpeculativeAcceptanceMethod = Literal["rejection_sampler",
                                       "typical_acceptance_sampler"]
 
@@ -2805,8 +2806,10 @@ class SpeculativeConfig:
                 elif (self.draft_model_config.hf_config.model_type ==
                       "mlp_speculator"):
                     self.method = "mlp_speculator"
-                elif (self.draft_model_config.hf_config.model_type ==
-                      "deepseek_mtp"):
+                elif (self.draft_model_config.hf_config.model_type
+                      == "deepseek_mtp"
+                      or self.draft_model_config.hf_config.model_type
+                      == "glm4_moe_mtp"):
                     self.method = "deepseek_mtp"
                     if self.num_speculative_tokens > 1:
                         logger.warning(

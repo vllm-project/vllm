@@ -1507,7 +1507,8 @@ class EngineArgs:
                     is_ngram_enabled = True
                 elif speculative_method == "medusa":
                     is_medusa_enabled = True
-                elif speculative_method in ("eagle", "eagle3", "deepseek_mtp"):
+                elif speculative_method in ("eagle", "eagle3", "deepseek_mtp",
+                                            "glm4_moe_mtp"):
                     is_eagle_enabled = True
             else:
                 speculative_model = self.speculative_config.get("model")

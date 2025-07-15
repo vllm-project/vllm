@@ -328,6 +328,7 @@ class Glm4MoeDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
+            add_qk_norm=config.add_qk_norm,
         )
 
         if (config.n_routed_experts is not None
