@@ -226,7 +226,7 @@ class OpenAIServing:
 
     def _get_async_tokenizer(self, tokenizer) -> AsyncMicrobatchTokenizer:
         """
-        Return (and cache) an `AsyncMicrobatchTokenizer` bound to the 
+        Return (and cache) an `AsyncMicrobatchTokenizer` bound to the
         given tokenizer.
         """
         async_tokenizer = self._async_tokenizer_pool.get(tokenizer)
@@ -811,6 +811,12 @@ class OpenAIServing:
                 prompt_token_ids=request_prompt_text["prompt_token_ids"])
             for request_prompt_text in request_prompts_text
         ]
+        cache_salt = request.cache_salt if (
+            hasattr(request, "cache_salt")
+            and request.cache_salt is not None) else None
+        if cache_salt:
+            for prompt_text in engine_prompts_text:
+                prompt_text["cache_salt"] = cache_salt
 
         # This check is equivalent to simply checking if
         # `request_prompts_embeds` is empty, but it's difficult to propagate
@@ -828,6 +834,9 @@ class OpenAIServing:
                 prompt_embeds=request_prompt_embeds["prompt_embeds"])
             for request_prompt_embeds in request_prompts_embeds
         ]
+        if cache_salt:
+            for prompt_embed in engine_prompts_embeds:
+                prompt_embed["cache_salt"] = cache_salt
 
         request_prompts = request_prompts_embeds + request_prompts_text
         engine_prompts = engine_prompts_embeds + engine_prompts_text
