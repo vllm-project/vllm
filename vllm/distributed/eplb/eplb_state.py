@@ -33,7 +33,7 @@ from dataclasses import dataclass
 import torch
 from torch.distributed import all_gather, all_reduce
 
-from vllm.config import ParallelConfig
+from vllm.config import EPConfig
 from vllm.distributed.parallel_state import get_ep_group, get_node_count
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
@@ -171,7 +171,7 @@ class EplbState:
         cls,
         model: MixtureOfExperts,
         device: torch.device,
-        parallel_config: ParallelConfig,
+        ep_config: EPConfig,
     ) -> "EplbState":
         """
         Build the initial EPLB state.
@@ -222,7 +222,7 @@ class EplbState:
             dtype=torch.int32,
             device=device,
         )
-        expert_load_window_size = parallel_config.eplb_window_size
+        expert_load_window_size = ep_config.lb_window_size
         expert_load_window = torch.zeros(
             (expert_load_window_size, model.num_moe_layers,
              model.num_local_physical_experts),
@@ -231,7 +231,7 @@ class EplbState:
         )
 
         # Set the initial progress of rearrangement to 3/4
-        eplb_step_interval = parallel_config.eplb_step_interval
+        eplb_step_interval = ep_config.lb_step_interval
         expert_rearrangement_step = max(
             0, eplb_step_interval - eplb_step_interval // 4)
 

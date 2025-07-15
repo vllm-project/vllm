@@ -1191,7 +1191,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """
         Step for the EPLB (Expert Parallelism Load Balancing) state.
         """
-        if not self.parallel_config.enable_eplb:
+        if not self.vllm_config.ep_config.enable_eplb:
             return
 
         assert self.eplb_state is not None
@@ -1200,7 +1200,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.model,
             is_dummy,
             is_profile,
-            log_stats=self.parallel_config.eplb_log_balancedness,
+            log_stats=self.vllm_config.ep_config.lb_log_balancedness,
         )
 
     def get_dp_padding(self,
@@ -1776,13 +1776,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         prepare_communication_buffer_for_model(self.model)
 
         if is_mixture_of_experts(
-                self.model) and self.parallel_config.enable_eplb:
+                self.model) and self.vllm_config.ep_config.enable_eplb:
             logger.info("EPLB is enabled for model %s.",
                         self.model_config.model)
             self.eplb_state = EplbState.build(
                 self.model,
                 self.device,
-                self.parallel_config,
+                self.vllm_config.ep_config,
             )
 
     def save_tensorized_model(
