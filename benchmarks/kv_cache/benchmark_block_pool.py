@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.utils import FlexibleArgumentParser
-from typing import Optional
 import gc
-from tabulate import tabulate
-from vllm.v1.core.block_pool import BlockPool
 import time
+from typing import Optional
+
+from tabulate import tabulate
+
+from vllm.utils import FlexibleArgumentParser
+from vllm.v1.core.block_pool import BlockPool
+
 
 class Metric:
     def __init__(self) -> None:
@@ -23,6 +26,7 @@ class Metric:
 
     def avg_v(self) -> float:
         return self.sum_v * 1.0 / self.cnt
+
 
 def main(args):
     rows = []
@@ -55,9 +59,13 @@ def main(args):
                 ]
             )
         else:
-            print("No valid metrics found."f" {get_blocks_metric.max_v=} {free_blocks_metric.max_v=}")
-    
-    print(tabulate(
+            print(
+                "No valid metrics found."
+                f" {get_blocks_metric.max_v=} {free_blocks_metric.max_v=}"
+            )
+
+    print(
+        tabulate(
             rows,
             headers=[
                 "Iterations",
@@ -94,6 +102,7 @@ def invoke_main() -> None:
     )
     args = parser.parse_args()
     main(args)
+
 
 if __name__ == "__main__":
     invoke_main()  # pragma: no cover
