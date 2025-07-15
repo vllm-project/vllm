@@ -237,12 +237,6 @@ class QuarkConfig(QuantizationConfig):
                 "Quark model is not in MX-FP4 format: not group_size=32")
             return False
 
-        # Weights need to use static quantization.
-        if weight_quant.get("is_dynamic") is True:
-            logger.debug(
-                "Quark model is not in MX-FP4 format: not weight static")
-            return False
-
         # Activations need to use dynamic quantization.
         if input_quant.get("is_dynamic") is False:
             logger.debug(

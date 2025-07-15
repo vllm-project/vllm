@@ -18,9 +18,10 @@ from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Callable, Optional
 
 import prometheus_client
+import pydantic
 import regex as re
 import uvloop
 from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
@@ -60,17 +61,14 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionResponse,
                                               DetokenizeRequest,
                                               DetokenizeResponse,
-                                              EmbeddingChatRequest,
-                                              EmbeddingCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse, ErrorResponse,
                                               LoadLoRAAdapterRequest,
-                                              PoolingChatRequest,
-                                              PoolingCompletionRequest,
                                               PoolingRequest, PoolingResponse,
                                               RerankRequest, RerankResponse,
-                                              ScoreRequest, ScoreResponse,
-                                              TokenizeRequest,
+                                              ResponsesRequest,
+                                              ResponsesResponse, ScoreRequest,
+                                              ScoreResponse, TokenizeRequest,
                                               TokenizeResponse,
                                               TranscriptionRequest,
                                               TranscriptionResponse,
@@ -85,8 +83,10 @@ from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
+                                                    LoRAModulePath,
                                                     OpenAIServingModels)
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
+from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
 from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
@@ -368,6 +368,10 @@ def models(request: Request) -> OpenAIServingModels:
     return request.app.state.openai_serving_models
 
 
+def responses(request: Request) -> Optional[OpenAIServingResponses]:
+    return request.app.state.openai_serving_responses
+
+
 def chat(request: Request) -> Optional[OpenAIServingChat]:
     return request.app.state.openai_serving_chat
 
@@ -426,6 +430,7 @@ async def get_server_load_metrics(request: Request):
     # - /v1/chat/completions
     # - /v1/completions
     # - /v1/audio/transcriptions
+    # - /v1/audio/translations
     # - /v1/embeddings
     # - /pooling
     # - /classify
@@ -529,6 +534,71 @@ async def show_available_models(raw_request: Request):
 async def show_version():
     ver = {"version": VLLM_VERSION}
     return JSONResponse(content=ver)
+
+
+@router.post("/v1/responses",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.OK.value: {
+                     "content": {
+                         "text/event-stream": {}
+                     }
+                 },
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.NOT_FOUND.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
+@with_cancellation
+async def create_responses(request: ResponsesRequest, raw_request: Request):
+    handler = responses(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Responses API")
+
+    generator = await handler.create_responses(request, raw_request)
+
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    elif isinstance(generator, ResponsesResponse):
+        return JSONResponse(content=generator.model_dump())
+    return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
+@router.get("/v1/responses/{response_id}")
+async def retrieve_responses(response_id: str, raw_request: Request):
+    handler = responses(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Responses API")
+
+    response = await handler.retrieve_responses(response_id)
+
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(content=response.model_dump(),
+                            status_code=response.code)
+    return JSONResponse(content=response.model_dump())
+
+
+@router.post("/v1/responses/{response_id}/cancel")
+async def cancel_responses(response_id: str, raw_request: Request):
+    handler = responses(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Responses API")
+
+    response = await handler.cancel_responses(response_id)
+
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(content=response.model_dump(),
+                            status_code=response.code)
+    return JSONResponse(content=response.model_dump())
 
 
 @router.post("/v1/chat/completions",
@@ -884,32 +954,9 @@ async def do_rerank_v2(request: RerankRequest, raw_request: Request):
     return await do_rerank(request, raw_request)
 
 
-TASK_HANDLERS: dict[str, dict[str, tuple]] = {
-    "generate": {
-        "messages": (ChatCompletionRequest, create_chat_completion),
-        "default": (CompletionRequest, create_completion),
-    },
-    "embed": {
-        "messages": (EmbeddingChatRequest, create_embedding),
-        "default": (EmbeddingCompletionRequest, create_embedding),
-    },
-    "score": {
-        "default": (RerankRequest, do_rerank)
-    },
-    "rerank": {
-        "default": (RerankRequest, do_rerank)
-    },
-    "reward": {
-        "messages": (PoolingChatRequest, create_pooling),
-        "default": (PoolingCompletionRequest, create_pooling),
-    },
-    "classify": {
-        "messages": (PoolingChatRequest, create_pooling),
-        "default": (PoolingCompletionRequest, create_pooling),
-    },
-}
-
 if envs.VLLM_SERVER_DEV_MODE:
+    logger.warning("SECURITY WARNING: Development endpoints are enabled! "
+                   "This should NOT be used in production!")
 
     @router.get("/server_info")
     async def show_server_info(raw_request: Request):
@@ -958,6 +1005,30 @@ if envs.VLLM_SERVER_DEV_MODE:
         return JSONResponse(content={"is_sleeping": is_sleeping})
 
 
+# TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
+# (requires typing_extensions >= 4.13)
+RequestType = Any
+GetHandlerFn = Callable[[Request], Optional[OpenAIServing]]
+EndpointFn = Callable[[RequestType, Request], Awaitable[Any]]
+
+# NOTE: Items defined earlier take higher priority
+INVOCATION_TYPES: list[tuple[RequestType, tuple[GetHandlerFn, EndpointFn]]] = [
+    (ChatCompletionRequest, (chat, create_chat_completion)),
+    (CompletionRequest, (completion, create_completion)),
+    (EmbeddingRequest, (embedding, create_embedding)),
+    (ClassificationRequest, (classify, create_classify)),
+    (ScoreRequest, (score, create_score)),
+    (RerankRequest, (rerank, do_rerank)),
+    (PoolingRequest, (pooling, create_pooling)),
+]
+
+# NOTE: Construct the TypeAdapters only once
+INVOCATION_VALIDATORS = [
+    (pydantic.TypeAdapter(request_type), (get_handler, endpoint))
+    for request_type, (get_handler, endpoint) in INVOCATION_TYPES
+]
+
+
 @router.post("/invocations",
              dependencies=[Depends(validate_json_request)],
              responses={
@@ -972,32 +1043,34 @@ if envs.VLLM_SERVER_DEV_MODE:
                  },
              })
 async def invocations(raw_request: Request):
-    """
-    For SageMaker, routes requests to other handlers based on model `task`.
-    """
+    """For SageMaker, routes requests based on the request type."""
     try:
         body = await raw_request.json()
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
                             detail=f"JSON decode error: {e}") from e
 
-    task = raw_request.app.state.task
+    valid_endpoints = [(validator, endpoint)
+                       for validator, (get_handler,
+                                       endpoint) in INVOCATION_VALIDATORS
+                       if get_handler(raw_request) is not None]
 
-    if task not in TASK_HANDLERS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported task: '{task}' for '/invocations'. "
-            f"Expected one of {set(TASK_HANDLERS.keys())}")
+    for request_validator, endpoint in valid_endpoints:
+        try:
+            request = request_validator.validate_python(body)
+        except pydantic.ValidationError:
+            continue
 
-    handler_config = TASK_HANDLERS[task]
-    if "messages" in body:
-        request_model, handler = handler_config["messages"]
-    else:
-        request_model, handler = handler_config["default"]
+        return await endpoint(request, raw_request)
 
-    # this is required since we lose the FastAPI automatic casting
-    request = request_model.model_validate(body)
-    return await handler(request, raw_request)
+    type_names = [
+        t.__name__ if isinstance(t := validator._type, type) else str(t)
+        for validator, _ in valid_endpoints
+    ]
+    msg = ("Cannot find suitable handler for request. "
+           f"Expected one of: {type_names}")
+    res = base(raw_request).create_error_response(message=msg)
+    return JSONResponse(content=res.model_dump(), status_code=res.code)
 
 
 if envs.VLLM_TORCH_PROFILER_DIR:
@@ -1130,6 +1203,142 @@ class XRequestIdMiddleware:
         return self.app(scope, receive, send_with_request_id)
 
 
+def _extract_content_from_chunk(chunk_data: dict) -> str:
+    """Extract content from a streaming response chunk."""
+    try:
+        from vllm.entrypoints.openai.protocol import (
+            ChatCompletionStreamResponse, CompletionStreamResponse)
+
+        # Try using Completion types for type-safe parsing
+        if chunk_data.get('object') == 'chat.completion.chunk':
+            chat_response = ChatCompletionStreamResponse.model_validate(
+                chunk_data)
+            if chat_response.choices and chat_response.choices[0].delta.content:
+                return chat_response.choices[0].delta.content
+        elif chunk_data.get('object') == 'text_completion':
+            completion_response = CompletionStreamResponse.model_validate(
+                chunk_data)
+            if completion_response.choices and completion_response.choices[
+                    0].text:
+                return completion_response.choices[0].text
+    except pydantic.ValidationError:
+        # Fallback to manual parsing
+        if 'choices' in chunk_data and chunk_data['choices']:
+            choice = chunk_data['choices'][0]
+            if 'delta' in choice and choice['delta'].get('content'):
+                return choice['delta']['content']
+            elif choice.get('text'):
+                return choice['text']
+    return ""
+
+
+class SSEDecoder:
+    """Robust Server-Sent Events decoder for streaming responses."""
+
+    def __init__(self):
+        self.buffer = ""
+        self.content_buffer = []
+
+    def decode_chunk(self, chunk: bytes) -> list[dict]:
+        """Decode a chunk of SSE data and return parsed events."""
+        import json
+
+        try:
+            chunk_str = chunk.decode('utf-8')
+        except UnicodeDecodeError:
+            # Skip malformed chunks
+            return []
+
+        self.buffer += chunk_str
+        events = []
+
+        # Process complete lines
+        while '\n' in self.buffer:
+            line, self.buffer = self.buffer.split('\n', 1)
+            line = line.rstrip('\r')  # Handle CRLF
+
+            if line.startswith('data: '):
+                data_str = line[6:].strip()
+                if data_str == '[DONE]':
+                    events.append({'type': 'done'})
+                elif data_str:
+                    try:
+                        event_data = json.loads(data_str)
+                        events.append({'type': 'data', 'data': event_data})
+                    except json.JSONDecodeError:
+                        # Skip malformed JSON
+                        continue
+
+        return events
+
+    def extract_content(self, event_data: dict) -> str:
+        """Extract content from event data."""
+        return _extract_content_from_chunk(event_data)
+
+    def add_content(self, content: str) -> None:
+        """Add content to the buffer."""
+        if content:
+            self.content_buffer.append(content)
+
+    def get_complete_content(self) -> str:
+        """Get the complete buffered content."""
+        return ''.join(self.content_buffer)
+
+
+def _log_streaming_response(response, response_body: list) -> None:
+    """Log streaming response with robust SSE parsing."""
+    from starlette.concurrency import iterate_in_threadpool
+
+    sse_decoder = SSEDecoder()
+    chunk_count = 0
+
+    def buffered_iterator():
+        nonlocal chunk_count
+
+        for chunk in response_body:
+            chunk_count += 1
+            yield chunk
+
+            # Parse SSE events from chunk
+            events = sse_decoder.decode_chunk(chunk)
+
+            for event in events:
+                if event['type'] == 'data':
+                    content = sse_decoder.extract_content(event['data'])
+                    sse_decoder.add_content(content)
+                elif event['type'] == 'done':
+                    # Log complete content when done
+                    full_content = sse_decoder.get_complete_content()
+                    if full_content:
+                        # Truncate if too long
+                        if len(full_content) > 2048:
+                            full_content = full_content[:2048] + ""
+                            "...[truncated]"
+                        logger.info(
+                            "response_body={streaming_complete: " \
+                            "content='%s', chunks=%d}",
+                            full_content, chunk_count)
+                    else:
+                        logger.info(
+                            "response_body={streaming_complete: " \
+                            "no_content, chunks=%d}",
+                            chunk_count)
+                    return
+
+    response.body_iterator = iterate_in_threadpool(buffered_iterator())
+    logger.info("response_body={streaming_started: chunks=%d}",
+                len(response_body))
+
+
+def _log_non_streaming_response(response_body: list) -> None:
+    """Log non-streaming response."""
+    try:
+        decoded_body = response_body[0].decode()
+        logger.info("response_body={%s}", decoded_body)
+    except UnicodeDecodeError:
+        logger.info("response_body={<binary_data>}")
+
+
 def build_app(args: Namespace) -> FastAPI:
     if args.disable_fastapi_docs:
         app = FastAPI(openapi_url=None,
@@ -1194,8 +1403,17 @@ def build_app(args: Namespace) -> FastAPI:
                 section async for section in response.body_iterator
             ]
             response.body_iterator = iterate_in_threadpool(iter(response_body))
-            logger.info("response_body={%s}",
-                        response_body[0].decode() if response_body else None)
+            # Check if this is a streaming response by looking at content-type
+            content_type = response.headers.get("content-type", "")
+            is_streaming = content_type == "text/event-stream; charset=utf-8"
+
+            # Log response body based on type
+            if not response_body:
+                logger.info("response_body={<empty>}")
+            elif is_streaming:
+                _log_streaming_response(response, response_body)
+            else:
+                _log_non_streaming_response(response_body)
             return response
 
     for middleware in args.middleware:
@@ -1262,14 +1480,47 @@ async def init_app_state(
                     "This discrepancy may lead to performance degradation.",
                     resolved_chat_template, args.model)
 
+    # Merge default_mm_loras into the static lora_modules
+    default_mm_loras = (vllm_config.lora_config.default_mm_loras
+                        if vllm_config.lora_config is not None else {})
+
+    lora_modules = args.lora_modules
+    if default_mm_loras:
+        default_mm_lora_paths = [
+            LoRAModulePath(
+                name=modality,
+                path=lora_path,
+            ) for modality, lora_path in default_mm_loras.items()
+        ]
+        if args.lora_modules is None:
+            lora_modules = default_mm_lora_paths
+        else:
+            lora_modules += default_mm_lora_paths
+
     state.openai_serving_models = OpenAIServingModels(
         engine_client=engine_client,
         model_config=model_config,
         base_model_paths=base_model_paths,
-        lora_modules=args.lora_modules,
+        lora_modules=lora_modules,
         prompt_adapters=args.prompt_adapters,
     )
     await state.openai_serving_models.init_static_loras()
+    state.openai_serving_responses = OpenAIServingResponses(
+        engine_client,
+        model_config,
+        state.openai_serving_models,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+        enable_auto_tools=args.enable_auto_tool_choice,
+        expand_tools_even_if_tool_choice_none=args.
+        expand_tools_even_if_tool_choice_none,
+        tool_parser=args.tool_call_parser,
+        reasoning_parser=args.reasoning_parser,
+        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+        enable_force_include_usage=args.enable_force_include_usage,
+    ) if "generate" in model_config.supported_tasks else None
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,
@@ -1286,7 +1537,7 @@ async def init_app_state(
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
-    ) if model_config.runner_type == "generate" else None
+    ) if "generate" in model_config.supported_tasks else None
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
         model_config,
@@ -1294,7 +1545,7 @@ async def init_app_state(
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_force_include_usage=args.enable_force_include_usage,
-    ) if model_config.runner_type == "generate" else None
+    ) if "generate" in model_config.supported_tasks else None
     state.openai_serving_pooling = OpenAIServingPooling(
         engine_client,
         model_config,
@@ -1302,7 +1553,7 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if model_config.runner_type == "pooling" else None
+    ) if "pooling" in model_config.supported_tasks else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,
@@ -1310,25 +1561,25 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if model_config.task == "embed" else None
-    state.openai_serving_scores = ServingScores(
-        engine_client,
-        model_config,
-        state.openai_serving_models,
-        request_logger=request_logger) if model_config.task in (
-            "score", "embed", "pooling") else None
+    ) if "embed" in model_config.supported_tasks else None
     state.openai_serving_classification = ServingClassification(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if model_config.task == "classify" else None
-    state.jinaai_serving_reranking = ServingScores(
+    ) if "classify" in model_config.supported_tasks else None
+
+    enable_serving_reranking = ("classify" in model_config.supported_tasks
+                                and getattr(model_config.hf_config,
+                                            "num_labels", 0) == 1)
+    state.openai_serving_scores = ServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
-        request_logger=request_logger
-    ) if model_config.task == "score" else None
+        request_logger=request_logger,
+    ) if ("embed" in model_config.supported_tasks
+          or enable_serving_reranking) else None
+
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,
@@ -1342,13 +1593,13 @@ async def init_app_state(
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if model_config.runner_type == "transcription" else None
+    ) if "transcription" in model_config.supported_tasks else None
     state.openai_serving_translation = OpenAIServingTranslation(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if model_config.runner_type == "transcription" else None
+    ) if "transcription" in model_config.supported_tasks else None
     state.task = model_config.task
 
     state.enable_server_load_tracking = args.enable_server_load_tracking

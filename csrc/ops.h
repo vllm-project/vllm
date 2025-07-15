@@ -167,6 +167,19 @@ void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
                         torch::Tensor const& seq_lens,
                         torch::Tensor const& page_table, double scale);
 
+void sm100_cutlass_mla_decode(
+    torch::Tensor const& out, torch::Tensor const& q_nope,
+    torch::Tensor const& q_pe, torch::Tensor const& kv_c_and_k_pe_cache,
+    torch::Tensor const& seq_lens, torch::Tensor const& page_table,
+    torch::Tensor const& workspace, double sm_scale,
+    int64_t num_kv_splits =
+        1 /* Set to 1 to avoid cuda_graph issue by default. */);
+
+int64_t sm100_cutlass_mla_get_workspace_size(
+    int64_t max_seq_len, int64_t num_batches, int64_t sm_count = 0,
+    int64_t num_kv_splits =
+        1 /* Set to 1 to avoid cuda_graph issue by default. */);
+
 torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
 #ifndef USE_ROCM
@@ -325,22 +338,6 @@ void selective_scan_fwd(const torch::Tensor& u, const torch::Tensor& delta,
                         const std::optional<torch::Tensor>& cache_indices,
                         const std::optional<torch::Tensor>& has_initial_state,
                         const torch::Tensor& ssm_states, int64_t pad_slot_id);
-
-void causal_conv1d_update(const at::Tensor& x, const at::Tensor& conv_state,
-                          const at::Tensor& weight,
-                          const std::optional<at::Tensor>& bias_,
-                          bool silu_activation,
-                          const std::optional<at::Tensor>& cache_seqlens_,
-                          const std::optional<at::Tensor>& conv_state_indices_,
-                          int64_t pad_slot_id);
-
-void causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
-                       const std::optional<at::Tensor>& bias_,
-                       const std::optional<at::Tensor>& conv_states,
-                       const std::optional<at::Tensor>& query_start_loc,
-                       const std::optional<at::Tensor>& cache_indices,
-                       const std::optional<at::Tensor>& has_initial_state,
-                       bool silu_activation, int64_t pad_slot_id);
 
 using fptr_t = int64_t;
 fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,

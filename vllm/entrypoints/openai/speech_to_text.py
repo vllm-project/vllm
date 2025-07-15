@@ -5,7 +5,7 @@ import io
 import math
 import time
 from collections.abc import AsyncGenerator
-from math import ceil
+from functools import cached_property
 from typing import Callable, Literal, Optional, TypeVar, Union, cast
 
 import numpy as np
@@ -24,9 +24,9 @@ from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.utils import get_model_architecture
+from vllm.model_executor.model_loader import get_model_cls
+from vllm.model_executor.models import SupportsTranscription
 from vllm.outputs import RequestOutput
-from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import PlaceholderModule
 
 try:
@@ -42,9 +42,6 @@ logger = init_logger(__name__)
 # As per https://platform.openai.com/docs/guides/speech-to-text#overview.
 # TODO configurable
 MAX_AUDIO_CLIP_FILESIZE_MB = 25
-MAX_AUDIO_CLIP_SECONDS = 30
-OVERLAP_CHUNK_SECOND = 1
-MIN_ENERGY_WINDOW_SIZE = 1600  # 1600 ~ 100ms for 16000 Hz audio
 
 
 class OpenAISpeechToText(OpenAIServing):
@@ -69,19 +66,20 @@ class OpenAISpeechToText(OpenAIServing):
 
         self.default_sampling_params = (
             self.model_config.get_diff_sampling_param())
-        processor = cached_get_processor(model_config.model)
-        self.max_audio_clip_s = processor.feature_extractor.chunk_length \
-            if hasattr(processor.feature_extractor, 'chunk_length') \
-            else MAX_AUDIO_CLIP_SECONDS
-        self.model_sr = processor.feature_extractor.sampling_rate
-        self.hop_length = processor.feature_extractor.hop_length
         self.task_type = task_type
-        self.model_cls, _ = get_model_architecture(model_config)
+
+        self.asr_config = self.model_cls.get_speech_to_text_config(
+            model_config, task_type)
 
         if self.default_sampling_params:
             logger.info(
                 "Overwriting default completion sampling param with: %s",
                 self.default_sampling_params)
+
+    @cached_property
+    def model_cls(self) -> type[SupportsTranscription]:
+        model_cls = get_model_cls(self.model_config)
+        return cast(type[SupportsTranscription], model_cls)
 
     async def _preprocess_speech_to_text(
         self,
@@ -93,7 +91,7 @@ class OpenAISpeechToText(OpenAIServing):
         # For now we default to en. See
         # https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py#L1520
         lang = request.language or "en"
-        self.model_cls.validate_language(lang)  # type: ignore[attr-defined]
+        self.model_cls.validate_language(lang)
 
         if len(audio_data) / 1024**2 > MAX_AUDIO_CLIP_FILESIZE_MB:
             raise ValueError("Maximum file size exceeded.")
@@ -101,27 +99,23 @@ class OpenAISpeechToText(OpenAIServing):
         with io.BytesIO(audio_data) as bytes_:
             # NOTE resample to model SR here for efficiency. This is also a
             # pre-requisite for chunking, as it assumes Whisper SR.
-            y, sr = librosa.load(bytes_, sr=self.model_sr)
+            y, sr = librosa.load(bytes_, sr=self.asr_config.sample_rate)
 
         duration = librosa.get_duration(y=y, sr=sr)
-        chunks = [y
-                  ] if duration < self.max_audio_clip_s else self._split_audio(
-                      y, int(sr))
+        do_split_audio = (self.asr_config.allow_audio_chunking
+                          and duration > self.asr_config.max_audio_clip_s)
+        chunks = [y] if not do_split_audio else self._split_audio(y, int(sr))
         prompts = []
         for chunk in chunks:
-            prompt = {
-                "encoder_prompt": {
-                    "prompt": "",
-                    "multi_modal_data": {
-                        "audio": (chunk, sr),
-                    },
-                },
-                "decoder_prompt":
-                self.model_cls.
-                get_decoder_prompt(  # type: ignore[attr-defined]
-                    lang, self.task_type, request.prompt)
-            }
-            prompts.append(cast(PromptType, prompt))
+            # The model has control over the construction, as long as it
+            # returns a valid PromptType.
+            prompt = self.model_cls.get_generation_prompt(
+                audio=chunk,
+                stt_config=self.asr_config,
+                language=lang,
+                task_type=self.task_type,
+                request_prompt=request.prompt)
+            prompts.append(prompt)
         return prompts, duration
 
     async def _create_speech_to_text(
@@ -190,7 +184,8 @@ class OpenAISpeechToText(OpenAIServing):
 
             self._log_inputs(
                 request_id,
-                prompts[0]['decoder_prompt'],  # type: ignore
+                # It will not display special tokens like <|startoftranscript|>
+                request.prompt,
                 params=sampling_params,
                 lora_request=None,
                 prompt_adapter_request=None)
@@ -255,17 +250,11 @@ class OpenAISpeechToText(OpenAIServing):
                 async for res in result_generator:
                     # On first result.
                     if res.prompt_token_ids is not None:
-                        # Do not account the 4-tokens `<|startoftranscript|>..`
-                        # Could be negative when language token
-                        # is not specified.
-                        num_prompt_tokens = max(
-                            len(res.prompt_token_ids) - 4, 0)
-                        # NOTE(NickLucche) user can't pass encoder
-                        # prompts directly at least not to Whisper.
-                        # One indicator of the encoder amount of processing
-                        # is the log-mel spectogram length.
-                        num_prompt_tokens += ceil(
-                            audio_duration_s * self.model_sr / self.hop_length)
+                        num_prompt_tokens = len(res.prompt_token_ids)
+                        if audio_tokens := self.model_cls.get_num_audio_tokens(
+                                audio_duration_s, self.asr_config,
+                                self.model_config):
+                            num_prompt_tokens += audio_tokens
 
                     # We need to do it here, because if there are exceptions in
                     # the result_generator, it needs to be sent as the FIRST
@@ -341,8 +330,8 @@ class OpenAISpeechToText(OpenAIServing):
 
     def _split_audio(self, audio_data: np.ndarray,
                      sample_rate: int) -> list[np.ndarray]:
-        chunk_size = sample_rate * self.max_audio_clip_s
-        overlap_size = sample_rate * OVERLAP_CHUNK_SECOND
+        chunk_size = sample_rate * self.asr_config.max_audio_clip_s
+        overlap_size = sample_rate * self.asr_config.overlap_chunk_second
         chunks = []
         i = 0
         while i < audio_data.shape[-1]:
@@ -378,10 +367,10 @@ class OpenAISpeechToText(OpenAIServing):
         # Calculate RMS energy in small windows
         min_energy = math.inf
         quietest_idx = 0
-        for i in range(0,
-                       len(segment) - MIN_ENERGY_WINDOW_SIZE,
-                       MIN_ENERGY_WINDOW_SIZE):
-            window = segment[i:i + MIN_ENERGY_WINDOW_SIZE]
+        min_energy_window = self.asr_config.min_energy_split_window_size
+        assert min_energy_window is not None
+        for i in range(0, len(segment) - min_energy_window, min_energy_window):
+            window = segment[i:i + min_energy_window]
             energy = (window**2).mean()**0.5
             if energy < min_energy:
                 quietest_idx = i + start_idx
