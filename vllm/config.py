@@ -1630,6 +1630,9 @@ class CacheConfig:
     checkpoint if available. Otherwise, the scales will default to 1.0."""
     cpu_kvcache_space_bytes: Optional[int] = None
     """(CPU backend only) CPU key-value cache space."""
+    mamba_page_size_padded: Optional[int] = None
+    """ Optional override for mamba page size; used by hybrid mamba/attention
+    models to ensure exact alignment with attention page size."""
 
     # Will be set after profiling.
     num_gpu_blocks: Optional[int] = field(default=None, init=False)
@@ -1725,35 +1728,6 @@ class CacheConfig:
             raise ValueError("Too large swap space. " + msg)
         elif cpu_memory_usage > 0.4 * total_cpu_memory:
             logger.warning("Possibly too large swap space. %s", msg)
-
-
-@config
-@dataclass
-class TokenizerPoolConfig:
-    """This config is deprecated and will be removed in a future release.
-
-    Passing these parameters will have no effect. Please remove them from your
-    configurations.
-    """
-
-    pool_size: int = 0
-    """This parameter is deprecated and will be removed in a future release.
-    Passing this parameter will have no effect. Please remove it from your
-    configurations."""
-    pool_type: str = "ray"
-    """This parameter is deprecated and will be removed in a future release.
-    Passing this parameter will have no effect. Please remove it from your
-    configurations."""
-    extra_config: dict = field(default_factory=dict)
-    """This parameter is deprecated and will be removed in a future release.
-    Passing this parameter will have no effect. Please remove it from your
-    configurations."""
-
-    def __post_init__(self) -> None:
-        logger.warning_once(
-            "TokenizerPoolConfig is deprecated and will be removed in a "
-            "future release. Passing this parameter will have no effect. "
-            "Please remove it from your configurations.")
 
 
 class LoadFormat(str, enum.Enum):
@@ -1918,10 +1892,6 @@ class ParallelConfig:
 
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
-
-    tokenizer_pool_config: Optional[TokenizerPoolConfig] = None
-    """This parameter is deprecated and will be removed in a future release.
-    Please remove it from your configs"""
 
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
@@ -4885,10 +4855,14 @@ class VllmConfig:
         if architecture is None:
             return
 
-        from vllm.model_executor.models.config import MODELS_CONFIG_MAP
+        from vllm.model_executor.models.config import (
+            MODELS_CONFIG_MAP, HybridAttentionMambaModelConfig)
         cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_config(self)
+
+        if self.model_config.is_hybrid:
+            HybridAttentionMambaModelConfig.verify_and_update_config(self)
 
         if self.model_config.task == "classify":
             # Maybe convert ForCausalLM into ForSequenceClassification model.
