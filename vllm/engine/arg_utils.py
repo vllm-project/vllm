@@ -1431,7 +1431,8 @@ class EngineArgs:
                 if speculative_model:
                     if speculative_model in ("ngram", "[ngram]"):
                         is_ngram_enabled = True
-                    # Special case: Check if it's a speculators Eagle model
+                    # Detect speculators format Eagle models which don't set the method
+                    # field explicitly but can be identified by their config structure
                     elif is_speculators_eagle_config(speculative_model):
                         is_eagle_enabled = True
                         

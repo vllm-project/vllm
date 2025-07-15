@@ -4,19 +4,53 @@
 import json
 import os
 from pathlib import Path
-from typing import Union
+from typing import Dict, Any, List, Optional, Union
 
 from transformers import PretrainedConfig
 
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 
+# Constants for speculators format
+SUPPORTED_SPECULATORS_TYPES = frozenset({"eagle", "eagle3"})
+DEFAULT_HIDDEN_SIZE = 4096
+DEFAULT_NUM_LOOKAHEAD_TOKENS = 5
+
 
 class SpeculatorsEagleConfig(EAGLEConfig):
     """
-    Adapter for speculators Eagle configs to make them compatible with vLLM.
+    Configuration adapter for speculators Eagle models.
     
-    This class handles the conversion between speculators config format and
-    vLLM's expected Eagle config format.
+    This class handles the translation between the speculators library's
+    config format and vLLM's expected format for Eagle models. It supports
+    both Eagle-1 and Eagle-3 variants.
+    
+    The speculators format differs from vLLM's standard Eagle format in:
+    - Config structure: nested under 'transformer_layer_config'
+    - Field naming: e.g., 'fusion_bias' vs 'eagle_fc_bias'
+    - Model detection: uses 'speculators_model_type' field
+    - Proposal configuration: speculative tokens in 'proposal_methods'
+    
+    To add support for new Eagle variants:
+    1. Add the variant name to SUPPORTED_SPECULATORS_TYPES
+    2. Add variant-specific conversion logic in _convert_speculators_to_vllm
+    3. Update the architecture mapping if needed
+    
+    Example speculators config structure:
+        {
+            "speculators_model_type": "eagle",
+            "speculators_config": {
+                "proposal_methods": [{
+                    "speculative_tokens": 5
+                }]
+            },
+            "transformer_layer_config": {
+                "hidden_size": 4096,
+                "num_hidden_layers": 1,
+                ...
+            },
+            "fusion_bias": false,
+            "layernorms": false  # HASS variant
+        }
     """
     
     @classmethod
@@ -27,6 +61,16 @@ class SpeculatorsEagleConfig(EAGLEConfig):
     ) -> "SpeculatorsEagleConfig":
         """
         Load a speculators Eagle config and convert it to vLLM format.
+        
+        Args:
+            pretrained_model_name_or_path: Path to the model or HuggingFace model ID
+            **kwargs: Additional arguments passed to get_config_dict
+        
+        Returns:
+            SpeculatorsEagleConfig instance with vLLM-compatible configuration
+        
+        Raises:
+            ValueError: If the config format is invalid or unsupported
         """
         # Use the parent class method to load config dict
         # This handles both local paths and HuggingFace model IDs
@@ -34,101 +78,275 @@ class SpeculatorsEagleConfig(EAGLEConfig):
         
         # Check if this is a speculators format config
         speculators_type = config_dict.get("speculators_model_type")
-        if speculators_type not in ["eagle", "eagle3"]:
+        if speculators_type not in SUPPORTED_SPECULATORS_TYPES:
             # Not a speculators config, use standard loading
             return super().from_pretrained(pretrained_model_name_or_path, **kwargs)
         
-        # Convert speculators format to vLLM format
+        # Validate and convert speculators format to vLLM format
+        cls._validate_speculators_config(config_dict)
         vllm_config = cls._convert_speculators_to_vllm(config_dict)
         
         return cls(**vllm_config)
     
     @classmethod
-    def _convert_speculators_to_vllm(cls, speculators_config: dict) -> dict:
+    def _validate_speculators_config(cls, config: Dict[str, Any]) -> None:
+        """
+        Validate that the config has required speculators format fields.
+        
+        Args:
+            config: Raw config dictionary
+        
+        Raises:
+            ValueError: If required fields are missing or invalid
+        """
+        # Check required top-level fields
+        if "speculators_model_type" not in config:
+            raise ValueError(
+                "Missing 'speculators_model_type' in config. "
+                f"Expected one of: {sorted(SUPPORTED_SPECULATORS_TYPES)}. "
+                "Please ensure you're loading a speculators-format Eagle model."
+            )
+        
+        model_type = config["speculators_model_type"]
+        if model_type not in SUPPORTED_SPECULATORS_TYPES:
+            raise ValueError(
+                f"Unsupported speculators_model_type: '{model_type}'. "
+                f"Supported types: {sorted(SUPPORTED_SPECULATORS_TYPES)}"
+            )
+        
+        # Check transformer config
+        if "transformer_layer_config" not in config:
+            raise ValueError(
+                "Missing 'transformer_layer_config' in speculators config. "
+                "This field should contain the transformer architecture configuration."
+            )
+        
+        # Check proposal methods
+        speculators_cfg = config.get("speculators_config", {})
+        if not isinstance(speculators_cfg, dict):
+            raise ValueError(
+                "'speculators_config' must be a dictionary. "
+                f"Got: {type(speculators_cfg).__name__}"
+            )
+        
+        proposal_methods = speculators_cfg.get("proposal_methods", [])
+        if not proposal_methods:
+            raise ValueError(
+                "No proposal methods found in speculators_config. "
+                "Expected: {'speculators_config': {'proposal_methods': "
+                "[{'speculative_tokens': N}]}}. "
+                "Check that your model config follows the speculators format."
+            )
+    
+    @classmethod
+    def _convert_speculators_to_vllm(cls, speculators_config: Dict[str, Any]) -> Dict[str, Any]:
         """
         Convert speculators Eagle config format to vLLM format.
         
-        Supports both Eagle and Eagle-3 models based on speculators_model_type.
+        This method handles the translation of field names and structure
+        between speculators and vLLM formats. It supports both Eagle-1
+        and Eagle-3 variants based on speculators_model_type.
+        
+        Args:
+            speculators_config: Dictionary containing speculators format config
+        
+        Returns:
+            Dictionary with vLLM-compatible Eagle configuration
         """
-        speculators_model_type = speculators_config.get("speculators_model_type")
-        assert speculators_model_type, "`speculators_model_type` must be specified in the config"
-
-        transformer_config = speculators_config.get("transformer_layer_config", {})
+        speculators_model_type = speculators_config["speculators_model_type"]
+        transformer_config = speculators_config["transformer_layer_config"]
         
         # Extract num_lookahead_tokens from proposal_methods
-        proposal_methods = speculators_config.get("speculators_config", {}).get("proposal_methods", [])
-        assert proposal_methods, "speculators_config must have at least one proposal method"
+        num_lookahead_tokens = cls._extract_num_lookahead_tokens(speculators_config)
         
-        # Only one proposal method is supported for now
-        proposal_method: dict = proposal_methods[0]
-        num_lookahead_tokens = proposal_method.get("speculative_tokens")
-        assert num_lookahead_tokens, "speculative_tokens must be specified in proposal_methods[0]"
-        
+        # Build base vLLM config
         vllm_config = {
             "model": transformer_config,
-            "method": speculators_model_type,
+            "method": speculators_model_type,  # Use speculators_model_type as method
             "num_lookahead_tokens": num_lookahead_tokens,
         }
         
+        # Apply version-specific conversions
         if speculators_model_type == "eagle":
-            # Eagle-1 specific handling
-            # Handle layernorms flag
-            if speculators_config.get("layernorms", False):
-                transformer_config["add_para_norm"] = True
-                # Ensure skip flags are set correctly for extra layernorms
-                transformer_config["skip_prenorm"] = False
-                transformer_config["skip_output_norm"] = False
-            
-            # Eagle-1 specific fields
-            vllm_config["eagle_fc_bias"] = speculators_config.get("fusion_bias", False)
-            vllm_config["truncated_vocab_size"] = transformer_config.get("vocab_size")
-            vllm_config["architectures"] = ["EAGLEModel"]
-            
+            cls._apply_eagle_v1_config(speculators_config, transformer_config, vllm_config)
         elif speculators_model_type == "eagle3":
-            # Eagle-3 specific handling
-            # Copy Eagle-3 specific fields from speculators config
-            if speculators_config.get("draft_vocab_size") is not None:
-                vllm_config["draft_vocab_size"] = speculators_config["draft_vocab_size"]
-            
-            # Handle target_hidden_size - if not provided, it should be set by vLLM
-            # based on the target model, but we can try to infer from transformer config
-            if speculators_config.get("target_hidden_size") is not None:
-                vllm_config["target_hidden_size"] = speculators_config["target_hidden_size"]
-            else:
-                # Use the draft model's hidden size as target_hidden_size
-                # This will be the same as the target model's hidden size
-                vllm_config["target_hidden_size"] = transformer_config.get("hidden_size", 4096)
-                
-            if "norm_before_residual" in speculators_config:
-                vllm_config["norm_before_residual"] = speculators_config["norm_before_residual"]
-            
-            # Eagle-3 uses different architecture
-            vllm_config["architectures"] = ["Eagle3LlamaForCausalLM"]
+            cls._apply_eagle_v3_config(speculators_config, transformer_config, vllm_config)
         
         # Ensure transformer config has required fields
+        cls._ensure_transformer_architectures(speculators_config, transformer_config)
+        
+        # Preserve additional fields not handled by specific conversions
+        cls._preserve_additional_fields(speculators_config, vllm_config)
+        
+        return vllm_config
+    
+    @classmethod
+    def _extract_num_lookahead_tokens(cls, config: Dict[str, Any]) -> int:
+        """
+        Extract number of lookahead tokens from proposal methods.
+        
+        Args:
+            config: Speculators config dictionary
+        
+        Returns:
+            Number of speculative tokens
+        
+        Note:
+            Currently only supports the first proposal method.
+            Future versions may support multiple proposal methods.
+        """
+        speculators_cfg = config["speculators_config"]
+        proposal_methods = speculators_cfg["proposal_methods"]
+        
+        # Currently we only support one proposal method
+        first_method = proposal_methods[0]
+        num_lookahead_tokens = first_method.get("speculative_tokens")
+        
+        if num_lookahead_tokens is None:
+            raise ValueError(
+                "Missing 'speculative_tokens' in proposal method. "
+                f"Got: {first_method}"
+            )
+        
+        return num_lookahead_tokens
+    
+    @classmethod
+    def _apply_eagle_v1_config(
+        cls,
+        speculators_config: Dict[str, Any],
+        transformer_config: Dict[str, Any],
+        vllm_config: Dict[str, Any]
+    ) -> None:
+        """
+        Apply Eagle-1 specific configuration transformations.
+        
+        Eagle-1 specific fields:
+        - fusion_bias → eagle_fc_bias
+        - layernorms → add_para_norm (for HASS variant)
+        - Uses truncated_vocab_size
+        """
+        # Handle HASS variant with additional layernorms
+        if speculators_config.get("layernorms", False):
+            transformer_config["add_para_norm"] = True
+            # When using extra layernorms, ensure skip flags are set correctly
+            # to maintain the expected architecture behavior
+            transformer_config["skip_prenorm"] = False
+            transformer_config["skip_output_norm"] = False
+        
+        # Map Eagle-1 specific fields
+        vllm_config["eagle_fc_bias"] = speculators_config.get("fusion_bias", False)
+        vllm_config["truncated_vocab_size"] = transformer_config.get("vocab_size")
+        vllm_config["architectures"] = ["EAGLEModel"]
+    
+    @classmethod
+    def _apply_eagle_v3_config(
+        cls,
+        speculators_config: Dict[str, Any],
+        transformer_config: Dict[str, Any],
+        vllm_config: Dict[str, Any]
+    ) -> None:
+        """
+        Apply Eagle-3 specific configuration transformations.
+        
+        Eagle-3 specific fields:
+        - draft_vocab_size: Size of the draft model's vocabulary
+        - target_hidden_size: Hidden size of the target model
+        - norm_before_residual: Whether to apply norm before residual connection
+        """
+        # Copy Eagle-3 specific fields
+        if speculators_config.get("draft_vocab_size") is not None:
+            vllm_config["draft_vocab_size"] = speculators_config["draft_vocab_size"]
+        
+        # Handle target_hidden_size
+        if speculators_config.get("target_hidden_size") is not None:
+            vllm_config["target_hidden_size"] = speculators_config["target_hidden_size"]
+        else:
+            # Default to the draft model's hidden size
+            # In practice, this should match the target model's hidden size
+            vllm_config["target_hidden_size"] = transformer_config.get(
+                "hidden_size", DEFAULT_HIDDEN_SIZE
+            )
+        
+        if "norm_before_residual" in speculators_config:
+            vllm_config["norm_before_residual"] = speculators_config["norm_before_residual"]
+        
+        # Eagle-3 uses a different architecture
+        vllm_config["architectures"] = ["Eagle3LlamaForCausalLM"]
+    
+    @classmethod
+    def _ensure_transformer_architectures(
+        cls,
+        speculators_config: Dict[str, Any],
+        transformer_config: Dict[str, Any]
+    ) -> None:
+        """
+        Ensure transformer config has required architecture field.
+        
+        If not present, infer from transformer_layer_architecture.
+        """
         if "architectures" not in transformer_config:
-            # Infer from transformer_layer_architecture
+            # Infer from transformer_layer_architecture if available
             arch = speculators_config.get("transformer_layer_architecture", "LlamaDecoderLayer")
             if arch == "LlamaDecoderLayer":
                 transformer_config["architectures"] = ["LlamaForCausalLM"]
             else:
+                # Use the architecture name as-is
                 transformer_config["architectures"] = [arch]
+    
+    @classmethod
+    def _preserve_additional_fields(
+        cls,
+        speculators_config: Dict[str, Any],
+        vllm_config: Dict[str, Any]
+    ) -> None:
+        """
+        Preserve any additional fields not handled by specific conversions.
         
-        speculators_specific_fields: set = {"speculators_model_type", "transformer_layer_config", 
-                          "layernorms", "fusion_bias", "architectures",
-                          "draft_vocab_size", "target_hidden_size", "norm_before_residual"}
+        This ensures forward compatibility with new speculators fields.
+        """
+        # Fields that are handled elsewhere and should not be copied
+        handled_fields = {
+            "speculators_model_type",
+            "transformer_layer_config",
+            "speculators_config",
+            "layernorms",
+            "fusion_bias",
+            "architectures",
+            "draft_vocab_size",
+            "target_hidden_size",
+            "norm_before_residual",
+        }
         
-        # Preserve any additional fields that might be needed
+        # Copy any unhandled fields
         for key, value in speculators_config.items():
-            if key not in speculators_specific_fields:
+            if key not in handled_fields:
                 vllm_config[key] = value
-        return vllm_config
 
 
 def is_speculators_eagle_config(config_path: Union[str, os.PathLike]) -> bool:
     """
     Check if a config file is in speculators Eagle format.
+    
+    Args:
+        config_path: Path to config file or HuggingFace model ID
+    
+    Returns:
+        True if the config is in speculators Eagle format, False otherwise
+    
+    Note:
+        This function is designed to be safe and return False for any
+        errors rather than raising exceptions, as it's used in detection logic.
     """
-    supported_model_types = ["eagle", "eagle3"]
-    config_dict, _ = PretrainedConfig.get_config_dict(config_path)
-    return config_dict.get("speculators_model_type") in supported_model_types
+    try:
+        # Use PretrainedConfig to load from both local and HF paths
+        config_dict, _ = PretrainedConfig.get_config_dict(config_path)
+        
+        # Check for speculators format by looking for required fields
+        if "speculators_model_type" not in config_dict:
+            return False
+        
+        model_type = config_dict.get("speculators_model_type")
+        return model_type in SUPPORTED_SPECULATORS_TYPES
+    except Exception:
+        # Any error in loading or parsing means it's not a speculators config
+        return False

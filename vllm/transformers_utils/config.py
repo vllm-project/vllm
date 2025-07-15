@@ -352,7 +352,9 @@ def get_config(
             raise ValueError(error_message) from e
 
     if config_format == ConfigFormat.HF:
-        # Check if this is a speculators Eagle model
+        # Speculators Eagle models use a different config format that requires
+        # translation to vLLM's expected format. This must be handled before
+        # the standard config loading to ensure proper model initialization.
         if is_speculators_eagle_config(model):
             config = SpeculatorsEagleConfig.from_pretrained(
                 model,
