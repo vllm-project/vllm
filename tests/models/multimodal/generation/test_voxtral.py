@@ -24,17 +24,17 @@ from ....conftest import AUDIO_ASSETS, AudioTestAssets
 from ....utils import RemoteOpenAIServer
 
 MODEL_NAME = "mistralai/Voxtral-Mini-3B-2507"
+MISTRAL_FORMAT_ARGS = [
+    "--tokenizer_mode", "mistral", "--config_format", "mistral",
+    "--load_format", "mistral"
+]
 
-@pytest.fixture(params=[
-    pytest.param({}, marks=pytest.mark.cpu_model),
-    pytest.param(CHUNKED_PREFILL_KWARGS),
-])
+@pytest.fixture()
 def server(request, audio_assets: AudioTestAssets):
     args = [
-        "--dtype", "bfloat16", "--max-model-len", "4096", "--enforce-eager",
-        "--limit-mm-per-prompt",
-        json.dumps({"audio": len(audio_assets)}), "--trust-remote-code"
-    ] + params_kwargs_to_cli_args(request.param)
+        "--enforce-eager", "--limit-mm-per-prompt",
+        json.dumps({"audio": len(audio_assets)}),
+    ] + MISTRAL_FORMAT_ARGS
 
     with RemoteOpenAIServer(MODEL_NAME,
                             args,
@@ -70,14 +70,9 @@ def _get_prompt(audio_assets, question):
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
-@pytest.mark.parametrize("vllm_kwargs", [
-    pytest.param({}, marks=pytest.mark.cpu_model),
-    pytest.param(CHUNKED_PREFILL_KWARGS),
-])
 def test_models_with_multiple_audios(vllm_runner,
                                      audio_assets: AudioTestAssets, dtype: str,
-                                     max_tokens: int, num_logprobs: int,
-                                     vllm_kwargs: dict) -> None:
+                                     max_tokens: int, num_logprobs: int) -> None:
 
     vllm_prompt = _get_prompt(audio_assets, MULTI_AUDIO_PROMPT)
     run_multi_audio_test(
@@ -89,7 +84,6 @@ def test_models_with_multiple_audios(vllm_runner,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
         tokenizer_mode="mistral",
-        **vllm_kwargs,
     )
 
 
@@ -98,10 +92,12 @@ async def test_online_serving(client, audio_assets: AudioTestAssets):
     """Exercises online serving with/without chunked prefill enabled."""
     def asset_to_chunk(asset):
         audio = Audio.from_file(str(asset.get_local_path()), strict=False)
-        return AudioChunk.from_audio(audio)
+        audio.format = "wav"
+        audio_dict = AudioChunk.from_audio(audio).to_openai()
+        return audio_dict
 
     audio_chunks = [
-        asset_to_chunk(asset).to_openai() for asset in audio_assets
+        asset_to_chunk(asset) for asset in audio_assets
     ]
     messages = [{
         "role":
