@@ -35,6 +35,7 @@ HYBRID_MODELS = [
     "nvidia/Nemotron-H-8B-Base-8K",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
+    "LiquidAI/LFM2-1.2B"
 ]
 
 HF_UNSUPPORTED_MODELS = [
@@ -53,16 +54,20 @@ HF_UNSUPPORTED_MODELS = [
 ]
 
 V1_SUPPORTED_MODELS = [
-    "mistralai/Mamba-Codestral-7B-v0.1",
-    "ibm-ai-platform/Bamba-9B-v1",
-    "Zyphra/Zamba2-1.2B-instruct",
-    "nvidia/Nemotron-H-8B-Base-8K",
-    "ibm-granite/granite-4.0-tiny-preview",
-    "tiiuae/Falcon-H1-0.5B-Base",
+    "mistralai/Mamba-Codestral-7B-v0.1", "ibm-ai-platform/Bamba-9B-v1",
+    "Zyphra/Zamba2-1.2B-instruct", "nvidia/Nemotron-H-8B-Base-8K",
+    "ibm-granite/granite-4.0-tiny-preview", "tiiuae/Falcon-H1-0.5B-Base",
+    "LiquidAI/LFM2-1.2B"
 ]
 
 # Avoid OOM
 MAX_NUM_SEQS = 4
+
+# To be removed once implemented
+V1_HYBRID_UNSUPPORTED_ARGS = {
+    "enforce_eager": True,
+    "enable_prefix_caching": False,
+}
 
 
 @pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
@@ -92,7 +97,9 @@ def test_models(
         else:
             hf_outputs = None
 
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+    with vllm_runner(model,
+                     max_num_seqs=MAX_NUM_SEQS,
+                     **V1_HYBRID_UNSUPPORTED_ARGS) as vllm_model:
         vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
@@ -104,8 +111,7 @@ def test_models(
                 m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
             with vllm_runner(model,
                              max_num_seqs=MAX_NUM_SEQS,
-                             enforce_eager=True,
-                             enable_prefix_caching=False) as vllm_model:
+                             **V1_HYBRID_UNSUPPORTED_ARGS) as vllm_model:
                 vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
                     example_prompts, max_tokens, num_logprobs)
     else:
@@ -148,7 +154,9 @@ def test_batching(
         pass
 
     for_loop_outputs = []
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+    with vllm_runner(model,
+                     max_num_seqs=MAX_NUM_SEQS,
+                     **V1_HYBRID_UNSUPPORTED_ARGS) as vllm_model:
         for prompt in example_prompts:
             single_output, = vllm_model.generate_greedy_logprobs([prompt],
                                                                  max_tokens,
@@ -183,6 +191,7 @@ def test_chunked_prefill(
 
     with vllm_runner(model,
                      enable_chunked_prefill=True,
+                     **V1_HYBRID_UNSUPPORTED_ARGS,
                      max_num_batched_tokens=max_num_batched_tokens,
                      max_num_seqs=max_num_seqs) as vllm_model:
         chunked = vllm_model.generate_greedy_logprobs(example_prompts,
@@ -190,6 +199,7 @@ def test_chunked_prefill(
 
     with vllm_runner(model,
                      enable_chunked_prefill=False,
+                     **V1_HYBRID_UNSUPPORTED_ARGS,
                      max_num_seqs=max_num_seqs) as vllm_model:
         non_chunked = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
@@ -230,6 +240,7 @@ def test_chunked_prefill_with_parallel_sampling(
             # forces prefill chunks with decoding
             max_num_batched_tokens=MAX_NUM_SEQS * 3,
             max_num_seqs=MAX_NUM_SEQS,
+            **V1_HYBRID_UNSUPPORTED_ARGS,
     ) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
@@ -254,7 +265,7 @@ def test_mamba_cache_cg_padding(
         example_prompts.append(example_prompts[0])
 
     try:
-        with vllm_runner(model) as vllm_model:
+        with vllm_runner(model, **V1_HYBRID_UNSUPPORTED_ARGS) as vllm_model:
             vllm_model.generate_greedy(example_prompts, max_tokens)
     except RuntimeError:
         pytest.fail(
@@ -274,7 +285,9 @@ def test_models_preemption_recompute(
     """
     Tests that outputs are identical with and w/o preemptions (recompute).
     """
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+    with vllm_runner(model,
+                     max_num_seqs=MAX_NUM_SEQS,
+                     **V1_HYBRID_UNSUPPORTED_ARGS) as vllm_model:
         scheduler = vllm_model.model.llm_engine.scheduler[0]
         scheduler.ENABLE_ARTIFICIAL_PREEMPT = True
         preempt_vllm_outputs = vllm_model.generate_greedy(
@@ -307,7 +320,9 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
     a single step.
     """
     try:
-        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+        with vllm_runner(model,
+                         max_num_seqs=MAX_NUM_SEQS,
+                         **V1_HYBRID_UNSUPPORTED_ARGS) as vllm_model:
             vllm_model.generate_greedy([example_prompts[0]] * 100, 10)
     except ValueError:
         pytest.fail("Hybrid inner state wasn't cleaned up properly between"
@@ -327,7 +342,9 @@ def test_state_cleanup(
     If its not cleaned, an error would be expected.
     """
     try:
-        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+        with vllm_runner(model,
+                         max_num_seqs=MAX_NUM_SEQS,
+                         **V1_HYBRID_UNSUPPORTED_ARGS) as vllm_model:
             for _ in range(10):
                 vllm_model.generate_greedy([example_prompts[0]] * 100, 1)
     except ValueError:
@@ -343,13 +360,17 @@ def test_multistep_correctness(
     model: str,
     max_tokens: int,
 ) -> None:
-    with vllm_runner(model, num_scheduler_steps=8,
-                     max_num_seqs=2) as vllm_model:
+    with vllm_runner(model,
+                     num_scheduler_steps=8,
+                     max_num_seqs=2,
+                     **V1_HYBRID_UNSUPPORTED_ARGS) as vllm_model:
         vllm_outputs_multistep = vllm_model.generate_greedy(
             example_prompts, max_tokens)
 
-    with vllm_runner(model, num_scheduler_steps=1,
-                     max_num_seqs=2) as vllm_model:
+    with vllm_runner(model,
+                     num_scheduler_steps=1,
+                     max_num_seqs=2,
+                     **V1_HYBRID_UNSUPPORTED_ARGS) as vllm_model:
         vllm_outputs_single_step = vllm_model.generate_greedy(
             example_prompts, max_tokens)
 
@@ -372,13 +393,17 @@ def test_distributed_correctness(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    with vllm_runner(model, tensor_parallel_size=1,
-                     max_num_seqs=2) as vllm_model:
+    with vllm_runner(model,
+                     tensor_parallel_size=1,
+                     max_num_seqs=2,
+                     **V1_HYBRID_UNSUPPORTED_ARGS) as vllm_model:
         vllm_outputs_tp_1 = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
-    with vllm_runner(model, tensor_parallel_size=2,
-                     max_num_seqs=2) as vllm_model:
+    with vllm_runner(model,
+                     tensor_parallel_size=2,
+                     max_num_seqs=2,
+                     **V1_HYBRID_UNSUPPORTED_ARGS) as vllm_model:
         vllm_outputs_tp_2 = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
