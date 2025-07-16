@@ -5,12 +5,11 @@ Example of using Jina Embeddings V4 with vLLM for multimodal embeddings.
 
 This example demonstrates:
 1. Text-only embeddings
-2. Image-only embeddings  
+2. Image-only embeddings
 3. Mixed text and image embeddings
 """
 
 import torch
-from PIL import Image
 
 from vllm import LLM
 from vllm.config import PoolerConfig
@@ -34,7 +33,7 @@ def get_embeddings(outputs):
         else:
             # For text-only inputs, use all token embeddings
             embeddings_tensor = output.outputs.data.detach().clone()
-        
+
         # Pool and normalize embeddings
         pooled_output = embeddings_tensor.mean(dim=0, dtype=torch.float32)
         embeddings.append(torch.nn.functional.normalize(pooled_output, dim=-1))
@@ -54,16 +53,16 @@ def main():
     print("=== Text Embeddings ===")
     query = "Overview of climate change impacts on coastal cities"
     query_prompt = TextPrompt(prompt=f"Query: {query}")
-    
+
     passage = """The impacts of climate change on coastal cities are significant
     and multifaceted. Rising sea levels threaten infrastructure, while increased
     storm intensity poses risks to populations and economies."""
     passage_prompt = TextPrompt(prompt=f"Passage: {passage}")
-    
+
     # Generate embeddings
     text_outputs = model.encode([query_prompt, passage_prompt])
     text_embeddings = get_embeddings(text_outputs)
-    
+
     # Calculate similarity
     similarity = torch.dot(text_embeddings[0], text_embeddings[1]).item()
     print(f"Query: {query[:50]}...")
@@ -75,25 +74,27 @@ def main():
     # Fetch sample images
     image1_url = "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
     image2_url = "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
-    
+
     image1 = fetch_image(image1_url)
     image2 = fetch_image(image2_url)
-    
+
     # Create image prompts with the required format
     image1_prompt = TextPrompt(
-        prompt="<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>Describe the image.<|im_end|>\n",
+        prompt="<|im_start|>user\n<|vision_start|><|image_pad|>"
+        "<|vision_end|>Describe the image.<|im_end|>\n",
         multi_modal_data={"image": image1},
     )
-    
+
     image2_prompt = TextPrompt(
-        prompt="<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>Describe the image.<|im_end|>\n",
+        prompt="<|im_start|>user\n<|vision_start|><|image_pad|>"
+        "<|vision_end|>Describe the image.<|im_end|>\n",
         multi_modal_data={"image": image2},
     )
-    
+
     # Generate embeddings
     image_outputs = model.encode([image1_prompt, image2_prompt])
     image_embeddings = get_embeddings(image_outputs)
-    
+
     # Calculate similarity
     similarity = torch.dot(image_embeddings[0], image_embeddings[1]).item()
     print(f"Image 1: {image1_url.split('/')[-1]}")
@@ -104,11 +105,11 @@ def main():
     print("=== Cross-modal Similarity ===")
     query = "scientific paper with markdown formatting"
     query_prompt = TextPrompt(prompt=f"Query: {query}")
-    
+
     # Generate embeddings for text query and second image
     cross_outputs = model.encode([query_prompt, image2_prompt])
     cross_embeddings = get_embeddings(cross_outputs)
-    
+
     # Calculate cross-modal similarity
     similarity = torch.dot(cross_embeddings[0], cross_embeddings[1]).item()
     print(f"Text query: {query}")
