@@ -34,7 +34,7 @@ def _convert_tokens_to_string_with_added_encoders(
 
     for token in output_tokens:
         # Use precomputed set for skip-special check
-        if skip_special_tokens and token in all_special_tokens:
+        if token in all_special_tokens:
             continue
         if token in added_vocab_set:
             if current_sub_text:
