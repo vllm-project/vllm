@@ -16,10 +16,8 @@ __device__ __forceinline__ float GroupReduceMax(float val, const int tid) {
   return val;
 }
 
-template <
-    typename T, typename DST_DTYPE, bool IS_COLUMN_MAJOR = false,
-    bool SCALE_UE8M0 = false,
-    typename scale_packed_t = std::conditional_t<SCALE_UE8M0, uint32_t, float>>
+template <typename T, typename DST_DTYPE, bool IS_COLUMN_MAJOR = false,
+          bool SCALE_UE8M0 = false, typename scale_packed_t = float>
 __global__ void per_token_group_quant_8bit_kernel(
     const T* __restrict__ input, void* __restrict__ output_q,
     scale_packed_t* __restrict__ output_s, const int group_size,
@@ -36,7 +34,7 @@ __global__ void per_token_group_quant_8bit_kernel(
 
   float local_absmax = eps;
 
-  using scale_element_t = std::conditional_t<SCALE_UE8M0, uint8_t, float>;
+  using scale_element_t = float;
   static_assert(sizeof(scale_packed_t) % sizeof(scale_element_t) == 0);
 
   const T* group_input = input + block_group_offset;
@@ -56,7 +54,6 @@ __global__ void per_token_group_quant_8bit_kernel(
                    (col_idx * scale_stride * num_elems_per_pack +
                     row_idx * num_elems_per_pack + pack_idx);
   } else {
-    static_assert(!SCALE_UE8M0);
     scale_output = output_s + global_group_id;
   }
 
@@ -84,13 +81,7 @@ __global__ void per_token_group_quant_8bit_kernel(
     y_s = exp2f(ceilf(log2f(fmaxf(fabsf(y_s), 1e-10f))));
   }
 
-  // TODO can optimize
-  scale_element_t y_s_quant;
-  if constexpr (SCALE_UE8M0) {
-    y_s_quant = (uint8_t)(((int)log2f(y_s)) + 127);
-  } else {
-    y_s_quant = y_s;
-  }
+  scale_element_t y_s_quant = y_s;
 
   if (lane_id == 0) {
     *scale_output = y_s_quant;
@@ -154,7 +145,7 @@ void sgl_per_token_group_quant_8bit(torch::Tensor input, torch::Tensor output_q,
         per_token_group_quant_8bit_kernel<T, DST_DTYPE, true, true>        \
             <<<grid, block, 0, stream>>>(                                  \
                 static_cast<T*>(input.data_ptr()), output_q.data_ptr(),    \
-                static_cast<uint32_t*>(output_s.data_ptr()), group_size,   \
+                static_cast<float*>(output_s.data_ptr()), group_size,      \
                 num_groups, groups_per_block, (float)eps, (float)min_8bit, \
                 (float)max_8bit, scale_num_rows, scale_stride);            \
       } else {                                                             \
@@ -166,13 +157,21 @@ void sgl_per_token_group_quant_8bit(torch::Tensor input, torch::Tensor output_q,
                 (float)max_8bit, scale_num_rows, scale_stride);            \
       }                                                                    \
     } else {                                                               \
-      assert(!scale_ue8m0);                                                \
-      per_token_group_quant_8bit_kernel<T, DST_DTYPE, false>               \
-          <<<grid, block, 0, stream>>>(                                    \
-              static_cast<T*>(input.data_ptr()), output_q.data_ptr(),      \
-              static_cast<float*>(output_s.data_ptr()), group_size,        \
-              num_groups, groups_per_block, (float)eps, (float)min_8bit,   \
-              (float)max_8bit);                                            \
+      if (scale_ue8m0) {                                                   \
+        per_token_group_quant_8bit_kernel<T, DST_DTYPE, false, true>       \
+            <<<grid, block, 0, stream>>>(                                  \
+                static_cast<T*>(input.data_ptr()), output_q.data_ptr(),    \
+                static_cast<float*>(output_s.data_ptr()), group_size,      \
+                num_groups, groups_per_block, (float)eps, (float)min_8bit, \
+                (float)max_8bit);                                          \
+      } else {                                                             \
+        per_token_group_quant_8bit_kernel<T, DST_DTYPE, false, false>      \
+            <<<grid, block, 0, stream>>>(                                  \
+                static_cast<T*>(input.data_ptr()), output_q.data_ptr(),    \
+                static_cast<float*>(output_s.data_ptr()), group_size,      \
+                num_groups, groups_per_block, (float)eps, (float)min_8bit, \
+                (float)max_8bit);                                          \
+      }                                                                    \
     }                                                                      \
   } while (0)
 
