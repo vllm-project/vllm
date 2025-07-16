@@ -839,6 +839,66 @@ class VisionArenaDataset(HuggingFaceDataset):
 
 
 # -----------------------------------------------------------------------------
+# Unsloth Vision Dataset Implementation
+# -----------------------------------------------------------------------------
+
+class UnslothVisionDataset(HuggingFaceDataset):
+    """
+    Unsloth Vision Dataset.
+    """
+
+    DEFAULT_OUTPUT_LEN = 256
+    SUPPORTED_DATASET_PATHS = {
+        "unsloth/LaTeX_OCR": lambda x: (
+            "Write the LaTeX representation for this image.",
+            x["image"]
+        ),
+        "unsloth/Radiology_mini": lambda x: (
+            "You are an expert radiographer. Describe accurately what you see in this image.",
+            x["image"]
+        ),
+    }
+    IS_MULTIMODAL = True
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        enable_multimodal_chat: bool = False,
+        **kwargs,
+    ) -> list:
+        output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
+        sampled_requests = []
+
+        parser_fn = self.SUPPORTED_DATASET_PATHS.get(self.dataset_path)
+        if parser_fn is None:
+            raise ValueError(f"Unsupported dataset path: {self.dataset_path}")
+
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break            
+            prompt, mm_content = parser_fn(item)
+            mm_content = process_image(mm_content)
+            prompt_len = len(tokenizer(prompt).input_ids)
+            if enable_multimodal_chat:
+                # Note: when chat is enabled the request prompt_len is no longer
+                # accurate and we will be using request output to count the
+                # actual prompt len
+                prompt = self.apply_multimodal_chat_transformation(
+                    prompt, mm_content)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=mm_content,
+                ))
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
 # Instruct Coder Dataset Implementation
 # -----------------------------------------------------------------------------
 
