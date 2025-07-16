@@ -26,7 +26,7 @@ from pydantic import (ConfigDict, SkipValidation, TypeAdapter, field_validator,
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.distributed import ProcessGroup, ReduceOp
-from typing_extensions import Self, deprecated, runtime_checkable
+from typing_extensions import Self, runtime_checkable
 
 import vllm.envs as envs
 from vllm import version
@@ -1630,6 +1630,9 @@ class CacheConfig:
     checkpoint if available. Otherwise, the scales will default to 1.0."""
     cpu_kvcache_space_bytes: Optional[int] = None
     """(CPU backend only) CPU key-value cache space."""
+    mamba_page_size_padded: Optional[int] = None
+    """ Optional override for mamba page size; used by hybrid mamba/attention
+    models to ensure exact alignment with attention page size."""
 
     # Will be set after profiling.
     num_gpu_blocks: Optional[int] = field(default=None, init=False)
@@ -1725,35 +1728,6 @@ class CacheConfig:
             raise ValueError("Too large swap space. " + msg)
         elif cpu_memory_usage > 0.4 * total_cpu_memory:
             logger.warning("Possibly too large swap space. %s", msg)
-
-
-@config
-@dataclass
-class TokenizerPoolConfig:
-    """This config is deprecated and will be removed in a future release.
-
-    Passing these parameters will have no effect. Please remove them from your
-    configurations.
-    """
-
-    pool_size: int = 0
-    """This parameter is deprecated and will be removed in a future release.
-    Passing this parameter will have no effect. Please remove it from your
-    configurations."""
-    pool_type: str = "ray"
-    """This parameter is deprecated and will be removed in a future release.
-    Passing this parameter will have no effect. Please remove it from your
-    configurations."""
-    extra_config: dict = field(default_factory=dict)
-    """This parameter is deprecated and will be removed in a future release.
-    Passing this parameter will have no effect. Please remove it from your
-    configurations."""
-
-    def __post_init__(self) -> None:
-        logger.warning_once(
-            "TokenizerPoolConfig is deprecated and will be removed in a "
-            "future release. Passing this parameter will have no effect. "
-            "Please remove it from your configurations.")
 
 
 class LoadFormat(str, enum.Enum):
@@ -1918,10 +1892,6 @@ class ParallelConfig:
 
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
-
-    tokenizer_pool_config: Optional[TokenizerPoolConfig] = None
-    """This parameter is deprecated and will be removed in a future release.
-    Please remove it from your configs"""
 
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
@@ -3689,18 +3659,6 @@ GuidedDecodingBackend = Literal[GuidedDecodingBackendV0,
 class DecodingConfig:
     """Dataclass which contains the decoding strategy of the engine."""
 
-    @property
-    @deprecated(
-        "`guided_decoding_backend` is deprecated and has been renamed to "
-        "`backend`. This will be removed in v0.10.0. Please use the "
-        "`backend` argument instead.")
-    def guided_decoding_backend(self) -> GuidedDecodingBackend:
-        return self.backend
-
-    @guided_decoding_backend.setter
-    def guided_decoding_backend(self, value: GuidedDecodingBackend):
-        self.backend = value
-
     backend: GuidedDecodingBackend = "auto" if envs.VLLM_USE_V1 else "xgrammar"
     """Which engine will be used for guided decoding (JSON schema / regex etc)
     by default. With "auto", we will make opinionated choices based on request
@@ -3743,9 +3701,6 @@ class DecodingConfig:
         return hash_str
 
     def __post_init__(self):
-        if ":" in self.backend:
-            self._extract_backend_options()
-
         if envs.VLLM_USE_V1:
             valid_guided_backends = get_args(GuidedDecodingBackendV1)
         else:
@@ -3760,24 +3715,6 @@ class DecodingConfig:
         if (self.disable_additional_properties and self.backend != "guidance"):
             raise ValueError("disable_additional_properties is only supported "
                              "for the guidance backend.")
-
-    @deprecated(
-        "Passing guided decoding backend options inside backend in the format "
-        "'backend:...' is deprecated. This will be removed in v0.10.0. Please "
-        "use the dedicated arguments '--disable-fallback', "
-        "'--disable-any-whitespace' and '--disable-additional-properties' "
-        "instead.")
-    def _extract_backend_options(self):
-        """Extract backend options from the backend string."""
-        backend, options = self.backend.split(":")
-        self.backend = cast(GuidedDecodingBackend, backend)
-        options_set = set(options.strip().split(","))
-        if "no-fallback" in options_set:
-            self.disable_fallback = True
-        if "disable-any-whitespace" in options_set:
-            self.disable_any_whitespace = True
-        if "no-additional-properties" in options_set:
-            self.disable_additional_properties = True
 
 
 DetailedTraceModules = Literal["model", "worker", "all"]
@@ -4882,10 +4819,14 @@ class VllmConfig:
         if architecture is None:
             return
 
-        from vllm.model_executor.models.config import MODELS_CONFIG_MAP
+        from vllm.model_executor.models.config import (
+            MODELS_CONFIG_MAP, HybridAttentionMambaModelConfig)
         cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_config(self)
+
+        if self.model_config.is_hybrid:
+            HybridAttentionMambaModelConfig.verify_and_update_config(self)
 
         if self.model_config.task == "classify":
             # Maybe convert ForCausalLM into ForSequenceClassification model.
