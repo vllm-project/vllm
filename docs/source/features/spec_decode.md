@@ -234,21 +234,49 @@ A variety of EAGLE draft models are available on the Hugging Face hub:
 
 ## Layer Skip Self-Speculative Decoding
 
-Layer Skip is a self-speculative decoding method that achieves speedup by performing early exit at intermediate transformer layers without requiring a separate draft model. Instead of processing tokens through all layers, the model can exit early (e.g., at layer 12 of 48) and use learned linear projection heads (LSQ heads) to predict tokens directly from intermediate representations.
+Layer Skip is a self-speculative decoding method that achieves speedup by performing 
+early exit at intermediate transformer layers without requiring a separate draft model. 
+Instead of processing tokens through all layers, the model exits early (e.g., at layer 
+12 of 32) and uses the intermediate representations to predict draft tokens.
+
+### How it works
+
+1. **Draft Generation**: Forward pass exits at layer `k`, using either the original 
+   LM head or a learned LSQ projection head to generate draft tokens
+2. **Verification**: Full model verifies draft tokens in a single forward pass
+3. **Token Acceptance**: Standard rejection sampling determines which tokens to keep
 
 ### Usage
 
 ```bash
-# Basic usage with layer skip at layer 12 and LSQ head
-vllm serve microsoft/Phi-3.5-mini-instruct \
-    --speculative-model microsoft/Phi-3.5-mini-instruct \
-    --use-v2-block-manager \
-    --speculative-method layer_skip \
-    --speculative-layer-skip 12 \
-    --lsq-head-path /path/to/lsq_head_l12.pt
+# Basic usage - exit at middle layer
+vllm serve meta-llama/Llama-2-7b-hf \
+    --speculative-config '{"method": "layer_skip", "num_speculative_tokens": 5}'
+
+# Specify exit layer explicitly
+vllm serve meta-llama/Llama-2-7b-hf \
+    --speculative-config '{"method": "layer_skip", "layer_skip": 16, "num_speculative_tokens": 5}'
+
+# With LSQ projection heads for better quality
+vllm serve meta-llama/Llama-2-7b-hf \
+    --speculative-config '{"method": "layer_skip", "layer_skip": 16, "lsq_head_path": "/path/to/lsq_heads", "num_speculative_tokens": 5}'
 ```
 
-The method uses entropy-based gating to decide whether to accept early predictions or continue processing through remaining layers, achieving approximately 2x speedup on compatible models.
+### Important Notes
+
+- **Temperature**: For best results, use `temperature ≥ 0.7`. Greedy sampling 
+  (temperature=0) typically yields very low acceptance rates with self-speculation.
+- **Exit Layer**: Defaults to `num_layers // 2` if not specified. Earlier layers 
+  generate faster but lower quality drafts.
+- **LSQ Heads**: Optional learned projection heads can improve draft quality. Files 
+  should be named `h{layer}.pt` in the specified directory.
+
+### Configuration Options
+
+- `method`: Must be `"layer_skip"`
+- `layer_skip`: Exit layer (0-indexed), defaults to middle layer
+- `lsq_head_path`: Optional path to directory with LSQ heads
+- `num_speculative_tokens`: Number of draft tokens to generate (default: 5)
 
 ## Lossless guarantees of Speculative Decoding
 
