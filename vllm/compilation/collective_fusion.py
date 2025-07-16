@@ -221,8 +221,7 @@ if flashinfer_comm is not None:
                 use_oneshot=True,
                 trigger_completion_at_end=trigger_completion_at_end,
                 fp32_acc=fp32_acc,
-                pattern_code=flashinfer_comm.AllReduceFusionPattern(
-                    pattern_code),
+                pattern_code=pattern_code,
                 allreduce_out=None,
                 quant_out=quant_out,
                 scale_out=None,
@@ -349,7 +348,7 @@ class AllReduceRMSNormPattern(BasePattern):
                         weight: torch.Tensor):
             residual = torch.zeros_like(input)
             allreduce = auto_functionalized(
-                torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default,
+                flashinfer_trtllm_fused_allreduce_norm,
                 allreduce_in=input,
                 residual=residual,
                 norm_out=rms_result,
@@ -408,7 +407,7 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
         def replacement(residual: torch.Tensor, input: torch.Tensor,
                         weight: torch.Tensor):
             allreduce = auto_functionalized(
-                torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default,
+                flashinfer_trtllm_fused_allreduce_norm,
                 allreduce_in=input,
                 residual=residual,
                 norm_out=None,
@@ -560,19 +559,19 @@ class AllReduceFusedAddRMSNormStaticQuantPattern(BasePattern):
                         input: torch.Tensor, weight: torch.Tensor,
                         scale: torch.Tensor):
             allreduce = auto_functionalized(
-                torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default,
+                flashinfer_trtllm_fused_allreduce_norm,
                 allreduce_in=input,
                 residual=residual,
                 norm_out=None,
                 quant_out=quant_result,
-                scale_factor=scale,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
                 pattern_code=flashinfer_comm.AllReduceFusionPattern.
                 kARResidualRMSNormFP8Quant,
+                scale_factor=scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
-            # quant_out, rms_norm_residual
+            # # quant_out, rms_norm_residual
             return allreduce[4], allreduce[2]
 
         pm.register_replacement(pattern, replacement, get_inputs(),

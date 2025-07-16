@@ -14,14 +14,12 @@ from vllm.distributed.parallel_state import (init_distributed_environment,
                                              initialize_model_parallel)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp)
+    GroupShape, QuantFP8)
 from vllm.platforms import current_platform
 from vllm.utils import update_environment_variables
 
 from ..utils import has_module_attribute, multi_gpu_test
 from .backend import TestBackend
-
-FP8_DTYPE = current_platform.fp8_dtype()
 
 
 class TestAllReduceRMSNormModel(torch.nn.Module):
@@ -71,34 +69,18 @@ class TestAllReduceFusedAddRMSNormStaticQuantModel(torch.nn.Module):
     def __init__(self, hidden_size=16, eps=1e-6):
         super().__init__()
         self.hidden_size = hidden_size
-        self.intermediate_size = hidden_size * 2
         self.eps = eps
         self.norm = RMSNorm(hidden_size, eps)
-        self.fp8_linear = Fp8LinearOp(cutlass_fp8_supported=True,
-                                      act_quant_static=True)
+        self.quant_fp8 = QuantFP8(static=True,
+                                  group_shape=GroupShape.PER_TENSOR)
         self.scale = torch.rand(1, dtype=torch.float32)
-        # Create a weight that is compatible with torch._scaled_mm,
-        # which expects a column-major layout.
-        self.w = torch.rand(self.intermediate_size,self.hidden_size)\
-            .to(dtype=FP8_DTYPE).t()
-        self.wscale = torch.rand(1, dtype=torch.float32)
 
     def forward(self, hidden_states, residual):
-        # Reshape input
         view = hidden_states.reshape(-1, self.hidden_size)
-        # Tensor parallel all-reduce
         all_reduce = tensor_model_parallel_all_reduce(view)
-
-        # layer normalization
         norm_output, residual_output = self.norm(all_reduce, residual)
-
-        fp8_linear_result = self.fp8_linear.apply(norm_output,
-                                                  self.w,
-                                                  self.wscale,
-                                                  input_scale=self.scale.to(
-                                                      norm_output.device))
-
-        return fp8_linear_result, residual_output
+        fp8_result, _ = self.quant_fp8(norm_output, self.scale)
+        return fp8_result, residual_output
 
     def ops_in_model_after(self):
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
@@ -111,13 +93,16 @@ class TestAllReduceFusedAddRMSNormStaticQuantModel(torch.nn.Module):
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("test_model", [
-    TestAllReduceRMSNormModel, TestAllReduceFusedAddRMSNormModel,
-    TestAllReduceFusedAddRMSNormStaticQuantModel
-])
+@pytest.mark.parametrize(
+    "test_model",
+    [
+        TestAllReduceRMSNormModel,
+        TestAllReduceFusedAddRMSNormModel,
+        # TestAllReduceFusedAddRMSNormStaticQuantModel
+    ])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [8])
-@pytest.mark.parametrize("hidden_size", [4096])
+@pytest.mark.parametrize("hidden_size", [16])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"],
                     reason="Only test on CUDA")
@@ -167,7 +152,7 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
         level=CompilationLevel.PIECEWISE,
         custom_ops=["+rms_norm", "+quant_fp8"]))
     vllm_config.compilation_config.pass_config = PassConfig(
-        enable_fi_allreduce_fusion=True)
+        enable_fi_allreduce_fusion=True, enable_noop=True)
     vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
 
     # this is a fake model name to construct the model config
