@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from typing import Literal, NamedTuple, Optional
 
 import pytest
-import torch
 
 from vllm.config import TaskOption
 from vllm.logger import init_logger
@@ -292,11 +291,8 @@ SP_TEXT_GENERATION_MODELS = {
 SP_TEST_MODELS = {
     # TODO support other models
     # [LANGUAGE GENERATION]
-    "meta-llama/Llama-3.2-1B-Instruct":
-    True,
-    # FP8 reduction requires sm90 or higher
-    "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8":
-    torch.cuda.get_device_capability() >= (9, 0),
+    "meta-llama/Llama-3.2-1B-Instruct",
+    "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
 }
 
 
@@ -306,7 +302,7 @@ SP_TEST_MODELS = {
     [
         params for model_id, settings in SP_TEXT_GENERATION_MODELS.items()
         for params in settings.iter_params(model_id)
-        if model_id in SP_TEST_MODELS and SP_TEST_MODELS[model_id]
+        if model_id in SP_TEST_MODELS
     ],
 )
 @create_new_process_for_each_test()
