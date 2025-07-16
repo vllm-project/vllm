@@ -1,0 +1,102 @@
+name: Build & Publish vLLM Docker
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
+concurrency:
+  group: deployment
+  cancel-in-progress: false
+jobs:
+  build-and-push:
+    strategy:
+      fail-fast: false
+    runs-on: large_ubuntu_4cpu
+    timeout-minutes: 360
+    env:
+      REGION: us-central1
+      REPO: vllm
+      IMAGE: vllm-forked
+      STAGING_PROJECT: character-ai-staging
+      PROD_PROJECT: character-ai
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Check disk space
+        run: |
+          sudo dpkg-query -Wf '${Installed-Size}\t${Package}\n' | sort -nr | head
+          df . -h
+          sudo du /usr/ -hx -d 4 --threshold=1G | sort -hr | head
+          
+      - name: Determine tags
+        id: tags
+        run: |
+          SHA=$(git rev-parse --short=7 HEAD)
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "tags=${SHA},latest" >> $GITHUB_OUTPUT
+      
+      - name: Authenticate to GCP Staging
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STAGING }}
+          service_account: ${{ secrets.GCP_SA_EMAIL_STAGING }}
+          
+      - name: "Set up Cloud SDK"
+        uses: "google-github-actions/setup-gcloud@v2"
+        with:
+          install_components: "beta"
+          
+      - name: Configure Docker credential helper for build
+        run: |
+          gcloud --quiet auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+          
+      # Build the image locally first
+      - name: Build Docker image
+        run: |
+          docker build \
+            -f ./docker/Dockerfile_internal \
+            --build-arg HF_HOME=/huggingface/cache \
+            -t local-image:${{ steps.tags.outputs.sha }} \
+            .
+          
+      # Tag and push to staging
+      - name: Tag and Push to Staging
+        run: |
+          docker tag local-image:${{ steps.tags.outputs.sha }} ${{ env.REGION }}-docker.pkg.dev/${{ env.STAGING_PROJECT }}/${{ env.REPO }}/${{ env.IMAGE }}:${{ steps.tags.outputs.sha }}
+          docker tag local-image:${{ steps.tags.outputs.sha }} ${{ env.REGION }}-docker.pkg.dev/${{ env.STAGING_PROJECT }}/${{ env.REPO }}/${{ env.IMAGE }}:latest
+          
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.STAGING_PROJECT }}/${{ env.REPO }}/${{ env.IMAGE }}:${{ steps.tags.outputs.sha }}
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.STAGING_PROJECT }}/${{ env.REPO }}/${{ env.IMAGE }}:latest
+      
+      # Re-authenticate to prod for prod pushes
+      - name: Authenticate to GCP Prod
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_PROD }}
+          service_account: ${{ secrets.GCP_SA_EMAIL_PROD }}
+          
+      - name: "Set up Cloud SDK for Prod"
+        uses: "google-github-actions/setup-gcloud@v2"
+        with:
+          install_components: "beta"
+          
+      - name: Configure Docker credential helper for Prod
+        run: |
+          gcloud --quiet auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+          gcloud --quiet auth configure-docker gcr.io
+          
+      # Push same image to prod
+      - name: Push to Prod and GCR
+        run: |
+          docker tag local-image:${{ steps.tags.outputs.sha }} ${{ env.REGION }}-docker.pkg.dev/${{ env.PROD_PROJECT }}/${{ env.REPO }}/${{ env.IMAGE }}:${{ steps.tags.outputs.sha }}
+          docker tag local-image:${{ steps.tags.outputs.sha }} ${{ env.REGION }}-docker.pkg.dev/${{ env.PROD_PROJECT }}/${{ env.REPO }}/${{ env.IMAGE }}:latest
+          docker tag local-image:${{ steps.tags.outputs.sha }} gcr.io/${{ env.PROD_PROJECT }}/vllm/${{ env.IMAGE }}:${{ steps.tags.outputs.sha }}
+          docker tag local-image:${{ steps.tags.outputs.sha }} gcr.io/${{ env.PROD_PROJECT }}/vllm/${{ env.IMAGE }}:latest
+          
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROD_PROJECT }}/${{ env.REPO }}/${{ env.IMAGE }}:${{ steps.tags.outputs.sha }}
+          docker push ${{ env.REGION }}-docker.pkg.dev/${{ env.PROD_PROJECT }}/${{ env.REPO }}/${{ env.IMAGE }}:latest
+          docker push gcr.io/${{ env.PROD_PROJECT }}/vllm/${{ env.IMAGE }}:${{ steps.tags.outputs.sha }}
+          docker push gcr.io/${{ env.PROD_PROJECT }}/vllm/${{ env.IMAGE }}:latest
