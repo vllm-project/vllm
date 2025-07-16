@@ -14,7 +14,7 @@ from typing import Optional, Union
 import torch
 import torch.nn as nn
 from PIL import Image
-from transformers import PretrainedConfig
+from transformers import AutoModel, PretrainedConfig
 from transformers.image_processing_utils_fast import BaseImageProcessorFast
 
 from vllm.config import VllmConfig
@@ -390,7 +390,6 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         *,
         prefix: str,
     ):
-        from transformers import AutoModel
         return AutoModel.from_config(config.vision_config,
                                      trust_remote_code=True)
 
