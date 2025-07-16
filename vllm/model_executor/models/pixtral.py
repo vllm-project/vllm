@@ -43,6 +43,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptReplacement, PromptUpdate,
                                         PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import (MistralTokenizer,
                                                cached_tokenizer_from_config)
@@ -54,7 +55,12 @@ from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
 
 try:
     from xformers import ops as xops
-    USE_XFORMERS_OPS = True
+    if (current_platform.is_cuda()
+            and current_platform.has_device_capability(100)):
+        # Xformers FA is not compatible with B200
+        USE_XFORMERS_OPS = False
+    else:
+        USE_XFORMERS_OPS = True
 except ImportError:
     USE_XFORMERS_OPS = False
 
@@ -1082,7 +1088,6 @@ class PixtralHFAttention(nn.Module):
             # Transpose q and k back for attention
             q = q.transpose(1, 2).contiguous()
             k = k.transpose(1, 2).contiguous()
-
             out = xops.memory_efficient_attention(q,
                                                   k,
                                                   v,
