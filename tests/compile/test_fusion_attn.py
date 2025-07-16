@@ -159,14 +159,18 @@ def test_attention_fusion_v0(example_prompts, monkeypatch, model: str,
     [("amd/Llama-3.1-8B-Instruct-FP8-KV", kFp8StaticTensorSym)])
 @pytest.mark.parametrize("use_split_attention", [True, False])
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
-@pytest.mark.skipif(not current_platform.is_rocm(),
-                    reason="Only test ROCm")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(),
+                    reason="Only test CUDA and ROCm")
 def test_attention_fusion_v1(example_prompts, monkeypatch, model: str,
                              quant_key: QuantKey, use_split_attention: bool):
     # Clean Dynamo cache to avoid reusing other test cases
     # (for some reason the reset at the end is not enough)
     torch._dynamo.reset()
 
+    if not current_platform.is_rocm():
+        if use_split_attention:
+            pytest.skip("Split attention with fusion is only supported on ROCm")
+        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
     monkeypatch.setenv("VLLM_USE_V1", "1")
     monkeypatch.setenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION",
                        str(int(use_split_attention)))
