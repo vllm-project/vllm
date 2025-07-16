@@ -11,27 +11,6 @@
 #include "get_group_starts.cuh"
 
 using namespace cute;
-
-// Kernel to swap M and N dimensions in problem_sizes for swap_ab
-__global__ void swap_problem_sizes_kernel(
-    const int32_t* input_problem_sizes,
-    int32_t* output_problem_sizes,
-    int num_experts) {
-  int expert_id = blockIdx.x * blockDim.x + threadIdx.x;
-  if (expert_id < num_experts) {
-    // Each expert has 3 values: M, N, K
-    int base_idx = expert_id * 3;
-    int32_t M = input_problem_sizes[base_idx + 0];
-    int32_t N = input_problem_sizes[base_idx + 1];
-    int32_t K = input_problem_sizes[base_idx + 2];
-    
-    // Swap M and N for swap_ab
-    output_problem_sizes[base_idx + 0] = N;  // New M = old N
-    output_problem_sizes[base_idx + 1] = M;  // New N = old M
-    output_problem_sizes[base_idx + 2] = K;  // K remains the same
-  }
-}
-
 namespace {
 
 using ProblemShape =
@@ -137,39 +116,17 @@ void cutlass_group_gemm_caller(
 
   run_get_group_gemm_starts(expert_offsets, a_ptrs, b_ptrs, out_ptrs,
                             a_scales_ptrs, b_scales_ptrs, a_tensors, b_tensors,
-                            out_tensors, a_scales, b_scales, swap_ab);
+                            out_tensors, a_scales, b_scales);
 
   using GemmKernel = typename Gemm::GemmKernel;
-  
+
   using StrideA = Stride<int64_t, Int<1>, Int<0>>;
   using StrideB = Stride<int64_t, Int<1>, Int<0>>;
   using StrideC = typename GemmKernel::InternalStrideC;
 
-  // Create effective problem sizes - may need to swap M and N for swap_ab
-  torch::Tensor effective_problem_sizes;
-  if constexpr (swap_ab) {
-    // For swap_ab, we need to swap M and N dimensions in problem sizes
-    effective_problem_sizes = torch::empty_like(problem_sizes);
-    // Launch kernel to swap M and N dimensions
-    auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
-    int num_experts = static_cast<int>(expert_offsets.size(0));
-    int block_size = 256;
-    int grid_size = (num_experts + block_size - 1) / block_size;
-    
-    swap_problem_sizes_kernel<<<grid_size, block_size, 0, stream>>>(
-        static_cast<const int32_t*>(problem_sizes.data_ptr()),
-        static_cast<int32_t*>(effective_problem_sizes.data_ptr()),
-        num_experts);
-    
-    // Synchronize to ensure the swapped problem sizes are ready
-    cudaStreamSynchronize(stream);
-  } else {
-    effective_problem_sizes = problem_sizes;
-  }
-
   ProblemShape::UnderlyingProblemShape* problem_sizes_as_shapes =
       static_cast<ProblemShape::UnderlyingProblemShape*>(
-          effective_problem_sizes.data_ptr());
+          problem_sizes.data_ptr());
   ProblemShape prob_shape{num_experts, problem_sizes_as_shapes, nullptr};
 
   typename GemmKernel::MainloopArguments mainloop_args;

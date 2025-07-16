@@ -16,32 +16,18 @@ __global__ void get_group_gemm_starts(
     ElementAB* b_base_as_int, ElementC* out_base_as_int,
     ElementAccumulator* a_scales_base_as_int,
     ElementAccumulator* b_scales_base_as_int, int64_t n, int64_t k,
-    bool per_act_token, bool per_out_ch, bool swap_ab = false) {
+    bool per_act_token, bool per_out_ch) {
   int expert_id = threadIdx.x;
 
   int64_t expert_offset = expert_offsets[expert_id];
 
-  if (swap_ab) {
-
-    a_offsets[expert_id] = b_base_as_int + expert_id * k * n;  // First operand gets B data
-    b_offsets[expert_id] = a_base_as_int + expert_offset * k;  // Second operand gets A data
-    
-    // Swap scale pointers accordingly
-    a_scales_offsets[expert_id] = 
-        b_scales_base_as_int + (per_out_ch ? n * expert_id : expert_id);
-    b_scales_offsets[expert_id] = 
-        a_scales_base_as_int + (per_act_token ? expert_offset : 0);
-  } else {
-    // Normal case
-    a_offsets[expert_id] = a_base_as_int + expert_offset * k;
-    b_offsets[expert_id] = b_base_as_int + expert_id * k * n;
-    
-    a_scales_offsets[expert_id] =
-        a_scales_base_as_int + (per_act_token ? expert_offset : 0);
-    b_scales_offsets[expert_id] =
-        b_scales_base_as_int + (per_out_ch ? n * expert_id : expert_id);
-  }
+  a_offsets[expert_id] = a_base_as_int + expert_offset * k;
+  b_offsets[expert_id] = b_base_as_int + expert_id * k * n;
   out_offsets[expert_id] = out_base_as_int + expert_offset * n;
+  a_scales_offsets[expert_id] =
+      a_scales_base_as_int + (per_act_token ? expert_offset : 0);
+  b_scales_offsets[expert_id] =
+      b_scales_base_as_int + (per_out_ch ? n * expert_id : expert_id);
 }
 
 #define __CALL_GET_STARTS_KERNEL(TENSOR_C_TYPE, C_TYPE)                    \
@@ -59,7 +45,7 @@ __global__ void get_group_gemm_starts(
             static_cast<C_TYPE*>(out_tensors.data_ptr()),                  \
             static_cast<float*>(a_scales.data_ptr()),                      \
             static_cast<float*>(b_scales.data_ptr()), out_tensors.size(1), \
-            a_tensors.size(1), per_act_token, per_out_ch, swap_ab);        \
+            a_tensors.size(1), per_act_token, per_out_ch);                 \
   }
 
 namespace {
@@ -70,7 +56,7 @@ void run_get_group_gemm_starts(
     torch::Tensor& a_scales_ptrs, torch::Tensor& b_scales_ptrs,
     torch::Tensor const& a_tensors, torch::Tensor const& b_tensors,
     torch::Tensor& out_tensors, torch::Tensor const& a_scales,
-    torch::Tensor const& b_scales, bool swap_ab = false) {
+    torch::Tensor const& b_scales) {
   TORCH_CHECK(a_tensors.dtype() == torch::kFloat8_e4m3fn);
   TORCH_CHECK(b_tensors.dtype() == torch::kFloat8_e4m3fn);
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
