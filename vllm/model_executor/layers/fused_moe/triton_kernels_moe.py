@@ -12,8 +12,8 @@ from triton_kernels.routing import (GatherIndx, RoutingData, ScatterIndx,
 
 def triton_kernel_moe_forward(
     hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
+    w1,
+    w2,
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
@@ -65,8 +65,8 @@ def triton_kernel_moe_forward(
 # This is a triton implementation of the fused_experts function
 def triton_kernel_fused_experts(
     hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
+    w1,
+    w2,
     routing_data: RoutingData,
     gather_indx: GatherIndx,
     scatter_indx: ScatterIndx,
@@ -90,16 +90,16 @@ def triton_kernel_fused_experts(
     # type check, uint8 means mxfp4
     #TODO: fp8 x mxfp4 on blackwell
     assert hidden_states.dtype == torch.bfloat16
-    assert w1.dtype in (torch.bfloat16, torch.uint8)
-    assert w2.dtype in (torch.bfloat16, torch.uint8)
+    # assert w1.dtype in (torch.bfloat16, torch.uint8)
+    # assert w2.dtype in (torch.bfloat16, torch.uint8)
     assert w1_bias.dtype == torch.float32
     assert w2_bias.dtype == torch.float32
 
     # Shape check, only check non-mxfp4
-    if w1.dtype != torch.uint8:
-        assert hidden_states.ndim == 2
-        assert hidden_states.shape[-1] == w1.shape[-2]
-        assert w2.shape[-1] == w1.shape[1]
+    # if w1.dtype != torch.uint8:
+    #     assert hidden_states.ndim == 2
+    #     assert hidden_states.shape[-1] == w1.shape[-2]
+    #     assert w2.shape[-1] == w1.shape[1]
 
     M, K = hidden_states.shape
     E, _, N = w1.shape

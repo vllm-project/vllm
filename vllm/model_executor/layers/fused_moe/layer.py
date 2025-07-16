@@ -684,6 +684,9 @@ class FusedMoE(torch.nn.Module):
                 self.use_triton_kernels = True
                 self.hidden_size_pad = smallest_even_divide_number(
                     hidden_size, 256) - hidden_size
+
+                self.w13_weight_triton_tensor = None
+                self.w2_weight_triton_tensor = None
             else:
                 raise ValueError("triton_kernels must be installed first")
 

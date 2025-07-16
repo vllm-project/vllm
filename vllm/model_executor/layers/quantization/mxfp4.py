@@ -4,14 +4,12 @@ from typing import Callable, Optional
 
 import torch
 from torch.nn.parameter import Parameter
-from triton_kernels.matmul_ogs import FlexCtx, MicroscalingCtx, PrecisionConfig
+from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 from triton_kernels.numerics import InFlexData
-from triton_kernels.numerics_details.mxfp import (SwizzlingType,
-                                                  perm_tensor_from_contig,
-                                                  perm_tuple_from_contig,
-                                                  swizzle_mx_scale_bw,
-                                                  swizzle_mxfp4_scale_hopper,
-                                                  swizzle_mxfp4_value_hopper)
+from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
+from triton_kernels.tensor_details.layout import (HopperMXScaleLayout,
+                                                  HopperMXValueLayout,
+                                                  StridedLayout)
 
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.linear import (LinearBase,
@@ -25,31 +23,18 @@ from vllm.model_executor.utils import set_weight_attrs
 
 
 def swizzle_mxfp4(quant_tensor, scale):
-    swizzle_value = SwizzlingType.HOPPER
-    swizzle_scale = SwizzlingType.HOPPER
-    axis = 1
-    swizzle_axis = 2
-    # Swizzling
-    if swizzle_value == SwizzlingType.HOPPER:
-        quant_tensor = swizzle_mxfp4_value_hopper(quant_tensor,
-                                                  op_idx=0,
-                                                  mma_version=3)
-    assert quant_tensor.is_contiguous()
-    quant_tensor = perm_tensor_from_contig(quant_tensor, axis, swizzle_axis)
-
-    orig_scale_shape = scale.shape
-    if swizzle_scale == SwizzlingType.BLACKWELL:
-        scale = swizzle_mx_scale_bw(scale, allow_pad=True)
-    elif swizzle_scale == SwizzlingType.HOPPER:
-        scale = swizzle_mxfp4_scale_hopper(scale, num_warps=8)
-    assert scale.is_contiguous()
-    scale = perm_tensor_from_contig(scale, axis, swizzle_axis)
-    return quant_tensor, InFlexData(), MicroscalingCtx(
-        weight_scale=scale,
-        swizzle_scale=swizzle_scale,
-        swizzle_value=swizzle_value,
-        actual_weight_scale_shape=perm_tuple_from_contig(
-            orig_scale_shape, axis, swizzle_axis))
+    value_layout = StridedLayout
+    scale_layout = StridedLayout
+    if torch.cuda.get_device_capability()[0] == 9:
+        value_layout = HopperMXValueLayout
+        scale_layout = HopperMXScaleLayout
+    # import pdb; pdb.set_trace()
+    quant_tensor = quant_tensor.transpose(-2, -1)
+    scale = scale.transpose(-2, -1)
+    quant_tensor = convert_layout(wrap_torch_tensor(quant_tensor, dtype=FP4),
+                                  value_layout)
+    scale = convert_layout(wrap_torch_tensor(scale), scale_layout)
+    return quant_tensor, InFlexData(), scale
 
 
 class Mxfp4Config(QuantizationConfig):
@@ -178,18 +163,21 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         layer.w13_bias = Parameter(w13_bias, requires_grad=False)
         layer.w2_bias = Parameter(w2_bias, requires_grad=False)
 
-        w13_weight, w13_flex, w13_mx = swizzle_mxfp4(layer.w13_weight,
-                                                     layer.w13_weight_scale)
-        w2_weight, w2_flex, w2_mx = swizzle_mxfp4(layer.w2_weight,
-                                                  layer.w2_weight_scale)
+        w13_weight, w13_flex, w13_scale = swizzle_mxfp4(
+            layer.w13_weight, layer.w13_weight_scale)
+        w2_weight, w2_flex, w2_scale = swizzle_mxfp4(layer.w2_weight,
+                                                     layer.w2_weight_scale)
 
         self.w13_precision_config = PrecisionConfig(
-            mx_ctx=w13_mx, flex_ctx=FlexCtx(rhs_data=w13_flex))
+            weight_scale=w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex))
         self.w2_precision_config = PrecisionConfig(
-            mx_ctx=w2_mx, flex_ctx=FlexCtx(rhs_data=w2_flex))
+            weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex))
 
-        layer.w13_weight = Parameter(w13_weight, requires_grad=False)
-        layer.w2_weight = Parameter(w2_weight, requires_grad=False)
+        del layer.w13_weight
+        del layer.w2_weight
+
+        layer.w13_weight_triton_tensor = w13_weight
+        layer.w2_weight_triton_tensor = w2_weight
 
     def apply(
         self,
@@ -222,8 +210,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         return triton_kernel_moe_forward(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=layer.w13_weight_triton_tensor,
+            w2=layer.w2_weight_triton_tensor,
             gating_output=router_logits,
             topk=top_k,
             renormalize=renormalize,
