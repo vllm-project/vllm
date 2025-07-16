@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # This script aims to tune the best server parameter combinations to maximize throughput for given requirement. 
-# See details in README.
+# See details in README (benchmarks/auto_tune/README.md).
 
 TAG=$(date +"%Y_%m_%d_%H_%M")
 BASE=""
