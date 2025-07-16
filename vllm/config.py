@@ -2741,6 +2741,31 @@ class SpeculativeConfig:
             raise ValueError(
                 "Eagle3 is only supported for Llama models. "
                 f"Got {self.target_model_config.hf_text_config.model_type=}")
+        
+        # Validate layer_skip configuration
+        if self.method == "layer_skip":
+            if self.layer_skip is not None:
+                if not isinstance(self.layer_skip, int):
+                    raise ValueError(
+                        f"layer_skip must be an integer, got {type(self.layer_skip)}")
+                if self.layer_skip < 0:
+                    raise ValueError(
+                        f"layer_skip must be >= 0, got {self.layer_skip}")
+                # Check against target model layers if available
+                if self.target_model_config and hasattr(
+                        self.target_model_config.hf_config, 'num_hidden_layers'):
+                    num_layers = self.target_model_config.hf_config.num_hidden_layers
+                    if self.layer_skip >= num_layers:
+                        raise ValueError(
+                            f"layer_skip ({self.layer_skip}) must be < num_layers "
+                            f"({num_layers})")
+            
+            if self.lsq_head_path is not None:
+                import os
+                if not os.path.isdir(self.lsq_head_path):
+                    raise ValueError(
+                        f"lsq_head_path must be a valid directory, got: "
+                        f"{self.lsq_head_path}")
 
     @property
     def num_lookahead_slots(self) -> int:

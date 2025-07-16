@@ -12,6 +12,11 @@ class EarlyExitModelRunner(ModelRunnerWrapperBase):
     
     This wraps the scorer's ModelRunner to exit early during forward passes,
     optionally using a learned LSQ projection head instead of the LM head.
+    
+    NOTE: This implementation does not support CUDA graphs. The early-exit
+    forward pass runs in eager mode, which may result in ~15-20% lower decode
+    throughput compared to graph-captured execution. CUDA graph support would
+    require special handling of the dynamic exit behavior.
     """
     
     def __init__(self, base_runner, exit_layer: int, lsq_head: Optional[nn.Module] = None):
@@ -40,6 +45,7 @@ class EarlyExitModelRunner(ModelRunnerWrapperBase):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata,
+        sampling_metadata,  # Required by vLLM's ModelRunner interface
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs
     ) -> Tuple[torch.Tensor, Optional[IntermediateTensors]]:
@@ -47,6 +53,10 @@ class EarlyExitModelRunner(ModelRunnerWrapperBase):
         
         This method is called by the base ModelRunner's execute_model().
         We intercept the forward pass to implement early exit behavior.
+        
+        NOTE: This implementation does not support CUDA graphs for the early-exit
+        path. The model will run in eager mode, which may have ~15-20% lower
+        decode throughput compared to graph-captured execution.
         """
         model = self.model
         
@@ -87,6 +97,8 @@ class EarlyExitModelRunner(ModelRunnerWrapperBase):
                 hidden_states=hidden_states,
                 kv_caches=kv_caches[i] if kv_caches else None,
                 attn_metadata=attn_metadata,
+                # Note: sampling_metadata is not used by transformer layers
+                # but we keep it available for consistency
             )
             
             # Handle different return formats

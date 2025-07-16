@@ -270,6 +270,10 @@ vllm serve meta-llama/Llama-2-7b-hf \
   generate faster but lower quality drafts.
 - **LSQ Heads**: Optional learned projection heads can improve draft quality. Files 
   should be named `h{layer}.pt` in the specified directory.
+- **CUDA Graph Support**: Layer skip currently runs in eager mode without CUDA graph 
+  optimization. This may result in ~15-20% lower decode throughput compared to other 
+  speculative methods. CUDA graph support is planned for future releases.
+- **Pipeline Parallelism**: Not currently supported with layer skip method.
 
 ### Configuration Options
 
