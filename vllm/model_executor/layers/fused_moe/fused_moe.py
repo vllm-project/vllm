@@ -1091,31 +1091,30 @@ def flashinfer_fused_moe_blockscale_fp8(
     assert global_num_experts % 4 == 0
     assert top_k < (topk_group * global_num_experts / num_expert_group)
 
-    output = torch.empty_like(x)
     a_q, a_sf = per_token_group_quant_fp8(x, block_shape[1])
-    # NOTE: hidden states have to be transposed!
+    # NOTE: scales of hidden states have to be transposed!
     a_sf_t = a_sf.t().contiguous()
     assert fi_fused_moe is not None
-    fi_fused_moe.trtllm_fp8_block_scale_moe(router_logits,
-                                            e_score_correction_bias,
-                                            a_q,
-                                            a_sf_t,
-                                            w13_weight,
-                                            w13_weight_scale_inv,
-                                            w2_weight,
-                                            w2_weight_scale_inv,
-                                            output,
-                                            global_num_experts,
-                                            top_k,
-                                            num_expert_group,
-                                            topk_group,
-                                            intermediate_size_per_partition,
-                                            expert_offset,
-                                            local_num_experts,
-                                            routed_scaling=1.0,
-                                            tile_tokens_dim=tile_tokens_dim,
-                                            routing_method_type=2)
-    return output
+    return fi_fused_moe.trtllm_fp8_block_scale_moe(
+        routing_logits=router_logits,
+        routing_bias=e_score_correction_bias,
+        hidden_states=a_q,
+        hidden_states_scale=a_sf_t,
+        gemm1_weights=w13_weight,
+        gemm1_weights_scale=w13_weight_scale_inv,
+        gemm2_weights=w2_weight,
+        gemm2_weights_scale=w2_weight_scale_inv,
+        num_experts=global_num_experts,
+        top_k=top_k,
+        n_group=num_expert_group,
+        topk_group=topk_group,
+        intermediate_size=intermediate_size_per_partition,
+        local_expert_offset=expert_offset,
+        local_num_experts=local_num_experts,
+        routed_scaling_factor=routed_scaling,
+        tile_tokens_dim=tile_tokens_dim,
+        routing_method_type=2,  # DeepSeek-styled routing method
+    )
 
 
 def flashinfer_fused_moe_blockscale_fp8_fake(
