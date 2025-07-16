@@ -2,6 +2,7 @@
 
 #include "scaled_mm.cuh"
 #include "cutlass_gemm_caller.cuh"
+#include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 
 /**
  * This file defines Gemm kernel configurations for SM90 (fp8) based on the Gemm
@@ -18,16 +19,13 @@ template <typename ElementAB_, typename ElementD_,
           typename EpilogueSchedule, bool swap_ab_ = false>
 struct cutlass_3x_gemm_sm90_fp8 {
   using ElementAB = ElementAB_;
+  using ElementC = ElementD_;
   using ElementD = ElementD_;
   using ElementAcc =
       typename std::conditional<std::is_same_v<ElementAB, int8_t>, int32_t,
                                 float>::type;
 
   using Epilogue = Epilogue_<ElementAcc, ElementD, TileShape>;
-
-  using StrideD = Stride<int64_t, Int<1>, Int<0>>;
-  using ElementC = void;
-  using StrideC = StrideD;
 
   using EVTCompute = typename Epilogue::EVTCompute;
 
@@ -99,8 +97,7 @@ struct cutlass_3x_gemm_sm90_fp8 {
   struct GemmKernel : public KernelType {};
 };
 
-template <typename InType, typename OutType,
-          template <typename, typename, typename> typename Epilogue>
+template <typename InType, typename OutType, bool EnableBias>
 struct sm90_fp8_config_default {
   // M in (128, inf)
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
@@ -109,14 +106,16 @@ struct sm90_fp8_config_default {
   using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
   using TileShape = Shape<_128, _128, _128>;
   using ClusterShape = Shape<_2, _1, _1>;
-  using Cutlass3xGemm =
-      cutlass_3x_gemm_sm90_fp8<InType, OutType, Epilogue, TileShape,
-                               ClusterShape, KernelSchedule, EpilogueSchedule,
-                               false>;
+  using Cutlass3xGemm = conditional_t<
+      EnableBias,
+      cutlass_3x_gemm_sm90_fp8<InType, OutType, c3x::ScaledEpilogueBias,
+                               TileShape, ClusterShape, KernelSchedule,
+                               EpilogueSchedule>,
+      cutlass_3x_gemm_sm90_fp8<InType, OutType, c3x::ScaledEpilogue, TileShape,
+                               ClusterShape, KernelSchedule, EpilogueSchedule>>;
 };
 
-template <typename InType, typename OutType,
-          template <typename, typename, typename> typename Epilogue>
+template <typename InType, typename OutType, bool EnableBias>
 struct sm90_fp8_config_M128 {
   // M in (64, 128]
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
@@ -125,78 +124,32 @@ struct sm90_fp8_config_M128 {
   using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
   using TileShape = Shape<_64, _128, _128>;
   using ClusterShape = Shape<_2, _1, _1>;
-  using Cutlass3xGemm =
-      cutlass_3x_gemm_sm90_fp8<InType, OutType, Epilogue, TileShape,
-                               ClusterShape, KernelSchedule, EpilogueSchedule,
-                               false>;
+  using Cutlass3xGemm = conditional_t<
+      EnableBias,
+      cutlass_3x_gemm_sm90_fp8<InType, OutType, c3x::ScaledEpilogueBias,
+                               TileShape, ClusterShape, KernelSchedule,
+                               EpilogueSchedule>,
+      cutlass_3x_gemm_sm90_fp8<InType, OutType, c3x::ScaledEpilogue, TileShape,
+                               ClusterShape, KernelSchedule, EpilogueSchedule>>;
 };
 
-template <typename InType, typename OutType,
-          template <typename, typename, typename> typename Epilogue>
-struct sm90_fp8_config_M64_N1280 {
-  // M in (16, 64], N in [1 1280]
+template <typename InType, typename OutType, bool EnableBias>
+struct sm90_fp8_config_M64 {
+  // M in [1, 64]
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-  using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
+  using KernelSchedule =
+      cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
   using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
-  using TileShape = Shape<_64, _16, _256>;
-  using ClusterShape = Shape<_1, _4, _1>;
-
-  // enable swap AB for M < 64
-  using Cutlass3xGemm =
-      cutlass_3x_gemm_sm90_fp8<InType, OutType, Epilogue, TileShape,
+  using TileShape = Shape<_64, _16, _128>;
+  using ClusterShape = Shape<_2, _2, _1>;
+  using Cutlass3xGemm = conditional_t<
+      EnableBias,
+      cutlass_3x_gemm_sm90_fp8<InType, OutType, c3x::ScaledEpilogueColumnBias,
+                               TileShape, ClusterShape, KernelSchedule,
+                               EpilogueSchedule, true>,
+      cutlass_3x_gemm_sm90_fp8<InType, OutType, c3x::ScaledEpilogue, TileShape,
                                ClusterShape, KernelSchedule, EpilogueSchedule,
-                               true>;
-};
-
-template <typename InType, typename OutType,
-          template <typename, typename, typename> typename Epilogue>
-struct sm90_fp8_config_M64_N8192 {
-  // M in (16, 64], N > 1280
-  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-  using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
-  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
-  using TileShape = Shape<_64, _64, _256>;
-  using ClusterShape = Shape<_1, _1, _1>;
-
-  // enable swap AB for M < 64
-  using Cutlass3xGemm =
-      cutlass_3x_gemm_sm90_fp8<InType, OutType, Epilogue, TileShape,
-                               ClusterShape, KernelSchedule, EpilogueSchedule,
-                               true>;
-};
-
-template <typename InType, typename OutType,
-          template <typename, typename, typename> typename Epilogue>
-struct sm90_fp8_config_M16_N1280 {
-  // M in [1, 16], N in [1, 1280]
-  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-  using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
-  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
-  using TileShape = Shape<_64, _16, _256>;
-  using ClusterShape = Shape<_1, _2, _1>;
-
-  // enable swap AB for M < 64
-  using Cutlass3xGemm =
-      cutlass_3x_gemm_sm90_fp8<InType, OutType, Epilogue, TileShape,
-                               ClusterShape, KernelSchedule, EpilogueSchedule,
-                               true>;
-};
-
-template <typename InType, typename OutType,
-          template <typename, typename, typename> typename Epilogue>
-struct sm90_fp8_config_M16_N8192 {
-  // M in [1, 16], N > 1280
-  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-  using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
-  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
-  using TileShape = Shape<_64, _16, _256>;
-  using ClusterShape = Shape<_1, _1, _1>;
-
-  // enable swap AB for M < 64
-  using Cutlass3xGemm =
-      cutlass_3x_gemm_sm90_fp8<InType, OutType, Epilogue, TileShape,
-                               ClusterShape, KernelSchedule, EpilogueSchedule,
-                               true>;
+                               true>>;
 };
 
 template <typename Gemm, typename... EpilogueArgs>
@@ -211,8 +164,6 @@ void cutlass_gemm_caller_sm90_fp8(torch::Tensor& out, torch::Tensor const& a,
   using StrideA = typename Gemm::GemmKernel::StrideA;
   using StrideB = typename Gemm::GemmKernel::StrideB;
   using StrideC = typename Gemm::GemmKernel::StrideC;
-  using StrideD = StrideC;
-  using StrideAux = StrideC;
 
   int32_t m = a.size(0), n = b.size(1), k = a.size(1);
   auto prob_shape =
@@ -225,9 +176,6 @@ void cutlass_gemm_caller_sm90_fp8(torch::Tensor& out, torch::Tensor const& a,
   StrideC c_stride = cutlass::make_cute_packed_stride(
       StrideC{},
       swap_ab ? cute::make_shape(n, m, 1) : cute::make_shape(m, n, 1));
-  StrideD d_stride = c_stride;
-
-  StrideAux aux_stride = d_stride;
 
   auto a_ptr = static_cast<ElementAB*>(a.data_ptr());
   auto b_ptr = static_cast<ElementAB*>(b.data_ptr());
@@ -242,18 +190,19 @@ void cutlass_gemm_caller_sm90_fp8(torch::Tensor& out, torch::Tensor const& a,
   typename GemmKernel::EpilogueArguments epilogue_args{
       Gemm::Epilogue::prepare_args(
           std::forward<EpilogueArgs>(epilogue_params)...),
-      c_ptr, c_stride, c_ptr, d_stride};
+      c_ptr, c_stride, c_ptr, c_stride};
 
   c3x::cutlass_gemm_caller<GemmKernel>(a.device(), prob_shape, mainloop_args,
                                        epilogue_args);
 }
 
-template <typename InType, typename OutType,
-          template <typename, typename, typename> typename Epilogue,
+template <typename InType, typename OutType, bool EnableBias,
           typename... EpilogueArgs>
 inline void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out,
                                            torch::Tensor const& a,
                                            torch::Tensor const& b,
+                                           torch::Tensor const& a_scales,
+                                           torch::Tensor const& b_scales,
                                            EpilogueArgs&&... args) {
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
@@ -261,71 +210,51 @@ inline void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out,
 
   using Cutlass3xGemmDefault =
       typename sm90_fp8_config_default<InType, OutType,
-                                       Epilogue>::Cutlass3xGemm;
+                                       EnableBias>::Cutlass3xGemm;
   using Cutlass3xGemmM128 =
-      typename sm90_fp8_config_M128<InType, OutType, Epilogue>::Cutlass3xGemm;
+      typename sm90_fp8_config_M128<InType, OutType, EnableBias>::Cutlass3xGemm;
 
-  using Cutlass3xGemmM64_N1280 =
-      typename sm90_fp8_config_M64_N1280<InType, OutType,
-                                         Epilogue>::Cutlass3xGemm;
-  using Cutlass3xGemmM64_N8192 =
-      typename sm90_fp8_config_M64_N8192<InType, OutType,
-                                         Epilogue>::Cutlass3xGemm;
-  using Cutlass3xGemmM16_N1280 =
-      typename sm90_fp8_config_M16_N1280<InType, OutType,
-                                         Epilogue>::Cutlass3xGemm;
-  using Cutlass3xGemmM16_N8192 =
-      typename sm90_fp8_config_M16_N8192<InType, OutType,
-                                         Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemmM64 =
+      typename sm90_fp8_config_M64<InType, OutType, EnableBias>::Cutlass3xGemm;
 
   uint32_t const m = a.size(0);
-  uint32_t const n = b.size(1);
 
-  if (m <= 16) {
-    // m in [1, 16]
-    if (n <= 1280) {
-      return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM16_N1280>(
-          out, a, b, std::forward<EpilogueArgs>(args)...);
-    }
-    return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM16_N8192>(
-        out, a, b, std::forward<EpilogueArgs>(args)...);
-  } else if (m <= 64) {
-    // m in (16, 64]
-    if (n <= 1280) {
-      return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM64_N1280>(
-          out, a, b, std::forward<EpilogueArgs>(args)...);
-    }
-    return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM64_N8192>(
-        out, a, b, std::forward<EpilogueArgs>(args)...);
+  if (m <= 64) {
+    // m in [1, 64]
+    return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM64>(
+        out, a, b, b_scales, a_scales, std::forward<EpilogueArgs>(args)...);
   } else if (m <= 128) {
     // m in (64, 128]
     return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmM128>(
-        out, a, b, std::forward<EpilogueArgs>(args)...);
+        out, a, b, a_scales, b_scales, std::forward<EpilogueArgs>(args)...);
   } else {
     // m in (128, inf)
     return cutlass_gemm_caller_sm90_fp8<Cutlass3xGemmDefault>(
-        out, a, b, std::forward<EpilogueArgs>(args)...);
+        out, a, b, a_scales, b_scales, std::forward<EpilogueArgs>(args)...);
   }
 }
 
-template <template <typename, typename, typename> typename Epilogue,
-          typename... EpilogueArgs>
+template <bool EnableBias, typename... EpilogueArgs>
 void cutlass_scaled_mm_sm90_fp8_epilogue(torch::Tensor& out,
                                          torch::Tensor const& a,
                                          torch::Tensor const& b,
+                                         torch::Tensor const& a_scales,
+                                         torch::Tensor const& b_scales,
                                          EpilogueArgs&&... epilogue_args) {
   TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
   TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
 
   if (out.dtype() == torch::kBFloat16) {
     return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
-                                          cutlass::bfloat16_t, Epilogue>(
-        out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
+                                          cutlass::bfloat16_t, EnableBias>(
+        out, a, b, a_scales, b_scales,
+        std::forward<EpilogueArgs>(epilogue_args)...);
   } else {
     TORCH_CHECK(out.dtype() == torch::kFloat16);
     return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
-                                          cutlass::half_t, Epilogue>(
-        out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
+                                          cutlass::half_t, EnableBias>(
+        out, a, b, a_scales, b_scales,
+        std::forward<EpilogueArgs>(epilogue_args)...);
   }
 }
 
