@@ -1953,6 +1953,16 @@ class DetokenizeResponse(OpenAIBaseModel):
     prompt: str
 
 
+class TokenizerInfoResponse(OpenAIBaseModel):
+    """
+    Response containing tokenizer configuration 
+    equivalent to tokenizer_config.json
+    """
+
+    model_config = ConfigDict(extra="allow")
+    tokenizer_class: str
+
+
 class LoadLoRAAdapterRequest(BaseModel):
     lora_name: str
     lora_path: str
