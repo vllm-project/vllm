@@ -325,9 +325,8 @@ class EngineClient(ABC):
         """Load a new LoRA adapter into the engine for future requests."""
         ...
 
-    @abstractmethod
     async def scale(self,
                     new_data_parallel_size: int,
                     drain_timeout: int = 300) -> None:
         """Scale the engine"""
-        ...
+        raise NotImplementedError

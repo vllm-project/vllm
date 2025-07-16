@@ -1005,7 +1005,22 @@ if envs.VLLM_SERVER_DEV_MODE:
         return JSONResponse(content={"is_sleeping": is_sleeping})
 
 
-@router.post("/scale", dependencies=[Depends(validate_json_request)])
+@router.post("/scale",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.OK.value: {
+                     "model": dict
+                 },
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.REQUEST_TIMEOUT.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
 async def scale(raw_request: Request):
     try:
         body = await raw_request.json()
