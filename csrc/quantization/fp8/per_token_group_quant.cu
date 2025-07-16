@@ -2,7 +2,6 @@
 #include <c10/util/Float8_e4m3fn.h>
 
 #include <cmath>
-#include "vec_dtypes.cuh"
 
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
@@ -42,6 +41,20 @@
       }                                                                     \
     }()
 #endif
+
+template <typename T, int N>
+struct __align__(16) simple_vec_t {
+  static_assert(N * sizeof(T) == 16,
+                "simple_vec_t only supports 16-byte total size vectors");
+  T data[N];
+
+  __device__ __forceinline__ void cast_load(const T* ptr) {
+    const auto* src = reinterpret_cast<const simple_vec_t*>(ptr);
+    *this = *src;  // Vectorized 16-byte load.
+  }
+
+  __device__ __forceinline__ T operator[](int idx) const { return data[idx]; }
+};
 
 __device__ __forceinline__ float GroupReduceMax(float val, const int tid) {
   unsigned mask = 0xffff;
@@ -95,7 +108,7 @@ __global__ void per_token_group_quant_8bit_kernel(
   }
 
   constexpr uint32_t vec_size = 16 / sizeof(T);
-  using vec_t = flashinfer::vec_t<T, vec_size>;
+  using vec_t = simple_vec_t<T, vec_size>;
 
   const int32_t num_vec_elems = group_size / vec_size;
 
