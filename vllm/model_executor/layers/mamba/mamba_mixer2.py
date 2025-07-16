@@ -134,7 +134,7 @@ class Mixer2RMSNormGated(CustomOp):
             return x * nn.functional.silu(gate.to(
                 torch.float32)).to(input_dtype)
 
-        if self.tp_size > 1 or self.n_groups != 1:
+        if (((self.n_groups % self.tp_size) != 0) or self.n_groups != 1):
             return self.forward_native(x, gate)
 
         return rms_norm_gated(x,
