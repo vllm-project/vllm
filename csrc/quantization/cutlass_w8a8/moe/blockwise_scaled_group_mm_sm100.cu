@@ -247,12 +247,6 @@ void cutlass_blockwise_scaled_grouped_mm_sm100(
   TORCH_CHECK(a_strides.dim() == 1, "a_strides must be 1D tensor");
   TORCH_CHECK(b_strides.dim() == 1, "b_strides must be 1D tensor");
   TORCH_CHECK(c_strides.dim() == 1, "c_strides must be 1D tensor");
-  TORCH_CHECK(a_strides.size(0) == expert_offsets.size(0),
-              "a_strides must have shape (num_experts)");
-  TORCH_CHECK(b_strides.size(0) == expert_offsets.size(0),
-              "b_strides must have shape (num_experts)");
-  TORCH_CHECK(c_strides.size(0) == expert_offsets.size(0),
-              "c_strides must have shape (num_experts)");
 
   TORCH_CHECK(output.dim() == 2, "output must be 2D tensor");
   TORCH_CHECK(a.dim() == 2, "a must be 2D tensor");
@@ -267,6 +261,12 @@ void cutlass_blockwise_scaled_grouped_mm_sm100(
   TORCH_CHECK(problem_sizes.dtype() == torch::kInt32,
               "problem_sizes must be int32");
   TORCH_CHECK(expert_offsets.dim() == 1, "expert_offsets must be 1D tensor");
+  TORCH_CHECK(a_strides.size(0) == b.size(0),
+              "a_strides must have shape (num_experts)");
+  TORCH_CHECK(b_strides.size(0) == b.size(0),
+              "b_strides must have shape (num_experts)");
+  TORCH_CHECK(c_strides.size(0) == b.size(0),
+              "c_strides must have shape (num_experts)");
 
 #if defined(ENABLE_CUTLASS_MOE_SM100) && ENABLE_CUTLASS_MOE_SM100
   if (output.scalar_type() == torch::kBFloat16) {

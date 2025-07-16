@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 from math import prod
-from typing import Optional
+from typing import Callable, Optional
 
 import pytest
 import torch
@@ -227,8 +227,8 @@ class MOETensors8Bit(MOETensors):
                               w2_d=w2_d)
 
 
-def run_with_expert_maps(num_experts: int, num_local_experts: int,
-                         **cutlass_moe_kwargs):
+def run_with_expert_maps(cutlass_moe_fn: Callable, num_experts: int,
+                         num_local_experts: int, **cutlass_moe_kwargs):
 
     def slice_experts():
         slice_params = [
@@ -261,7 +261,7 @@ def run_with_expert_maps(num_experts: int, num_local_experts: int,
 
     out_tensor = torch.zeros_like(cutlass_moe_kwargs["a"])
     for kwargs in slice_experts():
-        out_tensor = out_tensor + cutlass_moe_fp8(**kwargs)
+        out_tensor = out_tensor + cutlass_moe_fn(**kwargs)
 
     return out_tensor
 
@@ -297,14 +297,17 @@ def run_8_bit(moe_tensors: MOETensors8Bit,
 
     assert num_local_experts is not None
     return run_with_expert_maps(
+        cutlass_moe_fp8,
         num_experts,
         num_local_experts,  # type: ignore[arg-type]
         **kwargs)
 
 
-def run_blocked_8_bit(moe_tensors: MOETensors8Bit, topk_weights: torch.Tensor,
+def run_blocked_8_bit(moe_tensors: MOETensors8Bit,
+                      topk_weights: torch.Tensor,
                       topk_ids: torch.Tensor,
-                      per_act_block: bool) -> torch.Tensor:
+                      per_act_block: bool,
+                      num_local_experts: Optional[int] = None) -> torch.Tensor:
     assert not any([
         t is None for t in [
             moe_tensors.w1_q, moe_tensors.w2_q, moe_tensors.w1_scale,
@@ -339,7 +342,17 @@ def run_blocked_8_bit(moe_tensors: MOETensors8Bit, topk_weights: torch.Tensor,
         'block_shape': [128, 128],
     }
 
-    return block_scaled_cutlass_moe_fp8(**kwargs)
+    num_experts = moe_tensors.w1.size(0)
+    with_ep = num_local_experts is not None or num_local_experts == num_experts
+    if not with_ep:
+        return block_scaled_cutlass_moe_fp8(**kwargs)
+
+    assert num_local_experts is not None
+    return run_with_expert_maps(
+        block_scaled_cutlass_moe_fp8,
+        num_experts,
+        num_local_experts,  # type: ignore[arg-type]
+        **kwargs)
 
 
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
@@ -603,8 +616,11 @@ def test_blocked_cutlass_moe_8_bit(
     e: int,
     topk: int,
     per_act_block: bool,
+    monkeypatch,
+    ep_size: Optional[int] = None,
 ):
     current_platform.seed_everything(7)
+    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     with set_current_vllm_config(vllm_config):
         mt = MOETensors8Bit.make_moe_tensors_blocked_8bit(m,
                                                           k,
@@ -625,8 +641,13 @@ def test_blocked_cutlass_moe_8_bit(
         # Using a, w1 and w2 directly results in minor output differences.
         torch_output = torch_moe(mt.a_d, mt.w1_d, mt.w2_d, score, topk)
 
+        if ep_size is not None:
+            assert e % ep_size == 0, "Cannot distribute experts evenly"
+            number_local_experts = e // ep_size
+        else:
+            number_local_experts = None
         cutlass_output = run_blocked_8_bit(mt, topk_weights, topk_ids,
-                                           per_act_block)
+                                           per_act_block, number_local_experts)
 
         # Uncomment for debugging
         # print("out torch:", torch_output)
@@ -636,3 +657,28 @@ def test_blocked_cutlass_moe_8_bit(
                                    cutlass_output,
                                    atol=5e-2,
                                    rtol=1e-2)
+
+
+@pytest.mark.parametrize("m", [64])
+@pytest.mark.parametrize("n", [1024])
+@pytest.mark.parametrize("k", [4096])
+@pytest.mark.parametrize("e", [16])
+@pytest.mark.parametrize("topk", [1, 8])
+@pytest.mark.parametrize("per_act_block", [True])
+@pytest.mark.parametrize("ep_size", [1, 2, 4, 8, 16])
+@pytest.mark.skipif(
+    (lambda x: x is None or not ops.cutlass_blockwise_group_gemm_supported(
+        x.to_int()))(current_platform.get_device_capability()),
+    reason="Grouped gemm is not supported on this GPU type.")
+def test_blocked_cutlass_moe_8_bit_EP(
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    per_act_block: bool,
+    ep_size: int,
+    monkeypatch,
+):
+    test_blocked_cutlass_moe_8_bit(m, n, k, e, topk, per_act_block,
+                                   monkeypatch, ep_size)

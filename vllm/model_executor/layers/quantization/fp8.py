@@ -1004,6 +1004,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 activation,
                 layer.w13_input_scale,
                 layer.w2_input_scale,
+                expert_map,
                 apply_router_weight_on_input,
                 global_num_experts=(global_num_experts if global_num_experts
                                     != -1 else layer.w13_weight.shape[0]),
