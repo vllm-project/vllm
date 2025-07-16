@@ -97,9 +97,7 @@ def test_models(
         else:
             hf_outputs = None
 
-    with vllm_runner(model,
-                     max_num_seqs=MAX_NUM_SEQS,
-                     **V1_HYBRID_UNSUPPORTED_ARGS) as vllm_model:
+    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
         vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
@@ -154,9 +152,7 @@ def test_batching(
         pass
 
     for_loop_outputs = []
-    with vllm_runner(model,
-                     max_num_seqs=MAX_NUM_SEQS,
-                     **V1_HYBRID_UNSUPPORTED_ARGS) as vllm_model:
+    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
         for prompt in example_prompts:
             single_output, = vllm_model.generate_greedy_logprobs([prompt],
                                                                  max_tokens,

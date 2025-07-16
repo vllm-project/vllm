@@ -2,14 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
-from vllm.v1.kv_cache_interface import (MambaSpec, ShortConvSpec)
+from vllm.v1.kv_cache_interface import (MambaSpec, ShortConvSpec,
+                                        StaticCacheSpec)
 from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
@@ -87,14 +88,14 @@ class Mamba2AttentionMetadata:
 class Mamba2AttentionMetadataBuilder(
         AttentionMetadataBuilder[Mamba2AttentionMetadata]):
 
-    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: Union[MambaSpec, ShortConvSpec],
-                 block_table: BlockTable):
+    def __init__(self, runner: "GPUModelRunner",
+                 kv_cache_spec: StaticCacheSpec, block_table: BlockTable):
         self.runner = runner
         self.kv_cache_spec = kv_cache_spec
         self.block_table = block_table
         if isinstance(kv_cache_spec, MambaSpec):
-            self.chunk_size = runner.vllm_config.model_config.get_mamba_chunk_size(
-            )
+            self.chunk_size = \
+                runner.vllm_config.model_config.get_mamba_chunk_size()
         elif isinstance(kv_cache_spec, ShortConvSpec):
             self.chunk_size = 1
 

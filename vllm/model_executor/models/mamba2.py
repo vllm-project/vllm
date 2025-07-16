@@ -198,7 +198,7 @@ class Mamba2Model(nn.Module):
 class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
 
     @classmethod
-    def get_mamba_state_shape_from_config(
+    def get_static_cache_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
         use_v1: bool = True,
@@ -285,7 +285,7 @@ class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
                         self.vllm_config.parallel_config,
                         LayerBlockType.mamba))
                 mamba_state_shape = \
-                    self.get_mamba_state_shape_from_config(
+                    self.get_static_cache_shape_from_config(
                         self.vllm_config, use_v1=False)
                 self.mamba_cache = MambaCacheManager(self.vllm_config,
                                                      self.lm_head.weight.dtype,

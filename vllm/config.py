@@ -1643,9 +1643,10 @@ class CacheConfig:
     checkpoint if available. Otherwise, the scales will default to 1.0."""
     cpu_kvcache_space_bytes: Optional[int] = None
     """(CPU backend only) CPU key-value cache space."""
-    mamba_page_size_padded: Optional[int] = None
-    """ Optional override for mamba page size; used by hybrid mamba/attention
-    models to ensure exact alignment with attention page size."""
+    static_cache_page_size_padded: Optional[int] = None
+    """ Optional override for static cache page size; used by hybrid static
+    cache (e.g. mamba, short-conv) / attention models to ensure exact alignment
+    with attention page size."""
 
     # Will be set after profiling.
     num_gpu_blocks: Optional[int] = field(default=None, init=False)
