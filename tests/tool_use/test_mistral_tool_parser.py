@@ -412,7 +412,7 @@ def _test_extract_tool_calls_streaming(tool_parser, tokenizer, model_output,
             "",
         ),
         (
-            """[TOOL_CALLS][{"name": "add", "arguments": {"a": 3.5, "b": 4}}, {"name": "get_current_weather", "arguments":{"city": "San Francisco", "state": "CA", "unit": "celsius"}]""",  # noqa: E501
+            """[TOOL_CALLS][{"name": "add", "arguments": {"a": 3.5, "b": 4}}, {"name": "get_current_weather", "arguments":{"city": "San Francisco", "state": "CA", "unit": "celsius"}}]""",  # noqa: E501
             [
                 ToolCall(function=FunctionCall(name="add",
                                                arguments=json.dumps({
