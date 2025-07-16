@@ -759,7 +759,9 @@ def test_cutlass_fp8_blockwise_group_gemm(num_experts: int,
                                          k_b_scales] = a_scales_tensors[g].t(
                                          ).flatten()
         else:
-            a_scales_tensors_stacked = scale_a.t().repeat_interleave(g, dim=0)
+            a_scales_tensors_stacked = one_scale_a.repeat_interleave(
+                expert_offsets[num_experts],
+                dim=1).repeat_interleave(k_b_scales, dim=0)
     else:
         if per_act_block:
             a_scales_tensors_stacked = torch.empty(
