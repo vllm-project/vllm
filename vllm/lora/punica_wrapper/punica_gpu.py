@@ -11,7 +11,6 @@ from typing import Optional, Union, final
 
 import torch
 
-import vllm.envs as envs
 from vllm.lora.layers import LoRAMapping
 from vllm.triton_utils import HAS_TRITON
 
@@ -45,10 +44,12 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         # here), V0 captures the graph as if max_num_seqs is set to
         # the capture size.
         # V1 doesn't have this problem and always respects max_num_seqs.
-        max_num_prompts = (max_batches
-                           if envs.VLLM_USE_V1 else max_num_batched_tokens)
+        # When speculative decoding is enabled, max_num_samples is
+        # max_batches * (num_speculative_decoding_tokens + 1).
+        # This line can be optimized.
+        max_num_samples = max_num_batched_tokens
         self.prompt_mapping_meta = LoRAKernelMeta.make(self.max_loras,
-                                                       max_num_prompts,
+                                                       max_num_samples,
                                                        device=device)
 
     def update_metadata(self, mapping: LoRAMapping,
