@@ -126,7 +126,7 @@ void fused_experts_int4_w4a16_kernel_impl(
     int64_t topk,
     int64_t num_tokens_post_pad);
 
-// shared expert implememntation for int8 w8a8
+// shared expert implementation for int8 w8a8
 template <typename scalar_t>
 void shared_expert_int8_kernel_impl(
     scalar_t* __restrict__ output,
