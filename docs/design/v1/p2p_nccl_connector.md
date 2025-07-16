@@ -322,4 +322,4 @@ pgrep python | xargs kill -9 && pkill -f python
 
 ## **Scenario**: 1K input & 200 output tokens, E2E P99 latency ~2s
 
-![testdata](https://github.com/user-attachments/assets/458d00f2-f38c-41e2-9b17-2b4342e9b8e6)
+![testdata](https://github.com/user-attachments/assets/cef0953b-4567-4bf9-b940-405b92a28eb1)
