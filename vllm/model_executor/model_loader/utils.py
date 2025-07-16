@@ -253,7 +253,7 @@ def get_model_architecture(
                                              in vllm_supported_archs)
 
             if causal_lm_arch_vllm_supported:
-                architectures = [causal_lm_arch_vllm_supported]
+                architectures = [causal_lm_arch]
                 vllm_not_supported = False
                 break
 
