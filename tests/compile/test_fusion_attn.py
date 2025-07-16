@@ -169,7 +169,8 @@ def test_attention_fusion_v1(example_prompts, monkeypatch, model: str,
 
     if not current_platform.is_rocm():
         if use_split_attention:
-            pytest.skip("Split attention with fusion is only supported on ROCm")
+            pytest.skip(
+                "Split attention with fusion is only supported on ROCm")
         monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
     monkeypatch.setenv("VLLM_USE_V1", "1")
     monkeypatch.setenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION",
