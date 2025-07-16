@@ -182,6 +182,9 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     """If set to True, enable tracking server_load_metrics in the app state."""
     enable_force_include_usage: bool = False
     """If set to True, including usage on every request."""
+    enable_tokenizer_info_endpoint: bool = False
+    """Enable the /get_tokenizer_info endpoint. May expose chat
+    templates and other tokenizer configuration."""
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
