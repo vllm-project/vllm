@@ -36,6 +36,7 @@ def _run_test(
 
 MODELS = ["christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM"]
 
+
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", MODELS)
 def test_models_image(

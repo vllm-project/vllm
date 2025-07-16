@@ -1,16 +1,18 @@
-import os
-import albumentations
-from terratorch.datamodules import Sen1Floods11NonGeoDataModule
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
-from typing import List, Union
-import re
 import datetime
+import os
+import re
+from typing import Union
+
+import albumentations
 import numpy as np
 import rasterio
 import torch
-import time
 from einops import rearrange
-from typing import Tuple
+from terratorch.datamodules import Sen1Floods11NonGeoDataModule
+
 from vllm import LLM
 
 torch.set_default_dtype(torch.float16)
@@ -21,134 +23,76 @@ OFFSET = 0
 PERCENTILE = 99
 
 datamodule_config = {
-        'bands': ['BLUE',
-                  'GREEN',
-                  'RED',
-                  'NIR_NARROW',
-                  'SWIR_1',
-                  'SWIR_2'],
-        'batch_size': 16,
-        'constant_scale': 0.0001,
-        'data_root': '/dccstor/geofm-finetuning/datasets/sen1floods11',
-        'drop_last': True,
-        'no_data_replace': 0.0,
-        'no_label_replace': -1,
-        'num_workers': 8,
-        'test_transform': [albumentations.Resize(always_apply=False,
-                                                 height=448,
-                                                 interpolation=1,
-                                                 p=1,
-                                                 width=448),
-                           albumentations.pytorch.ToTensorV2(
-                               transpose_mask=False,
-                               always_apply=True,
-                               p=1.0
-                           )],
+    "bands": ["BLUE", "GREEN", "RED", "NIR_NARROW", "SWIR_1", "SWIR_2"],
+    "batch_size": 16,
+    "constant_scale": 0.0001,
+    "data_root": "/dccstor/geofm-finetuning/datasets/sen1floods11",
+    "drop_last": True,
+    "no_data_replace": 0.0,
+    "no_label_replace": -1,
+    "num_workers": 8,
+    "test_transform": [
+        albumentations.Resize(
+            always_apply=False, height=448, interpolation=1, p=1, width=448
+        ),
+        albumentations.pytorch.ToTensorV2(
+            transpose_mask=False, always_apply=True, p=1.0
+        ),
+    ],
 }
 
+
 class PrithviMAE:
-    def __init__(self,model):
-        print("Initializing Terratorch model")
-        #self.model = LLM(model=os.path.join(os.path.dirname(__file__), "./model"), skip_tokenizer_init=True, dtype="float32")
-        self.model = LLM(model=model,skip_tokenizer_init=True, dtype="float16",enforce_eager=True)
+    def __init__(self, model):
+        self.model = LLM(
+            model=model, skip_tokenizer_init=True, dtype="float16", enforce_eager=True
+        )
 
-    def patchify(self, pixel_values):
-        """
-        Args:
-            pixel_values (torch.FloatTensor of shape `(batch_size, num_channels, time, height, width)`):
-                Pixel values.
-
-        Returns:
-            torch.FloatTensor of shape `(batch_size, num_patches, patch_size[0]*patch_size[1]*patch_size[2] * num_channels)`:
-                Patchified pixel values.
-        """
-        patch_size_t, patch_size_h, patch_size_w = self.get_patch_size()
-        num_channels = self.get_num_channels()
-
-        # patchify
-        patchified_pixel_values = rearrange(pixel_values, 'b c (t s) (h p) (w q) -> b (t h w) (s p q c)',
-                                            c=num_channels, s=patch_size_t, p=patch_size_h, q=patch_size_w)
-
-
-        return patchified_pixel_values
-
-    def unpatchify(self, patchified_pixel_values, image_size: Tuple[int, int] | None = None):
-        """
-        Args:
-            patchified_pixel_values (`torch.FloatTensor` of shape
-                `(batch_size, num_patches, patch_size[0]*patch_size[1]*patch_size[2] * num_channels)`:
-                Patchified pixel values.
-            image_size (`Tuple[int, int]`, *optional*):
-                Original image size.
-
-        Returns:
-            `torch.FloatTensor` of shape `(batch_size, num_channels, height, width)`:
-                Pixel values.
-        """
-        patch_size_t, patch_size_h, patch_size_w = self.get_patch_size()
-        image_size = to_2tuple(image_size) if image_size is not None else self.get_img_size()
-        original_height, original_width = image_size
-        num_patches_h = original_height // patch_size_h
-        num_patches_w = original_width // patch_size_w
-        num_channels = self.get_num_channels()
-
-        pixel_values = rearrange(patchified_pixel_values, 'b (t h w) (s p q c) -> b c (t s) (h p) (w q)',
-                                 c=num_channels, h=num_patches_h, w=num_patches_w,
-                                 s=patch_size_t, p=patch_size_h, q=patch_size_w)
-        return pixel_values
-
-    def run(self, input_data, temporal_coords, location_coords):
-        print("################ Running inference on vLLM ##############")
+    def run(self, input_data, location_coords):
         # merge the inputs into one data structure
-        if input_data is not None and input_data.dtype == torch.float32 :
-            input_data= input_data.to(torch.float16)
+        if input_data is not None and input_data.dtype == torch.float32:
+            input_data = input_data.to(torch.float16)
             input_data = input_data[0]
 
         mm_data = {
-            "pixel_values": torch.empty(0) if input_data is None else input_data,
-            "location_coords": torch.empty(0) if location_coords is None else location_coords
+            "pixel_values": input_data,
+            "location_coords": location_coords,
         }
 
-        prompt = {
-            "prompt_token_ids": [1],
-            "multi_modal_data": mm_data
-        }
-
-        start = time.time()
+        prompt = {"prompt_token_ids": [1], "multi_modal_data": mm_data}
         outputs = self.model.encode(prompt, use_tqdm=False)
-        end = time.time()
-        elapsed = end - start
-        print(f"################ Inference done (it took {round(elapsed,2)} seconds)  ##############")
 
         return outputs[0].outputs.data
 
-def generate_datamodule():
-    
 
-    datamodule = Sen1Floods11NonGeoDataModule(data_root=datamodule_config['data_root'],
-                                              batch_size=datamodule_config["batch_size"],
-                                              num_workers=datamodule_config["num_workers"],
-                                              bands=datamodule_config["bands"],
-                                              drop_last=datamodule_config["drop_last"],
-                                              test_transform=datamodule_config["test_transform"
-                                                                               ""])
+def generate_datamodule():
+    datamodule = Sen1Floods11NonGeoDataModule(
+        data_root=datamodule_config["data_root"],
+        batch_size=datamodule_config["batch_size"],
+        num_workers=datamodule_config["num_workers"],
+        bands=datamodule_config["bands"],
+        drop_last=datamodule_config["drop_last"],
+        test_transform=datamodule_config["test_transform"],
+    )
 
     return datamodule
+
 
 def process_channel_group(orig_img, channels):
     """
     Args:
-        orig_img: torch.Tensor representing original image (reference) with shape = (bands, H, W).
+        orig_img: torch.Tensor representing original image (reference)
+        with shape = (bands, H, W).
         channels: list of indices representing RGB channels.
 
     Returns:
-        torch.Tensor with shape (num_channels, height, width) for original image
+        torch.Tensor with shape (num_channels, height, width)
+        for original image
     """
 
     orig_img = orig_img[channels, ...]
     valid_mask = torch.ones_like(orig_img, dtype=torch.bool)
     valid_mask[orig_img == NO_DATA_FLOAT] = False
-
 
     # Rescale (enhancing contrast)
     max_value = max(3000, np.percentile(orig_img[valid_mask], PERCENTILE))
@@ -178,7 +122,7 @@ def read_geotiff(file_path: str):
         meta = src.meta
         try:
             coords = src.lnglat()
-        except:
+        except Exception:
             # Cannot read coords
             coords = None
 
@@ -209,17 +153,19 @@ def _convert_np_uint8(float_image: torch.Tensor):
 
 
 def load_example(
-    file_paths: List[str],
-    mean: List[float] = None,
-    std: List[float] = None,
+    file_paths: list[str],
+    mean: list[float] = None,
+    std: list[float] = None,
     indices: Union[list[int], None] = None,
 ):
     """Build an input example by loading images in *file_paths*.
 
     Args:
         file_paths: list of file paths .
-        mean: list containing mean values for each band in the images in *file_paths*.
-        std: list containing std values for each band in the images in *file_paths*.
+        mean: list containing mean values for each band in the
+              images in *file_paths*.
+        std: list containing std values for each band in the
+             images in *file_paths*.
 
     Returns:
         np.array containing created example
@@ -247,17 +193,21 @@ def load_example(
             location_coords.append(coords)
 
         try:
-            match = re.search(r'(\d{7,8}T\d{6})', file)
+            match = re.search(r"(\d{7,8}T\d{6})", file)
             if match:
                 year = int(match.group(1)[:4])
-                julian_day = match.group(1).split('T')[0][4:]
+                julian_day = match.group(1).split("T")[0][4:]
                 if len(julian_day) == 3:
                     julian_day = int(julian_day)
                 else:
-                    julian_day = datetime.datetime.strptime(julian_day, '%m%d').timetuple().tm_yday
+                    julian_day = (
+                        datetime.datetime.strptime(julian_day, "%m%d")
+                        .timetuple()
+                        .tm_yday
+                    )
                 temporal_coords.append([year, julian_day])
         except Exception as e:
-            print(f'Could not extract timestamp for {file} ({e})')
+            print(f"Could not extract timestamp for {file} ({e})")
 
     imgs = np.stack(imgs, axis=0)  # num_frames, H, W, C
     imgs = np.moveaxis(imgs, -1, 0).astype("float32")  # C, num_frames, H, W
@@ -266,7 +216,15 @@ def load_example(
     return imgs, temporal_coords, location_coords, metas
 
 
-def run_model(input_data, temporal_coords, location_coords, model, datamodule, img_size, lightning_model=None):
+def run_model(
+    input_data,
+    temporal_coords,
+    location_coords,
+    model,
+    datamodule,
+    img_size,
+    lightning_model=None,
+):
     # Reflect pad if not divisible by img_size
     original_h, original_w = input_data.shape[-2:]
     pad_h = (img_size - (original_h % img_size)) % img_size
@@ -278,7 +236,7 @@ def run_model(input_data, temporal_coords, location_coords, model, datamodule, i
     # Build sliding window
 
     batch_size = 1
-    #batch = torch.tensor(input_data, device="cpu")
+    # batch = torch.tensor(input_data, device="cpu")
     batch = torch.tensor(input_data)
     windows = batch.unfold(3, img_size, img_size).unfold(4, img_size, img_size)
     h1, w1 = windows.shape[3:5]
@@ -290,18 +248,11 @@ def run_model(input_data, temporal_coords, location_coords, model, datamodule, i
     num_batches = windows.shape[0] // batch_size if windows.shape[0] > batch_size else 1
     windows = torch.tensor_split(windows, num_batches, dim=0)
 
-    if torch.cuda.is_available():
-        device = torch.device('cuda')
-    else:
-        device = torch.device('cpu')
-
     if temporal_coords:
-        #temporal_coords = torch.tensor(temporal_coords, device=device).unsqueeze(0)
         temporal_coords = torch.tensor(temporal_coords).unsqueeze(0)
     else:
         temporal_coords = None
     if location_coords:
-        #location_coords = torch.tensor(location_coords[0], device=device).unsqueeze(0)
         location_coords = torch.tensor(location_coords[0]).unsqueeze(0)
     else:
         location_coords = None
@@ -310,19 +261,16 @@ def run_model(input_data, temporal_coords, location_coords, model, datamodule, i
     pred_imgs = []
     for x in windows:
         # Apply standardization
-        x = datamodule.test_transform(image=x.squeeze().numpy().transpose(1,2,0))
-        x = datamodule.aug(x)['image']
+        x = datamodule.test_transform(image=x.squeeze().numpy().transpose(1, 2, 0))
+        x = datamodule.aug(x)["image"]
 
         with torch.no_grad():
-            pred = model.run(x, temporal_coords=temporal_coords, location_coords=location_coords)
-            if lightning_model:
-                pred_lightning = lightning_model(x, temporal_coords=temporal_coords, location_coords=location_coords)
-                pred_lightning = pred_lightning.output.detach().cpu()
-                if not torch.equal(pred, pred_lightning):
-                    print("Inference output is not equal")
+            pred = model.run(x, location_coords=location_coords)
         y_hat = pred.argmax(dim=1)
 
-        y_hat = torch.nn.functional.interpolate(y_hat.unsqueeze(1).float(), size=img_size, mode="nearest")
+        y_hat = torch.nn.functional.interpolate(
+            y_hat.unsqueeze(1).float(), size=img_size, mode="nearest"
+        )
 
         pred_imgs.append(y_hat)
 
@@ -348,6 +296,7 @@ def run_model(input_data, temporal_coords, location_coords, model, datamodule, i
 
     return pred_imgs
 
+
 def main(
     data_file: str,
     model: str,
@@ -357,16 +306,13 @@ def main(
 ):
     os.makedirs(output_dir, exist_ok=True)
 
-    # Load Prithvi-EO-V2-300M-TL-Sen1Floods11 ---------------------------------------------------------------------------------
-
     model_obj = PrithviMAE(model=model)
     datamodule = generate_datamodule()
     img_size = 512  # Size of Sen1Floods11
 
-    # Loading data ---------------------------------------------------------------------------------
-
     input_data, temporal_coords, location_coords, meta_data = load_example(
-        file_paths=[data_file], indices=input_indices,
+        file_paths=[data_file],
+        indices=input_indices,
     )
 
     meta_data = meta_data[0]  # only one image
@@ -374,17 +320,18 @@ def main(
     if input_data.mean() > 1:
         input_data = input_data / 10000  # Convert to range 0-1
 
-    # Running Prithvi-EO-V2-300M-TL-Sen1Floods11 --------------------------------------------------------------------------------
+    channels = [
+        datamodule_config["bands"].index(b) for b in ["RED", "GREEN", "BLUE"]
+    ]  # BGR -> RGB
 
-    channels = [datamodule_config["bands"].index(b) for b in ["RED", "GREEN", "BLUE"]]  # BGR -> RGB
-
-    # lightning_model = LightningInferenceModel.from_config(config, checkpoint)
-    pred = run_model(input_data, temporal_coords, location_coords,
-                     model_obj, datamodule, img_size)
-
+    pred = run_model(
+        input_data, temporal_coords, location_coords, model_obj, datamodule, img_size
+    )
     # Save pred
     meta_data.update(count=1, dtype="uint8", compress="lzw", nodata=0)
-    pred_file = os.path.join(output_dir, f"pred_{os.path.splitext(os.path.basename(data_file))[0]}.tiff")
+    pred_file = os.path.join(
+        output_dir, f"pred_{os.path.splitext(os.path.basename(data_file))[0]}.tiff"
+    )
     save_geotiff(_convert_np_uint8(pred), pred_file, meta_data)
 
     # Save image + pred
@@ -397,13 +344,15 @@ def main(
         orig_img=torch.Tensor(input_data[0, :, 0, ...]),
         channels=channels,
     )
-    rgb_orig= rgb_orig.to(torch.float32)
+    rgb_orig = rgb_orig.to(torch.float32)
 
-    pred[pred == 0.] = np.nan
+    pred[pred == 0.0] = np.nan
     img_pred = rgb_orig * 0.7 + pred * 0.3
     img_pred[img_pred.isnan()] = rgb_orig[img_pred.isnan()]
 
-    img_pred_file = os.path.join(output_dir, f"rgb_pred_{os.path.splitext(os.path.basename(data_file))[0]}.tiff")
+    img_pred_file = os.path.join(
+        output_dir, f"rgb_pred_{os.path.splitext(os.path.basename(data_file))[0]}.tiff"
+    )
     save_geotiff(
         image=_convert_np_uint8(img_pred),
         output_path=img_pred_file,
@@ -412,14 +361,16 @@ def main(
 
     # Save image rgb
     if rgb_outputs:
-        rgb_file = os.path.join(output_dir, f"original_rgb_{os.path.splitext(os.path.basename(data_file))[0]}.tiff")
+        name_suffix = os.path.splitext(os.path.basename(data_file))[0]
+        rgb_file = os.path.join(
+            output_dir,
+            f"original_rgb_{name_suffix}.tiff",
+        )
         save_geotiff(
             image=_convert_np_uint8(rgb_orig),
             output_path=rgb_file,
             meta=meta_data,
         )
-
-    print("Done!")
 
 
 if __name__ == "__main__":
@@ -428,10 +379,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--data_file",
         type=str,
-        default="/workspace/scripts/demo_flooding/examples/India_900498_S2Hand.tif",
+        default="./India_900498_S2Hand.tif",
         help="Path to the file.",
     )
-
     parser.add_argument(
         "--model",
         type=str,
@@ -446,10 +396,13 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--input_indices",
-        default=[1,2,3,8,11,12],
+        default=[1, 2, 3, 8, 11, 12],
         type=int,
         nargs="+",
-        help="0-based indices of the six Prithvi channels to be selected from the input. By default selects [1,2,3,8,11,12] for S2L1C data.",
+        help="""
+        0-based indices of the six Prithvi channels to be selected from the input.
+        By default selects [1,2,3,8,11,12] for S2L1C data.
+        """,
     )
     parser.add_argument(
         "--rgb_outputs",

@@ -329,7 +329,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             scheduler_output: The scheduler output.
         """
         if self.model_config.is_attention_free:
-            return False
+            return
 
         self.attn_metadata_builders[0].reorder_batch(self.input_batch,
                                                      scheduler_output)
@@ -560,10 +560,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.input_batch.refresh_metadata()
 
     def _maybe_add_multimodal_kwargs(
-            self,
-            model_kwargs: dict[str, Any],
-            scheduler_output: "SchedulerOutput" = None,
-            num_reqs: int = -1,
+        self,
+        model_kwargs: dict[str, Any],
+        scheduler_output: Optional["SchedulerOutput"] = None,
+        num_reqs: int = -1,
     ):
 
         if not self.model_supports_multimodal_raw_input:
@@ -591,7 +591,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         model_kwargs.update(multi_modal_kwargs)
 
- 
     def _get_cumsum_and_arange(
         self,
         num_tokens: np.ndarray,

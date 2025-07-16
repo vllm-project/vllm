@@ -145,6 +145,7 @@ def supports_multimodal(
 
     return isinstance(model, SupportsMultiModal)
 
+
 @runtime_checkable
 class SupportsMultiModalWithRawInput(SupportsMultiModal, Protocol):
     """The interface required for all multi-modal models."""
@@ -158,6 +159,7 @@ class SupportsMultiModalWithRawInput(SupportsMultiModal, Protocol):
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
     """
+
 
 @runtime_checkable
 class _SupportsMultiModalWithRawInput(Protocol):
@@ -184,6 +186,7 @@ def supports_multimodal_raw_input(
         return isinstance(model, _SupportsMultiModalWithRawInput)
 
     return isinstance(model, SupportsMultiModalWithRawInput)
+
 
 @runtime_checkable
 class SupportsScoreTemplate(Protocol):
