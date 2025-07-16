@@ -7,6 +7,7 @@ import torch.distributed
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.distributed import get_world_group
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
@@ -155,7 +156,8 @@ class XPUWorker(Worker):
                                             current_platform.dist_backend)
 
         # global all_reduce needed for overall oneccl warm up
-        torch.distributed.all_reduce(torch.zeros(1).xpu())
+        torch.distributed.all_reduce(torch.zeros(1).xpu(),
+                                     group=get_world_group().device_group)
 
         # Set random seed.
         set_random_seed(self.model_config.seed)
