@@ -294,11 +294,83 @@ class MaxThinkTokensLogitsProcessor(LogitsProcessor):
         self.device = device
         self._state: dict[int, dict[str, Any]] = {}
 
-    def _find_last_token_index(self, tokens: list[int], token_id: int) -> int:
+    def _find_first_token_index(self, target_list: list[int], token_id: int) -> int:
+        """
+        Find the last occurrence of a single token in the list of tokens.
+
+        Args:
+          target_list (list[int]): The list of token IDs.
+          token_id (int): The token ID to find.
+        """
         try:
-            return len(tokens) - tokens[::-1].index(token_id) - 1
+            return len(target_list) - target_list[::-1].index(token_id) - 1
         except ValueError:
             return -1
+
+    def _find_last_sequence_index(self, target_list: list[int], token_ids: list[int]) -> int:
+        """
+        Find the last occurrence of the sequence of token_ids in tokens.
+
+        Args:
+          target_list (list[int]): The list of token IDs.
+          token_ids (list[int]): The sequence of token IDs to find.
+        """
+        index = self._find_first_token_index(target_list, token_ids[0])
+        if index != -1:
+            i = 1
+            for token_id in token_ids[1:]:
+                if index + i >= len(target_list) or target_list[index + i] != token_id:
+                    return -1
+                i += 1
+                index += 1
+
+        return index
+
+    def _init_state_entry(self, prompt_tok_ids, max_think_tokens):
+        last_start = self._find_last_sequence_index(
+            prompt_tok_ids, self.think_start_token_id)
+        last_end = self._find_last_sequence_index(
+            prompt_tok_ids, self.think_end_token_id)
+        in_think = last_start > last_end
+        think_count = len(prompt_tok_ids) - (last_start + 1) if in_think else 0
+
+        return {
+            "in_think": in_think,
+            "in_end": False,
+            "think_count": think_count,
+            "end_count": 0,
+            "prompt_tok_ids": prompt_tok_ids,
+            "output_tok_ids": [],
+            "max_think_tokens": max_think_tokens,
+        }
+
+    def _update_think_state(self, state):
+        output = state["output_tok_ids"]
+        if not output:
+            return
+
+        sliced_output1 = output[-1 + len(self.think_start_token_id):]
+        sliced_output2 = output[-1 + len(self.think_end_token_id):]
+
+        if self._find_last_sequence_index(sliced_output1, self.think_start_token_id) != -1:
+            state["in_think"] = True
+            state["think_count"] = 0
+        elif self._find_last_sequence_index(sliced_output2, self.think_end_token_id) != -1:
+            state["in_think"] = False
+            state["think_count"] = 0
+        else:
+            state["think_count"] += 1
+
+        if state["in_end"]:
+            state["end_count"] += 1
+            if state["end_count"] >= len(self.think_end_token_id):
+                state["in_end"] = False
+                state["end_count"] = 0
+        else:
+            if state["in_think"] and state["think_count"] >= state["max_think_tokens"]:
+                state["in_think"] = False
+                state["in_end"] = True
+                state["end_count"] = 0
 
     def is_argmax_invariant(self) -> bool:
         """This logits processor can change the outcome of
@@ -308,52 +380,25 @@ class MaxThinkTokensLogitsProcessor(LogitsProcessor):
 
     def update_state(self, batch_update: Optional[BatchUpdate]):
         if batch_update:
-            for (index, params, prompt_tok_ids,
-                 output_tok_ids) in batch_update.added:
+            for (index, params, prompt_tok_ids, output_tok_ids) in batch_update.added:
                 max_think_tokens = (params.max_think_tokens if isinstance(
                     params, SamplingParams) else None)
                 if max_think_tokens is not None:
-                    last_start = self._find_last_token_index(
-                        prompt_tok_ids, self.think_start_token_id)
-                    last_end = self._find_last_token_index(
-                        prompt_tok_ids, self.think_end_token_id)
-                    in_think = last_start > last_end
-                    count = len(prompt_tok_ids) - (last_start +
-                                                   1) if in_think else 0
-
-                    self._state[index] = {
-                        "in_think": in_think,
-                        "count": count,
-                        "prompt_tok_ids": prompt_tok_ids,
-                        "output_tok_ids": output_tok_ids,
-                        "max_think_tokens": max_think_tokens,
-                    }
+                    self._state[index] = self._init_state_entry(
+                        prompt_tok_ids, max_think_tokens)
+                    self._state[index]["output_tok_ids"] = output_tok_ids
 
             for index in batch_update.removed:
                 self._state.pop(index, {})
 
             for i1, i2, direction in batch_update.moved:
                 if direction == MoveDirectionality.SWAP:
-                    self._state[i1], self._state[i2] = self._state[
-                        i2], self._state[i1]
+                    self._state[i1], self._state[i2] = self._state[i2], self._state[i1]
                 else:
                     self._state[i2] = self._state.pop(i1, {})
 
-        # Update in_think and count for all active requests
         for state in self._state.values():
-            output = state["output_tok_ids"]
-            if not output:
-                continue
-
-            last_tok = output[-1]
-            if last_tok == self.think_start_token_id:
-                state["in_think"] = True
-                state["count"] = 0
-            elif last_tok == self.think_end_token_id:
-                state["in_think"] = False
-                state["count"] = 0
-            elif state["in_think"]:
-                state["count"] += 1
+            self._update_think_state(state)
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         batch_size = logits.size(0)
@@ -368,12 +413,13 @@ class MaxThinkTokensLogitsProcessor(LogitsProcessor):
             if not state:
                 continue
 
-            if state["in_think"] and state["count"] >= state[
-                    "max_think_tokens"]:
+            force_end_token_id = None
+            if state["in_end"]:
+                force_end_token_id = self.think_end_token_id[state["end_count"]]
                 mask[index] = True
 
         if mask.any():
             logits[mask] = -float("inf")
-            logits[mask, end_token_id] = 0.0
+            logits[mask, force_end_token_id] = 0.0
 
         return logits
