@@ -138,7 +138,7 @@ class NemotronVLProcessor(InternVLProcessor):
         return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
 
 
-class NemotronVLProcessingInfo(InternVLProcessingInfo):
+class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
     """Processing info for Nemotron VL models."""
 
     def get_hf_processor(
