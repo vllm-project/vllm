@@ -20,7 +20,24 @@ from .monitor import start_monitoring_torch_compile
 
 logger = init_logger(__name__)
 
+IGNORE_COMPILE_KEY = "_ignore_compile_vllm"
+
 _T = TypeVar("_T", bound=type[nn.Module])
+
+
+def ignore_torch_compile(cls: _T) -> _T:
+    """
+    A decorator to ignore support_torch_compile decorator
+    on the class. This is useful when a parent class has
+    a support_torch_compile decorator, but we don't want to
+    compile the class `cls` that inherits the parent class.
+    This only ignores compiling the forward of the class the
+    decorator is applied to. If the class has one or more submodules
+    that have support_torch_compile decorator applied, compile will
+    not be ignored for those submodules.
+    """
+    setattr(cls, IGNORE_COMPILE_KEY, True)
+    return cls
 
 
 @overload
@@ -156,7 +173,8 @@ def _support_torch_compile(
         self.do_not_compile = \
             vllm_config.compilation_config.level in [
             CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS
-        ] or not supports_dynamo()
+        ] or not supports_dynamo() or getattr(
+            self, IGNORE_COMPILE_KEY, False)
         if self.do_not_compile:
             return
         compilation_counter.num_models_seen += 1
