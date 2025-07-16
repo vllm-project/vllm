@@ -192,7 +192,6 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
         # Special case: allowed_origins, allowed_methods, allowed_headers all
         # need json.loads type
         # Should also remove nargs
-        print(frontend_kwargs["allowed_origins"])
         frontend_kwargs["allowed_origins"]["type"] = json.loads
         frontend_kwargs["allowed_methods"]["type"] = json.loads
         frontend_kwargs["allowed_headers"]["type"] = json.loads
