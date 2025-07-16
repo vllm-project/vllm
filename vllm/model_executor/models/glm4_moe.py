@@ -587,14 +587,6 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        if hasattr(config, "num_nextn_predict_layers"):
-            hf_overrides = {"architectures": ["Glm4MoeMTPForCausalLM"]}
-            raise RuntimeError(
-                "The configuration of this model indicates that it supports "
-                "MTP, but you instantiated the main model without MTP"
-                "of this model. Please use the vision model by setting "
-                f"`--hf-overrides '{json.dumps(hf_overrides)}'`")
-
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config

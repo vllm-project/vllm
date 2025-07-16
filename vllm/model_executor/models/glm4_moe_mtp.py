@@ -60,7 +60,7 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         self.mtp_block = Glm4MoeDecoderLayer(config=config,
                                              cache_config=cache_config,
                                              quant_config=quant_config,
-                                             prefix=prefix),
+                                             prefix=prefix)
 
     def forward(
         self,
