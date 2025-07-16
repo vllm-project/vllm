@@ -17,17 +17,13 @@ class ConvCacheParams:
 
     def at_layer_idx(self, layer_idx):
         return ConvCacheParams(self.conv_state[layer_idx],
-                                self.state_indices_tensor)
+                               self.state_indices_tensor)
 
 
 class ConvCacheManager(ConstantSizeCache):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig, 
-        dtype: torch.dtype,
-        num_conv_layers: int,
-        conv_state_shape: tuple[int, int]):
+    def __init__(self, vllm_config: VllmConfig, dtype: torch.dtype,
+                 num_conv_layers: int, conv_state_shape: tuple[int, int]):
 
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
         if not vllm_config.model_config.enforce_eager:

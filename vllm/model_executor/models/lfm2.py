@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
 from typing import Any, Optional
 
@@ -8,22 +9,18 @@ from transformers import Lfm2Config
 
 from vllm import envs
 from vllm.attention import Attention
-from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.conv import ShortConv
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba2_metadata import (
     Mamba2Metadata, prepare_mamba2_metadata)
-from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
-    causal_conv1d_fn, causal_conv1d_update)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -35,13 +32,11 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType
 
-from .interfaces import (HasInnerState, IsHybrid,  
-                         SupportsLoRA, SupportsPP,
+from .interfaces import (HasInnerState, IsHybrid, SupportsLoRA, SupportsPP,
                          SupportsQuant)
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
-from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionMetadata
 
 
 class Lfm2MLP(nn.Module):
@@ -367,7 +362,7 @@ class Lfm2Model(nn.Module):
     ) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
 
-        if not envs.VLLM_USE_V1:    
+        if not envs.VLLM_USE_V1:
             mamba2_metadata = prepare_mamba2_metadata(
                 chunk_size=1,
                 attn_metadata=attn_metadata,
@@ -499,7 +494,7 @@ class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         if not use_v1:
             conv_state_shape = (conv_state_shape[1], conv_state_shape[0])
 
-        return (conv_state_shape,)
+        return (conv_state_shape, )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         config = vllm_config.model_config.hf_config
@@ -561,8 +556,11 @@ class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         conv_cache_params = None
         if not envs.VLLM_USE_V1:
             if self.lfm2_cache is None:
-                num_conv_layers = self.model_config.get_num_layers_by_block_type(
-                    self.vllm_config.parallel_config, LayerBlockType.conv)
+                num_conv_layers = \
+                    self.model_config.get_num_layers_by_block_type(
+                        self.vllm_config.parallel_config,
+                        LayerBlockType.conv
+                    )
                 conv_shape = self.get_conv_cache_shape_from_config(
                     self.vllm_config, use_v1=False)
                 self.lfm2_cache = ConvCacheManager(
