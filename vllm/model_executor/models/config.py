@@ -205,7 +205,20 @@ class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
         }
 
 
-class HybridAttentionStaticCacheModelConfig(VerifyAndUpdateConfig):
+class GraniteMoeHybridModelConfig(VerifyAndUpdateConfig):
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        config = vllm_config.model_config
+        config.max_seq_len_to_capture = config.max_model_len
+        logger.info(
+            "Setting max_seq_len_to_capture to %d "
+            "to ensure that CUDA graph capture "
+            "covers sequences of length up to max_model_len.",
+            config.max_model_len)
+
+
+class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
 
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -306,4 +319,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
+    "GraniteMoeHybridForCausalLM": GraniteMoeHybridModelConfig,
 }
