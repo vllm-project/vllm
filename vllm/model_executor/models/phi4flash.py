@@ -193,7 +193,7 @@ class SambaYAttention(nn.Module):
             ],
                                 dim=-1)
             attn_output = self.attn(q, k, v)
-        else:  # re-use the kv cache, full attention
+        else:  # reuse the kv cache, full attention
             q = self.Wqkv(hidden_states)
             attn_output = self.attn(q, None, None)
         attn_output = attn_output.view(-1, self.num_heads * self.head_dim)
