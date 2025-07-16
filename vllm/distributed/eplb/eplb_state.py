@@ -191,10 +191,14 @@ class EplbState:
             physical_to_logical_map_list,
             device=device,
         )
-        # TODO(yongji): hard-wired to make sure the tensor does not get resized
-        MAX_PHYSICAL_EXPERT_FACTOR = 2
-        max_slots_per_logical_expert = (model.num_logical_experts *
-                                        MAX_PHYSICAL_EXPERT_FACTOR)
+        # Assuming 8 GPUs per node, this supports up to
+        # (255 + 1) / 8 = 32 nodes for now.
+        # TODO(rui): make this configurable
+        MAX_EXPERT_REDUNDANCY = 255
+        assert model.num_redundant_experts <= MAX_EXPERT_REDUNDANCY, (
+            f"num_redundant_experts {model.num_redundant_experts} "
+            f"must be less than or equal to {MAX_EXPERT_REDUNDANCY}")
+        max_slots_per_logical_expert = MAX_EXPERT_REDUNDANCY + 1
         logical_to_physical_map = torch.full(
             (model.num_logical_experts, max_slots_per_logical_expert),
             -1,
