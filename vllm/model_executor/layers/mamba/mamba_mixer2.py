@@ -17,8 +17,11 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba2_metadata import (Mamba2Metadata,
                                                               update_metadata)
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    extra_groups_for_head_shards, get_mamba_state_shape)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
@@ -145,18 +148,6 @@ class Mixer2RMSNormGated(CustomOp):
         return out
 
 
-def extra_groups_for_head_shards(ngroups: int, tp_size: int):
-    """Compute the increase in group numbers to account for
-    replication in order to accompany the head shards."""
-
-    # in the case ngoups % tp_size == 0, this will be zero
-    if ngroups % tp_size == 0:
-        return 0
-
-    # for n_groups == 1, this is exactly tp_size - n_groups
-    return tp_size - ngroups
-
-
 def mamba_v2_sharded_weight_loader(
     shard_spec: list[tuple[int, int, float]],
     tp_size: int,
@@ -219,7 +210,7 @@ def mamba_v2_sharded_weight_loader(
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
 @CustomOp.register("mamba_mixer2")
-class MambaMixer2(CustomOp):
+class MambaMixer2(MambaBase, CustomOp):
     """
     Compute ∆, A, B, C, and D the state space parameters and compute
     the `contextualized_states`. A, D are input independent
@@ -231,22 +222,21 @@ class MambaMixer2(CustomOp):
     """
 
     def __init__(
-            self,
-            hidden_size: int,
-            ssm_state_size: int,
-            conv_kernel_size: int,
-            intermediate_size: int,
-            use_conv_bias: bool,
-            use_bias: bool,
-            n_groups: int = 1,
-            num_heads: int = 128,
-            head_dim: int = 64,
-            rms_norm_eps: float = 1e-5,
-            activation: str = "silu",
-            use_rms_norm: bool = True,
-            quant_config: Optional[QuantizationConfig] = None,
-            prefix: str = "",
-            chunk_size: int = -1,  # the chunk size used by v1
+        self,
+        hidden_size: int,
+        ssm_state_size: int,
+        conv_kernel_size: int,
+        intermediate_size: int,
+        use_conv_bias: bool,
+        use_bias: bool,
+        n_groups: int = 1,
+        num_heads: int = 128,
+        head_dim: int = 64,
+        rms_norm_eps: float = 1e-5,
+        activation: str = "silu",
+        use_rms_norm: bool = True,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -428,10 +418,7 @@ class MambaMixer2(CustomOp):
             # of Attention + v0 PP.
             # The inner tuple is (conv_state, ssm_state)
             self.kv_cache = [(torch.tensor([]), torch.tensor([]))]
-            assert chunk_size != -1, "chunk_size must be set for v1"
 
-        # NOTE: chunk_size may be -1 for models without v1 support
-        self.chunk_size = chunk_size
         self.prefix = prefix
 
     def forward_native(
@@ -586,8 +573,8 @@ class MambaMixer2(CustomOp):
             x = hidden_states_B_C_p.transpose(
                 0, 1)  # this is the form that causal-conv see
             if mamba2_metadata.cu_seqlen is None:
-                mamba2_metadata = update_metadata(
-                    x, attn_metadata.query_start_loc, mamba2_metadata)
+                mamba2_metadata = update_metadata(x, query_start_loc_p,
+                                                  mamba2_metadata)
             hidden_states_B_C_p = causal_conv1d_fn(
                 x,
                 conv_weights,
@@ -596,6 +583,7 @@ class MambaMixer2(CustomOp):
                 conv_states=conv_state,
                 has_initial_state=has_initial_states_p,
                 cache_indices=state_indices_tensor_p,
+                metadata=mamba2_metadata,
                 query_start_loc=query_start_loc_p).transpose(
                     0, 1)[:num_prefill_tokens]
 
@@ -606,9 +594,14 @@ class MambaMixer2(CustomOp):
             initial_states = None
             if (has_initial_states_p is not None and prep_initial_states):
                 # making a copy of the states
-                initial_states = torch.where(
-                    has_initial_states_p[:, None, None, None],
-                    ssm_state[state_indices_tensor_p], 0)
+                if envs.VLLM_USE_V1:
+                    initial_states = torch.where(
+                        has_initial_states_p[:, None, None, None],
+                        ssm_state[state_indices_tensor_p], 0)
+                else:
+                    initial_states = torch.where(
+                        has_initial_states_p[:num_prefills, None, None, None],
+                        ssm_state[state_indices_tensor_p], 0)
 
             scan_output, varlen_state = mamba_chunk_scan_combined(
                 hidden_states_p.view(1, num_prefill_tokens,
@@ -710,30 +703,12 @@ class MambaMixer2(CustomOp):
         return out
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
-        world_size = get_tensor_model_parallel_world_size()
-
-        conv_state_shape, temporal_state_shape = None, None
-
-        # if n_groups is not divisible by world_size, need to extend the shards
-        # to ensure all groups needed by a head is sharded along with it
-        n_groups = (self.n_groups +
-                    extra_groups_for_head_shards(self.n_groups, world_size))
-
-        # - heads and n_groups are TP-ed
-        conv_dim = (self.intermediate_size +
-                    2 * n_groups * self.ssm_state_size)
-        # contiguous along 'dim' axis
-        conv_state_shape = (
-            self.conv_kernel_size - 1,
-            divide(conv_dim, world_size),
+        return get_mamba_state_shape(
+            intermediate_size=self.intermediate_size,
+            tp_world_size=get_tensor_model_parallel_world_size(),
+            n_groups=self.n_groups,
+            num_heads=self.num_heads,
+            head_dim=self.head_dim,
+            state_size=self.ssm_state_size,
+            conv_kernel=self.conv_kernel_size,
         )
-
-        # These are not TP-ed as they depend on A, dt_bias, D
-        # - they are typically small
-        #   e.g., (h_heads, d_head, d_state) = (128, 64, 128)
-        temporal_state_shape = (
-            divide(self.num_heads, world_size),
-            self.head_dim,
-            self.ssm_state_size,
-        )
-        return conv_state_shape, temporal_state_shape

@@ -172,16 +172,6 @@ if(NVCC_THREADS AND VLLM_GPU_LANG STREQUAL "CUDA")
 endif()
 
 #
-# Set nvcc fatbin compression.
-#
-if(VLLM_GPU_LANG STREQUAL "CUDA")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-    list(APPEND VLLM_GPU_FLAGS "-Xfatbin" "-compress-all" "-compress-mode=size")
-  endif()
-endif()
-
-
-#
 # Use FetchContent for C++ dependencies that are compiled as part of vLLM's build process.
 # setup.py will override FETCHCONTENT_BASE_DIR to play nicely with sccache.
 # Each dependency that produces build artifacts should override its BINARY_DIR to avoid
@@ -563,7 +553,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   cuda_archs_loose_intersection(MLA_ARCHS "10.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND MLA_ARCHS)
     set(SRCS
-      "csrc/attention/mla/cutlass_mla_kernels.cu")
+      "csrc/attention/mla/cutlass_mla_kernels.cu"
+      "csrc/attention/mla/sm100_cutlass_mla_kernel.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${MLA_ARCHS}")
