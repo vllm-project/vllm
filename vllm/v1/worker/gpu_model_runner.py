@@ -1415,7 +1415,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 **MultiModalKwargs.as_kwargs(
                     model_kwargs,
                     device=self.device,
-                ))
+                ),
+            )
 
             self.maybe_wait_for_kv_save()
 
@@ -2073,12 +2074,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.vllm_config,
                     num_tokens=num_tokens,
                     num_tokens_across_dp=num_tokens_across_dp):
-                outputs = model(input_ids=input_ids,
-                                positions=positions,
-                                intermediate_tensors=intermediate_tensors,
-                                inputs_embeds=inputs_embeds,
-                                **MultiModalKwargs.as_kwargs(
-                                    model_kwargs, device=self.device))
+                outputs = model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    **MultiModalKwargs.as_kwargs(
+                        model_kwargs,
+                        device=self.device,
+                    ),
+                )
 
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs

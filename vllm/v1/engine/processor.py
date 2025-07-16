@@ -380,10 +380,9 @@ class Processor:
         prompt_type: Literal["encoder", "decoder"],
     ):
         model_config = self.model_config
-        if model_config.skip_tokenizer_init:
-            tokenizer = None
-        else:
-            tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
+
+        tokenizer = (None if model_config.skip_tokenizer_init else
+                     self.tokenizer.get_lora_tokenizer(lora_request))
 
         prompt_ids = prompt_inputs["prompt_token_ids"]
         if not prompt_ids:
