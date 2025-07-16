@@ -436,7 +436,7 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
     embedding_padding_modules = ["lm_head"]
 
     @classmethod
-    def get_mamba_state_shape_from_config(
+    def get_static_cache_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
         use_v1: bool = True,
@@ -524,7 +524,7 @@ class BambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                         LayerBlockType.mamba
                     )
                 mamba_state_shape = \
-                    self.get_mamba_state_shape_from_config(
+                    self.get_static_cache_shape_from_config(
                         self.vllm_config, use_v1=False)
                 self.mamba_cache = MambaCacheManager(self.vllm_config,
                                                      self.lm_head.weight.dtype,

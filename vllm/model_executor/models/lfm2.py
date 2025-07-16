@@ -466,7 +466,7 @@ class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
     embedding_padding_modules = ["lm_head"]
 
     @classmethod
-    def get_conv_cache_shape_from_config(
+    def get_static_cache_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
         use_v1: bool = True,
@@ -561,7 +561,7 @@ class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                         self.vllm_config.parallel_config,
                         LayerBlockType.conv
                     )
-                conv_shape = self.get_conv_cache_shape_from_config(
+                conv_shape = self.get_static_cache_shape_from_config(
                     self.vllm_config, use_v1=False)
                 self.lfm2_cache = ConvCacheManager(
                     vllm_config=self.vllm_config,

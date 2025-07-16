@@ -2497,12 +2497,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     raise NotImplementedError
 
         if has_attn and has_static_cache_layers:
-            self._verify_hybrid_attention_mamba_layout(kv_cache_config,
-                                                       kv_cache_raw_tensors)
+            self._verify_hybrid_attention_static_cache_layout(
+                kv_cache_config, kv_cache_raw_tensors)
 
         return kv_caches
 
-    def _verify_hybrid_attention_mamba_layout(
+    def _verify_hybrid_attention_static_cache_layout(
             self, kv_cache_config: KVCacheConfig,
             kv_cache_raw_tensors: dict[str, torch.Tensor]) -> None:
         """
@@ -2638,55 +2638,36 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 raise ValueError(
                     f"Unknown attention type: {attn_module.attn_type}")
 
-        mamba_layers = get_layers_from_vllm_config(self.vllm_config, MambaBase)
-        short_conv_layers = get_layers_from_vllm_config(
-            self.vllm_config, ShortConv)
-        if len(mamba_layers) > 0:
+        for layer_cls, spec_cls in zip((MambaBase, ShortConv),
+                                       (MambaSpec, ShortConvSpec)):
+            static_cache_layers = get_layers_from_vllm_config(
+                self.vllm_config, layer_cls)
+            if len(static_cache_layers) > 0:
+                break
+
+        if len(static_cache_layers) > 0:
             if self.vllm_config.speculative_config is not None:
                 raise NotImplementedError(
-                    "Mamba with speculative decoding is not supported yet.")
+                    "Static cache models with speculative decoding is not "
+                    "yet supported.")
             if not self.vllm_config.model_config.enforce_eager:
                 raise NotImplementedError(
-                    "Mamba with cuda graph is not supported yet.")
+                    "Static cache models with cuda graph is not "
+                    "yet supported.")
             if self.vllm_config.cache_config.enable_prefix_caching:
                 raise NotImplementedError(
-                    "Prefix caching is not supported for Mamba yet.")
+                    "Prefix caching for static cache models is not "
+                    "yet supported.")
             max_model_len = self.vllm_config.model_config.max_model_len
 
             page_size_padded = (
-                self.vllm_config.cache_config.mamba_page_size_padded)
+                self.vllm_config.cache_config.static_cache_page_size_padded)
 
-            # Set block_size to max_model_len, so that mamba model will always
-            # have only one block in the KV cache.
-            for layer_name, mamba_module in mamba_layers.items():
-                kv_cache_spec[layer_name] = MambaSpec(
-                    shapes=mamba_module.get_state_shape(),
-                    dtype=self.kv_cache_dtype,
-                    block_size=max_model_len,
-                    page_size_padded=page_size_padded)
-
-        elif len(short_conv_layers) > 0:
-            if self.vllm_config.speculative_config is not None:
-                raise NotImplementedError(
-                    "ShortConv with speculative decoding is not supported yet."
-                )
-            if not self.vllm_config.model_config.enforce_eager:
-                raise NotImplementedError(
-                    "ShortConv with cuda graph is not supported yet.")
-            if self.vllm_config.cache_config.enable_prefix_caching:
-                raise NotImplementedError(
-                    "Prefix caching is not supported for ShortConv yet.")
-            max_model_len = self.vllm_config.model_config.max_model_len
-
-            page_size_padded = self._maybe_pad_fixed_state_page_size(
-                attn_layers, short_conv_layers, kv_cache_spec, ShortConvSpec,
-                max_model_len, block_size)
-
-            # Set block_size to max_model_len, so that mamba model will always
-            # have only one block in the KV cache.
-            for layer_name, short_conv_module in short_conv_layers.items():
-                kv_cache_spec[layer_name] = ShortConvSpec(
-                    shapes=short_conv_module.get_state_shape(),
+            # Set block_size to max_model_len, so that the static cache /
+            # hybrid model will always have only one block in the KV cache.
+            for layer_name, static_cache_module in static_cache_layers.items():
+                kv_cache_spec[layer_name] = spec_cls(
+                    shapes=static_cache_module.get_state_shape(),
                     dtype=self.kv_cache_dtype,
                     block_size=max_model_len,
                     page_size_padded=page_size_padded)

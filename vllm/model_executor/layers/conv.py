@@ -68,7 +68,7 @@ class ShortConv(CustomOp):
             # The inner tuple is (conv_state,)
             self.kv_cache = [(torch.tensor([]))]
 
-        # For compatibility with MambaSpec utils
+        # For compatibility with StaticCacheSpec utils
         self.chunk_size = 1
         self.prefix = prefix
 
@@ -83,7 +83,7 @@ class ShortConv(CustomOp):
         conv_metadata: Mamba2Metadata,
     ) -> torch.Tensor:
         forward_context = get_forward_context()
-        # mamba2_metadata contains metadata necessary for the mamba2 triton
+        # Mamba2Metadata contains metadata necessary for the mamba2 triton
         # kernels to operate in continuous batching and in chunked prefill
         # modes; they are computed at top-level model forward since they
         # stay the same and reused for all mamba layers in the same iteration
@@ -99,20 +99,10 @@ class ShortConv(CustomOp):
                 conv_state = self_kv_cache[0].transpose(-1, -2)
                 state_indices_tensor = attn_metadata.state_indices_tensor
                 has_initial_states_p = attn_metadata.has_initial_states
-                # prep_initial_states = attn_metadata.prep_initial_states
-                # chunk_size = attn_metadata.chunk_size
-                # seq_idx_p = attn_metadata.seq_idx
-                # chunk_indices_p = attn_metadata.chunk_indices
-                # chunk_offsets_p = attn_metadata.chunk_offsets
         else:
             conv_state = conv_cache_params.conv_state
             state_indices_tensor = conv_cache_params.state_indices_tensor
             has_initial_states_p = conv_metadata.has_initial_states
-            # prep_initial_states = conv_metadata.prep_initial_states
-            # chunk_size = conv_metadata.chunk_size
-            # seq_idx_p = conv_metadata.seq_idx
-            # chunk_indices_p = conv_metadata.chunk_indices
-            # chunk_offsets_p = conv_metadata.chunk_offsets
 
         BCx, _ = self.in_proj(hidden_states)
 

@@ -7,7 +7,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, ShortConvSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, StaticCacheSpec
 
 if TYPE_CHECKING:
 
@@ -224,10 +224,10 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """
         Ensure that page size of attention layers is greater than or
-        equal to the fixed state layers (e.g. mamba, short-conv). 
-        If not, automatically set the attention block size to ensure that it is. 
-        If the attention page size is strictly greater than the fixed state page size, 
-        we pad the fixed state page size to make them equal.
+        equal to the static cache layers (e.g. mamba, short-conv). If not,
+        automatically set the attention block size to ensure that it is. If the
+        attention page size is strictly greater than the static cache page
+        size, we pad the static cache page size to make them equal.
 
         Args:
             vllm_config: vLLM Config
@@ -257,20 +257,13 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             model_config._model_info.architecture)[0]
 
         # get mamba page size
-        static_cache_shapes = model_cls.get_mamba_state_shape_from_config(vllm_config)
-        if static_cache_shapes is not None:
-            static_cache_page_size = MambaSpec(
-                shapes=static_cache_shapes,
-                dtype=kv_cache_dtype,
-                block_size=model_config.max_model_len,
-            ).page_size_bytes
-        else:
-            static_cache_shapes = model_cls.get_conv_cache_shape_from_config(vllm_config)
-            static_cache_page_size = ShortConvSpec(
-                shapes=static_cache_shapes,
-                dtype=kv_cache_dtype,
-                block_size=model_config.max_model_len,
-            ).page_size_bytes
+        static_cache_shapes = model_cls.get_static_cache_shape_from_config(
+            vllm_config)
+        static_cache_page_size = StaticCacheSpec(
+            shapes=static_cache_shapes,
+            dtype=kv_cache_dtype,
+            block_size=model_config.max_model_len,
+        ).page_size_bytes
 
         # some attention backends (e.g. FA) only support setting
         # block size to multiple of 16, so let's suggest a value
@@ -301,14 +294,15 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             return
 
         # pad mamba page size to exactly match attention
-        if (cache_config.mamba_page_size_padded is None
-                or cache_config.mamba_page_size_padded != attn_page_size):
-            cache_config.mamba_page_size_padded = (attn_page_size)
-            static_cache_padding_pct = 100 * (attn_page_size -
-                                       static_cache_page_size) / static_cache_page_size
+        if (cache_config.static_cache_page_size_padded is None or
+                cache_config.static_cache_page_size_padded != attn_page_size):
+            cache_config.static_cache_page_size_padded = (attn_page_size)
+            static_cache_padding_pct = 100 * (
+                attn_page_size -
+                static_cache_page_size) / static_cache_page_size
             logger.info(
-                "Padding fixed state page size by %.2f%% to ensure "
-                "that fixed state page size and attention page size are "
+                "Padding static cache page size by %.2f%% to ensure "
+                "that static cache page size and attention page size are "
                 "exactly equal.", static_cache_padding_pct)
 
 
