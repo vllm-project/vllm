@@ -206,9 +206,8 @@ class ShortConv(CustomOp):
                                   query_start_loc=query_start_loc_p).transpose(
                                       0, 1)[:num_prefill_tokens]
 
-            C_p = C_p.view(1, num_prefill_tokens, -1)
             y = C_p * Bx
-            conv_output_list.append(y.view(num_prefill_tokens, -1))
+            conv_output_list.append(y)
 
         if has_decode:
             Bx_d = (B_d * x_d).contiguous()
@@ -219,9 +218,11 @@ class ShortConv(CustomOp):
                 self.conv.bias,
                 activation=None,
                 conv_state_indices=state_indices_tensor_d)
-            C_d = C_d.view(num_decodes, -1)
             y = C_d * Bx
-            conv_output_list.append(y.view(num_decodes, -1))
+            if envs.VLLM_USE_V1:
+                conv_output_list.insert(0, y)
+            else:
+                conv_output_list.append(y)
 
         # Merge prefill and decode outputs before passing to gated MLP
         hidden_states = torch.vstack(conv_output_list)
