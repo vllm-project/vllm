@@ -2657,11 +2657,12 @@ class SpeculativeConfig:
                 "n_predict": n_predict,
                 "architectures": ["DeepSeekMTPModel"]
             })
-        if hf_config.model_type == "glm4_moe_mtp":
+        if hf_config.architectures[0] == "Glm4MoeForCausalLM":
+            hf_config.model_type = "glm4_moe_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update({
                 "n_predict": n_predict,
-                "architectures": ["Glm4MoeMTPModel"]
+                "architectures": ["Glm4MoeMTPForCausalLM"]
             })
         if hf_config.architectures[0] == "MiMoForCausalLM":
             hf_config.model_type = "mimo_mtp"
@@ -2671,8 +2672,6 @@ class SpeculativeConfig:
                 "n_predict": n_predict,
                 "architectures": ["MiMoMTPModel"]
             })
-            return hf_config
-
         return hf_config
 
     def __post_init__(self):
@@ -2690,7 +2689,7 @@ class SpeculativeConfig:
             # mtp acceleration for more models besides deepseek_v3
             if self.target_model_config and \
                 (self.target_model_config.hf_text_config.model_type in
-                 ["deepseek_v3","mimo","glm4_moe"]):
+                 ('deepseek_v3', 'mimo', 'glm4_moe')):
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
             elif self.method in ("ngram", "[ngram]"):
