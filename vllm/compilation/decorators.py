@@ -32,12 +32,24 @@ def ignore_torch_compile(cls: _T) -> _T:
     a support_torch_compile decorator, but we don't want to
     compile the class `cls` that inherits the parent class.
     This only ignores compiling the forward of the class the
-    decorator is applied to. If the class has one or more submodules
+    decorator is applied to. 
+
+    If the parent has ignore_torch_compile but the child has
+    support_torch_compile, the child will still be compiled.
+    
+    If the class has one or more submodules
     that have support_torch_compile decorator applied, compile will
     not be ignored for those submodules.
     """
     setattr(cls, IGNORE_COMPILE_KEY, True)
     return cls
+
+
+def _should_ignore_torch_compile(cls) -> bool:
+    """
+    Check if the class should be ignored for torch.compile.
+    """
+    return getattr(cls, IGNORE_COMPILE_KEY, False)
 
 
 @overload
@@ -165,6 +177,8 @@ def _support_torch_compile(
 
     old_init = cls.__init__
 
+    setattr(cls, IGNORE_COMPILE_KEY, False)
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = '', **kwargs):
         old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
         self.vllm_config = vllm_config
@@ -173,10 +187,11 @@ def _support_torch_compile(
         self.do_not_compile = \
             vllm_config.compilation_config.level in [
             CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS
-        ] or not supports_dynamo() or (
-            IGNORE_COMPILE_KEY in self.__class__.__dict__)
+        ] or not supports_dynamo() or _should_ignore_torch_compile(
+            self.__class__)
         if self.do_not_compile:
             return
+
         compilation_counter.num_models_seen += 1
         TorchCompileWrapperWithCustomDispatcher.__init__(
             self, compilation_level=vllm_config.compilation_config.level)

@@ -113,26 +113,6 @@ class CompiledAttentionTwo(CompiledAttention):
 
 
 @ignore_torch_compile
-class SimpleModel(ParentModel):
-
-    def __init__(self,
-                 *,
-                 mlp_size: int,
-                 hidden_size: int,
-                 vllm_config: VllmConfig,
-                 prefix: str = '',
-                 **kwargs) -> None:
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-        self.attn_one = Attention(mlp_size, hidden_size)
-        self.attn_two = Attention(mlp_size, hidden_size)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.attn_one(x)
-        x = self.attn_two(x) + x
-        return x
-
-
-@ignore_torch_compile
 class SimpleModelWithTwoGraphs(ParentModel):
 
     def __init__(self,
@@ -175,8 +155,10 @@ class SimpleModelWithTwoGraphs(ParentModel):
         return x
 
 
-def test_ignore_torch_compile_decorator():
+def test_ignore_torch_compile_decorator(monkeypatch):
     assert VLLM_USE_V1
+
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     # piecewise
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
@@ -186,12 +168,54 @@ def test_ignore_torch_compile_decorator():
         cudagraph_capture_sizes=[1, 2],
     ))
 
-    with set_current_vllm_config(vllm_config):
-        model = SimpleModel(mlp_size=MLP_SIZE,
-                            hidden_size=HIDDEN_SIZE,
-                            vllm_config=vllm_config,
-                            prefix='').eval().cuda()
+    @support_torch_compile
+    class A(nn.Module):
 
+        def __init__(self,
+                     *,
+                     vllm_config: VllmConfig,
+                     prefix: str = '',
+                     **kwargs) -> None:
+            super().__init__()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            x = x + x
+            attn_output = torch.empty_like(x)
+            torch.ops.silly.attention(x, x, x, attn_output)
+            x = attn_output
+            x = x * 3
+            return x
+
+    @ignore_torch_compile
+    class B(A):
+        ...
+
+    @support_torch_compile
+    class C(B):
+        ...
+
+    with set_current_vllm_config(vllm_config):
+        mod_A = A(vllm_config=vllm_config, prefix='').eval().cuda()
+
+    # A has support_torch_compile
+    with compilation_counter.expect(
+            num_graphs_seen=1,
+            num_piecewise_graphs_seen=3,
+            num_piecewise_capturable_graphs_seen=2,
+            num_backend_compilations=2,
+            num_cudagraph_captured=4,
+            # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+    ), set_forward_context({}, vllm_config=vllm_config):
+        # first run is for compile
+        mod_A(torch.randn(BATCH_SIZE, MLP_SIZE).cuda())
+        # run cudagraph captured sizes
+        mod_A(torch.randn(2, MLP_SIZE).cuda())
+        mod_A(torch.randn(1, MLP_SIZE).cuda())
+
+    with set_current_vllm_config(vllm_config):
+        mod_B = B(vllm_config=vllm_config, prefix='').eval().cuda()
+
+    # B's ignore_torch_compile should override A's support_torch_compile
     with compilation_counter.expect(
             num_graphs_seen=0,
             num_piecewise_graphs_seen=0,
@@ -199,12 +223,25 @@ def test_ignore_torch_compile_decorator():
             num_backend_compilations=0,
             num_cudagraph_captured=0,
     ), set_forward_context({}, vllm_config=vllm_config):
-        # first run is for compile
-        model(torch.randn(BATCH_SIZE, MLP_SIZE).cuda())
+        mod_B(torch.randn(BATCH_SIZE, MLP_SIZE).cuda())
+        mod_B(torch.randn(2, MLP_SIZE).cuda())
+        mod_B(torch.randn(1, MLP_SIZE).cuda())
 
-        # run cudagraph captured sizes
-        model(torch.randn(2, MLP_SIZE).cuda())
-        model(torch.randn(1, MLP_SIZE).cuda())
+    with set_current_vllm_config(vllm_config):
+        mod_C = C(vllm_config=vllm_config, prefix='').eval().cuda()
+
+    # C's support_torch_compile should override B's ignore_torch_compile
+    with compilation_counter.expect(
+            num_graphs_seen=1,
+            num_piecewise_graphs_seen=3,
+            num_piecewise_capturable_graphs_seen=2,
+            num_backend_compilations=2,
+            num_cudagraph_captured=4,
+            # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+    ), set_forward_context({}, vllm_config=vllm_config):
+        mod_C(torch.randn(BATCH_SIZE, MLP_SIZE).cuda())
+        mod_C(torch.randn(2, MLP_SIZE).cuda())
+        mod_C(torch.randn(1, MLP_SIZE).cuda())
 
 
 @torch.inference_mode
