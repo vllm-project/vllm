@@ -6,10 +6,15 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.v1.sample.logits_processor.state import BatchUpdate
 
 
 class LogitsProcessor(ABC):
+
+    @abstractmethod
+    def __init__(self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool) -> None:
+        raise NotImplementedError
 
     @abstractmethod
     def apply(self, logits: torch.Tensor) -> torch.Tensor:

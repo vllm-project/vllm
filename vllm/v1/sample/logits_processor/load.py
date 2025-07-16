@@ -3,14 +3,17 @@
 import importlib
 import itertools
 import logging
-from typing import Optional, Union
+from typing import Optional, Union, TYPE_CHECKING
 
+import torch
 from vllm.v1.sample.logits_processor import LogitsProcessor
 from vllm.v1.sample.logits_processor.impls import (LogitBiasLogitsProcessor,
                                                    MinPLogitsProcessor,
                                                    MinTokensLogitsProcessor)
 from vllm.v1.sample.logits_processor.state import LogitsProcessors
-from vllm.v1.sample.logits_processor.utils import LogitProcessorCtorArgs
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = logging.getLogger(__name__)
 
@@ -23,22 +26,22 @@ _builtin_logitsprocs_classes: list[type[LogitsProcessor]] = [
 ]
 
 
-def _load_logitsprocs_by_fqns(
+def _load_logitsprocs_by_fqcns(
     logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]]
 ) -> list[type[LogitsProcessor]]:
-    """Load logit processor types, identifying them by fully-qualified names
-    (FQNs).
+    """Load logit processor types, identifying them by fully-qualified class
+    names (FQCNs).
 
-    Effectively, a mixed list of logitproc types and FQN strings is converted
-    into a list of entirely logitproc types, by loading the FQNs.
+    Effectively, a mixed list of logitproc types and FQCN strings is converted
+    into a list of entirely logitproc types, by loading from the FQCNs.
 
-    FQN syntax is <module>:<type> i.e. x.y.z:CustomLogitProc
+    FQCN syntax is <module>:<type> i.e. x.y.z:CustomLogitProc
 
     Already-loaded logitproc types must be subclasses of LogitsProcessor
 
     Args:
-      fqns: Potentially mixed list of logitsprocs types and FQN strings for
-            logitproc types
+      logits_processors: Potentially mixed list of logitsprocs types and FQCN
+                         strings for logitproc types
 
     Returns:
       List of logitproc types
@@ -125,7 +128,7 @@ def load_custom_logitsprocs(
 
     Args:
       logits_processors: potentially mixed list of logitproc types and
-                         logitproc type fully-qualified names (FQNs)
+                         logitproc type fully-qualified names (FQCNs)
                          which need to be loaded
 
     Returns:
@@ -138,11 +141,13 @@ def load_custom_logitsprocs(
         return []
 
     return (_load_logitsprocs_plugins() +
-            _load_logitsprocs_by_fqns(logits_processors))
+            _load_logitsprocs_by_fqcns(logits_processors))
 
 
-def build_logitsprocs(args: LogitProcessorCtorArgs) -> LogitsProcessors:
+def build_logitsprocs(vllm_config: "VllmConfig", 
+                      device: torch.device, 
+                      is_pin_memory: bool) -> LogitsProcessors:
+    custom_logitsprocs_classes = vllm_config.logits_processors or []
     return LogitsProcessors(
-        ctor(args)
-        for ctor in itertools.chain(_builtin_logitsprocs_classes,
-                                    args.vllm_config.logits_processors or []))
+        ctor(vllm_config, device, is_pin_memory) for ctor in itertools.chain(
+            _builtin_logitsprocs_classes, custom_logitsprocs_classes))

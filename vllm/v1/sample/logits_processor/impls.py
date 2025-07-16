@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import torch
 
@@ -9,33 +9,32 @@ from vllm import SamplingParams
 from vllm.v1.sample.logits_processor.core import LogitsProcessor
 from vllm.v1.sample.logits_processor.state import (BatchUpdate,
                                                    MoveDirectionality)
-from vllm.v1.sample.logits_processor.utils import LogitProcessorCtorArgs
 
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 class MinPLogitsProcessor(LogitsProcessor):
 
-    def __init__(self, args: LogitProcessorCtorArgs):
-        super().__init__()
-        max_num_reqs = args.vllm_config.scheduler_config.max_num_seqs
+    def __init__(self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool):
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.min_p_count: int = 0
 
         self.min_p_cpu_tensor = torch.zeros((max_num_reqs, ),
                                             dtype=torch.float32,
                                             device="cpu",
-                                            pin_memory=args.is_pin_memory)
+                                            pin_memory=is_pin_memory)
         self.min_p_cpu = self.min_p_cpu_tensor.numpy()
 
         self.use_double_tensor = torch.device("cpu") != torch.device(
-            args.device)
+            device)
 
         if self.use_double_tensor:
             # Pre-allocated device tensor
             self.min_p_device: torch.Tensor = torch.empty((max_num_reqs, ),
                                                           dtype=torch.float32,
-                                                          device=args.device)
+                                                          device=device)
         else:
             self.min_p_device = self.min_p_cpu_tensor
-
         # Current slice of the device tensor
         self.min_p: torch.Tensor = self.min_p_device[:0]
 
@@ -108,11 +107,10 @@ class MinPLogitsProcessor(LogitsProcessor):
 
 class LogitBiasLogitsProcessor(LogitsProcessor):
 
-    def __init__(self, args: LogitProcessorCtorArgs):
-        super().__init__()
+    def __init__(self, _, device: torch.device, is_pin_memory: bool):
+        self.device=device
+        self.pin_memory=is_pin_memory
         self.biases: dict[int, dict[int, float]] = {}
-        self.device = args.device
-        self.pin_memory = args.is_pin_memory
 
         self.bias_tensor: torch.Tensor = torch.tensor(())
         self.logits_slice = (self._device_tensor([], torch.int32),
@@ -187,12 +185,11 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
 
 class MinTokensLogitsProcessor(LogitsProcessor):
 
-    def __init__(self, args: LogitProcessorCtorArgs):
+    def __init__(self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool):
         # index -> (min_toks, output_token_ids, stop_token_ids)
-        super().__init__()
+        self.device=device
+        self.pin_memory=is_pin_memory
         self.min_toks: dict[int, tuple[int, Sequence[int], set[int]]] = {}
-        self.device = args.device
-        self.pin_memory = args.is_pin_memory
 
         # (req_idx_tensor,eos_tok_id_tensor)
         self.logits_slice: tuple[torch.Tensor,

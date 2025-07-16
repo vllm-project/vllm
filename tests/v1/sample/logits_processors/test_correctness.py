@@ -27,7 +27,6 @@ from vllm.v1.sample.logits_processor import (BatchUpdate, BatchUpdateBuilder,
                                              MoveDirectionality)
 # yapf: enable
 from vllm.v1.sample.logits_processor.load import build_logitsprocs
-from vllm.v1.sample.logits_processor.utils import LogitProcessorCtorArgs
 from vllm.v1.sample.metadata import SamplingMetadata
 
 PIN_MEMORY_AVAILABLE = is_pin_memory_available()
@@ -72,16 +71,6 @@ class LogitsProcsRequestParams:
         summ = ', '.join(f'{k}={v}' for k, v in vars(self).items())
         return f"MyClass({summ})"
 
-
-def _generate_fake_logitsprocs_args(
-        device: torch.device) -> LogitProcessorCtorArgs:
-    return LogitProcessorCtorArgs(
-        vllm_config=VllmConfig(max_num_reqs=MAX_NUM_REQS),
-        device=device,
-        is_pin_memory=PIN_MEMORY_AVAILABLE,
-    )
-
-
 def _generate_fake_sampling_metadata(
     num_output_tokens: int,
     batch_size: int,
@@ -99,9 +88,11 @@ def _generate_fake_sampling_metadata(
                               vocab_size,
                               size=np.random.randint(
                                   1, MAX_NUM_PROMPT_TOKENS)).tolist())
-    logitsprocs = build_logitsprocs(
-        _generate_fake_logitsprocs_args(device=device))
-
+    logitsprocs = build_logitsprocs(   
+        vllm_config=VllmConfig(),
+        device=device,
+        is_pin_memory=PIN_MEMORY_AVAILABLE,
+    )
     fake_sampling_metadata = SamplingMetadata(
         temperature=torch.full((batch_size, ), 0.0),
         all_greedy=True,
