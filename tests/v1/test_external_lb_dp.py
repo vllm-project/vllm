@@ -17,7 +17,7 @@ MODEL_NAME = "ibm-research/PowerMoE-3b"
 
 # Number of data parallel ranks for external LB testing
 DP_SIZE = int(os.getenv("DP_SIZE", "2"))
-# Default tensor parallell size to use
+# Default tensor parallel size to use
 TP_SIZE = int(os.getenv("TP_SIZE", "1"))
 
 
