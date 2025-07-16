@@ -354,21 +354,13 @@ def test_processing_correctness_phi4_multimodal(
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
-    monkeypatch: pytest.MonkeyPatch,
 ):
-    # HACK(Isotr0py): phi4_multimodal processor has a precision issue,
-    # which causes the test to fail:
-    # -  22.1997, 23.0574, 21.8926, 22.6318, 22.1144, 22.8465, 23.4688, 22.1902,
-    # ?                          ^
-    # +  22.1997, 23.0574, 21.8925, 22.6318, 22.1144, 22.8465, 23.4688, 22.1902,
-    with monkeypatch.context() as m:
-        m.setattr(torch, "equal", partial(torch.allclose, rtol=1e-4))
-        _test_processing_correctness(
-            model_arch,
-            hit_rate=hit_rate,
-            num_batches=num_batches,
-            simplify_rate=simplify_rate,
-        )
+    _test_processing_correctness(
+        model_arch,
+        hit_rate=hit_rate,
+        num_batches=num_batches,
+        simplify_rate=simplify_rate,
+    )
 
 
 def _assert_inputs_equal(
