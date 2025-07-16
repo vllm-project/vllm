@@ -200,8 +200,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             proposer_worker = MultiStepWorker(
                 worker_cls=LayerSkipDraftWorker,
                 worker_kwargs=dict(
-                    model_runner=draft_runner,
-                    vllm_config=draft_worker_kwargs["vllm_config"]
+                    model_runner=draft_runner
                 ),
                 **draft_worker_kwargs
             )

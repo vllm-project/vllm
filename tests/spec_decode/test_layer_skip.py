@@ -47,7 +47,8 @@ def test_layer_skip_deterministic(model: str):
     
     # Get base model output
     llm_base = LLM(model=model, tensor_parallel_size=1, gpu_memory_utilization=0.3)
-    base_output = llm_base.generate(prompt, sampling_params)[0].outputs[0].text
+    base_output = llm_base.generate(prompt, sampling_params)[0].outputs[0]
+    base_token_ids = base_output.token_ids
     del llm_base  # Free memory
     
     # Get layer-skip output with exit at last layer (should be identical)
@@ -61,10 +62,11 @@ def test_layer_skip_deterministic(model: str):
         tensor_parallel_size=1,
         gpu_memory_utilization=0.3,
     )
-    skip_output = llm_skip.generate(prompt, sampling_params)[0].outputs[0].text
+    skip_output = llm_skip.generate(prompt, sampling_params)[0].outputs[0]
+    skip_token_ids = skip_output.token_ids
     
-    assert base_output == skip_output, \
-        f"Outputs differ:\nBase: {base_output}\nSkip: {skip_output}"
+    assert base_token_ids == skip_token_ids, \
+        f"Token IDs differ:\nBase: {base_token_ids}\nSkip: {skip_token_ids}"
 
 def test_layer_skip_acceptance_rate():
     """Test that we get reasonable acceptance rates with proper temperature."""

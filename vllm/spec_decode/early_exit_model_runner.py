@@ -65,8 +65,20 @@ class EarlyExitModelRunner(ModelRunnerWrapperBase):
         hidden_states = embed_tokens(input_ids)
         
         # Process layers up to exit point
-        # Note: Different models have different layer signatures
-        for i in range(min(self.exit_layer, len(layers))):
+        # Handle pipeline parallelism: calculate global layer index
+        pp_rank = getattr(self.device_config, 'pp_rank', 0)
+        pp_world_size = getattr(self.device_config, 'pp_world_size', 1)
+        total_num_layers = self.model_config.hf_config.num_hidden_layers
+        layers_per_rank = total_num_layers // pp_world_size
+        
+        for i in range(len(layers)):
+            # Calculate global layer index for pipeline parallel
+            global_layer_idx = i + pp_rank * layers_per_rank
+            
+            # Stop if we've reached the exit layer
+            if global_layer_idx >= self.exit_layer:
+                break
+                
             layer = layers[i]
             
             # Most transformer layers in vLLM follow this pattern
@@ -100,14 +112,14 @@ class EarlyExitModelRunner(ModelRunnerWrapperBase):
         if self.lsq_head is not None:
             # Use LSQ projection head
             logits = self.logits_processor(
-                self.lsq_head.weight,
+                self.lsq_head,
                 hidden_states,
                 sampling_metadata
             )
         else:
             # Fallback to original LM head
             logits = self.logits_processor(
-                self.model.lm_head.weight,
+                self.model.lm_head,
                 hidden_states,
                 sampling_metadata
             )

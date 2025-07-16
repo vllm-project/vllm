@@ -43,13 +43,6 @@ class LayerSkipDraftWorker(WorkerBase):
         """Delegate to model runner."""
         return self.model_runner.get_cache_block_size_bytes()
     
-    def execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[List[SamplerOutput]]:
-        """Execute using the wrapped model runner."""
-        return self.model_runner.execute_model(execute_model_req)
-    
     def get_model(self) -> nn.Module:
         """Return the model from the wrapped runner."""
         return self.model_runner.model
