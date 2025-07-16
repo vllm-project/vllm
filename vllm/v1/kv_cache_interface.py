@@ -166,7 +166,8 @@ class StaticCacheSpec(KVCacheSpec):
 
     @property
     def type_id(self) -> str:
-        raise NotImplementedError(f"Please instantiate a subclass of StaticCacheSpec")
+        raise NotImplementedError(
+            "Please instantiate a subclass of StaticCacheSpec")
 
     @property
     def page_size_bytes(self) -> int:
@@ -189,6 +190,7 @@ class MambaSpec(StaticCacheSpec):
     @property
     def type_id(self) -> str:
         return f"mamba_{self.shapes}_{self.dtype}"
+
 
 @dataclass
 class ShortConvSpec(StaticCacheSpec):
