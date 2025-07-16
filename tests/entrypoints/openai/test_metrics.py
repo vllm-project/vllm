@@ -229,9 +229,12 @@ EXPECTED_METRICS = [
 EXPECTED_METRICS_V1 = [
     "vllm:num_requests_running",
     "vllm:num_requests_waiting",
-    "vllm:gpu_cache_usage_perc",
-    "vllm:gpu_prefix_cache_queries",
-    "vllm:gpu_prefix_cache_hits",
+    "vllm:gpu_cache_usage_perc",  # deprecated
+    "vllm:cache_usage_perc",
+    "vllm:gpu_prefix_cache_queries",  # deprecated
+    "vllm:prefix_cache_queries",
+    "vllm:gpu_prefix_cache_hits",  # deprecated
+    "vllm:prefix_cache_hits",
     "vllm:num_preemptions_total",
     "vllm:prompt_tokens_total",
     "vllm:generation_tokens_total",
@@ -273,7 +276,11 @@ EXPECTED_METRICS_V1 = [
     "vllm:request_decode_time_seconds_count",
 ]
 
-HIDDEN_DEPRECATED_METRICS: list[str] = []
+HIDDEN_DEPRECATED_METRICS: list[str] = [
+    "vllm:gpu_cache_usage_perc",
+    "vllm:gpu_prefix_cache_queries",
+    "vllm:gpu_prefix_cache_hits",
+]
 
 
 @pytest.mark.asyncio
@@ -288,9 +295,15 @@ async def test_metrics_exist(server: RemoteOpenAIServer,
     response = requests.get(server.url_for("metrics"))
     assert response.status_code == HTTPStatus.OK
 
-    for metric in (EXPECTED_METRICS_V1 if use_v1 else EXPECTED_METRICS):
-        if (not server.show_hidden_metrics
-                and metric not in HIDDEN_DEPRECATED_METRICS):
+    metrics_list = EXPECTED_METRICS_V1 if use_v1 else EXPECTED_METRICS
+    if not server.show_hidden_metrics:
+        for metric in HIDDEN_DEPRECATED_METRICS:
+            assert metric not in response.text
+        for metric in metrics_list:
+            if metric not in HIDDEN_DEPRECATED_METRICS:
+                assert metric in response.text
+    else:
+        for metric in metrics_list:
             assert metric in response.text
 
 
