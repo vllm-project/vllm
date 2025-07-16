@@ -209,7 +209,7 @@ class Glm4MoeAttention(nn.Module):
         head_dim: Optional[int] = None,
         rms_norm_eps: float = 1e-05,
         qkv_bias: bool = False,
-        add_qk_norm: bool = False,
+        use_qk_norm: bool = False,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -236,7 +236,7 @@ class Glm4MoeAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
-        self.add_qk_norm = add_qk_norm
+        self.use_qk_norm = use_qk_norm
 
         self.qkv_proj = QKVParallelLinear(hidden_size,
                                           self.head_dim,
@@ -271,7 +271,7 @@ class Glm4MoeAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-        if self.add_qk_norm:
+        if self.use_qk_norm:
             self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
             self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
@@ -282,7 +282,7 @@ class Glm4MoeAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        if self.add_qk_norm:
+        if self.use_qk_norm:
             q = self.q_norm(q.reshape(-1, self.num_heads,
                                       self.head_dim)).reshape(q.shape)
             k = self.k_norm(k.reshape(-1, self.num_kv_heads,
@@ -329,7 +329,7 @@ class Glm4MoeDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
-            add_qk_norm=config.add_qk_norm,
+            use_qk_norm=config.use_qk_norm,
         )
 
         if (config.n_routed_experts is not None
