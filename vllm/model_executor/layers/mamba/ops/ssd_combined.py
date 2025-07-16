@@ -36,7 +36,8 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    chunk_offsets=None,
                                    cu_seqlens=None,
                                    dt_softplus=False,
-                                   dt_limit=(0.0, float("inf"))):
+                                   dt_limit=(0.0, float("inf")),
+                                   preallocated_ssm_out=None):
     batch, seqlen, nheads, headdim = x.shape
     _, _, ngroups, dstate = B.shape
     assert nheads % ngroups == 0
@@ -147,6 +148,7 @@ def _mamba_chunk_scan_combined_fwd(x,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
         initial_states=initial_states,
+        preallocated_ssm_out=preallocated_ssm_out,
     )
     if cu_seqlens is None:
         return out, out_x, dt, dA_cumsum, states, final_states
@@ -180,6 +182,7 @@ def mamba_chunk_scan_combined(x,
                               cu_seqlens=None,
                               dt_softplus=False,
                               dt_limit=(0.0, float("inf")),
+                              preallocated_ssm_out=None,
                               return_final_states=False,
                               return_varlen_states=False):
     """
@@ -197,6 +200,7 @@ def mamba_chunk_scan_combined(x,
         seq_idx: (batch, seqlen)
         cu_seqlens: (num_sequences + 1) or None, only used if return_varlen_states is True
         dt_softplus: Whether to apply softplus to dt
+        preallocated_ssm_out: Preallocated ssm output tensor
     Return:
         out: (batch, seqlen, nheads, headdim)
     """
@@ -221,7 +225,8 @@ def mamba_chunk_scan_combined(x,
         chunk_offsets=chunk_offsets,
         cu_seqlens=cu_seqlens,
         dt_softplus=dt_softplus,
-        dt_limit=dt_limit)
+        dt_limit=dt_limit,
+        preallocated_ssm_out=preallocated_ssm_out)
     if not return_varlen_states:
         return out if not return_final_states else (out, final_states)
     else:
