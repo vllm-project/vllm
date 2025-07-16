@@ -36,7 +36,7 @@ class FutureWrapper(Future):
             return self.refs[0].get()
         else:
             outputs = [ref.get() for ref in self.refs]
-            return self.aggregator.aggregate(outputs)
+            return self.aggregator.aggregate(outputs, output_rank=0)
 
 
 class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
@@ -92,6 +92,6 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
             # Block and get results from all workers
             outputs = [ref.get() for ref in refs]
             return self.kv_output_aggregator.aggregate(outputs)
-        else:
-            # Return a future that will aggregate outputs from all workers
-            return FutureWrapper(refs, self.kv_output_aggregator)
+
+        # Return a future that will aggregate outputs from all workers
+        return FutureWrapper(refs, self.kv_output_aggregator)

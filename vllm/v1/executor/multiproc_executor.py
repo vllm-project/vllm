@@ -26,6 +26,7 @@ from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.executor.multiproc_worker_utils import (
     _add_prefix, set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
@@ -34,7 +35,6 @@ from vllm.utils import (get_distributed_init_method, get_mp_context,
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
-from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 
 logger = init_logger(__name__)
 
@@ -118,7 +118,8 @@ class MultiprocExecutor(Executor):
 
         self.output_rank = self._get_output_rank()
         self.has_connector = self.vllm_config.kv_transfer_config is not None
-        self.kv_output_aggregator = KVOutputAggregator(self.parallel_config.world_size)
+        self.kv_output_aggregator = KVOutputAggregator(
+            self.parallel_config.world_size)
 
     def start_worker_monitor(self):
         workers = self.workers
@@ -180,8 +181,9 @@ class MultiprocExecutor(Executor):
 
         # aggregate all workers output to a single output
         if non_block:
-            return self.kv_output_aggregator.async_aggregate(outputs)
-        return self.kv_output_aggregator.aggregate(outputs)
+            return self.kv_output_aggregator.async_aggregate(
+                outputs, self.output_rank)
+        return self.kv_output_aggregator.aggregate(outputs, self.output_rank)
 
     def collective_rpc(self,
                        method: Union[str, Callable],
