@@ -14,3 +14,4 @@ When serving large language models with vLLM, Anyscale can rapidly provision [pr
 - [Offline batch inference](https://console.anyscale.com/template-preview/llm_batch_inference?utm_source=vllm_docs)
 - [Deploy vLLM services](https://console.anyscale.com/template-preview/llm_serving?utm_source=vllm_docs)
 - [Curate a dataset](https://console.anyscale.com/template-preview/audio-dataset-curation-llm-judge?utm_source=vllm_docs)
+- [Finetune an LLM](https://console.anyscale.com/template-preview/entity-recognition-with-llms?utm_source=vllm_docs)
