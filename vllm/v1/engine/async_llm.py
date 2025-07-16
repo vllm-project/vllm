@@ -618,12 +618,6 @@ class AsyncLLM(EngineClient):
         if len(self.stat_loggers) == 0:
             self.stat_loggers = [[] for _ in range(engine_num)]
 
-        logger_type = type(logger_factory)
-        for logger in self.stat_loggers[0]:
-            if type(logger) is logger_type:
-                raise KeyError(
-                    f"Logger with type {logger_type} already exists.")
-
         for i, logger_list in enumerate(self.stat_loggers):
             logger_list.append(logger_factory(self.vllm_config, i))
 

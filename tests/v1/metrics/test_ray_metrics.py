@@ -43,8 +43,8 @@ def test_engine_log_metrics_ray(
                 disable_log_stats=False,
             )
 
-            engine = AsyncLLM.from_engine_args(engine_args)
-            await engine.add_logger(RayPrometheusStatLogger)
+            engine = AsyncLLM.from_engine_args(
+                engine_args, stat_loggers=[RayPrometheusStatLogger])
 
             for i, prompt in enumerate(example_prompts):
                 results = engine.generate(
