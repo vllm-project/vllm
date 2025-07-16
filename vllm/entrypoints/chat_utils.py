@@ -28,6 +28,7 @@ from openai.types.chat import (ChatCompletionMessageToolCallParam,
                                ChatCompletionToolMessageParam)
 from openai.types.chat.chat_completion_content_part_input_audio_param import (
     InputAudio)
+from openai.types.responses import ResponseInputImageParam
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 # yapf: enable
@@ -942,6 +943,8 @@ _ImageParser = TypeAdapter(ChatCompletionContentPartImageParam).validate_python
 _AudioParser = TypeAdapter(ChatCompletionContentPartAudioParam).validate_python
 _VideoParser = TypeAdapter(ChatCompletionContentPartVideoParam).validate_python
 
+_ResponsesInputImageParser = TypeAdapter(
+    ResponseInputImageParam).validate_python
 _ContentPart: TypeAlias = Union[str, dict[str, str], InputAudio, PILImage]
 
 # Define a mapping from part types to their corresponding parsing functions.
@@ -953,6 +956,8 @@ MM_PARSER_MAP: dict[
     lambda part: _TextParser(part).get("text", None),
     "input_text":
     lambda part: _TextParser(part).get("text", None),
+    "input_image":
+    lambda part: _ResponsesInputImageParser(part).get("image_url", None),
     "image_url":
     lambda part: _ImageParser(part).get("image_url", {}).get("url", None),
     "image_embeds":
@@ -1085,10 +1090,8 @@ def _parse_chat_message_content_part(
     """
     if isinstance(part, str):  # Handle plain text parts
         return part
-
     # Handle structured dictionary parts
     part_type, content = _parse_chat_message_content_mm_part(part)
-
     # if part_type is text/refusal/image_url/audio_url/video_url/input_audio but
     # content is None, log a warning and skip
     if part_type in VALID_MESSAGE_CONTENT_MM_PART_TYPES and content is None:
@@ -1109,7 +1112,7 @@ def _parse_chat_message_content_part(
         image_content = cast(Image.Image, content)
         mm_parser.parse_image_pil(image_content)
         modality = "image"
-    elif part_type == "image_url":
+    elif part_type in ("image_url", "input_image"):
         str_content = cast(str, content)
         mm_parser.parse_image(str_content)
         modality = "image"
