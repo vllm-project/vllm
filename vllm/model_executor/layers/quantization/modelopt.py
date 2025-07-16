@@ -743,23 +743,18 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
         self.fused_experts = cutlass_moe_fp4
 
-    @property
-    def load_up_proj_weight_first(self) -> bool:
-        # FlashInfer CUTLASS kernel assumes [Up, Gate] Proj as W13
-        return self.allow_flashinfer_cutlass
-
-    def select_experts_impl(self, moe_parallel_config):
+    def select_experts_impl(
+            self, moe_parallel_config) -> mk.FusedMoEPermuteExpertsUnpermute:
         if not self.allow_flashinfer_cutlass:
             return
 
-        logger.debug("FlashInferExperts")
+        logger.debug_once("FlashInferExperts")
         # default to TP/EP case only
 
         experts_kwargs = {
             "use_nvfp4_w4a4": True,
             "use_dp": moe_parallel_config.dp_size > 1,
         }
-        # if not moe_parallel_config.dp_size > 1 and moe_parallel_config.use_ep:
         experts_kwargs["ep_rank"] = moe_parallel_config.ep_rank
         experts_kwargs["ep_size"] = moe_parallel_config.ep_size
         experts_kwargs["tp_rank"] = moe_parallel_config.tp_rank
@@ -779,7 +774,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     # only prepare_finalize is not None call select_gemm_impl
     # so when native cutlass fp4, fused_expert is in fuse_moe.py fused_expert
     # when it's not called(TP case), we still have 2 kernels to use.
-    def select_gemm_impl(self, prepare_finalize, moe):
+    def select_gemm_impl(self, prepare_finalize,
+                         moe) -> mk.FusedMoEPermuteExpertsUnpermute:
 
         assert moe is not None
         assert prepare_finalize is not None
@@ -789,7 +785,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if self.allow_flashinfer_cutlass:
             from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
                 FlashInferExperts)
-            logger.debug("FlashInferExperts %s", moe)
+            logger.debug_once("Using FlashInferExperts")
             experts = FlashInferExperts(
                 use_nvfp4_w4a4=True,
                 use_dp=moe.moe_parallel_config.dp_size > 1,
@@ -800,11 +796,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             )
         else:
             assert moe.dp_size > 1
-            logger.debug("CutlassExpertsFp4 %s", moe)
-            # current doesn't support DP
+            logger.debug_once("Using CutlassExpertsFp4")
+            # Currently CutlassExpertsFp4 doesn't support DP
             raise ValueError(
-                "CutlassExpertsFp4 Doesn't support DP. "
-                "Use flashinfer CUTLASS FusedMoE backend instead.")
+                "CutlassExpertsFp4 doesn't support DP. "
+                "Use flashinfer CUTLASS FusedMoE(VLLM_USE_FLASHINFER_MOE)"
+                " backend instead.")
 
         return experts
 
@@ -928,8 +925,30 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 if scale_ndim == 2 else swizzled_scale.reshape(B, M, K))
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-
         # GEMM 1
+        # The FlashInfer Cutlass fused MoE kernel expects the combined weights
+        # to be ordered as [w3, w1], unlike the standard [w1, w3] layout.
+        gemm1_weight = layer.w13_weight.data
+        gemm1_weight_scale = layer.w13_weight_scale.data
+
+        if self.allow_flashinfer_cutlass:
+            dim = -2
+            size = gemm1_weight.size(dim)
+            assert size % 2 == 0, f"Expected even size in dim {dim}, got {size}"
+            half = size // 2
+
+            # Reorder weight
+            w1, w3 = gemm1_weight.split(half, dim=dim)
+            gemm1_weight = torch.cat([w3, w1], dim=dim).contiguous()
+
+            # Reorder scale
+            s1, s3 = gemm1_weight_scale.split(half, dim=dim)
+            gemm1_weight_scale = torch.cat([s3, s1], dim=dim).contiguous()
+
+        layer.w13_weight = Parameter(gemm1_weight, requires_grad=False)
+        layer.w13_weight_scale = Parameter(gemm1_weight_scale,
+                                           requires_grad=False)
+
         if not torch.allclose(layer.w13_weight_scale_2[:, 0],
                               layer.w13_weight_scale_2[:, 1]):
             logger.warning_once(
@@ -959,9 +978,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         # This is for quantization, so we need to invert it.
         layer.w13_input_scale_quant = Parameter(
             (1 / w13_input_scale).to(torch.float32), requires_grad=False)
-
-        layer.w13_weight = Parameter(layer.w13_weight.data,
-                                     requires_grad=False)
 
         # GEMM 2
         layer.g2_alphas = Parameter(

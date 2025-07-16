@@ -523,8 +523,7 @@ def run_cutlass_moe_fp4(
     c3 = _resize_cache(workspace13, (m * topk, k))
     ops.cutlass_fp4_moe_mm(c1, rep_a_fp4, w1_fp4, rep_a_blockscale,
                            w1_blockscale, w1_alphas, problem_sizes1,
-                           expert_offsets[:-1], blockscale_offsets[:-1],
-                           out_dtype, device)
+                           expert_offsets[:-1], blockscale_offsets[:-1])
     del rep_a_fp4, rep_a_blockscale
     torch.ops._C.silu_and_mul(c2, c1)
     int_fp4, int_blockscale = ops.scaled_fp4_experts_quant(
@@ -532,15 +531,18 @@ def run_cutlass_moe_fp4(
 
     ops.cutlass_fp4_moe_mm(c3, int_fp4, w2_fp4, int_blockscale, w2_blockscale,
                            w2_alphas, problem_sizes2, expert_offsets[:-1],
-                           blockscale_offsets[:-1], out_dtype, device)
+                           blockscale_offsets[:-1])
     del int_fp4, int_blockscale
 
     c3 = ops.shuffle_rows(c3, c_map)
 
     assert output.dtype == out_dtype
-    output.copy_((c3.view(m, num_topk, k) *
-                  topk_weights.view(m, num_topk, 1).half()).sum(dim=1),
-                 non_blocking=True)
+    if not apply_router_weight_on_input:
+        output.copy_((c3.view(m, num_topk, k) *
+                    topk_weights.view(m, num_topk, 1).to(out_dtype)).sum(dim=1),
+                    non_blocking=True)
+    else:
+        output.copy_(c2.view(m, num_topk, k).sum(dim=1), non_blocking=True)
     return
 
 
@@ -706,7 +708,6 @@ def cutlass_moe_fp4(
         ),
     )
     extra_expert_args = {
-        # 'topk_weights': topk_weights,
         'g1_alphas': g1_alphas,
         'g2_alphas': g2_alphas,
         'a1_gscale': a1_gscale,
@@ -718,9 +719,10 @@ def cutlass_moe_fp4(
         'device': device,
     }
 
-    # NVFP4 requires two levels of quantization, which involves computing some scaling
-    # factors dynamically. This makes it incompatible with the typical
-    # prepare -> MoE -> finalize pipeline. Move the quantization logic into the MoE body.
+    # NVFP4 requires two levels of quantization, which involves computing some 
+    # scaling factors dynamically. This makes it incompatible with the typical
+    # prepare -> MoE -> finalize pipeline. Move the quantization logic into the 
+    # MoE body.
     extra_prepare_args = {
         'skip_quant': True,
     }

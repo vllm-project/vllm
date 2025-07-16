@@ -88,7 +88,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             quant_config.quant_dtype,
             self.per_channel_quant,
             self.block_shape,
-            is_fp4_scalar_swizzled=
+            is_fp4_scale_swizzled=
             not use_dp,  # Needs swizzling after communication
         )
         if use_dp:

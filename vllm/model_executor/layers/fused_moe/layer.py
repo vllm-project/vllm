@@ -931,18 +931,12 @@ class FusedMoE(torch.nn.Module):
                                                  shard_size)
         # Narrow parameter and load.
         # w1, gate_proj: Load into first logical weight of w13.
+        if shard_id == "w1":
+            expert_data = expert_data.narrow(shard_dim, 0, shard_size)
         # w3, up_proj: Load into second logical weight of w13.
-        # The FlashInfer Cutlass fused MoE kernel expects the combined weights
-        # to be ordered as [w3, w1], unlike the standard [w1, w3] layout.
-        assert shard_id in ("w1", "w3")
-        switch_w13 = getattr(self.quant_method, 'load_up_proj_weight_first',
-                             False)
-        if (switch_w13 and shard_id == "w1") or (not switch_w13
-                                                 and shard_id == "w3"):
-            start = shard_size
         else:
-            start = 0
-        expert_data = expert_data.narrow(shard_dim, start, shard_size)
+            assert shard_id == "w3"
+            expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
         expert_data.copy_(loaded_weight)
 
     def _load_w2(self,
