@@ -36,6 +36,11 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
                       "KimiVLForConditionalGeneration"):
         pytest.skip("Avoid OOM")
 
+    if model_arch in ("Llama4ForCausalLM", "EagleLlama4ForCausalLM"):
+        from vllm.model_executor.models.llama4 import Llama4ForCausalLM
+        from vllm.model_executor.models.registry import ModelRegistry
+        ModelRegistry.register_model("Llama4ForCausalLM", Llama4ForCausalLM)
+
     # Avoid OOM and reduce initialization time by only using 1 layer
     def hf_overrides(hf_config: PretrainedConfig) -> PretrainedConfig:
         hf_config.update(model_info.hf_overrides)
