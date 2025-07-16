@@ -34,7 +34,7 @@ This API adds several batteries-included capabilities that simplify large-scale,
 - Scaling up the workload without code changes.
 
 ```python
-import ray
+import ray  # Requires ray>=2.44.1
 from ray.data.llm import vLLMEngineProcessorConfig, build_llm_processor
 
 config = vLLMEngineProcessorConfig(model_source="unsloth/Llama-3.2-1B-Instruct")
@@ -42,7 +42,7 @@ processor = build_llm_processor(
     config,
     preprocess=lambda row: {
         "messages": [
-            {"role": "system", "content": "You are a bot that responds with haikus."},
+            {"role": "system", "content": "You are a bot that completes unfinished haikus."},
             {"role": "user", "content": row["item"]},
         ],
         "sampling_params": {"temperature": 0.3, "max_tokens": 250},
@@ -50,7 +50,7 @@ processor = build_llm_processor(
     postprocess=lambda row: {"answer": row["generated_text"]},
 )
 
-ds = ray.data.from_items(["Start of the haiku is: Complete this for me..."])
+ds = ray.data.from_items(["An old silent pond..."])
 ds = processor(ds)
 ds.write_parquet("local:///tmp/data/")
 ```
