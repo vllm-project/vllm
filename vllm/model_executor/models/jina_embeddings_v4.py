@@ -12,8 +12,8 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import (HAS_TRITON, Pooler, PoolingType,
                                                extract_vision_tokens_kernel)
-from vllm.model_executor.pooling_metadata import (PoolingMetadata as
-                                                  V0PoolingMetadata)
+from vllm.model_executor.pooling_metadata import (
+    PoolingMetadata as V0PoolingMetadata)
 from vllm.model_executor.pooling_metadata import PoolingTensors
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
