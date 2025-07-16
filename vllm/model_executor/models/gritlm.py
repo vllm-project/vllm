@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import PoolerHead
+from vllm.model_executor.layers.pooler import PoolerHead, PoolerNormalize
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
@@ -49,7 +49,7 @@ class GritLMPooler(nn.Module):
         self.embed_pattern_ids = tokens_to_ids(
             ["▁<", "|", "embed", "|", ">", "<0x0A>"])
 
-        self.head = PoolerHead(normalize=True, softmax=False)
+        self.head = PoolerHead(PoolerNormalize())
 
     def _find_array(self, arr: array, target: array, start_idx: int) -> int:
         """

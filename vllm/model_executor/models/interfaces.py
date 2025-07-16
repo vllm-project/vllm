@@ -5,11 +5,14 @@ from collections.abc import Iterable, MutableSequence
 from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
                     Union, overload, runtime_checkable)
 
+import numpy as np
 import torch
 from torch import Tensor
 from typing_extensions import Self, TypeIs
 
+from vllm.config import ModelConfig, SpeechToTextConfig
 from vllm.inputs import TokensPrompt
+from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -19,6 +22,7 @@ from .interfaces_base import is_pooling_model
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
+    from vllm.config import VllmConfig
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.sequence import IntermediateTensors
 
@@ -478,6 +482,25 @@ class IsHybrid(Protocol):
         , also indicates that the model's hf_config has 
         'layers_block_type' """
 
+    @classmethod
+    def get_mamba_state_shape_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+        use_v1: bool = True,
+    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+        """Calculate shapes for Mamba's convolutional and state caches.
+
+        Args:
+            vllm_config: vLLM config
+            use_v1: Get shapes for V1 (or V0)
+
+        Returns:
+            Tuple containing:
+            - conv_state_shape: Shape for convolutional state cache
+            - temporal_state_shape: Shape for state space model cache
+        """
+        ...
+
 
 @runtime_checkable
 class _IsHybridType(Protocol):
@@ -636,7 +659,7 @@ def supports_cross_encoding(
 def has_step_pooler(model: Union[type[object], object]) -> bool:
     """Check if the model uses step pooler."""
     return is_pooling_model(model) and any(
-        type(module).__name__ == "StepPool" for module in model.modules())
+        type(module).__name__ == "StepPooler" for module in model.modules())
 
 
 class SupportsQuant:
@@ -691,16 +714,46 @@ class SupportsTranscription(Protocol):
 
     supports_transcription: ClassVar[Literal[True]] = True
 
+    supports_transcription_only: ClassVar[bool] = False
+    """
+    Transcription models can opt out of text generation by setting this to
+    `True`.
+    """
+
     @classmethod
-    def get_decoder_prompt(cls, language: str, task_type: str,
-                           prompt: str) -> str:
-        """Get the decoder prompt for the ASR model."""
+    def get_generation_prompt(cls, audio: np.ndarray,
+                              stt_config: SpeechToTextConfig,
+                              model_config: ModelConfig, language: str,
+                              task_type: str,
+                              request_prompt: str) -> PromptType:
+        """Get the prompt for the ASR model.
+        The model has control over the construction, as long as it
+        returns a valid PromptType."""
         ...
 
     @classmethod
     def validate_language(cls, language: str) -> bool:
         """Check if the model supports a specific ISO639_1 language."""
         ...
+
+    @classmethod
+    def get_speech_to_text_config(
+            cls, model_config: ModelConfig,
+            task_type: Literal["transcribe",
+                               "translate"]) -> SpeechToTextConfig:
+        """Get the speech to text config for the ASR model."""
+        ...
+
+    @classmethod
+    def get_num_audio_tokens(cls, audio_duration_s: float,
+                             stt_config: SpeechToTextConfig,
+                             model_config: ModelConfig) -> Optional[int]:
+        """
+        Map from audio duration to number of audio tokens produced by the ASR 
+        model, without running a forward pass.
+        This is used for estimating the amount of processing for this audio.
+        """
+        return None
 
 
 @overload

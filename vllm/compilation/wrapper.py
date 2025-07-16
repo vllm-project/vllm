@@ -93,9 +93,10 @@ class TorchCompileWrapperWithCustomDispatcher:
             return
 
         self.compiled_codes.append(new_code)
-        local_cache_dir = self.vllm_config.compilation_config.local_cache_dir
-        if isinstance(local_cache_dir, str):
-            decompiled_file = os.path.join(local_cache_dir,
+        debug_dump_dir = self.vllm_config.compilation_config.debug_dump_path
+        if isinstance(debug_dump_dir, str) and debug_dump_dir != "":
+            rank = self.vllm_config.parallel_config.rank
+            decompiled_file = os.path.join(debug_dump_dir, f"rank_{rank}",
                                            "transformed_code.py")
             if not os.path.exists(decompiled_file):
                 try:
@@ -105,6 +106,7 @@ class TorchCompileWrapperWithCustomDispatcher:
                     # not a reversible process.
                     import depyf
                     src = depyf.decompile(new_code)
+
                     with open(decompiled_file, "w") as f:
                         f.write(src)
 
