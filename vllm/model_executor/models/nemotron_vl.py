@@ -364,7 +364,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
 
     def _process_image_input(
         self,
-        image_input: Union[InternVLImageInputs, InternVLVideoPixelInputs],
+        image_input: InternVLImageInputs,
     ) -> tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
