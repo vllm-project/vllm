@@ -114,6 +114,10 @@ Models that combine Mamba-2 layers with standard attention layers are also suppo
 these models currently require enforcing eager mode, disabling prefix caching, and using the FlashInfer attention
 backend in V1.
 
+Hybrid models that share similar sub-components to Mamba2 layers, e.g. ShortConv layers in LFM2, are also supported.
+As above, they also require enforcing eager mode, disabling prefix caching, and using the FlashInfer attention
+backend in V1.
+
 #### Encoder-Decoder Models
 
 Models requiring cross-attention between separate encoder and decoder (e.g., `BartForConditionalGeneration`, `MllamaForConditionalGeneration`)
