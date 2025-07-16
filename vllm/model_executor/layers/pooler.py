@@ -459,15 +459,15 @@ class SimplePooler(BasePooler):
         cls,
         pooler_config: ResolvedPoolingConfig,
     ) -> "SimplePooler":
-        in_pool = PoolingMethod.from_pooling_type(pooler_config.pooling_type)
+        pooling = PoolingMethod.from_pooling_type(pooler_config.pooling_type)
         head = PoolerHead.from_config(pooler_config)
 
-        return cls(in_pool, head)
+        return cls(pooling, head)
 
-    def __init__(self, in_pool: PoolingMethod, head: PoolerHead) -> None:
+    def __init__(self, pooling: PoolingMethod, head: PoolerHead) -> None:
         super().__init__()
 
-        self.in_pool = in_pool
+        self.pooling = pooling
         self.head = head
 
     def forward(
@@ -475,7 +475,7 @@ class SimplePooler(BasePooler):
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
-        pooled_data = self.in_pool(hidden_states, pooling_metadata)
+        pooled_data = self.pooling(hidden_states, pooling_metadata)
         pooled_data = self.head(pooled_data, pooling_metadata)
         return build_output(pooled_data)
 
@@ -501,7 +501,7 @@ class StepPooler(BasePooler):
     ) -> None:
         super().__init__()
 
-        self.in_pool = AllPool()
+        self.pooling = AllPool()
         self.head = head
         self.step_tag_id = step_tag_id
         self.returned_token_ids = returned_token_ids
@@ -525,7 +525,7 @@ class StepPooler(BasePooler):
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
-        pooled_data_lst = self.in_pool(hidden_states, pooling_metadata)
+        pooled_data_lst = self.pooling(hidden_states, pooling_metadata)
         prompt_token_ids = self.get_prompt_token_ids(pooling_metadata)
 
         pooled_data = list[torch.Tensor]()
@@ -578,8 +578,10 @@ class Pooler(nn.Module):
         return SimplePooler.from_config(resolved_config)
 
 
+PoolingFn = Callable[
+    [Union[torch.Tensor, list[torch.Tensor]], PoolingMetadata],
+    Union[torch.Tensor, list[torch.Tensor]]]
 ClassifierFn = Callable[[torch.Tensor], torch.Tensor]
-PoolerFn = Callable[[torch.Tensor], torch.Tensor]
 
 
 class ClassifierPooler(nn.Module):
@@ -597,15 +599,14 @@ class ClassifierPooler(nn.Module):
     def __init__(
         self,
         config: ModelConfig,
+        pooling: PoolingFn,
         classifier: ClassifierFn,
-        pooler: Optional[PoolerFn] = None,
         act_fn: Optional[PoolerActivation] = None,
     ) -> None:
         super().__init__()
 
-        self.in_pool = AllPool()
+        self.pooling = pooling
         self.classifier = classifier
-        self.pooler = pooler
 
         self.classification_act_fn = get_classification_activation_function(
             config.hf_config) if act_fn is None else act_fn
@@ -622,13 +623,12 @@ class ClassifierPooler(nn.Module):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         """Pools sentence pair scores from the hidden_states."""
-        pooled_data = self.in_pool(hidden_states, pooling_metadata)
-
-        if self.pooler is not None:
-            pooled_data = [self.pooler(data) for data in pooled_data]
+        pooled_data = self.pooling(hidden_states, pooling_metadata)
 
         # apply classifier once on the full batch if possible
-        if len({data.shape for data in pooled_data}) <= 1:
+        if isinstance(pooled_data, torch.Tensor):
+            pooled_output = self.classifier(pooled_data)
+        elif len({data.shape for data in pooled_data}) <= 1:
             pooled_output = self.classifier(torch.stack(pooled_data))
         else:
             pooled_output = [self.classifier(data) for data in pooled_data]
