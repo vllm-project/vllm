@@ -449,13 +449,13 @@ class SimplePooler(Pooler):
     """
 
     @classmethod
-    def from_config_with_defaults(
+    def from_config_with_defaults(  # type: ignore[override]
         cls,
         pooler_config: PoolerConfig,
         pooling_type: PoolingType,
         normalize: bool,
         softmax: bool,
-    ) -> "SimplePooler":  # type: ignore[override]
+    ) -> "SimplePooler":
         resolved_config = ResolvedPoolingConfig.from_config_with_defaults(
             pooler_config=pooler_config,
             pooling_type=pooling_type,
