@@ -353,7 +353,7 @@ class ResponsesRequest(OpenAIBaseModel):
             raise ValueError("prompt template is not supported")
         return data
 
-   @model_validator(mode="before")
+    @model_validator(mode="before")
     def check_cache_salt_support(cls, data):
         if data.get("cache_salt") is not None:
             if not envs.VLLM_USE_V1:
