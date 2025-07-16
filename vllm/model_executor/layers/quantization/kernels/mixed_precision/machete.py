@@ -119,6 +119,8 @@ class MacheteLinearKernel(MPLinearKernel):
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         c = self.config
         w_q, w_s, w_zp, _ = self._get_weight_params(layer)
+        if not c.zero_points:
+            w_zp = None
 
         x_2d = x.reshape(-1, x.shape[-1])
         out_shape = x.shape[:-1] + (c.partition_weight_shape[1], )
