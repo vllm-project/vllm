@@ -143,5 +143,6 @@ def load_custom_logitsprocs(
 
 def build_logitsprocs(args: LogitProcessorCtorArgs) -> LogitsProcessors:
     return LogitsProcessors(
-        ctor(args) for ctor in itertools.chain(
-            _builtin_logitsprocs_classes, args.vllm_config.logits_processors))
+        ctor(args)
+        for ctor in itertools.chain(_builtin_logitsprocs_classes,
+                                    args.vllm_config.logits_processors or []))
