@@ -8,9 +8,10 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
-from tests.v1.sample.logits_processors.utils import (
-    DUMMY_LOGITPROC_ARG, DUMMY_LOGITPROC_ENTRYPOINT, DUMMY_LOGITPROC_FQCN,
-    MAX_TOKENS, MODEL_NAME, TEMP_GREEDY, prompts)
+from tests.v1.sample.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
+                                                     DUMMY_LOGITPROC_FQCN,
+                                                     MAX_TOKENS, MODEL_NAME,
+                                                     TEMP_GREEDY, prompts)
 
 
 @pytest.fixture(scope="module")
@@ -27,17 +28,15 @@ def default_server_args():
     ]
 
 
-@pytest.fixture(
-    scope="module",
-    params=[[
-        "--logits-processors-entrypoints",
-        DUMMY_LOGITPROC_ENTRYPOINT + "," + DUMMY_LOGITPROC_ENTRYPOINT
-    ],
-            [
-                "--logits-processors-fqns",
-                DUMMY_LOGITPROC_FQCN + "," + DUMMY_LOGITPROC_FQCN
-            ]])
+@pytest.fixture(scope="module",
+                params=[["--logits-processors", DUMMY_LOGITPROC_FQCN]])
 def server(default_server_args, request):
+    """Server cli arg list is parameterized by logitproc source
+    
+    TODO (andy): entrypoints unit test; currently CLI logitsprocs
+    unit test only covers the case where logitproc is specified by
+    FQCN
+    """
     if request.param:
         default_server_args = default_server_args + request.param
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
@@ -70,8 +69,7 @@ async def test_custom_logitsprocs_cli(client: openai.AsyncOpenAI,
     
     Launch vLLM OpenAI-compatible server with CLI argument to loads a custom
     logitproc that has a well-defined behavior (mask out all tokens except one
-    `target_token`) Test is implicitly parameterized by the logitproc source
-    (fully-qualified class name or entrypoint)
+    `target_token`). Logitproc is specified by fully-qualified class name (FQCN)
 
     Pass in requests, 50% of which pass a `target_token` value
     in through `extra_body["vllm_xargs"]`, 50% of which do not.

@@ -1,5 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Optional
+
+import torch
+
+from vllm.config import VllmConfig
+from vllm.sampling_params import SamplingParams
+from vllm.v1.sample.logits_processor import (BatchUpdate, LogitsProcessor,
+                                             MoveDirectionality)
+
 MODELS_ON_S3 = [
     "adept/fuyu-8b",
     "ai21labs/AI21-Jamba-1.5-Mini",
@@ -128,3 +137,50 @@ MODELS_ON_S3 = [
 ]
 
 MODEL_WEIGHTS_S3_BUCKET = "s3://vllm-ci-model-weights"
+
+
+class DummyLogitsProcessor(LogitsProcessor):
+    """Fake logit processor to support unit testing and examples"""
+
+    def __init__(self, vllm_config: "VllmConfig", device: torch.device,
+                 is_pin_memory: bool):
+        self.req_info = {}
+
+    def is_argmax_invariant(self) -> bool:
+        """Never impacts greedy sampling"""
+        return False
+
+    def update_state(self, batch_update: Optional[BatchUpdate]):
+        if not batch_update:
+            return
+
+        # Process added requests.
+        for index, params, _ in batch_update.added:
+            if isinstance(params, SamplingParams) and params.extra_args:
+                target_token = params.extra_args.get("target_token", None)
+            else:
+                target_token = None
+            self.req_info[index] = target_token
+
+        if self.req_info:
+            # Process removed requests.
+            for index in batch_update.removed:
+                self.req_info.pop(index, None)
+
+            # Process moved requests, unidirectional (a->b) and swap (a<->b)
+            for adx, bdx, direct in batch_update.moved:
+                if direct == MoveDirectionality.SWAP:
+                    (self.req_info[adx],
+                     self.req_info[bdx]) = (self.req_info[bdx],
+                                            self.req_info[adx])
+                else:
+                    self.req_info[bdx] = self.req_info[adx]
+
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        for bdx in range(logits.shape[0]):
+            if (target_token := self.req_info[bdx]) is not None:
+                mask = torch.ones_like(logits[bdx, :], dtype=torch.bool)
+                mask[target_token] = False
+                logits[bdx, mask] = float('-inf')
+
+        return logits

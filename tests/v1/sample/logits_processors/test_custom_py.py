@@ -9,10 +9,11 @@ from tests.v1.sample.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
                                                      DUMMY_LOGITPROC_FQCN,
                                                      MAX_TOKENS, MODEL_NAME,
                                                      TEMP_GREEDY,
-                                                     DummyLogitsProcessor,
                                                      LogitprocSource, prompts)
-# yapf: enable
 from vllm import LLM, SamplingParams
+from vllm.test_utils import DummyLogitsProcessor
+
+# yapf: enable
 
 # Create a mixture of requests which do and don't utilize the dummy logitproc
 sampling_params_list = [
