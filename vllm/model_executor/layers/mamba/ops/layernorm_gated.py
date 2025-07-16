@@ -19,11 +19,11 @@ def _layer_norm_fwd_1pass_kernel(
     Z,  # pointer to the other branch
     Mean,  # pointer to the mean
     Rstd,  # pointer to the 1/std
-    stride_x_row,  # how much to increase the pointer when moving by 1 row
-    stride_y_row,
-    stride_z_row,
-    M,  # number of rows in X
-    N,  # number of columns in X
+    stride_x_row: tl.int64,
+    stride_y_row: tl.int64,
+    stride_z_row: tl.int64,
+    M: tl.int64,  # number of rows in X
+    N: tl.int64,  # number of columns in X
     eps,  # epsilon to avoid division by zero
     BLOCK_N: tl.constexpr,
     HAS_BIAS: tl.constexpr,
