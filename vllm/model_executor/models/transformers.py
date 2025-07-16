@@ -50,11 +50,12 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_get_processor
+from vllm.utils import is_list_of
 
 from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
                          SupportsQuant)
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
-                    is_pp_missing_parameter,
+                    flatten_bn, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, maybe_prefix)
 
 logger = init_logger(__name__)
@@ -872,15 +873,23 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
             "image_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
+        if image_embeds is not None:
+            return image_embeds
+
         if pixel_values is None and image_embeds is None:
             return None
 
         num_image_patches = kwargs.pop("num_image_patches")
         if pixel_values is not None:
             if isinstance(pixel_values, torch.Tensor):
-                pixel_values = pixel_values.flatten(0, 1).to(self.dtype)
+                pixel_values = flatten_bn(pixel_values).to(self.dtype)
+            elif is_list_of(pixel_values, torch.Tensor):
+                pixel_values = flatten_bn(flatten_bn(pixel_values),
+                                          concat=True).to(self.dtype)
             else:
-                pixel_values = torch.cat(pixel_values).to(self.dtype)
+                raise ValueError(
+                    f"Unsupported pixel_values type {type(pixel_values)}. "
+                    "Expected `torch.Tensor` or list of `torch.Tensor`.")
 
             if isinstance(num_image_patches, list):
                 num_image_patches = torch.cat(num_image_patches)
@@ -910,16 +919,14 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
 
             return vision_embeddings
 
-        if image_embeds is not None:
-            return image_embeds
-
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings=None,
     ) -> torch.Tensor:
         inputs_embeds = self.model.model.get_input_embeddings()(input_ids)
-        if multimodal_embeddings is not None:
+        if (multimodal_embeddings is not None
+                and len(multimodal_embeddings) != 0):
             mask = (input_ids == self.config.image_token_id)
             mask = mask.unsqueeze(-1).expand_as(inputs_embeds)
             multimodal_embeddings = torch.cat(multimodal_embeddings)
