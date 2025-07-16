@@ -1514,8 +1514,6 @@ async def init_app_state(
         chat_template_content_format=args.chat_template_content_format,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
-        expand_tools_even_if_tool_choice_none=args.
-        expand_tools_even_if_tool_choice_none,
         tool_parser=args.tool_call_parser,
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
@@ -1531,8 +1529,6 @@ async def init_app_state(
         chat_template_content_format=args.chat_template_content_format,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
-        expand_tools_even_if_tool_choice_none=args.
-        expand_tools_even_if_tool_choice_none,
         tool_parser=args.tool_call_parser,
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
@@ -1544,6 +1540,7 @@ async def init_app_state(
         state.openai_serving_models,
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
     ) if "generate" in model_config.supported_tasks else None
     state.openai_serving_pooling = OpenAIServingPooling(

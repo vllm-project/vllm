@@ -378,8 +378,6 @@ def per_token_group_quant_fp8(
         is supported for now.
         column_major_scales: Outputs scales in column major.
         out_q: Optional output tensor. If not provided, function will create.
-        tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
-        scaling factor for quantization.
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
         scaling factor.

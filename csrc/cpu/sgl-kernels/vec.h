@@ -37,7 +37,7 @@ inline Vectorized<at::BFloat16> convert_from_float_ext<at::BFloat16>(const Vecto
 #define CVT_FP16_TO_FP32(a) \
     _mm512_cvtps_ph(a, (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC))
 
-// this doesn't hanel NaN.
+// this doesn't handle NaN.
 inline __m512bh cvt_e4m3_bf16_intrinsic_no_nan(__m256i fp8_vec) {
   const __m512i x = _mm512_cvtepu8_epi16(fp8_vec);
 
