@@ -2952,7 +2952,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                             **execute_model_kwargs,
                             selected_token_indices=sampling_metadata.selected_token_indices
                         )
-                        if warmup_mode == True and is_dummy_run == False:
+                        if profile_run_mode == True and is_dummy_run == False:
                             torch.hpu.synchronize()
                             import torch.distributed as dist
                             if dist.is_initialized():
