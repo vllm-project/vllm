@@ -142,6 +142,7 @@ def create_requests(
         request = Request(
             request_id=f"{i}",
             prompt_token_ids=prompt_token_ids,
+            token_type_ids=None,
             sampling_params=sampling_params,
             pooling_params=None,
             multi_modal_inputs=mm_inputs,
