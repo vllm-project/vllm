@@ -131,7 +131,7 @@ class AsyncTPPass(VllmInductorPass):
         AllGatherGEMMPattern(self.model_dtype,
                              self.device).register(self.patterns)
 
-    def is_applicable(self, splitting_ops: list[int],
+    def is_applicable(self, splitting_ops: list[str],
                       shape: Optional[int]) -> bool:
         if splitting_ops is None or splitting_ops == []:
             return True

@@ -469,7 +469,7 @@ class SequenceParallelismPass(VllmInductorPass):
             # and allow multiple values of epsilon.
             torch._inductor.pattern_matcher._seen_patterns.clear()
 
-    def is_applicable(self, splitting_ops: list[int],
+    def is_applicable(self, splitting_ops: list[str],
                       shape: Optional[int]) -> bool:
         if splitting_ops is None or splitting_ops == []:
             return True
