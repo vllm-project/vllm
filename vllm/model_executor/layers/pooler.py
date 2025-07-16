@@ -105,7 +105,7 @@ class Pooler(nn.Module, ABC):
         self,
         hidden_states: Union[list[torch.Tensor], torch.Tensor],
         pooling_metadata: PoolingMetadata,
-    ) -> Union[list[torch.Tensor], torch.Tensor]:
+    ) -> PoolerOutput:
         raise NotImplementedError
 
 
