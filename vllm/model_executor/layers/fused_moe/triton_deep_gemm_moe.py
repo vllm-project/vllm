@@ -122,6 +122,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
+        topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,
@@ -135,6 +136,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        apply_router_weight_on_input: bool,
     ):
         use_deep_gemm = (self.allow_deep_gemm
                          and (_valid_deep_gemm(hidden_states, w1, w2)
@@ -148,6 +150,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             hidden_states,
             w1,
             w2,
+            topk_weights,
             topk_ids,
             activation,
             global_num_experts,
@@ -161,4 +164,5 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             workspace13,
             workspace2,
             expert_tokens_meta,
+            apply_router_weight_on_input,
         )
