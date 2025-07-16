@@ -205,11 +205,8 @@ def moe_align_block_size(
     sorted_ids = torch.empty((max_num_tokens_padded, ),
                              dtype=torch.int32,
                              device=topk_ids.device)
-    sorted_ids.fill_(topk_ids.numel())
     max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
-    # Expert ids must be zeroed out to prevent index out of bounds error while
-    # mapping global expert ids to local expert ids in expert parallelism.
-    expert_ids = torch.zeros((max_num_m_blocks, ),
+    expert_ids = torch.empty((max_num_m_blocks, ),
                              dtype=torch.int32,
                              device=topk_ids.device)
     num_tokens_post_pad = torch.empty((1),

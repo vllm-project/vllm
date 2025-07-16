@@ -36,13 +36,11 @@ def test_moe_align_block_size_compare_implementations(block_size, num_tokens,
     ])
 
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
-
     sorted_ids_cuda = torch.empty((max_num_tokens_padded, ),
                                   dtype=torch.int32,
                                   device=topk_ids.device)
-    sorted_ids_cuda.fill_(topk_ids.numel())
-    max_num_m_blocks = max_num_tokens_padded // block_size
-    expert_ids_cuda = torch.zeros((max_num_m_blocks, ),
+    max_num_m_blocks = (max_num_tokens_padded + block_size - 1) // block_size
+    expert_ids_cuda = torch.empty((max_num_m_blocks, ),
                                   dtype=torch.int32,
                                   device=topk_ids.device)
     num_tokens_post_pad_cuda = torch.empty((1),
@@ -71,6 +69,8 @@ def test_moe_align_block_size_compare_implementations(block_size, num_tokens,
         expert_ids_triton,
         num_tokens_post_pad_triton,
     )
+
+    assert torch.equal(sorted_ids_cuda.sort()[0], sorted_ids_triton.sort()[0])
 
     assert torch.allclose(expert_ids_cuda, expert_ids_triton), (
         f"Expert IDs mismatch for block_size={block_size}, "
