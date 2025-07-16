@@ -21,7 +21,7 @@ import zmq.asyncio
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.utils import get_open_zmq_inproc_path, make_zmq_socket
+from vllm.utils import get_open_port, get_open_zmq_inproc_path, make_zmq_socket
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType,
                             ReconfigureDistributedRequest, UtilityOutput)
@@ -933,15 +933,14 @@ class DPAsyncMPClient(AsyncMPClient):
                                 ("SCALE_DP", new_engine_count))
                             await socket.send(scale_msg)
                             continue
-                        logger.error(
-                            "Received invalid scale up notification: %s",
-                            decoded)
 
                         # Regular request notification - send a message to
                         # notify the coordinator that
                         # we're sending a request while the engines are
                         # paused, so that it can wake the others up
                         # (to run dummy EP loop).
+                        logger.info(
+                            "Received first request, waking up engines")
                         self.engines_running = True
                         target_eng_index = int.from_bytes(buf, "little")
                         msg = msgspec.msgpack.encode(
@@ -1105,9 +1104,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # Phase 1: Send reconfigure messages to all existing engines and wait
         # for them to be sent
         reconfig_futures = []
-        # one for stateless group in EngineCore, one for worker's distributed
-        # world group
-        self.vllm_config.parallel_config.data_parallel_master_port += 2
+        self.vllm_config.parallel_config.data_parallel_master_port = \
+            get_open_port()
         for engine in self.core_engines:
             reconfig_request = ReconfigureDistributedRequest(
                 new_data_parallel_size=new_data_parallel_size,
@@ -1179,9 +1177,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         assert self.vllm_config.parallel_config.data_parallel_backend == \
             "ray", ("Only ray DP backend supports scale down")
 
-        # one for stateless group in EngineCore, one for worker's distributed
-        # world group
-        self.vllm_config.parallel_config.data_parallel_master_port += 2
+        self.vllm_config.parallel_config.data_parallel_master_port = \
+            get_open_port()
 
         reconfig_futures = []
         for cur_dp_rank, engine in enumerate(self.core_engines):
