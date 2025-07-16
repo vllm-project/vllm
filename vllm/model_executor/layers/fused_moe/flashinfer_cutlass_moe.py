@@ -9,41 +9,31 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
+from vllm.utils.flashinfer import (flashinfer_cutlass_fused_moe,
+                                   has_flashinfer_cutlass_fused_moe)
 
 logger = init_logger(__name__)
 
-from typing import TYPE_CHECKING
 
-try:
-    from flashinfer import fp4_quantize as fp4_quantize
-    from flashinfer.fused_moe import (
-        cutlass_fused_moe as flashinfer_cutlass_fused_moe)
-except ImportError:
-    if not TYPE_CHECKING:
-        cutlass_fused_moe = None
-
-has_flashinfer_cutlass_fused_moe = flashinfer_cutlass_fused_moe is not None
-
-
-def _valid_flashinfer_fused_moe(hidden_states: torch.Tensor, w1: torch.Tensor,
-                                w2: torch.Tensor) -> bool:
+def is_valid_flashinfer_cutlass_fused_moe(hidden_states: torch.Tensor,
+                                          w1: torch.Tensor,
+                                          w2: torch.Tensor) -> bool:
     """
     Check if the given problem size is supported by the FlashInfer CUTLASS MoE 
     kernel.
     """
-    if not has_flashinfer_cutlass_fused_moe:
-        logger.debug(
-            "FlashInferExperts disabled: flashinfer_cutlass_fused_moe not available."
-        )
+    if not has_flashinfer_cutlass_fused_moe():
+        logger.debug_once("FlashInferExperts disabled: "
+                          "flashinfer_cutlass_fused_moe not available.")
         return False
     # Data type checks
     if (w1.dtype != torch.uint8 or w2.dtype != torch.uint8
             or hidden_states.dtype
             not in [torch.float32, torch.float16, torch.bfloat16]):
-        logger.debug(
-            f"FlashInferExperts disabled: w1/w2 must be torch.uint8 (got w1={w1.dtype}, w2={w2.dtype}), "
-            f"hidden_states must be float32, float16, or bfloat16 (got {hidden_states.dtype})."
-        )
+        logger.debug_once(
+            "FlashInferExperts disabled: w1/w2 must be torch.uint8 "
+            f"(got w1={w1.dtype}, w2={w2.dtype}), hidden_states must be "
+            f"float32, float16, or bfloat16 (got {hidden_states.dtype}).")
         return False
     return True
 
@@ -160,6 +150,12 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # min because inv_scale.
         assert self.use_nvfp4_w4a4 is True, ("Only nvfp4 quantization is "
                                              "currently supported.")
+
+        # Ensure w1_scale and w2_scale are not None before calling view
+        assert w1_scale is not None and w2_scale is not None, (
+            "w1_scale and w2_scale must not "
+            "be None for FlashInferExperts")
+
         quant_scales = [
             a1_gscale,
             w1_scale.view(torch.int32),

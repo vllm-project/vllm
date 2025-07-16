@@ -11,6 +11,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
+from vllm.utils.flashinfer import fp4_swizzle_blockscale
 
 
 def get_local_sizes(local_tokens):
@@ -92,11 +93,10 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         )
         if use_dp:
             topk_weights, topk_ids, a1q, a1q_scale = \
-                get_dp_group().all_gatherv([topk_weights, topk_ids, a1q, a1q_scale],
+                get_dp_group().all_gatherv([topk_weights, topk_ids, a1q, a1q_scale], # noqa: E501
                                            dim=0,
                                            sizes=get_local_sizes(local_tokens))
             a1_m, a1_n = a1q.shape
-            from flashinfer import fp4_swizzle_blockscale
             a1q_scale = fp4_swizzle_blockscale(a1q_scale, a1_m, a1_n * 2)
 
         return a1q, a1q_scale, None, topk_ids, topk_weights

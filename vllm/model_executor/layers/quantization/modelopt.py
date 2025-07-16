@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import torch
 from torch.nn import Module
@@ -13,9 +13,7 @@ from vllm._custom_ops import (cutlass_scaled_fp4_mm,
                               cutlass_scaled_mm_supports_fp4, scaled_fp4_quant)
 from vllm.distributed import get_ep_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    FlashInferExperts, _valid_flashinfer_fused_moe)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (
+from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
     FlashInferCutlassMoEPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
@@ -36,14 +34,6 @@ from vllm.model_executor.parameter import (ModelWeightParameter,
                                            PerTensorScaleParameter)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-
-try:
-    from flashinfer import fp4_quantize as fp4_quantize
-    from flashinfer.fused_moe import (
-        cutlass_fused_moe as flashinfer_cutlass_fused_moe)
-except ImportError:
-    if not TYPE_CHECKING:
-        flashinfer_cutlass_fused_moe = None
 
 logger = init_logger(__name__)
 
@@ -738,8 +728,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 self.allow_flashinfer_cutlass = True
             else:
                 logger.warning_once(
-                    "Flashinfer CUTLASS Fused MoE not supported or found on the current platform."
-                )
+                    "Flashinfer CUTLASS Fused MoE not supported "
+                    "or found on the current platform.")
 
         if not self.cutlass_nvfp4_supported:
             if is_fp4_marlin_supported():
@@ -774,6 +764,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         experts_kwargs["ep_size"] = moe_parallel_config.ep_size
         experts_kwargs["tp_rank"] = moe_parallel_config.tp_rank
         experts_kwargs["tp_size"] = moe_parallel_config.tp_size
+        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
+            FlashInferExperts)
         experts = FlashInferExperts(**experts_kwargs)
         self.fused_experts = mk.FusedMoEModularKernel(
             FlashInferCutlassMoEPrepareAndFinalize(
@@ -782,13 +774,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             ),
             experts,
         )
-
-    @property
-    def load_up_proj_weight_first(self) -> bool:
-        # FlashInfer CUTLASS kernel assumes [Up, Gate] Proj as W13
-        if self.allow_flashinfer_cutlass:
-            return True
-        return False
 
     # This method update self.fused_experts
     # only prepare_finalize is not None call select_gemm_impl
@@ -802,7 +787,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
         if self.allow_flashinfer_cutlass:
-            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
                 FlashInferExperts)
             logger.debug("FlashInferExperts %s", moe)
             experts = FlashInferExperts(
@@ -1066,15 +1051,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         a2_gscale = torch.min(layer.w2_input_scale_quant)
         if self.allow_flashinfer_cutlass:
             # TP or DP case
-            assert _valid_flashinfer_fused_moe(
+            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
+                is_valid_flashinfer_cutlass_fused_moe)
+            assert is_valid_flashinfer_cutlass_fused_moe(
                 x, layer.w13_weight, layer.w2_weight), (
                     "Flashinfer CUTLASS Fused MoE not applicable!")
             extra_expert_args = {
                 'g1_alphas': layer.g1_alphas,
                 'g2_alphas': layer.g2_alphas,
                 'out_dtype': x.dtype,
-                # Avoid confusion with a1_scale and a2_scale whare are batch size
-                # related.
+                # Avoid confusion with a1_scale and a2_scale
+                # where are batch size related.
                 'a1_gscale': a1_gscale,
                 'a2_gscale': a2_gscale,
             }

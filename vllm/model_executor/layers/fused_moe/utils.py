@@ -4,7 +4,6 @@ from math import prod
 from typing import Optional, Union
 
 import torch
-from flashinfer import fp4_quantize as fp4_quantize
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -16,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
+from vllm.utils.flashinfer import fp4_quantize
 
 
 @triton.jit

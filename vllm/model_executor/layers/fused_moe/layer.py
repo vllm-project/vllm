@@ -4,7 +4,7 @@
 from abc import abstractmethod
 from collections.abc import Iterable
 from enum import Enum
-from typing import TYPE_CHECKING, Callable, Literal, Optional, overload
+from typing import Callable, Literal, Optional, overload
 
 import torch
 import torch.nn.functional as F
@@ -34,15 +34,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import direct_register_custom_op, has_deep_ep, has_pplx
-
-try:
-    from flashinfer import fp4_quantize as fp4_quantize
-    from flashinfer.fused_moe import (
-        cutlass_fused_moe as flashinfer_cutlass_fused_moe)
-except ImportError:
-    if not TYPE_CHECKING:
-        flashinfer_cutlass_fused_moe = None
-has_flashinfer = flashinfer_cutlass_fused_moe is not None
+from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
@@ -54,7 +46,7 @@ if current_platform.is_cuda_alike():
         from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
         from .deepep_ll_prepare_finalize import (DEEPEP_QUANT_BLOCK_SHAPE,
                                                  DeepEPLLPrepareAndFinalize)
-    if has_flashinfer:
+    if has_flashinfer_cutlass_fused_moe():
         from .flashinfer_cutlass_prepare_finalize import (
             FlashInferCutlassMoEPrepareAndFinalize)
 else:
@@ -1493,7 +1485,9 @@ class FusedMoE(torch.nn.Module):
         assert self.quant_method is not None
         # Route to the chunked forward path using the FlashInfer Cutlass kernel
         # only when data parallelism (DP) is enabled.
-        use_flashinfer_cutlass_kernels = self.dp_size > 1 and self.moe_parallel_config.use_flashinfer_cutlass_kernels
+        use_flashinfer_cutlass_kernels = (
+            self.dp_size > 1
+            and self.moe_parallel_config.use_flashinfer_cutlass_kernels)
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels
                 or use_flashinfer_cutlass_kernels):
