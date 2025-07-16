@@ -19,7 +19,7 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
 from .bert_with_rope import BertWithRope, JinaRobertaModel
-from .interfaces import SupportsCrossEncoding, SupportsV0Only
+from .interfaces import ClsPooling, SupportsCrossEncoding, SupportsV0Only
 
 
 class RobertaEmbedding(nn.Module):
@@ -124,7 +124,6 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
        model: An instance of BertModel used for forward operations.
        _pooler: An instance of Pooler used for pooling operations.
    """
-    default_pooling_type = "CLS"
 
     def _build_model(self,
                      vllm_config: VllmConfig,
@@ -155,7 +154,7 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
 
 
 class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
-                                       SupportsV0Only):
+                                       SupportsV0Only, ClsPooling):
     """A model that uses Roberta to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
@@ -165,7 +164,6 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
        roberta: An instance of BertModel used for forward operations.
        _pooler: An instance of Pooler used for pooling operations.
    """
-    default_pooling_type = "CLS"
     jina_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             'emb_ln': "embeddings.LayerNorm",

@@ -774,8 +774,11 @@ class ModelConfig:
 
             # set default pooler config
             if pooler_config.pooling_type is None:
-                default_pooling_type = self.model_info.default_pooling_type
-                pooler_config.pooling_type = default_pooling_type
+                if self.task == "reward":
+                    pooler_config.pooling_type = "ALL"
+                else:
+                    default_pooling_type = self.model_info.default_pooling_type
+                    pooler_config.pooling_type = default_pooling_type
             if pooler_config.normalize is None:
                 if self.task in ["classify", "reward", "pooling"]:
                     pooler_config.normalize = False

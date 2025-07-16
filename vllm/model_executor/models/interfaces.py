@@ -642,6 +642,13 @@ def has_step_pooler(model: Union[type[object], object]) -> bool:
         type(module).__name__ == "StepPool" for module in model.modules())
 
 
+class ClsPooling(Protocol):
+    """The interface required for all models
+    that using cls as default_pooling_type."""
+
+    default_pooling_type: ClassVar[str] = "CLS"
+
+
 class SupportsQuant:
     """The interface required for all models that support quantization."""
 

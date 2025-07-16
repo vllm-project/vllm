@@ -25,7 +25,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
-from .interfaces import SupportsCrossEncoding, SupportsQuant, SupportsV0Only
+from .interfaces import (ClsPooling, SupportsCrossEncoding, SupportsQuant,
+                         SupportsV0Only)
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
@@ -314,9 +315,8 @@ class BertOutput(nn.Module):
         return hidden_states
 
 
-class BertModel(nn.Module, SupportsQuant):
+class BertModel(nn.Module, SupportsQuant, ClsPooling):
     packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
-    default_pooling_type = "CLS"
 
     def __init__(self,
                  *,
@@ -389,7 +389,7 @@ class BertModel(nn.Module, SupportsQuant):
         return loaded_params
 
 
-class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
+class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant, ClsPooling):
     """A model that uses Bert to provide embedding functionalities.
 
     This class encapsulates the BertModel and provides an interface for
@@ -399,7 +399,6 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
         model: An instance of BertModel used for forward operations.
         _pooler: An instance of Pooler used for pooling operations.
     """
-    default_pooling_type = "CLS"
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -453,7 +452,8 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
 
 
 class BertForSequenceClassification(nn.Module, SupportsV0Only,
-                                    SupportsCrossEncoding, SupportsQuant):
+                                    SupportsCrossEncoding, SupportsQuant,
+                                    ClsPooling):
     """A model that uses Bert to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
@@ -463,7 +463,6 @@ class BertForSequenceClassification(nn.Module, SupportsV0Only,
        model: An instance of BertModel used for forward operations.
        _pooler: An instance of Pooler used for pooling operations.
    """
-    default_pooling_type = "CLS"
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
