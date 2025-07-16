@@ -335,7 +335,7 @@ class QuarkW4A4MXFP4(QuarkScheme):
                     x_s = x_scales
                 if M >= 32:
                     sm, sn = x_s.shape
-                    x_s = x_s.view(sm // 32, sn * 32)
+                    x_s = x_s.contiguous().view(sm // 32, sn * 32)
                 y = torch.empty(x_q.shape[0],
                                 layer.weight.shape[0],
                                 device=x_q.device,
