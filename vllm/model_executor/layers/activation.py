@@ -70,7 +70,7 @@ class SiluAndMul(CustomOp):
         if current_platform.is_rocm() and envs.VLLM_USE_AITER_TRITON_SILU_MUL:
             import aiter.ops.triton.activation as ops
             self.op = lambda x, shuffle: \
-                ops.act_mul_and_mxfp4_quant(x, "silu", shuffle)
+                ops.act_mul_and_mxfp4_quant(x, "silu", shuffle=shuffle)
         elif current_platform.is_cuda_alike() or current_platform.is_cpu():
             self.op = torch.ops._C.silu_and_mul
         elif current_platform.is_xpu():
