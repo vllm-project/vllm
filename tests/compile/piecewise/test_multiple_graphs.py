@@ -245,12 +245,8 @@ def test_ignore_torch_compile_decorator(monkeypatch):
 
 
 @torch.inference_mode
-def run_model(vllm_config, model: nn.Module):
+def run_model(vllm_config, model: nn.Module, inputs: torch.Tensor):
     with set_forward_context({}, vllm_config=vllm_config):
-        # Pre-allocate memory for CUDAGraph which expects
-        # static tensor addresses
-        inputs = torch.randn(BATCH_SIZE, MLP_SIZE).cuda()
-
         # First run is for compile
         model(inputs)
 
@@ -258,7 +254,6 @@ def run_model(vllm_config, model: nn.Module):
         model(inputs[:2])
         model(inputs[:1])
 
-        inputs[:2].fill_(1.0)
         output = model(inputs[:2])
 
         output = output.cpu()
@@ -286,6 +281,10 @@ def test_multi_graph_piecewise_compile(monkeypatch):
                                          vllm_config=vllm_config,
                                          prefix='').eval().cuda()
 
+    # Pre-allocate memory for CUDAGraph which expects
+    # static tensor addresses
+    inputs = torch.randn(BATCH_SIZE, MLP_SIZE).cuda()
+
     with compilation_counter.expect(
             num_graphs_seen=2,  # two graphs for the model
             num_piecewise_graphs_seen=6,
@@ -297,7 +296,7 @@ def test_multi_graph_piecewise_compile(monkeypatch):
             num_cudagraph_captured=8,
             # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
     ):
-        outputs.append(run_model(vllm_config, model))
+        outputs.append(run_model(vllm_config, model, inputs))
 
     # no compile or cudagraph
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
@@ -316,6 +315,6 @@ def test_multi_graph_piecewise_compile(monkeypatch):
             num_backend_compilations=0,
             num_cudagraph_captured=0,
     ):
-        outputs.append(run_model(vllm_config, model))
+        outputs.append(run_model(vllm_config, model, inputs))
 
     assert torch.allclose(outputs[0], outputs[1])
