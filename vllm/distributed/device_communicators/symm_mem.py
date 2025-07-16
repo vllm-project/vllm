@@ -23,6 +23,12 @@ logger = init_logger(__name__)
 
 class SymmMemCommunicator:
 
+    # World sizes where multi-mem all-reduce performs the best
+    _WORLD_SIZES_MULTIMEM = {
+        "9.0": [4, 6, 8],
+        "10.0": [6, 8],
+    }
+
     def __init__(self, group: ProcessGroup, device: Union[int, str,
                                                           torch.device]):
         self.disabled = True
@@ -43,25 +49,26 @@ class SymmMemCommunicator:
         self.device = device
         self.group = group
         self.world_size = dist.get_world_size(self.group)
-        device_capability = current_platform.get_device_capability(
+        self.device_capability = current_platform.get_device_capability(
         ).as_version_str()
 
-        if device_capability not in SYMM_MEM_ALL_REDUCE_MAX_SIZES:
+        if self.device_capability not in SYMM_MEM_ALL_REDUCE_MAX_SIZES \
+            or self.device_capability not in self._WORLD_SIZES_MULTIMEM:
             logger.warning(
                 "SymmMemCommunicator: Device capability %s not supported, "
                 "communicator is not available.",
-                device_capability,
+                self.device_capability,
             )
             return
         if self.world_size not in SYMM_MEM_ALL_REDUCE_MAX_SIZES[
-                device_capability]:
+                self.device_capability]:
             logger.warning(
                 "SymmMemCommunicator: World size %d not supported, "
                 "communicator is not available.",
                 self.world_size,
             )
             return
-        self.max_size = SYMM_MEM_ALL_REDUCE_MAX_SIZES[device_capability][
+        self.max_size = SYMM_MEM_ALL_REDUCE_MAX_SIZES[self.device_capability][
             self.world_size]
         self.buffer = torch_symm_mem.empty(
             self.max_size // self.dtype.itemsize,
@@ -95,14 +102,13 @@ class SymmMemCommunicator:
         if out is None:
             out = torch.empty_like(inp)
         self.buffer[:inp.numel()].copy_(inp.view(-1))
-        if self.world_size in [2, 4]:
-            # Use two-shot all-reduce for 2 and 4 GPUs
-            torch.ops.symm_mem.two_shot_all_reduce_(self.buffer[:inp.numel()],
+        if self.world_size in self._WORLD_SIZES_MULTIMEM[
+                self.device_capability]:
+            torch.ops.symm_mem.multimem_all_reduce_(self.buffer[:inp.numel()],
                                                     "sum",
                                                     self.group.group_name)
         else:
-            # Use multi-mem all-reduce for 6 and 8 GPUs
-            torch.ops.symm_mem.multimem_all_reduce_(self.buffer[:inp.numel()],
+            torch.ops.symm_mem.two_shot_all_reduce_(self.buffer[:inp.numel()],
                                                     "sum",
                                                     self.group.group_name)
         out.copy_(self.buffer[:inp.numel()].view(out.shape))

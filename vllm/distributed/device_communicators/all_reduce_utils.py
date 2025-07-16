@@ -30,7 +30,7 @@ MiB = 1024 * 1024
 CUSTOM_ALL_REDUCE_MAX_SIZES = {
     "9.0": {
         2: 64 * MiB,  # 64 MB
-        4: 32 * MiB,  # 32 MB
+        4: 1 * MiB,  # 1 MB
         6: MiB // 2,  # 512 KB
         8: MiB // 4,  # 256 KB
     },
