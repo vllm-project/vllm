@@ -348,8 +348,7 @@ class Proxy:
                 except HTTPException as http_exc:
                     self.remove_instance_endpoint("decode", decode_instance)
                     raise http_exc
-        else:
-            self.repeat_p_request -= 1
+        self.repeat_p_request -= 1
 
     async def create_completion(self, raw_request: Request):
         try:

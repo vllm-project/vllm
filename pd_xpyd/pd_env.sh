@@ -6,6 +6,11 @@ export PATH=$PATH:/usr/local/lib/python3.10/dist-packages/mooncake/
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/python3.10/dist-packages/mooncake
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/libfabric/lib:/usr/lib/habanalabs/:/usr/local/lib/
 
+#For PCIE
+export REQUIRED_VERSION=1.22.0
+export LIBFABRIC_ROOT=/opt/libfabric-1.22.0
+export LD_LIBRARY_PATH=$LIBFABRIC_ROOT/lib:$LD_LIBRARY_PATH
+
 export PT_HPU_LAZY_MODE=1
 
 ray stop --force
@@ -25,6 +30,8 @@ export VLLM_EP_SIZE=8
 export VLLM_DELAYED_SAMPLING="false"
 export VLLM_MLA_PERFORM_MATRIX_ABSORPTION=0
 
+export VLLM_USE_ASYNC_PD=1
+
 block_size=128
 # DO NOT change ends...
 
@@ -33,12 +40,12 @@ export VLLM_HPU_LOG_STEP_GRAPH_COMPILATION=true
 export PT_HPU_METRICS_GC_DETAILS=1
 export GRAPH_VISUALIZATION=1
 
-hl-prof-config --use-template profile_api_with_nics --fuser on --trace-analyzer on --gaudi2 --merged "hltv,csv"
+#hl-prof-config --use-template profile_api_with_nics --fuser on --trace-analyzer on --gaudi2 --merged "hltv,csv"
 
-export HABANA_PROFILE=1
-export VLLM_PROFILER_ENABLED=full
-export VLLM_TORCH_PROFILER_DIR=/workspace/
-export HABANA_PROFILE_WRITE_HLTV=1
+#export HABANA_PROFILE=1
+#export VLLM_PROFILER_ENABLED=full
+#export VLLM_TORCH_PROFILER_DIR=/workspace/
+#export HABANA_PROFILE_WRITE_HLTV=1
 
 #unset VLLM_HPU_LOG_STEP_GRAPH_COMPILATION PT_HPU_METRICS_GC_DETAILS GRAPH_VISUALIZATION
 
