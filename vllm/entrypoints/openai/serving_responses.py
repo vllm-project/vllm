@@ -372,7 +372,7 @@ class OpenAIServingResponses(OpenAIServing):
                         })
 
         # Append the new input.
-        # Reponses API supports simple text inputs without chat format.
+        # Responses API supports simple text inputs without chat format.
         if isinstance(request.input, str):
             messages.append({"role": "user", "content": request.input})
         else:
