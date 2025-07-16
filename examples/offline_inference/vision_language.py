@@ -442,8 +442,6 @@ def run_nemotron_vl(questions: list[str], modality: str) -> ModelRequestData:
 
     if modality == "image":
         placeholder = "<image>"
-    elif modality == "video":
-        placeholder = "<video>"
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     messages = [
