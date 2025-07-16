@@ -1288,7 +1288,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             return self.kv_connector_no_forward(scheduler_output)
 
-
         # Prepare the decoder inputs.
         (attn_metadata, attention_cuda_graphs, logits_indices,
          spec_decode_metadata,
@@ -1407,7 +1406,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             if self.input_batch.pooling_params:
                 return self._pool(hidden_states, num_scheduled_tokens,
-                                  num_scheduled_tokens_np, finished_sending, finished_recving)
+                                  num_scheduled_tokens_np, finished_sending,
+                                  finished_recving)
 
             sample_hidden_states = hidden_states[logits_indices]
             logits = self.model.compute_logits(sample_hidden_states, None)
