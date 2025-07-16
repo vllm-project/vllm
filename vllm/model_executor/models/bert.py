@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsCrossEncoding, SupportsQuant, SupportsV0Only
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
@@ -408,7 +408,7 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
         pooler_config = vllm_config.model_config.pooler_config
         self.model = self._build_model(vllm_config=vllm_config,
                                        prefix=maybe_prefix(prefix, "model"))
-        self._pooler = self._build_pooler(pooler_config)
+        self.pooler = self._build_pooler(pooler_config)
 
     def forward(
         self,
@@ -421,13 +421,6 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
                           position_ids=positions,
                           inputs_embeds=inputs_embeds,
                           intermediate_tensors=intermediate_tensors)
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         weights_list = list(weights)
@@ -476,7 +469,7 @@ class BertForSequenceClassification(nn.Module, SupportsV0Only,
                               embedding_class=BertEmbedding,
                               add_pooling_layer=True)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-        self._pooler = ClassifierPooler(
+        self.pooler = ClassifierPooler(
             vllm_config.model_config,
             pooling=self.bert.pooler,
             classifier=self.classifier,
@@ -486,13 +479,6 @@ class BertForSequenceClassification(nn.Module, SupportsV0Only,
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights)
         return loaded_params
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)
 
     def forward(
         self,

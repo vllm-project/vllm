@@ -27,9 +27,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
-from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType
 
 from .interfaces import (HasInnerState, IsHybrid, SupportsLoRA, SupportsPP,
@@ -590,16 +589,9 @@ class JambaForSequenceClassification(JambaForCausalLM):
             softmax=False,
         )
 
-        self._pooler = ClassifierPooler(
+        self.pooler = ClassifierPooler(
             vllm_config.model_config,
             pooling=pooler.pooling,
             classifier=self.score,
             act_fn=pooler.head.activation,
         )
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)

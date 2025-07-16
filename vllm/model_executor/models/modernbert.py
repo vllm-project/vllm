@@ -20,7 +20,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsCrossEncoding, SupportsV0Only
 from .utils import WeightsMapper, maybe_prefix
@@ -288,7 +288,7 @@ class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
         self.model = ModernBertModel(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "modernbert"))
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-        self._pooler = ClassifierPooler(
+        self.pooler = ClassifierPooler(
             vllm_config.model_config,
             pooling=ModernBertPooler(config),
             classifier=self.classifier,
@@ -320,13 +320,6 @@ class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)
 
     def forward(
         self,

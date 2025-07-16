@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 from typing import (TYPE_CHECKING, Optional, Protocol, Union, overload,
                     runtime_checkable)
 
@@ -13,8 +12,7 @@ from vllm.utils import supports_kw
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.model_executor.layers.pooler import PoolerOutput
-    from vllm.model_executor.pooling_metadata import PoolingMetadata
+    from vllm.model_executor.layers.pooler import Pooler
     from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 logger = init_logger(__name__)
@@ -130,16 +128,11 @@ def is_text_generation_model(
 
 
 @runtime_checkable
-class VllmModelForPooling(VllmModel[T], Protocol[T]):
+class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
     """The interface required for all pooling models in vLLM."""
 
-    def pooler(
-        self,
-        hidden_states: T,
-        pooling_metadata: "PoolingMetadata",
-    ) -> "PoolerOutput":
-        """Only called on TP rank 0."""
-        ...
+    pooler: "Pooler"
+    """The pooler is only called on TP rank 0."""
 
 
 @overload
