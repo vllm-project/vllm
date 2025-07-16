@@ -10,7 +10,7 @@ from torch import nn
 from transformers import RobertaConfig
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.pooler import AllPool, ClassifierPooler
+from vllm.model_executor.layers.pooler import ClassifierPooler, CLSPool
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -105,8 +105,8 @@ class RobertaClassificationHead(nn.Module):
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.out_proj = nn.Linear(config.hidden_size, config.num_labels)
 
-    def forward(self, features, **kwargs):
-        x = features[0, :]  # take <s> token (equiv. to [CLS])
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # CLSPool has already been applied in `pooling`
         x = self.dense(x)
         x = torch.tanh(x)
         x = self.out_proj(x)
@@ -185,7 +185,7 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
 
         self._pooler = ClassifierPooler(
             vllm_config.model_config,
-            pooling=AllPool(),
+            pooling=CLSPool(),
             classifier=self.classifier,
         )
 
