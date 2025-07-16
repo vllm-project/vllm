@@ -475,7 +475,9 @@ class ColumnParallelLinear(LinearBase):
             final_shape = list(loaded_weight.shape)
             if output_dim is not None:
                 assert final_shape[output_dim] % self.tp_size == 0
-                final_shape[output_dim] = final_shape[output_dim] // self.tp_size
+                final_shape[output_dim] = (
+                    final_shape[output_dim] // self.tp_size
+                )
             param.materialize(final_shape, dtype=loaded_weight.dtype)
 
         param_data = param.data
@@ -569,7 +571,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
-        assert all(output_size % self.tp_size == 0 for output_size in output_sizes)
+        assert all(
+            output_size % self.tp_size == 0 for output_size in output_sizes
+        )
         super().__init__(input_size=input_size,
                          output_size=sum(output_sizes),
                          bias=bias,
@@ -604,7 +608,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
             output_dim = getattr(param, "output_dim", None)
             shard_size = loaded_weight.size(output_dim) // self.tp_size
-            start_idx =  self.tp_rank * shard_size
+            start_idx = self.tp_rank * shard_size
 
             if loaded_shard_id is not None:
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx,
@@ -671,7 +675,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         assert loaded_shard_id < len(self.output_sizes)
         if output_dim is not None:
-            shard_offset = sum(self.output_sizes[:loaded_shard_id]) // self.tp_size
+            shard_offset = (
+                sum(self.output_sizes[:loaded_shard_id]) // self.tp_size
+            )
             shard_size = self.output_sizes[loaded_shard_id] // self.tp_size
             # Special case for quantization.
             # If quantized, we need to adjust the offset and size to account
@@ -1257,7 +1263,9 @@ class RowParallelLinear(LinearBase):
         if is_gguf_weight and isinstance(param, UninitializedParameter):
             weight_shape = list(loaded_weight.shape)
             if input_dim:
-                weight_shape[input_dim] = weight_shape[input_dim] // self.tp_size
+                weight_shape[input_dim] = (
+                    weight_shape[input_dim] // self.tp_size
+                )
             param.materialize(tuple(weight_shape), dtype=loaded_weight.dtype)
 
         param_data = param.data
