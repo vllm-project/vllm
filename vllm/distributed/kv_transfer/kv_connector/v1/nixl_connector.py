@@ -29,7 +29,7 @@ from vllm.distributed.utils import divide
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.platforms import _Backend, current_platform
-from vllm.utils import make_zmq_path, make_zmq_socket, round_down
+from vllm.utils import make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 
