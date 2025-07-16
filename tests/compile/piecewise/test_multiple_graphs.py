@@ -123,11 +123,11 @@ class SimpleModelWithTwoGraphs(ParentModel):
                  prefix: str = '',
                  **kwargs) -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        # Test will fail without `set_model_tag`` here with error:
+        # Test will fail without set_model_tag here with error:
         # "ValueError: too many values to unpack (expected 3)"
         # This is because CompiledAttention and CompiledAttentionTwo
         # have different implmentations but the same torch.compile
-        # cache dir will be used by default
+        # cache dir will be used as default prefix is 'model_tag'
         with set_model_tag("attn_one"):
             self.attn_one = CompiledAttention(
                 mlp_size=mlp_size,
