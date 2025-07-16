@@ -13,6 +13,7 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
 
@@ -390,12 +391,11 @@ def _apply_bnb_4bit_fake(
 
 
 try:
-    direct_register_custom_op(
-        op_name="apply_bnb_4bit",
-        op_func=_apply_bnb_4bit,
-        mutates_args=["out"],
-        fake_impl=_apply_bnb_4bit_fake,
-    )
+    direct_register_custom_op(op_name="apply_bnb_4bit",
+                              op_func=_apply_bnb_4bit,
+                              mutates_args=["out"],
+                              fake_impl=_apply_bnb_4bit_fake,
+                              dispatch_key=current_platform.dispatch_key)
     apply_bnb_4bit = torch.ops.vllm.apply_bnb_4bit
 
 except AttributeError as error:
