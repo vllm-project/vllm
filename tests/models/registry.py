@@ -465,6 +465,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                             trust_remote_code=True,
                                             speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
                                             tokenizer="meta-llama/Llama-3.1-8B-Instruct"),
+    "EagleLlama4ForCausalLM": _HfExamplesInfo(
+        "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
+        trust_remote_code=True,
+        speculative_model="morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
+        tokenizer="meta-llama/Llama-4-Scout-17B-16E-Instruct"),  # noqa: E501
     "EagleMiniCPMForCausalLM": _HfExamplesInfo("openbmb/MiniCPM-1B-sft-bf16",
                                             trust_remote_code=True,
                                             is_available_online=False,
