@@ -270,4 +270,10 @@ int64_t sm100_cutlass_mla_get_workspace_size(int64_t max_seq_len, int64_t num_ba
 }
 
 #endif
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+  m.impl("sm100_cutlass_mla_decode", &sm100_cutlass_mla_decode);
+  m.impl("sm100_cutlass_mla_get_workspace_size", &sm100_cutlass_mla_get_workspace_size);
+}
+
 // clang-format on
