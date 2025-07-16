@@ -399,7 +399,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.attention_chunk_size = kv_cache_spec.attention_chunk_size
         self._null_block = block_pool.null_block
-        print("chunked liocal")
 
     @classmethod
     def find_longest_cache_hit(
@@ -421,7 +420,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
 
         1. Attention chunk size of 8, block size of 4, max length of 15
         for next token at 15th (zero-indexed), 8th - 14th tokens are in 
-        the window(needs lookup), 0th - 7th are not int the window, 
+        the window(needs lookup), 0th - 7th are not in the window, 
         so they are already marked as computed. We check the complete 
         block3 (8th - 11th tokens), Assume block 3 is hit, we will return 
         [null, null, block 3], otherwise, we return [null, null]
@@ -430,12 +429,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         for next token at 16th (zero-indexed), 0th - 15th tokens are not 
         in the window, so they are already marked as computed. 
         we return 4 blocks[null, null, null, null]
-
-        3. Attention chunk size of 8, block size of 4, max length of 16, 
-        use_eagle is true,for next token at 16th (zero-indexed), 
-        we only look for cache hit for 0th - 14th tokens, since last token
-        15th needs to be recomputed for eagle, so return [null, null, block3] 
-        if block3 is hit and [null, null] if block3 is not hit.
 
         Args:
             block_hashes: The block hashes of the request.
@@ -451,8 +444,8 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         assert isinstance(kv_cache_spec, ChunkedLocalAttentionSpec), (
             "ChunkedLocalAttentionManager can only be used for " +
             "chunked local attention groups")
-        if use_eagle:
-            max_length -= 1
+        assert use_eagle is False, ("Hybrid KV cache is not supported for " +
+                                    "eagle + chunked local attention.")
         max_num_blocks = max_length // kv_cache_spec.block_size
         if max_length > 0:
             local_attention_start_idx = (max_length //
