@@ -6,6 +6,7 @@ from typing import Optional
 import torch
 
 from vllm import SamplingParams
+from vllm.config import VllmConfig
 from vllm.v1.sample.logits_processor import (BatchUpdate, LogitsProcessor,
                                              MoveDirectionality)
 
@@ -31,8 +32,8 @@ prompts = [
 class DummyLogitsProcessor(LogitsProcessor):
     """Fake logit processor to support unit testing and examples"""
 
-    def __init__(self, _):
-        super().__init__()
+    def __init__(self, vllm_config: "VllmConfig", device: torch.device,
+                 is_pin_memory: bool):
         self.req_info = {}
 
     def is_argmax_invariant(self) -> bool:
