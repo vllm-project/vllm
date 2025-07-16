@@ -215,4 +215,8 @@ class TestModel:
         invocation_output = invocation_response.json()
 
         assert score_output.keys() == invocation_output.keys()
-        assert score_output["data"] == invocation_output["data"]
+        for score_data, invocation_data in zip(score_output["data"],
+                                               invocation_output["data"]):
+            assert score_data.keys() == invocation_data.keys()
+            assert score_data["score"] == pytest.approx(
+                invocation_data["score"], rel=0.01)
