@@ -109,7 +109,8 @@ class CustomAllreduce:
         # now `device` is a `torch.device` object
         assert isinstance(device, torch.device)
         self.device = device
-        device_capability = current_platform.get_device_capability()
+        device_capability = current_platform.get_device_capability(
+        ).as_version_str()
         if (current_platform.is_cuda() and envs.VLLM_ALLREDUCE_USE_SYMM_MEM
                 and device_capability in CUSTOM_ALL_REDUCE_MAX_SIZES):
             max_size = min(

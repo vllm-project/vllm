@@ -43,7 +43,8 @@ class SymmMemCommunicator:
         self.device = device
         self.group = group
         self.world_size = dist.get_world_size(self.group)
-        device_capability = current_platform.get_device_capability()
+        device_capability = current_platform.get_device_capability(
+        ).as_version_str()
 
         if device_capability not in SYMM_MEM_ALL_REDUCE_MAX_SIZES:
             logger.warning(
