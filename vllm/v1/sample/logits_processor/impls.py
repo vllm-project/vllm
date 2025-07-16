@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -13,9 +13,11 @@ from vllm.v1.sample.logits_processor.state import (BatchUpdate,
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
+
 class MinPLogitsProcessor(LogitsProcessor):
 
-    def __init__(self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool):
+    def __init__(self, vllm_config: "VllmConfig", device: torch.device,
+                 is_pin_memory: bool):
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.min_p_count: int = 0
 
@@ -25,8 +27,7 @@ class MinPLogitsProcessor(LogitsProcessor):
                                             pin_memory=is_pin_memory)
         self.min_p_cpu = self.min_p_cpu_tensor.numpy()
 
-        self.use_double_tensor = torch.device("cpu") != torch.device(
-            device)
+        self.use_double_tensor = torch.device("cpu") != torch.device(device)
 
         if self.use_double_tensor:
             # Pre-allocated device tensor
@@ -108,8 +109,8 @@ class MinPLogitsProcessor(LogitsProcessor):
 class LogitBiasLogitsProcessor(LogitsProcessor):
 
     def __init__(self, _, device: torch.device, is_pin_memory: bool):
-        self.device=device
-        self.pin_memory=is_pin_memory
+        self.device = device
+        self.pin_memory = is_pin_memory
         self.biases: dict[int, dict[int, float]] = {}
 
         self.bias_tensor: torch.Tensor = torch.tensor(())
@@ -185,10 +186,11 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
 
 class MinTokensLogitsProcessor(LogitsProcessor):
 
-    def __init__(self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool):
+    def __init__(self, vllm_config: "VllmConfig", device: torch.device,
+                 is_pin_memory: bool):
         # index -> (min_toks, output_token_ids, stop_token_ids)
-        self.device=device
-        self.pin_memory=is_pin_memory
+        self.device = device
+        self.pin_memory = is_pin_memory
         self.min_toks: dict[int, tuple[int, Sequence[int], set[int]]] = {}
 
         # (req_idx_tensor,eos_tok_id_tensor)

@@ -55,8 +55,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
-from vllm.v1.sample.logits_processor import (LogitsProcessors,
-                                             build_logitsprocs)
+from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
@@ -198,7 +197,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Build logits processors. If specified by user, load custom
         # logitsprocs constructors.
         self.logitsprocs: LogitsProcessors = build_logitsprocs(
-            vllm_config,self.device,self.pin_memory)
+            vllm_config, self.device, self.pin_memory)
 
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
