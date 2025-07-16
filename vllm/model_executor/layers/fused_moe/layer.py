@@ -853,6 +853,7 @@ class FusedMoE(torch.nn.Module):
 
     def update_expert_map(self):
         # ep_size and ep_rank should already be updated
+        assert self.expert_map is not None
         with self.expert_map.device:
             self.local_num_experts, self.expert_map = determine_expert_map(
                 ep_size=self.ep_size,

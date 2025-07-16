@@ -1099,6 +1099,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             f"than cur_data_parallel_size {cur_data_parallel_size} "
             "for scale up")
 
+        assert self.vllm_config.parallel_config.data_parallel_backend == \
+            "ray", ("Only ray DP backend supports scale up")
+
         # Phase 1: Send reconfigure messages to all existing engines and wait
         # for them to be sent
         reconfig_futures = []
@@ -1172,6 +1175,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             f"new_data_parallel_size {new_data_parallel_size} must be less "
             f"than cur_data_parallel_size {cur_data_parallel_size} "
             "for scale down")
+
+        assert self.vllm_config.parallel_config.data_parallel_backend == \
+            "ray", ("Only ray DP backend supports scale down")
 
         # one for stateless group in EngineCore, one for worker's distributed
         # world group
