@@ -47,7 +47,8 @@ class LMCacheConnector(KVConnectorBase):
         # TODO (Jiayi): Find model_config, parallel_config, and cache_config
         self.engine = init_lmcache_engine(config.model_config,
                                           config.parallel_config,
-                                          config.cache_config)
+                                          config.cache_config,
+                                          config.scheduler_config)
         self.lmcache_engine_name = ENGINE_NAME
         self.lmcache_engine_builder = LMCacheEngineBuilder
 
