@@ -22,7 +22,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GLM-4-MOE model compatible with HuggingFace weights."""
-import json
 import typing
 from collections.abc import Callable, Iterable
 from typing import Any, Optional, Union
