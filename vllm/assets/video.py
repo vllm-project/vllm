@@ -59,7 +59,7 @@ def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
         if idx in frame_indices:  # only decompress needed
             ret, frame = cap.retrieve()
             if ret:
-                frames.append(frame)
+                frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
     frames = np.stack(frames)
     if len(frames) < num_frames:
