@@ -424,6 +424,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         num_steps = worker_input.num_steps
         if (execute_model_req is not None and execute_model_req.spec_step_idx):
             kwargs["spec_step_idx"] = execute_model_req.spec_step_idx
+        if (execute_model_req is not None and execute_model_req.kv_cache_shared_dict):
+            kwargs["kv_cache_shared_dict"] = (
+                execute_model_req.kv_cache_shared_dict)
 
         self.execute_worker(worker_input)
 

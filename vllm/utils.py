@@ -201,6 +201,24 @@ class Counter:
         self.counter = 0
 
 
+class SharedDict:
+    def __init__(self):
+        self.dict = {}
+        self.lock = threading.Lock()
+
+    def add_item(self, key, value):
+        with self.lock:
+            self.dict[key] = value
+
+    def get_item(self, key):
+        with self.lock:
+            return self.dict.get(key, None)
+
+    def remove_item(self, key):
+        with self.lock:
+            if key in self.dict:
+                del self.dict[key]
+
 class CacheInfo(NamedTuple):
     hits: int
     total: int
