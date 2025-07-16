@@ -171,7 +171,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         draft_model_config = draft_worker_kwargs["vllm_config"].model_config
         draft_parallel_config: ParallelConfig = draft_worker_kwargs[
             'vllm_config'].parallel_config
-        
         if layer_skip_method:
             from vllm.spec_decode.early_exit_model_runner import (
                 EarlyExitModelRunner, load_lsq_head)
@@ -945,7 +944,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             draft_token_ids=proposal_token_ids,
             **sampler_extra_kwargs,
         )
-        
         # Append output tokens from non-speculative sequences to
         # the accepted token ids tensor.
         non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len +
