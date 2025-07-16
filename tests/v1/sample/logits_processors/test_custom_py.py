@@ -42,12 +42,8 @@ def test_custom_logitsprocs_py(logitproc_source: str):
     * Requests which activate the custom logitproc, only output `target_token`
 
     Args:
-<<<<<<< HEAD
-      logitproc_source: what source (entrypoint or fully-qualified name) the
-=======
-      logitproc_source: what source (entrypoint or fully-qualified class name) the 
->>>>>>> d08a89d3868d534a7bd46ed4a2d78cde593b642f
-                        user pulls the logitproc from
+      logitproc_source: what source (entrypoint or fully-qualified class name)
+                        the user pulls the logitproc from
     """
     random.seed(40)
 
