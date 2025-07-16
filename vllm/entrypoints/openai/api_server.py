@@ -522,6 +522,19 @@ async def detokenize(request: DetokenizeRequest, raw_request: Request):
     assert_never(generator)
 
 
+def maybe_register_tokenizer_info_endpoint(args):
+    """Conditionally register the tokenizer info endpoint if enabled."""
+    if getattr(args, 'enable_tokenizer_info_endpoint', False):
+
+        @router.get("/tokenizer_info")
+        async def get_tokenizer_info(raw_request: Request):
+            """Get comprehensive tokenizer information."""
+            result = await tokenization(raw_request).get_tokenizer_info()
+            return JSONResponse(content=result.model_dump(),
+                                status_code=result.code if isinstance(
+                                    result, ErrorResponse) else 200)
+
+
 @router.get("/v1/models")
 async def show_available_models(raw_request: Request):
     handler = models(raw_request)
@@ -1692,6 +1705,7 @@ async def run_server_worker(listen_address,
         uvicorn_kwargs['log_config'] = log_config
 
     async with build_async_engine_client(args, client_config) as engine_client:
+        maybe_register_tokenizer_info_endpoint(args)
         app = build_app(args)
 
         vllm_config = await engine_client.get_vllm_config()
