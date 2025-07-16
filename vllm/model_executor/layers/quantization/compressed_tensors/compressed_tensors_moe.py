@@ -929,10 +929,8 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        a1_scale = layer.w13_input_scale
-        a2_scale = layer.w2_input_scale
-        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
-            a2_scale.numel() != 1 if a2_scale is not None else False)
+        per_act_token = (
+            self.input_quant.strategy == QuantizationStrategy.TOKEN)
 
         if self.fused_experts is None:
             # If no modular kernel is provided, use cutlass_moe_fp8
@@ -950,8 +948,8 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
                 expert_map=None if self.disable_expert_map else expert_map,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
-                a1_scale=a1_scale,
-                a2_scale=a2_scale,
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale,
             )
         else:
             return self.fused_experts(
