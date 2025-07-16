@@ -96,7 +96,7 @@ class Pooler(nn.Module, ABC):
     def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
         """
         Construct the pooling parameters to use for a task,
-        or `None` if the task is not support.
+        or `None` if the task is not supported.
         """
         return None
 
