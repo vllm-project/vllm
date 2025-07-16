@@ -585,7 +585,10 @@ class MambaMixer2(MambaBase, CustomOp):
         # Preallocate output tensor to avoid memcpy cost for merging prefill
         # and decode outputs
         preallocated_ssm_out = torch.empty(
-            [num_prefill_tokens + num_decodes, self.num_heads * self.head_dim],
+            [
+                num_prefill_tokens + num_decodes,
+                (self.num_heads // self.tp_size) * self.head_dim
+            ],
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
@@ -640,7 +643,8 @@ class MambaMixer2(MambaBase, CustomOp):
                         has_initial_states_p[:num_prefills, None, None, None],
                         ssm_state[state_indices_tensor_p], 0)
 
-            scan_output, varlen_state = mamba_chunk_scan_combined(
+            # NOTE: final output is an in-place update in pre_allocated_ssm_out
+            _, varlen_state = mamba_chunk_scan_combined(
                 hidden_states_p.view(1, num_prefill_tokens,
                                      self.num_heads // self.tp_size,
                                      self.head_dim),
@@ -700,8 +704,8 @@ class MambaMixer2(MambaBase, CustomOp):
             # - the hidden is reshaped into (bs, num_heads, head_dim)
             # - mamba_cache_params.ssm_state's slots will be selected
             #   using state_indices_tensor_d
-
-            hidden_states_d = selective_state_update(
+            # NOTE: final output is an in-place update in pre_allocated_ssm_out
+            _ = selective_state_update(
                 ssm_state,
                 hidden_states_d,
                 dt_d,
