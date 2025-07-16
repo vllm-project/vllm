@@ -2422,6 +2422,29 @@ class ObservabilityConfig:
             self.collect_detailed_traces[0].split(","))
 
 
+class ReasoningConfig:
+    """Configuration for reasoning models."""
+
+    think_start_str: Optional[str] = None
+    """String that indicates the start of reasoning."""
+    think_end_str: Optional[str] = None
+    """String that indicates the end of reasoning."""
+    think_start_token_ids: Optional[int] = None
+    """Token ID that indicates the start of reasoning."""
+    think_end_token_ids: Optional[int] = None
+    """Token ID that indicates the end of reasoning."""
+
+    def __init__(self,
+                 think_start_str: Optional[str] = None,
+                 think_end_str: Optional[str] = None,
+                 think_start_token_ids: Optional[int] = None,
+                 think_end_token_ids: Optional[int] = None):
+        self.think_start_str = think_start_str
+        self.think_end_str = think_end_str
+        self.think_start_token_ids = think_start_token_ids
+        self.think_end_token_ids = think_end_token_ids
+
+
 @config
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class VllmConfig:
