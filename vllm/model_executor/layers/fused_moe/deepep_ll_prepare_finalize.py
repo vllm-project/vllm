@@ -10,7 +10,9 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input, normalize_batched_scales_shape)
+    MoeQuantOp, normalize_batched_scales_shape)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
@@ -42,11 +44,16 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     # specific hidden sizes.
     SUPPORTED_HIDDEN_SIZES = [2048, 2560, 4096, 5120, 7168]
 
-    def __init__(self,
-                 buffer: deep_ep.Buffer,
-                 max_tokens_per_rank: int,
-                 num_dispatchers: int,
-                 use_fp8_dispatch: bool = False):
+    def __init__(
+        self,
+        buffer: deep_ep.Buffer,
+        max_tokens_per_rank: int,
+        num_dispatchers: int,
+        quant_dtype: Optional[torch.dtype] = None,
+        per_act_token_quant: bool = False,
+        block_shape: Optional[list[int]] = None,
+        use_fp8_dispatch: bool = False,
+    ):
         super().__init__()
 
         self.buffer = buffer
@@ -57,6 +64,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # combine function.
         self.handle = None
         self.num_dispatchers_ = num_dispatchers
+        self.moe_quant: Optional[MoeQuantOp] = (
+            MoeQuantOp(static=not per_act_token_quant,
+                       group_shape=(GroupShape.PER_TOKEN if per_act_token_quant
+                                    else GroupShape.PER_TENSOR))
+            if quant_dtype == torch.float8_e4m3fn and block_shape is None else
+            None)
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
@@ -99,9 +112,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # TODO (varun): Optimization - Use a batched version of quant
         x = x.view((-1, hidden_dim))
-        x, x_scales = moe_kernel_quantize_input(x, a1_scale, quant_dtype,
-                                                per_act_token_quant,
-                                                block_shape)
+        x, x_scales = (self.moe_quant.apply(
+            x, a1_scale) if self.moe_quant is not None else MoeQuantOp.apply_(
+                x, a1_scale, quant_dtype, per_act_token_quant, block_shape))
         x = x.view((num_experts, -1, hidden_dim))
 
         if quant_dtype is not None:

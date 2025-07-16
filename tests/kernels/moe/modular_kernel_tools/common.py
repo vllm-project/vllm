@@ -596,7 +596,11 @@ def make_modular_kernel(config: Config,
         prepare_finalize = FusedMoEMethodBase.maybe_make_prepare_finalize(moe)
         assert prepare_finalize is not None
     else:
-        prepare_finalize = MoEPrepareAndFinalizeNoEP()
+        prepare_finalize = MoEPrepareAndFinalizeNoEP(
+            quant_dtype=moe.quant_dtype,
+            per_act_token_quant=moe.per_act_token_quant,
+            block_shape=moe.block_shape,
+        )
 
     fused_experts = make_fused_experts(config, moe,
                                        prepare_finalize.num_dispatchers())

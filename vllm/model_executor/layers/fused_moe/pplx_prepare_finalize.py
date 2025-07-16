@@ -10,8 +10,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
-from vllm.model_executor.layers.fused_moe.utils import (
-    _validate_scale_shape, moe_kernel_quantize_input)
+from vllm.model_executor.layers.fused_moe.utils import (MoeQuantOp,
+                                                        _validate_scale_shape)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 from vllm.utils import cdiv, round_up
 
 logger = init_logger(__name__)
@@ -66,6 +68,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         max_num_tokens: int,
         num_local_experts: int,
         num_dispatchers: int,
+        quant_dtype: Optional[torch.dtype] = None,
+        per_act_token_quant: bool = False,
+        block_shape: Optional[list[int]] = None,
     ):
         super().__init__()
         assert max_num_tokens > 0
@@ -74,6 +79,12 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.max_num_tokens = max_num_tokens
         self.num_local_experts = num_local_experts
         self.num_dispatchers_ = num_dispatchers
+        self.moe_quant: Optional[MoeQuantOp] = (
+            MoeQuantOp(static=not per_act_token_quant,
+                       group_shape=(GroupShape.PER_TOKEN if per_act_token_quant
+                                    else GroupShape.PER_TENSOR))
+            if quant_dtype == torch.float8_e4m3fn and block_shape is None else
+            None)
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -128,11 +139,14 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         repeat_cols = 4
         repeat_rows = 1 if quant_config.per_act_token_quant else a1.size(0)
-        a1q, a1q_scale = moe_kernel_quantize_input(
-            a1, (None if quant_config.per_act_token_quant else a1_scale),
-            quant_dtype=quant_config.quant_dtype,
-            per_act_token_quant=quant_config.per_act_token_quant,
-            block_shape=quant_config.block_shape)
+        a1_scale = None if quant_config.per_act_token_quant else a1_scale
+        a1q, a1q_scale = (self.moe_quant.apply(
+            a1, a1_scale) if self.moe_quant is not None else MoeQuantOp.apply_(
+                a1,
+                a1_scale,
+                quant_dtype=quant_config.quant_dtype,
+                per_act_token_quant=quant_config.per_act_token_quant,
+                block_shape=quant_config.block_shape))
 
         _validate_scale_shape(a1q, a1q_scale, quant_config.per_act_token_quant,
                               quant_config.block_shape)

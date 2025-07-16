@@ -10,11 +10,10 @@ from transformers import AutoConfig
 
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _moe_permute,
-    _moe_unpermute_and_reduce,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import *
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import *
-from vllm.model_executor.layers.fused_moe.utils import _fp8_quantize
+from vllm.model_executor.layers.fused_moe.utils import MoeQuantOp
 from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser
 
@@ -46,7 +45,7 @@ def benchmark_permute(
     # output_hidden_states = torch.empty_like(hidden_states)
     if use_fp8_w8a8:
         align_block_size = 128  # deepgemm needs 128 m aligned block
-        qhidden_states, scale = _fp8_quantize(hidden_states, None, None)
+        qhidden_states, scale = MoeQuantOp._fp8_quantize(hidden_states, None, None)
     else:
         align_block_size = None
         qhidden_states = hidden_states
@@ -137,7 +136,7 @@ def benchmark_unpermute(
     output_hidden_states = torch.empty_like(hidden_states)
     if use_fp8_w8a8:
         align_block_size = 128  # deepgemm needs 128 m aligned block
-        qhidden_states, scale = _fp8_quantize(hidden_states, None, None)
+        qhidden_states, scale = MoeQuantOp._fp8_quantize(hidden_states, None, None)
     else:
         align_block_size = None
         qhidden_states = hidden_states

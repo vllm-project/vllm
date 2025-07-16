@@ -8,11 +8,26 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous, TopKWeightAndReduceDelegate)
-from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
+from vllm.model_executor.layers.fused_moe.utils import MoeQuantOp
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 
 
 class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
+
+    def __init__(
+        self,
+        quant_dtype: Optional[torch.dtype] = None,
+        per_act_token_quant: bool = False,
+        block_shape: Optional[list[int]] = None,
+    ):
+        super().__init__()
+        self.moe_quant: Optional[MoeQuantOp] = (
+            MoeQuantOp(static=not per_act_token_quant,
+                       group_shape=(GroupShape.PER_TOKEN if per_act_token_quant
+                                    else GroupShape.PER_TENSOR))
+            if quant_dtype == torch.float8_e4m3fn and block_shape is None else
+            None)
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -48,9 +63,15 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
             assert topk == 1, \
                 "apply_router_weight_on_input is only implemented for topk=1"
             a1.mul_(topk_weights.to(a1.dtype))
-        a1q, a1q_scale = moe_kernel_quantize_input(
-            a1, a1_scale, quant_config.quant_dtype,
-            quant_config.per_act_token_quant, quant_config.block_shape)
+
+        a1q, a1q_scale = (self.moe_quant.apply(a1, a1_scale)
+                          if self.moe_quant is not None else MoeQuantOp.apply_(
+                              a1,
+                              a1_scale,
+                              quant_config.quant_dtype,
+                              quant_config.per_act_token_quant,
+                              quant_config.block_shape,
+                          ))
 
         return a1q, a1q_scale, None, None, None
 

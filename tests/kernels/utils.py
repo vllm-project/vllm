@@ -16,8 +16,7 @@ from torch._prims_common import TensorLikeType
 from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
+from vllm.model_executor.layers.fused_moe.utils import MoeQuantOp
 from vllm.platforms.interface import _Backend
 from vllm.utils import (STR_BACKEND_ENV_VAR, STR_FLASH_ATTN_VAL,
                         STR_XFORMERS_ATTN_VAL, make_tensor_with_pad)
@@ -1092,8 +1091,8 @@ def torch_experts(
 
     if a1_scale:
         assert not per_act_token_quant and block_shape is None
-    a, a_scale = moe_kernel_quantize_input(a, a1_scale, quant_dtype,
-                                           per_act_token_quant, block_shape)
+    a, a_scale = MoeQuantOp.apply_(a, a1_scale, quant_dtype,
+                                   per_act_token_quant, block_shape)
 
     num_experts = w1.shape[0]
 
@@ -1118,9 +1117,9 @@ def torch_experts(
                                                 w1_scale[i], block_shape,
                                                 out.dtype)
                 tmp2 = SiluAndMul()(tmp1)
-                tmp2, b_scale = moe_kernel_quantize_input(
-                    tmp2, a2_scale, quant_dtype, per_act_token_quant,
-                    block_shape)
+                tmp2, b_scale = MoeQuantOp.apply_(tmp2, a2_scale, quant_dtype,
+                                                  per_act_token_quant,
+                                                  block_shape)
 
                 out[mask] = native_w8a8_block_matmul(tmp2, w2[i], b_scale,
                                                      w2_scale[i], block_shape,
@@ -1136,9 +1135,9 @@ def torch_experts(
 
                 tmp2 = SiluAndMul()(tmp1).to(out.dtype)
 
-                tmp2, b_scale = moe_kernel_quantize_input(
-                    tmp2, a2_scale, quant_dtype, per_act_token_quant,
-                    block_shape)
+                tmp2, b_scale = MoeQuantOp.apply_(tmp2, a2_scale, quant_dtype,
+                                                  per_act_token_quant,
+                                                  block_shape)
                 assert b_scale is not None
 
                 tmp2 = tmp2.to(f32) * b_scale

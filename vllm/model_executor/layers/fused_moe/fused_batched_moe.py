@@ -12,7 +12,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate, TopKWeightAndReduceNaiveBatched)
 from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache, moe_kernel_quantize_input, normalize_batched_scales_shape,
+    MoeQuantOp, _resize_cache, normalize_batched_scales_shape,
     normalize_scales_shape)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     group_broadcast)
@@ -572,7 +572,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                         rhs_a1_scale = a1_scale
                 else:
                     rhs_a1_scale = None
-                b_a1[idx, :rows, :], b_s = moe_kernel_quantize_input(
+                b_a1[idx, :rows, :], b_s = MoeQuantOp.apply_(
                     rhs,
                     rhs_a1_scale,
                     quant_config.quant_dtype,
@@ -768,10 +768,9 @@ def batched_moe_kernel_quantize_input(
         hidden_dim = A.size(-1)
         assert A_scale is None or A_scale.ndim <= 2, (
             f"{A_scale.shape if A_scale is not None else None}")
-        A_q, A_q_scale = moe_kernel_quantize_input(A.view(-1,
-                                                          hidden_dim), A_scale,
-                                                   qtype, per_act_token_quant,
-                                                   block_shape)
+        A_q, A_q_scale = MoeQuantOp.apply_(A.view(-1,
+                                                  hidden_dim), A_scale, qtype,
+                                           per_act_token_quant, block_shape)
         A_q = A_q.view(E, -1, hidden_dim)
         A_q_scale = normalize_batched_scales_shape(A_q_scale, E)
 
@@ -806,7 +805,7 @@ def batched_moe_kernel_quantize_input(
                     scales = A_scale[e, :min(num_tokens, A_scale.shape[1])]
                 else:
                     scales = None
-                A_q[e, :num_tokens], tmp_scale = moe_kernel_quantize_input(
+                A_q[e, :num_tokens], tmp_scale = MoeQuantOp.apply_(
                     A[e, :num_tokens],
                     scales,
                     qtype,

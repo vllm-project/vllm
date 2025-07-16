@@ -13,8 +13,7 @@ from vllm.model_executor.layers.fused_moe.cutlass_moe import (
     cutlass_moe_fp8, run_cutlass_moe_fp8)
 from vllm.model_executor.layers.fused_moe.fused_moe import (fused_experts,
                                                             fused_topk)
-from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
+from vllm.model_executor.layers.fused_moe.utils import MoeQuantOp
 from vllm.platforms import current_platform
 
 NUM_EXPERTS = [40, 64]
@@ -440,9 +439,8 @@ def test_run_cutlass_moe_fp8(
         expert_map = torch.tensor(expert_map, dtype=torch.int32, device="cuda")
 
         activation = lambda o, i: torch.ops._C.silu_and_mul(o, i)
-        a1q, a1q_scale = moe_kernel_quantize_input(mt.a, mt.a_scale,
-                                                   torch.float8_e4m3fn,
-                                                   per_act_token)
+        a1q, a1q_scale = MoeQuantOp.apply_(mt.a, mt.a_scale,
+                                           torch.float8_e4m3fn, per_act_token)
         global_num_experts = -1 if mt.w1_q is None else mt.w1_q.size(0)
         func = lambda output: run_cutlass_moe_fp8(
             output, a1q, mt.w1_q, mt.w2_q, topk_ids, activation,

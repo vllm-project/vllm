@@ -12,8 +12,7 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize, BatchedTritonExperts, NaiveBatchedExperts)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
-from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
+from vllm.model_executor.layers.fused_moe.utils import MoeQuantOp
 from vllm.utils import round_up
 
 
@@ -156,8 +155,9 @@ def make_quantized_test_activations(
         a_q = torch.zeros_like(a, dtype=quant_dtype)
         a_scale_l = [None] * E
         for e in range(E):
-            a_q[e], a_scale_l[e] = moe_kernel_quantize_input(
-                a[e], None, quant_dtype, per_act_token_quant, block_shape)
+            a_q[e], a_scale_l[e] = MoeQuantOp.apply_(a[e], None, quant_dtype,
+                                                     per_act_token_quant,
+                                                     block_shape)
         a_scale = torch.stack(a_scale_l)
 
         if not per_act_token_quant and block_shape is None:

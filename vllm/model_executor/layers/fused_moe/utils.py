@@ -6,12 +6,15 @@ from typing import Optional, Union
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
@@ -98,89 +101,106 @@ def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
     return x.flatten()[:prod(v)].view(*v)
 
 
-def _fp8_quantize(
-    A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
-    per_act_token: bool,
-    block_shape: Optional[list[int]] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Perform fp8 quantization on the inputs.  If a block_shape
-    is provided, the output will be blocked.
-    """
-    if block_shape is None:
-        # TODO(luka): use QuantFP8 custom op
-        #  https://github.com/vllm-project/vllm/issues/20711
-        A, A_scale = ops.scaled_fp8_quant(
-            A, A_scale, use_per_token_if_dynamic=per_act_token)
-    else:
-        assert not per_act_token
-        assert len(block_shape) == 2
-        _, block_k = block_shape[0], block_shape[1]
-        A, A_scale = per_token_group_quant_fp8(A, block_k)
-        assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
+class MoeQuantOp:
 
-    return A, A_scale
+    def __init__(self,
+                 static: bool,
+                 group_shape: GroupShape,
+                 num_token_padding: Optional[int] = None):
+        self.quant_fp8 = QuantFP8(static, group_shape, num_token_padding)
 
-
-def _int8_quantize(
-    A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
-    per_act_token: bool,
-    block_shape: Optional[list[int]] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Perform int8 quantization on the inputs.  If a block_shape
-    is provided, the output will be blocked.
-    """
-
-    # If weights are per-channel (per_channel_quant=True), then
-    # activations apply per-token quantization. Otherwise, assume
-    # activation tensor-wise fp8/int8 quantization, dynamic or static
-    if block_shape is None:
-        assert per_act_token, \
-            "int8 quantization only supports block or channel-wise"
-        A, A_scale = per_token_quant_int8(A)
-    else:
-        assert not per_act_token
-        assert len(block_shape) == 2
-        _, block_k = block_shape[0], block_shape[1]
-        A, A_scale = per_token_group_quant_int8(A, block_k)
-        assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
-
-    return A, A_scale
-
-
-def _mxfp4_quantize(
-    A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
-    per_act_token_quant: bool,
-    block_shape: Optional[list[int]] = None,
-) -> tuple[torch.Tensor, None]:
-    assert block_shape is None
-    if not current_platform.supports_mx():
-        A = quant_dequant_mxfp4(A)
-    else:
-        raise NotImplementedError()
-
-    return A, None
-
-
-def moe_kernel_quantize_input(
-    A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
-    quant_dtype: Union[None, torch.dtype, str],
-    per_act_token_quant: bool,
-    block_shape: Optional[list[int]] = None,
-) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-    if quant_dtype == torch.float8_e4m3fn:
-        return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
-    elif quant_dtype == torch.int8:
-        return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)
-    elif quant_dtype == "mxfp4":
-        return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
-    else:
+    def apply(
+        self,
+        A: torch.Tensor,
+        A_scale: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        A, A_scale = self.quant_fp8(A, A_scale)
         return A, A_scale
+
+    @staticmethod
+    def apply_(
+        A: torch.Tensor,
+        A_scale: Optional[torch.Tensor],
+        quant_dtype: Union[None, torch.dtype, str],
+        per_act_token_quant: bool,
+        block_shape: Optional[list[int]] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if quant_dtype == torch.float8_e4m3fn:
+            return MoeQuantOp._fp8_quantize(A, A_scale, per_act_token_quant,
+                                            block_shape)
+        elif quant_dtype == torch.int8:
+            return MoeQuantOp._int8_quantize(A, A_scale, per_act_token_quant,
+                                             block_shape)
+        elif quant_dtype == "mxfp4":
+            return MoeQuantOp._mxfp4_quantize(A, A_scale, per_act_token_quant,
+                                              block_shape)
+        else:
+            return A, A_scale
+
+    @staticmethod
+    def _fp8_quantize(
+        A: torch.Tensor,
+        A_scale: Optional[torch.Tensor],
+        per_act_token: bool,
+        block_shape: Optional[list[int]] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Perform fp8 quantization on the inputs.  If a block_shape
+        is provided, the output will be blocked.
+        """
+        if block_shape is None:
+            A, A_scale = ops.scaled_fp8_quant(
+                A, A_scale, use_per_token_if_dynamic=per_act_token)
+        else:
+            assert not per_act_token
+            assert len(block_shape) == 2
+            _, block_k = block_shape[0], block_shape[1]
+            A, A_scale = per_token_group_quant_fp8(A, block_k)
+            assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
+
+        return A, A_scale
+
+    @staticmethod
+    def _int8_quantize(
+        A: torch.Tensor,
+        A_scale: Optional[torch.Tensor],
+        per_act_token: bool,
+        block_shape: Optional[list[int]] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Perform int8 quantization on the inputs.  If a block_shape
+        is provided, the output will be blocked.
+        """
+        # If weights are per-channel (per_channel_quant=True), then
+        # activations apply per-token quantization. Otherwise, assume
+        # activation tensor-wise fp8/int8 quantization, dynamic or static
+        if block_shape is None:
+            assert per_act_token, \
+                "int8 quantization only supports block or channel-wise"
+            A, A_scale = per_token_quant_int8(A)
+        else:
+            assert not per_act_token
+            assert len(block_shape) == 2
+            _, block_k = block_shape[0], block_shape[1]
+            A, A_scale = per_token_group_quant_int8(A, block_k)
+            assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
+
+        return A, A_scale
+
+    @staticmethod
+    def _mxfp4_quantize(
+        A: torch.Tensor,
+        A_scale: Optional[torch.Tensor],
+        per_act_token_quant: bool,
+        block_shape: Optional[list[int]] = None,
+    ) -> tuple[torch.Tensor, None]:
+        assert block_shape is None
+        if not current_platform.supports_mx():
+            A = quant_dequant_mxfp4(A)
+        else:
+            raise NotImplementedError()
+
+        return A, None
 
 
 def _fp8_perm(m: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:

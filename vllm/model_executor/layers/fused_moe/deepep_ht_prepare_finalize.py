@@ -9,8 +9,9 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous, TopKWeightAndReduceDelegate)
-from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
+from vllm.model_executor.layers.fused_moe.utils import MoeQuantOp
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 
 
 class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
@@ -18,8 +19,16 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     Prepare/Finalize using DeepEP High-Throughput kernels.
     """
 
-    def __init__(self, buffer: deep_ep.Buffer, num_dispatchers: int,
-                 dp_size: int, rank_expert_offset: int):
+    def __init__(
+        self,
+        buffer: deep_ep.Buffer,
+        num_dispatchers: int,
+        dp_size: int,
+        rank_expert_offset: int,
+        quant_dtype: Optional[torch.dtype] = None,
+        per_act_token_quant: bool = False,
+        block_shape: Optional[list[int]] = None,
+    ):
         super().__init__()
         self.buffer = buffer
         self.num_dispatchers_ = num_dispatchers
@@ -32,6 +41,13 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # From https://github.com/deepseek-ai/DeepEP/blob/9fe9021f29c9083cd1808ab36b740208524d9f63/deep_ep/buffer.py#L164
         self.available_rank_configs = [2, 4, 8, 16, 24, 32, 64, 128, 144, 160]
+
+        self.moe_quant: Optional[MoeQuantOp] = (
+            MoeQuantOp(static=not per_act_token_quant,
+                       group_shape=(GroupShape.PER_TOKEN if per_act_token_quant
+                                    else GroupShape.PER_TENSOR))
+            if quant_dtype == torch.float8_e4m3fn and block_shape is None else
+            None)
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
@@ -149,13 +165,15 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1 = a1 * topk_weights.to(a1.dtype)
 
         if quant_config.per_act_token_quant:
-            a1q, a1q_scale = moe_kernel_quantize_input(
-                a1,
-                a1_scale,
-                quant_dtype=quant_config.quant_dtype,
-                per_act_token_quant=True,
-                block_shape=quant_config.block_shape,
-            )
+            a1q, a1q_scale = (self.moe_quant.apply(a1, a1_scale)
+                              if self.moe_quant is not None else
+                              MoeQuantOp.apply_(
+                                  a1,
+                                  a1_scale,
+                                  quant_dtype=quant_config.quant_dtype,
+                                  per_act_token_quant=True,
+                                  block_shape=quant_config.block_shape,
+                              ))
             if a1q_scale is not None and a1q_scale.numel() == 1:
                 a1q_scale = a1q_scale.view(1, 1)
             (expert_x, expert_x_scale, expert_tokens_meta, expert_topk_ids,
@@ -178,12 +196,15 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             # quantize now
             expert_x_scale = None
             if expert_x.numel() != 0:
-                expert_x, expert_x_scale = moe_kernel_quantize_input(
-                    expert_x,
-                    a1_scale,
-                    quant_dtype=quant_config.quant_dtype,
-                    per_act_token_quant=False,
-                    block_shape=quant_config.block_shape)
+                expert_x, expert_x_scale = (
+                    self.moe_quant.apply(expert_x, a1_scale)
+                    if self.moe_quant is not None else MoeQuantOp.apply_(
+                        expert_x,
+                        a1_scale,
+                        quant_dtype=quant_config.quant_dtype,
+                        per_act_token_quant=False,
+                        block_shape=quant_config.block_shape,
+                    ))
 
         return (expert_x, expert_x_scale, expert_tokens_meta, expert_topk_ids,
                 expert_topk_weights)

@@ -121,7 +121,11 @@ def pplx_cutlass_moe(
         ata,
         max_num_tokens=max_num_tokens,
         num_local_experts=num_local_experts,
-        num_dispatchers=num_dispatchers)
+        num_dispatchers=num_dispatchers,
+        quant_dtype=torch.float8_e4m3fn,
+        per_act_token_quant=per_act_token,
+        block_shape=None,
+    )
 
     experts = CutlassExpertsFp8(num_local_experts,
                                 out_dtype,
