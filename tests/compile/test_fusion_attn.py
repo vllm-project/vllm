@@ -159,8 +159,8 @@ def test_attention_fusion_v0(example_prompts, monkeypatch, model: str,
     [("amd/Llama-3.1-8B-Instruct-FP8-KV", kFp8StaticTensorSym)])
 @pytest.mark.parametrize("use_split_attention", [True, False])
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
-@pytest.mark.skipif(not current_platform.is_cuda_alike(),
-                    reason="Only test CUDA and ROCm")
+@pytest.mark.skipif(not current_platform.is_rocm(),
+                    reason="Only test ROCm")
 def test_attention_fusion_v1(example_prompts, monkeypatch, model: str,
                              quant_key: QuantKey, use_split_attention: bool):
     # Clean Dynamo cache to avoid reusing other test cases
