@@ -440,7 +440,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                          tokenizer="Isotr0py/Florence-2-tokenizer",  # noqa: E501
                                                          trust_remote_code=True),  # noqa: E501
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
-    "VoxtralForConditionalGeneration": _HfExamplesInfo("mistralai/Voxtral-Mini-3B-2507", is_available_online=False, tokenizer_mode="mistral"),  # noqa: E501
+    "VoxtralForConditionalGeneration": _HfExamplesInfo("mistralai/Voxtral-Mini-3B-2507", tokenizer_mode="mistral"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
 
     # [Cross-encoder]
@@ -465,6 +465,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                             trust_remote_code=True,
                                             speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
                                             tokenizer="meta-llama/Llama-3.1-8B-Instruct"),
+    "EagleLlama4ForCausalLM": _HfExamplesInfo(
+        "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
+        trust_remote_code=True,
+        speculative_model="morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
+        tokenizer="meta-llama/Llama-4-Scout-17B-16E-Instruct"),  # noqa: E501
     "EagleMiniCPMForCausalLM": _HfExamplesInfo("openbmb/MiniCPM-1B-sft-bf16",
                                             trust_remote_code=True,
                                             is_available_online=False,
