@@ -30,12 +30,9 @@ RUN mkdir -p $VLLM_PATH && \
 
 # Install vllm-fork inside the container
 ENV VLLM_TARGET_DEVICE=hpu
-RUN pip install -v -e $VLLM_PATH
-RUN pip install -v -e $VLLM_PATH/tests/vllm_test_utils
-
-# Install additional Python packages
-RUN pip install datasets && \
-    pip install pandas
+RUN pip install -v -r $VLLM_PATH/requirements-hpu.txt
+RUN pip install -v -e $VLLM_PATH --no-build-isolation
+RUN pip install -v -e $VLLM_PATH/tests/vllm_test_utils --no-build-isolation
 
 # Copy utility scripts and configuration
 RUN mkdir -p /root/scripts/
