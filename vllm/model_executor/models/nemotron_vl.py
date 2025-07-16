@@ -31,8 +31,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargs, NestedTensors)
 from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import (PromptReplacement, PromptUpdate,
-                                        PromptUpdateDetails)
+from vllm.multimodal.processing import PromptUpdate, PromptUpdateDetails
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import (
     cached_image_processor_from_config)
@@ -62,7 +61,6 @@ class NemotronVLProcessor(InternVLProcessor):
         min_dynamic_patch: Optional[int] = None,
         max_dynamic_patch: Optional[int] = None,
         dynamic_image_size: Optional[bool] = None,
-        video_token: Optional[str] = None,
     ) -> None:
         ABC.__init__(self)
         self.config = config
@@ -90,9 +88,6 @@ class NemotronVLProcessor(InternVLProcessor):
         self.max_dynamic_patch = max_dynamic_patch
         self.dynamic_image_size = dynamic_image_size
         self.use_thumbnail: bool = self.image_processor.use_thumbnail
-
-        # add extra video token for video processing
-        self.video_token = video_token
 
     @property
     def image_token_id(self) -> int:
@@ -144,24 +139,9 @@ class NemotronVLProcessor(InternVLProcessor):
 
         return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
 
-    def get_video_repl(
-        self,
-        feature_size: int,
-        num_patches: Optional[int] = None,
-        video_context_token: str = IMG_CONTEXT,
-    ) -> PromptUpdateDetails[str]:
-        repl_features = video_context_token * self.num_image_token
-        repl_features_with_sep = IMG_START + repl_features + IMG_END
-        # num_patches is equal to num_frames
-        repl_full = ''.join([
-            f'Frame{i+1}: {repl_features_with_sep}' for i in range(num_patches)
-        ])
-
-        return PromptUpdateDetails.select_text(repl_full, video_context_token)
-
 
 class NemotronVLProcessingInfo(InternVLProcessingInfo):
-    """Nemotron VL ProcessingInfo extended for video processing"""
+    """Processing info for Nemotron VL models."""
 
     def get_hf_processor(
         self,
@@ -178,7 +158,6 @@ class NemotronVLProcessingInfo(InternVLProcessingInfo):
         if dynamic_image_size is not None:
             kwargs["dynamic_image_size"] = dynamic_image_size
 
-        kwargs["video_token"] = self.get_video_token()
         image_processor = self.get_image_processor()
         return self.ctx.init_processor(
             NemotronVLProcessor,
@@ -187,6 +166,9 @@ class NemotronVLProcessingInfo(InternVLProcessingInfo):
             image_processor=image_processor,
             **kwargs,
         )
+
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+        return {"image": None}
 
     def get_image_processor(
         self,
@@ -200,12 +182,6 @@ class NemotronVLProcessingInfo(InternVLProcessingInfo):
 
 class NemotronVLDummyInputsBuilder(
         BaseInternVLDummyInputsBuilder[NemotronVLProcessingInfo]):
-    """Nemotron VL DummyInputsBuilder extended for video support"""
-
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        num_videos = mm_counts.get("video", 0)
-
-        return super().get_dummy_text(mm_counts) + "<video>" * num_videos
 
     def get_dummy_mm_data(
         self,
@@ -214,27 +190,12 @@ class NemotronVLDummyInputsBuilder(
     ) -> MultiModalDataDict:
         dummy_image = super().get_dummy_mm_data(seq_len=seq_len,
                                                 mm_counts=mm_counts)
-        if self.info.supports_video:
-            config = self.info.get_hf_config()
-            image_size: int = config.vision_config.image_size
-            target_num_frames = \
-                self.info.get_num_frames_with_most_features(seq_len, mm_counts)
-            num_videos = mm_counts.get("video", 0)
-            dummy_video = {
-                "video":
-                self._get_dummy_videos(width=image_size,
-                                       height=image_size,
-                                       num_frames=target_num_frames,
-                                       num_videos=num_videos)
-            }
-        else:
-            dummy_video = {}
-        return {**dummy_image, **dummy_video}
+
+        return {**dummy_image}
 
 
 class NemotronVLMultiModalProcessor(
         BaseInternVLMultiModalProcessor[NemotronVLProcessingInfo]):
-    """Nemotron VL MultiModalProcessor extended for video support"""
 
     def _call_hf_processor(
         self,
@@ -246,10 +207,6 @@ class NemotronVLMultiModalProcessor(
         processed_outputs = super()._call_hf_processor(prompt, mm_data,
                                                        mm_kwargs, tok_kwargs)
 
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        if self.info.supports_video and (
-                video_token_id := hf_processor.video_token_id) is not None:
-            processed_outputs["video_token_id"] = torch.tensor(video_token_id)
         return processed_outputs
 
     def _get_mm_fields_config(
@@ -259,21 +216,7 @@ class NemotronVLMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         image_fields = super()._get_mm_fields_config(hf_inputs,
                                                      hf_processor_mm_kwargs)
-        if self.info.supports_video:
-            video_num_patches = hf_inputs.get("video_num_patches",
-                                              torch.empty(0))
-            num_videos = len(video_num_patches)
-            video_fields = dict(
-                pixel_values_flat_video=MultiModalFieldConfig.flat_from_sizes(
-                    "video", video_num_patches),
-                video_num_patches=MultiModalFieldConfig.batched("video"),
-                video_token_id=MultiModalFieldConfig.shared(
-                    "video", num_videos),
-            )
-        else:
-            video_fields = {}
-
-        return image_fields | video_fields
+        return image_fields
 
     def _get_prompt_updates(
         self,
@@ -284,33 +227,6 @@ class NemotronVLMultiModalProcessor(
         prompt_repl: list[PromptUpdate] = super()._get_prompt_updates(
             mm_items, hf_processor_mm_kwargs, out_mm_kwargs)
 
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-
-        if "video_num_patches" in out_mm_kwargs:
-            video_num_patches = out_mm_kwargs["video_num_patches"]
-            assert isinstance(video_num_patches, torch.Tensor)
-            video_num_patches = video_num_patches.tolist()
-        else:
-            video_num_patches = []
-
-        def get_video_replacement_internvl(item_idx: int):
-            feature_size = hf_processor.num_image_token
-            num_patches = video_num_patches[item_idx]
-            if num_patches is not None:
-                assert isinstance(num_patches, int)
-
-            return hf_processor.get_video_repl(
-                feature_size,
-                num_patches,
-                video_context_token=hf_processor.video_token)
-
-        if self.info.supports_video:
-            prompt_repl.append(
-                PromptReplacement(
-                    modality="video",
-                    target="<video>",
-                    replacement=get_video_replacement_internvl,
-                ))
         return prompt_repl
 
 
@@ -325,10 +241,8 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
             return "<image>"
-        if modality.startswith("video"):
-            return "<video>"
 
-        raise ValueError("Only image or video modality is supported")
+        raise ValueError("Only image modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -365,7 +279,6 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         self.mlp1 = self._init_mlp1(config)
 
         self.img_context_token_id = None
-        self.video_context_token_id = None
 
         self.visual_token_mask = None
         self.make_empty_intermediate_tensors = (
@@ -501,51 +414,6 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
 
         raise AssertionError("This line should be unreachable.")
 
-    def _parse_and_validate_video_input(
-            self, **kwargs: object) -> Optional[InternVLVideoPixelInputs]:
-        pixel_values_flat_video = kwargs.pop("pixel_values_flat_video", None)
-        video_num_patches = kwargs.pop("video_num_patches", None)
-        video_embeds = kwargs.pop("image_embeds", None)
-
-        if pixel_values_flat_video is None and video_embeds is None:
-            return None
-
-        if video_embeds is not None:
-            if not isinstance(video_embeds, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of video embeddings. "
-                                 f"Got type: {type(video_embeds)}")
-
-            return InternVLImageEmbeddingInputs(
-                type="video_embeds",
-                data=flatten_bn(video_embeds),
-            )
-
-        video_token_id = kwargs["video_token_id"]
-        assert isinstance(video_token_id, torch.Tensor)
-        self.video_context_token_id = video_token_id.flatten().unique().item()
-
-        if pixel_values_flat_video is not None:
-            if not isinstance(pixel_values_flat_video, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values_flat_video)}")
-
-            if not isinstance(video_num_patches, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image_num_patches. "
-                                 f"Got type: {type(video_num_patches)}")
-
-            pixel_values_flat_video = flatten_bn(pixel_values_flat_video,
-                                                 concat=True)
-            video_num_patches = flatten_bn(video_num_patches, concat=True)
-
-            return InternVLVideoPixelInputs(
-                type="pixel_values_videos",
-                pixel_values_flat=self._validate_pixel_values(
-                    pixel_values_flat_video),
-                num_patches=video_num_patches,
-            )
-
-        raise AssertionError("This line should be unreachable.")
-
     def _process_image_input(
         self,
         image_input: Union[InternVLImageInputs, InternVLVideoPixelInputs],
@@ -584,10 +452,6 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                              "image_embeds") and "images" not in modalities:
                 modalities["images"] = self._parse_and_validate_image_input(
                     **kwargs)
-            if input_key in ("pixel_values_flat_video",
-                             ) and "videos" not in modalities:
-                modalities["videos"] = self._parse_and_validate_video_input(
-                    **kwargs)
 
         return modalities
 
@@ -605,7 +469,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
             return []
 
         # The result multimodal_embeddings is tuple of tensors, with each
-        # tensor correspoending to a multimodal data item (image or video).
+        # tensor correspoending to a multimodal data item (image).
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
         # NOTE: It is important to iterate over the keys in this dictionary
@@ -615,10 +479,6 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                 image_input = modalities["images"]
                 vision_embeddings = self._process_image_input(image_input)
                 multimodal_embeddings += vision_embeddings
-            if modality == "videos":
-                video_input = modalities["videos"]
-                video_embeddings = self._process_image_input(video_input)
-                multimodal_embeddings += video_embeddings
 
         return multimodal_embeddings
 
@@ -630,11 +490,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if multimodal_embeddings is not None \
             and len(multimodal_embeddings) != 0:
-            context_token_ids = [
-                token_id for token_id in (self.img_context_token_id,
-                                          self.video_context_token_id)
-                if token_id is not None
-            ]
+            context_token_ids = [self.img_context_token_id]
             assert len(context_token_ids) >= 1
             self._set_visual_token_mask(input_ids)
             inputs_embeds = merge_multimodal_embeddings(
