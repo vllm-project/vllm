@@ -26,23 +26,23 @@ logger = init_logger(__name__)
 
 # Map speculators weight names to vLLM names
 SPECULATORS_WEIGHT_MAP = {
-    "fusion_fc.weight": "fc.weight",
-    "fusion_fc.bias": "fc.bias",
-    "pre_lm_head_layernorm.weight": "hidden_states_layernorm.weight",
+    "fusion_fc.weight": "model.fc.weight",
+    "fusion_fc.bias": "model.fc.bias",
+    "embedding_layernorm.weight": "model.embedding_layernorm.weight",
+    "pre_lm_head_layernorm.weight": "model.hidden_states_layernorm.weight",
 }
 
 
 def remap_speculators_weight_name(name: str) -> Optional[str]:
     """Remap speculators format weight names to vLLM names.
     
-    Maps speculators format weight names to vLLM format.
+    Returns None for weights that should be skipped.
     """
     if name in SPECULATORS_WEIGHT_MAP:
         return SPECULATORS_WEIGHT_MAP[name]
     elif name.startswith("transformer."):
-        # Remove the "transformer." prefix to match vLLM's naming
-        # e.g., "transformer.mlp.down_proj.weight" -> "mlp.down_proj.weight"
-        return name[len("transformer."):]
+        # Replace "transformer." with "model.layers.0."
+        return "model.layers.0." + name[len("transformer."):]
     return name
 
 
@@ -208,14 +208,5 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
             remapped_name = remap_speculators_weight_name(name)
             if remapped_name is None:
                 continue
-            name = remapped_name
-            
-            # Handle transformer layer weights - they map to layer 0
-            if any(layer_component in name for layer_component in 
-                   ["mlp.", "self_attn.", "input_layernorm", "post_attention_layernorm"]):
-                name = f"layers.0.{name}"
-            
-            if "lm_head" not in name:
-                name = "model." + name
-            model_weights[name] = loaded_weight
+            model_weights[remapped_name] = loaded_weight
         loader.load_weights(model_weights.items())

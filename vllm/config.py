@@ -2767,6 +2767,10 @@ class SpeculativeConfig:
                 # Automatically detect the method
                 if self.method in ('eagle', 'eagle3'):
                     pass
+                elif hasattr(self.draft_model_config.hf_config, 
+                           "speculators_model_type") and \
+                        self.draft_model_config.hf_config.speculators_model_type in ("eagle", "eagle3"):
+                    self.method = self.draft_model_config.hf_config.speculators_model_type
                 elif "eagle-" in self.draft_model_config.model.lower() or \
                         "eagle3-" in self.draft_model_config.model.lower():
                     self.method = "eagle"
