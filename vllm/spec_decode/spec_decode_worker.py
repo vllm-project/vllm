@@ -379,12 +379,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # Hidden states from target model to pass to proposer
         # in the subsequent step.
         self.previous_hidden_states: Optional[HiddenStates] = None
-        
-        # Acceptance rate tracking for debugging
-        self._total_draft_tokens = 0
-        self._total_accepted_tokens = 0
         self._disable_logprobs = disable_logprobs
-        self._disable_log_stats = disable_log_stats
+        og_stats = disable_log_stats
         self._num_spec_prefill_steps = num_spec_prefill_steps
 
     def init_device(self) -> None:
@@ -398,7 +394,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # NOTE(cade): load_model is not part of the WorkerBase interface.
         self.scorer_worker.load_model()
         self.proposer_worker.load_model()
-        
         # Load LSQ head for layer-skip if needed
         if hasattr(self.proposer_worker, 'worker') and hasattr(self.proposer_worker.worker, 'model_runner'):
             model_runner = self.proposer_worker.worker.model_runner
@@ -472,10 +467,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         """
         (self.scorer_worker.model_runner.sampler.include_gpu_probs_tensor
          ) = True
-        # DISABLE greedy prob modification for better acceptance rates
-        # This may affect theoretical guarantees but makes greedy sampling practical
         (self.scorer_worker.model_runner.sampler.
-         should_modify_greedy_probs_inplace) = False
+         should_modify_greedy_probs_inplace) = True
         self.proposer_worker.set_include_gpu_probs_tensor()
         self.proposer_worker.set_should_modify_greedy_probs_inplace()
 
@@ -853,17 +846,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
         execute_model_req.previous_hidden_states = None
 
-        # Debug logging
-        from vllm.logger import init_logger
-        logger = init_logger(__name__)
-
-        # Mark sequences as no longer prompt so scorer returns real probabilities
-        # for the draft tokens (otherwise they get masked to 0)
-        for sgm in execute_model_req.seq_group_metadata_list:
-            sgm.is_prompt = False
-
         with Timer() as scoring_timer:
-            # BREAKPOINT 2: Scorer evaluation - watch proposals.proposal_token_ids, full model run
             proposal_scores = self.scorer.score_proposals(
                 execute_model_req,
                 proposals,
@@ -945,7 +928,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # Get proposed tokens.
         proposal_token_ids = proposals.proposal_token_ids[spec_indices]
 
-        # Scale down draft probabilities to account for overconfidence
         # Draft model at early layers tends to be more confident than target
         proposal_probs = proposal_probs / 5.0
 
@@ -959,7 +941,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                 if sgm.sampling_params.seed is not None
             }
 
-        # BREAKPOINT 3: Rejection sampling - watch draft vs target probs, acceptance decisions
         accepted_token_ids = self.spec_decode_sampler(
             target_with_bonus_probs=proposal_verifier_probs,
             bonus_token_ids=bonus_token_ids,
@@ -1191,7 +1172,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
         # Populate the data structures needed to keep track of sequences with
         # bonus tokens.
-        # BREAKPOINT 4: Final sequence tracking - watch which tokens were accepted/rejected
         self._track_sequences_with_bonus_tokens(seq_ids,
                                                 request_ids_seq_ids_mapping,
                                                 accepted_token_ids_by_step)
@@ -1395,30 +1375,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
     def stop_profile(self):
         if isinstance(self.scorer_worker, WorkerBase):
             self.scorer_worker.stop_profile()
-    
-    def _track_acceptance_rate(self, proposal_token_ids: torch.Tensor, accepted_token_ids: torch.Tensor):
-        """Track acceptance rate for debugging purposes."""
-        # Count draft tokens (non-negative values in proposal_token_ids)
-        draft_tokens = (proposal_token_ids >= 0).sum().item()
-        
-        # Count accepted tokens (non-negative values in accepted_token_ids, excluding bonus token)
-        # accepted_token_ids shape: [batch_size, max_proposal_len + 1]
-        # The first column is the bonus token, skip it
-        accepted_tokens = (accepted_token_ids[:, 1:] >= 0).sum().item()
-        
-        self._total_draft_tokens += draft_tokens
-        self._total_accepted_tokens += accepted_tokens
-        
-        # Print acceptance rate periodically
-        if self._total_draft_tokens > 0 and self._total_draft_tokens % 100 == 0:
-            acceptance_rate = self._total_accepted_tokens / self._total_draft_tokens
-            print(f"[ACCEPTANCE_RATE] {self._total_accepted_tokens}/{self._total_draft_tokens} = {acceptance_rate:.3f}")
-    
-    def get_acceptance_rate(self) -> float:
-        """Get current acceptance rate."""
-        if self._total_draft_tokens == 0:
-            return 0.0
-        return self._total_accepted_tokens / self._total_draft_tokens
 
 
 def split_num_cache_blocks_evenly(scorer_cache_block_size_bytes: int,
