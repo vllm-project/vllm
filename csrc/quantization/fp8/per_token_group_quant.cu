@@ -8,6 +8,8 @@
 
 #include <torch/all.h>
 
+#include "../vectorization.cuh"
+
 #ifndef _DISPATCH_CASE_F16
   #define _DISPATCH_CASE_F16(c_type, ...) \
     case at::ScalarType::Half: {          \
@@ -41,20 +43,6 @@
       }                                                                     \
     }()
 #endif
-
-template <typename T, int N>
-struct __align__(16) simple_vec_t {
-  static_assert(N * sizeof(T) == 16,
-                "simple_vec_t only supports 16-byte total size vectors");
-  T data[N];
-
-  __device__ __forceinline__ void cast_load(const T* ptr) {
-    const auto* src = reinterpret_cast<const simple_vec_t*>(ptr);
-    *this = *src;  // Vectorized 16-byte load.
-  }
-
-  __device__ __forceinline__ T operator[](int idx) const { return data[idx]; }
-};
 
 __device__ __forceinline__ float GroupReduceMax(float val, const int tid) {
   unsigned mask = 0xffff;
@@ -108,17 +96,17 @@ __global__ void per_token_group_quant_8bit_kernel(
   }
 
   constexpr uint32_t vec_size = 16 / sizeof(T);
-  using vec_t = simple_vec_t<T, vec_size>;
+  using vec_t = vllm::vec_n_t<T, vec_size>;
 
   const int32_t num_vec_elems = group_size / vec_size;
 
   for (int32_t i = lane_id; i < num_vec_elems; i += 16) {
-    vec_t input_vec;
-    input_vec.cast_load(group_input + i * vec_size);
+    vec_t input_vec =
+        *reinterpret_cast<const vec_t*>(group_input + i * vec_size);
 
 #pragma unroll
     for (uint32_t j = 0; j < vec_size; ++j) {
-      float val = static_cast<float>(input_vec[j]);
+      float val = static_cast<float>(input_vec.val[j]);
       float abs_val = fabsf(val);
       local_absmax = fmaxf(local_absmax, abs_val);
     }
@@ -138,12 +126,12 @@ __global__ void per_token_group_quant_8bit_kernel(
   }
 
   for (int32_t i = lane_id; i < num_vec_elems; i += 16) {
-    vec_t input_vec;
-    input_vec.cast_load(group_input + i * vec_size);
+    vec_t input_vec =
+        *reinterpret_cast<const vec_t*>(group_input + i * vec_size);
 
 #pragma unroll
     for (uint32_t j = 0; j < vec_size; ++j) {
-      float val = static_cast<float>(input_vec[j]);
+      float val = static_cast<float>(input_vec.val[j]);
       float q_val = fminf(fmaxf(val / y_s, min_8bit), max_8bit);
       group_output[i * vec_size + j] = DST_DTYPE(q_val);
     }
