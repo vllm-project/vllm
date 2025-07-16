@@ -477,7 +477,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.cudnn_workspace = torch.empty(
                 CUDNN_WORKSPACE_SIZE * scheduler_config.max_num_seqs,
                 dtype=torch.int8,
-                device=self.device,
+                device=device,
             )
 
     def _build_fi_prefill_wrappers(self, prefill: FlashInferPrefillMetadata):
