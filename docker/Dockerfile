@@ -207,6 +207,19 @@ ARG SCCACHE_ENDPOINT
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
 ARG SCCACHE_S3_NO_CREDENTIALS=0
+
+# Flag to control whether to use pre-built vLLM wheels
+ARG VLLM_USE_PRECOMPILED
+# TODO: in setup.py VLLM_USE_PRECOMPILED is sensitive to truthiness, it will take =0 as "true", this should be fixed
+ENV VLLM_USE_PRECOMPILED=""
+RUN if [ "${VLLM_USE_PRECOMPILED}" = "1" ]; then \
+        export VLLM_USE_PRECOMPILED=1 && \
+        echo "Using precompiled wheels"; \
+    else \
+        unset VLLM_USE_PRECOMPILED && \
+        echo "Leaving VLLM_USE_PRECOMPILED unset to build wheels from source"; \
+    fi
+
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
