@@ -469,7 +469,10 @@ class SequenceParallelismPass(VllmInductorPass):
             # and allow multiple values of epsilon.
             torch._inductor.pattern_matcher._seen_patterns.clear()
 
-    def is_applicable_for_shape(self, shape: Optional[int]) -> bool:
+    def is_applicable(self, splitting_ops: list[int],
+                      shape: Optional[int]) -> bool:
+        if splitting_ops is None or splitting_ops == []:
+            return True
         tp_size = get_tensor_model_parallel_world_size()
         return shape is not None and shape % tp_size == 0
 
