@@ -162,8 +162,7 @@ class Exaone4Attention(nn.Module):
         layer_idx = extract_layer_index(prefix)
         layer_has_sliding_window = (
             getattr(config, "sliding_window_pattern", "LLLG")
-            and (layer_idx + 1) % self.config.sliding_window_pattern.__len__()
-            != 0)
+            and (layer_idx + 1) % config.sliding_window_pattern.__len__() != 0)
 
         interleaved_sliding_window = getattr(config,
                                              "interleaved_sliding_window",
@@ -278,8 +277,8 @@ class Exaone4DecoderLayer(nn.Module):
         )
 
         # Use post-LN
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = residual + hidden_states
 
         residual = hidden_states
 
@@ -287,8 +286,9 @@ class Exaone4DecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
 
         # Use post-LN
-        hidden_states, residual = self.post_feedforward_layernorm(
-            hidden_states, residual)
+        hidden_states = self.post_feedforward_layernorm(hidden_states)
+        hidden_states = residual + hidden_states
+
         return hidden_states, residual
 
 
@@ -490,7 +490,7 @@ class Exaone4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 quant_config=quant_config,
             )
             if config.tie_word_embeddings:
-                self.lm_head.weight = self.transformer.wte.weight
+                self.lm_head.weight = self.model.embed_tokens.weight
 
             logit_scale = getattr(config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
@@ -500,7 +500,7 @@ class Exaone4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.lm_head = PPMissingLayer()
 
         self.make_empty_intermediate_tensors = (
-            self.transformer.make_empty_intermediate_tensors)
+            self.model.make_empty_intermediate_tensors)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -512,8 +512,8 @@ class Exaone4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        model_output = self.transformer(input_ids, positions,
-                                        intermediate_tensors, inputs_embeds)
+        model_output = self.model(input_ids, positions, intermediate_tensors,
+                                  inputs_embeds)
         return model_output
 
     def compute_logits(
