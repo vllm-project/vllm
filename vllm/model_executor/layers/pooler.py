@@ -380,25 +380,6 @@ class LambdaPoolerActivation(PoolerActivation):
 class PoolerHead(nn.Module):
 
     @classmethod
-    def from_config_with_defaults(
-        cls,
-        pooler_config: PoolerConfig,
-        pooling_type: PoolingType,
-        normalize: bool,
-        softmax: bool,
-    ) -> "PoolerHead":
-        resolved_config = ResolvedPoolingConfig.from_config_with_defaults(
-            pooler_config=pooler_config,
-            pooling_type=pooling_type,
-            normalize=normalize,
-            softmax=softmax,
-            step_tag_id=None,
-            returned_token_ids=None,
-        )
-
-        return cls.from_config(resolved_config)
-
-    @classmethod
     def from_config(cls, pooler_config: ResolvedPoolingConfig) -> "PoolerHead":
         if pooler_config.normalize and pooler_config.softmax:
             raise ValueError("`normalize=True` and `softmax=True` should not "
@@ -474,7 +455,7 @@ class SimplePooler(Pooler):
         pooling_type: PoolingType,
         normalize: bool,
         softmax: bool,
-    ) -> "SimplePooler":
+    ) -> "SimplePooler":  # type: ignore[override]
         resolved_config = ResolvedPoolingConfig.from_config_with_defaults(
             pooler_config=pooler_config,
             pooling_type=pooling_type,
@@ -504,7 +485,9 @@ class SimplePooler(Pooler):
     def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
         if task == "encode":
             return PoolingParams()
-        if task in ("embed", "classify", "score"):
+
+        # The equalities are split up to keep mypy happy
+        if task == "embed" or task == "classify" or task == "score":
             if isinstance(self.pooling, (LastPool, CLSPool, MeanPool)):
                 return PoolingParams()
 
@@ -587,7 +570,9 @@ class StepPooler(Pooler):
     def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
         if task == "encode":
             return PoolingParams(logits_processing_needs_token_ids=True)
-        if task in ("embed", "classify", "score"):
+
+        # The equalities are split up to keep mypy happy
+        if task == "embed" or task == "classify" or task == "score":
             return None
 
         assert_never(task)
