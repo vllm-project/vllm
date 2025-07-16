@@ -478,6 +478,7 @@ class OpenAIServingCompletion(OpenAIServing):
         choices: list[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
+        kv_transfer_params= None
 
         for final_res in final_res_batch:
             prompt_token_ids = final_res.prompt_token_ids
@@ -553,14 +554,15 @@ class OpenAIServingCompletion(OpenAIServing):
                 cached_tokens=final_res.num_cached_tokens)
 
         request_metadata.final_usage_info = usage
-
+        if final_res_batch:
+            kv_transfer_params = final_res_batch[0].kv_transfer_params
         return CompletionResponse(
             id=request_id,
             created=created_time,
             model=model_name,
             choices=choices,
             usage=usage,
-            kv_transfer_params=final_res_batch[0].kv_transfer_params)
+            kv_transfer_params=kv_transfer_params)
 
     def _create_completion_logprobs(
         self,
