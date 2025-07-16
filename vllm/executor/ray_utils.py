@@ -18,11 +18,6 @@ from vllm.utils import get_ip
 from vllm.worker.worker_base import WorkerWrapperBase
 
 
-from vllm.distributed.kv_transfer import (get_kv_transfer_group,
-                                          has_kv_transfer_group)
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
-import copy
-
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.outputs import ModelRunnerOutput
@@ -140,19 +135,6 @@ try:
                 scheduler_output, intermediate_tensors = scheduler_output, None
             output = self.worker.model_runner.execute_model(
                 scheduler_output, intermediate_tensors)
-            
-            logger.info(f"in the ray_utils.py ...")
-            if has_kv_transfer_group():
-                finished_sending, finished_recving = (
-                    get_kv_transfer_group().get_finished(
-                        scheduler_output.finished_req_ids))
-                if finished_sending or finished_recving:
-                    if not output or output is EMPTY_MODEL_RUNNER_OUTPUT:
-                        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-                    output.finished_sending = finished_sending
-                    output.finished_recving = finished_recving
-                logger.info(f"Have succesfully set finished_sending: {finished_sending}, finished_recving: {finished_recving}")
-            
             if isinstance(output, IntermediateTensors):
                 output = scheduler_output, output
             return output
