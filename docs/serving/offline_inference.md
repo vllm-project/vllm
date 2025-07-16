@@ -52,7 +52,7 @@ processor = build_llm_processor(
 
 ds = ray.data.from_items(["Start of the haiku is: Complete this for me..."])
 ds = processor(ds)
-ds.write_parquet("output.parquet")
+ds.write_parquet("local:///tmp/data/")
 ```
 
 For more information about the Ray Data LLM API, see the [Ray Data LLM documentation](https://docs.ray.io/en/latest/data/working-with-llms.html).
