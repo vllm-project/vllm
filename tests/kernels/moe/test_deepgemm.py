@@ -95,7 +95,7 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
     topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1)
     topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
 
-    # triton referrence
+    # triton reference
     out_triton = fused_experts(
         hidden_states=tokens_bf16,
         w1=w1,

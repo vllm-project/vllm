@@ -43,7 +43,7 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
         text_config = hf_config.get_text_config()
 
         # Ensure at least 2 expert per group
-        # Since `grouped_topk` assums top-2
+        # Since `grouped_topk` assumes top-2
         n_group = getattr(text_config, 'n_group', None)
         num_experts = n_group * 2 if n_group is not None else 2
 
