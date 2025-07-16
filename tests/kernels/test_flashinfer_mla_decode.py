@@ -11,10 +11,10 @@ from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 
-# if not current_platform.has_device_capability(100):
-#     pytest.skip(
-#         reason="FlashInfer MLA Requires compute capability of 10 or above.",
-#         allow_module_level=True)
+if not current_platform.has_device_capability(100):
+    pytest.skip(
+        reason="FlashInfer MLA Requires compute capability of 10 or above.",
+        allow_module_level=True)
 
 def ref_mla(
         out: Tensor,  # (bs, num_heads, v_head_dim)
@@ -48,9 +48,6 @@ def ref_mla(
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("bs", [1, 2, 4, 16])
 @pytest.mark.parametrize("block_size", [32, 64])
-# @pytest.mark.parametrize("dtype", [torch.bfloat16])
-# @pytest.mark.parametrize("bs", [1])
-# @pytest.mark.parametrize("block_size", [32])
 def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int,
                             block_size: int):
     torch.set_default_dtype(dtype)
