@@ -246,13 +246,14 @@ def get_model_architecture(
             if not arch.endswith("ForSequenceClassification"):
                 continue
 
-            assert model_config.task in ["auto", "classify"]
-            model_config.task = "classify"
-            new_arch = arch.replace("ForSequenceClassification", "ForCausalLM")
-            vllm_supported = not any(arch in vllm_supported_archs
-                                     for arch in architectures)
-            if vllm_supported:
-                architectures = [new_arch]
+            assert model_config.task == "classify"
+            causal_lm_arch = arch.replace("ForSequenceClassification",
+                                          "ForCausalLM")
+            causal_lm_arch_vllm_supported = (causal_lm_arch
+                                             in vllm_supported_archs)
+
+            if causal_lm_arch_vllm_supported:
+                architectures = [causal_lm_arch_vllm_supported]
                 vllm_not_supported = False
                 break
 
