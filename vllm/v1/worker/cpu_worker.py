@@ -47,12 +47,15 @@ class CPUWorker(Worker):
     def init_device(self):
         # Setup OpenMP threads affinity.
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
-        self.local_omp_cpuid = "all"
         if omp_cpuids == "auto":
             if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
+                # For SMT-8, use 4 CPUs per core
                 self.local_omp_cpuid = self._get_autobind_cpu_ids(4)
-            else:
+            elif current_platform.get_cpu_architecture() == CpuArchEnum.X86:
+                # For SMT-2, use 1 CPU per core
                 self.local_omp_cpuid = self._get_autobind_cpu_ids(1)
+            else:
+                self.local_omp_cpuid = "all"
         else:
             self.local_omp_cpuid = omp_cpuids.split("|")[self.rank]
 
@@ -163,7 +166,7 @@ class CPUWorker(Worker):
         ]
         assert len(logical_cpu_list) != 0, (
             f"No allowed CPU on NUMA node {self.local_rank}. "
-            f"Allowed CPU ids are {allowed_cpu_id_list}, "
+            f"Allowed CPU ids are {allowed_cpu_id_list}. "
             "Their NUMA nodes can be got via `lscpu`. "
             "Please try to bind threads manually.")
         # Select at most cpu_num_per_core CPUs from each physical core
