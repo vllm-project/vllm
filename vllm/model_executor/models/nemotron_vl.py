@@ -8,7 +8,7 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 from abc import ABC
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from typing import Optional, Union
 
 import torch
@@ -28,10 +28,8 @@ from vllm.model_executor.models.internvl import (
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
-from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import PromptUpdate, PromptUpdateDetails
+from vllm.multimodal.inputs import NestedTensors
+from vllm.multimodal.processing import PromptUpdateDetails
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import (
     cached_image_processor_from_config)
@@ -180,60 +178,10 @@ class NemotronVLProcessingInfo(InternVLProcessingInfo):
         )
 
 
-class NemotronVLDummyInputsBuilder(
-        BaseInternVLDummyInputsBuilder[NemotronVLProcessingInfo]):
-
-    def get_dummy_mm_data(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> MultiModalDataDict:
-        dummy_image = super().get_dummy_mm_data(seq_len=seq_len,
-                                                mm_counts=mm_counts)
-
-        return {**dummy_image}
-
-
-class NemotronVLMultiModalProcessor(
-        BaseInternVLMultiModalProcessor[NemotronVLProcessingInfo]):
-
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> Mapping[str, NestedTensors]:
-        processed_outputs = super()._call_hf_processor(prompt, mm_data,
-                                                       mm_kwargs, tok_kwargs)
-
-        return processed_outputs
-
-    def _get_mm_fields_config(
-        self,
-        hf_inputs: Mapping[str, NestedTensors],
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        image_fields = super()._get_mm_fields_config(hf_inputs,
-                                                     hf_processor_mm_kwargs)
-        return image_fields
-
-    def _get_prompt_updates(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
-    ) -> Sequence[PromptUpdate]:
-        prompt_repl: list[PromptUpdate] = super()._get_prompt_updates(
-            mm_items, hf_processor_mm_kwargs, out_mm_kwargs)
-
-        return prompt_repl
-
-
 @MULTIMODAL_REGISTRY.register_processor(
-    NemotronVLMultiModalProcessor,
+    BaseInternVLMultiModalProcessor[NemotronVLProcessingInfo],
     info=NemotronVLProcessingInfo,
-    dummy_inputs=NemotronVLDummyInputsBuilder)
+    dummy_inputs=BaseInternVLDummyInputsBuilder[NemotronVLProcessingInfo])
 class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                                SupportsLoRA):
 
