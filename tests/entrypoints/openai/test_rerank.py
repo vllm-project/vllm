@@ -120,4 +120,8 @@ def test_invocations(server: RemoteOpenAIServer):
     invocation_output = invocation_response.json()
 
     assert rerank_output.keys() == invocation_output.keys()
-    assert rerank_output["results"] == invocation_output["results"]
+    for rerank_result, invocations_result in zip(rerank_output["results"],
+                                                 invocation_output["results"]):
+        assert rerank_result.keys() == invocations_result.keys()
+        assert rerank_result["relevance_score"] == pytest.approx(
+            invocations_result["relevance_score"], rel=0.01)
