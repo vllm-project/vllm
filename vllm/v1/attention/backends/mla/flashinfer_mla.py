@@ -101,7 +101,6 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             dtype=torch.uint8,
             device=q.device,
         )
-
         trtllm_batch_decode_with_kv_cache_mla(
             query=q,
             kv_cache=kv_c_and_k_pe_cache,
@@ -113,7 +112,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             seq_lens=attn_metadata.decode.seq_lens,
             block_size=page_size,
             max_seq_len=max_seq_len,
-            scale=self.scale,
+            sm_scale=self.scale,
             out=o,
         )
 
