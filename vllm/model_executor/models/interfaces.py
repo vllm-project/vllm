@@ -667,7 +667,7 @@ def supports_cross_encoding(
 def has_step_pooler(model: Union[type[object], object]) -> bool:
     """Check if the model uses step pooler."""
     return is_pooling_model(model) and any(
-        type(module).__name__ == "StepPool" for module in model.modules())
+        type(module).__name__ == "StepPooler" for module in model.modules())
 
 
 class SupportsQuant:

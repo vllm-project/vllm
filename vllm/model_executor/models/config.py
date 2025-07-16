@@ -7,7 +7,8 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, ShortConvSpec
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, MambaSpec,
+                                        ShortConvSpec)
 
 if TYPE_CHECKING:
 
@@ -205,6 +206,19 @@ class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
         }
 
 
+class GraniteMoeHybridModelConfig(VerifyAndUpdateConfig):
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        config = vllm_config.model_config
+        config.max_seq_len_to_capture = config.max_model_len
+        logger.info(
+            "Setting max_seq_len_to_capture to %d "
+            "to ensure that CUDA graph capture "
+            "covers sequences of length up to max_model_len.",
+            config.max_model_len)
+
+
 class HybridAttentionStaticCacheModelConfig(VerifyAndUpdateConfig):
 
     @classmethod
@@ -244,7 +258,8 @@ class HybridAttentionStaticCacheModelConfig(VerifyAndUpdateConfig):
             model_config._model_info.architecture)[0]
 
         # get mamba page size
-        static_cache_shapes = model_cls.get_mamba_state_shape_from_config(vllm_config)
+        static_cache_shapes = model_cls.get_mamba_state_shape_from_config(
+            vllm_config)
         if static_cache_shapes is not None:
             static_cache_page_size = MambaSpec(
                 shapes=static_cache_shapes,
@@ -252,7 +267,8 @@ class HybridAttentionStaticCacheModelConfig(VerifyAndUpdateConfig):
                 block_size=model_config.max_model_len,
             ).page_size_bytes
         else:
-            static_cache_shapes = model_cls.get_conv_cache_shape_from_config(vllm_config)
+            static_cache_shapes = model_cls.get_conv_cache_shape_from_config(
+                vllm_config)
             static_cache_page_size = ShortConvSpec(
                 shapes=static_cache_shapes,
                 dtype=kv_cache_dtype,
@@ -291,8 +307,9 @@ class HybridAttentionStaticCacheModelConfig(VerifyAndUpdateConfig):
         if (cache_config.mamba_page_size_padded is None
                 or cache_config.mamba_page_size_padded != attn_page_size):
             cache_config.mamba_page_size_padded = (attn_page_size)
-            static_cache_padding_pct = 100 * (attn_page_size -
-                                       static_cache_page_size) / static_cache_page_size
+            static_cache_padding_pct = 100 * (
+                attn_page_size -
+                static_cache_page_size) / static_cache_page_size
             logger.info(
                 "Padding fixed state page size by %.2f%% to ensure "
                 "that fixed state page size and attention page size are "
@@ -306,4 +323,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
+    "GraniteMoeHybridForCausalLM": GraniteMoeHybridModelConfig,
 }

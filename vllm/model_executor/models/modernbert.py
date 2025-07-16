@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -13,7 +13,8 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.pooler import ClassifierPooler
+from vllm.model_executor.layers.pooler import (BasePooler, ClassifierPooler,
+                                               PoolingMethod, PoolingType)
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -252,10 +253,13 @@ class ModernBertModel(nn.Module):
         return norm_outputs
 
 
-class ModernBertPooler(nn.Module):
+class ModernBertPooler(BasePooler):
 
     def __init__(self, config: ModernBertConfig):
         super().__init__()
+
+        pooling_type = PoolingType[config.classifier_pooling.upper()]
+        self.pooling = PoolingMethod.from_pooling_type(pooling_type)
         self.dense = nn.Linear(config.hidden_size, config.hidden_size,
                                config.classifier_bias)
         self.pooling_type = config.classifier_pooling
@@ -264,15 +268,12 @@ class ModernBertPooler(nn.Module):
                                  eps=config.norm_eps,
                                  bias=config.norm_bias)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        pooled_output = hidden_states
-        if self.pooling_type == "mean":
-            pooled_output = pooled_output.mean(dim=0, keepdim=False)
-        elif self.pooling_type == "cls":
-            pooled_output = pooled_output[0, :]
-        else:
-            raise ValueError("Pooling type should be either `cls` or `mean`, "
-                             f"but got {self.pooling_type}")
+    def forward(
+        self,
+        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
+        pooling_metadata: PoolingMetadata,
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+        pooled_output = self.pooling(hidden_states, pooling_metadata)
         pooled_output = self.norm(self.act(self.dense(pooled_output)))
         return pooled_output
 
@@ -287,9 +288,11 @@ class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
         self.model = ModernBertModel(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "modernbert"))
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-        self._pooler = ClassifierPooler(vllm_config.model_config,
-                                        self.classifier,
-                                        ModernBertPooler(config))
+        self._pooler = ClassifierPooler(
+            vllm_config.model_config,
+            pooling=ModernBertPooler(config),
+            classifier=self.classifier,
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
