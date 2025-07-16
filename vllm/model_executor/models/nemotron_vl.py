@@ -8,8 +8,8 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 from abc import ABC
-from collections.abc import Iterable, Mapping
-from typing import Optional, Union
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -22,9 +22,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.models.internvl import (
     BaseInternVLDummyInputsBuilder, BaseInternVLMultiModalProcessor,
-    InternVLImageEmbeddingInputs, InternVLImageInputs,
-    InternVLImagePixelInputs, InternVLProcessingInfo, InternVLProcessor,
-    InternVLVideoPixelInputs)
+    BaseInternVLProcessingInfo, InternVLImageEmbeddingInputs,
+    InternVLImageInputs, InternVLImagePixelInputs, InternVLProcessor)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -164,9 +163,6 @@ class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
             image_processor=image_processor,
             **kwargs,
         )
-
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None}
 
     def get_image_processor(
         self,
