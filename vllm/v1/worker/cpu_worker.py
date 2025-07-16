@@ -155,11 +155,13 @@ class CPUWorker(Worker):
                                                text=True)
         logical_cpu_list: list[LogicalCPUInfo] = json.loads(
             lscpu_output, object_hook=LogicalCPUInfo.json_decoder)['cpus']
+
         # Filter allowed CPUs
         allowed_cpu_id_list = os.sched_getaffinity(0)
         logical_cpu_list = [
             x for x in logical_cpu_list if x.id in allowed_cpu_id_list
         ]
+
         # Get CPUs on NUMA node `local_rank`
         logical_cpu_list = [
             x for x in logical_cpu_list if x.numa_node == self.local_rank
@@ -169,6 +171,7 @@ class CPUWorker(Worker):
             f"Allowed CPU ids are {allowed_cpu_id_list}. "
             "Their NUMA nodes can be got via `lscpu`. "
             "Please try to bind threads manually.")
+
         # Select at most cpu_num_per_core CPUs from each physical core
         core_to_cpus: dict[int, list[LogicalCPUInfo]] = {}
         for cpu_info in logical_cpu_list:
@@ -180,6 +183,7 @@ class CPUWorker(Worker):
             cpu_list = sorted(cpu_list, key=lambda x: x.id)
             logical_cpu_list.extend(cpu_list[-cpu_num_per_core:])
         logical_cpu_list = sorted(logical_cpu_list, key=lambda x: x.id)
+
         # Reserve CPUs for other processes
         reserve_cpu_num = envs.VLLM_CPU_NUM_OF_RESERVED_CPU
         if reserve_cpu_num is None:
@@ -189,6 +193,7 @@ class CPUWorker(Worker):
             f"should less than {len(logical_cpu_list)}.")
         if reserve_cpu_num != 0:
             logical_cpu_list = logical_cpu_list[:-reserve_cpu_num]
+
         logger.info("auto thread-binding list (id, physical core): %s",
                     [(x.id, x.physical_core) for x in logical_cpu_list])
         return ",".join([str(x.id) for x in logical_cpu_list])
