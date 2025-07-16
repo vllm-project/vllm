@@ -1,14 +1,15 @@
-
-from typing import Any, Optional
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Optional
 
 import torch
-import torch.nn as nn
 
 from vllm import envs
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import get_current_vllm_config
+from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import CustomOp
-from vllm.distributed import divide, get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear)
@@ -16,9 +17,7 @@ from vllm.model_executor.layers.mamba.mamba2_metadata import (Mamba2Metadata,
                                                               update_metadata)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.model_executor.models.conv_cache import ConvCacheParams
-from vllm.model_executor.layers.mamba.mamba2_metadata import Mamba2Metadata
 from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionMetadata
 
 
@@ -88,7 +87,8 @@ class ShortConv(CustomOp):
         # kernels to operate in continuous batching and in chunked prefill
         # modes; they are computed at top-level model forward since they
         # stay the same and reused for all mamba layers in the same iteration
-        attn_metadata: Optional[AttentionMetadata] = get_forward_context().attn_metadata
+        attn_metadata: Optional[AttentionMetadata] = get_forward_context(
+        ).attn_metadata
         if envs.VLLM_USE_V1:
             if attn_metadata is not None:
                 assert isinstance(attn_metadata, dict)
@@ -120,19 +120,19 @@ class ShortConv(CustomOp):
 
         conv_weights = self.conv.weight.view(self.conv.weight.size(0),
                                              self.conv.weight.size(2))
-        
+
         if envs.VLLM_USE_V1 and attn_metadata is None:
             # V1 profile run
             Bx = (B * x).contiguous()
             hidden_states = C * Bx
             contextualized_states, _ = self.out_proj(hidden_states)
             return contextualized_states
-            
-        num_prefills        = attn_metadata.num_prefills  # request count
-        num_decodes         = attn_metadata.num_decode_tokens  # token count (=request)
-        num_prefill_tokens  = attn_metadata.num_prefill_tokens  # token count
-        has_prefill         = num_prefills > 0
-        has_decode          = num_decodes > 0
+
+        num_prefills = attn_metadata.num_prefills  # request count
+        num_decodes = attn_metadata.num_decode_tokens  # token count (=request)
+        num_prefill_tokens = attn_metadata.num_prefill_tokens  # token count
+        has_prefill = num_prefills > 0
+        has_decode = num_decodes > 0
 
         # NOTE: V0 put prefill before decode, v1 puts decode before prefill
         # Separate prefill and decode by splitting varlen input
@@ -180,7 +180,7 @@ class ShortConv(CustomOp):
             )
             # Split along batch dimension
             state_indices_tensor_p, state_indices_tensor_d = torch.split(
-                conv_cache_params.state_indices_tensor,
+                state_indices_tensor,
                 [num_prefills, num_decodes],
                 dim=0,
             )
@@ -195,17 +195,16 @@ class ShortConv(CustomOp):
             if conv_metadata.cu_seqlen is None:
                 conv_metadata = update_metadata(Bx_p, query_start_loc_p,
                                                 conv_metadata)
-            Bx = causal_conv1d_fn(
-                Bx_p,
-                conv_weights,
-                self.conv.bias,
-                activation=None,
-                conv_states=conv_state,
-                has_initial_state=has_initial_states_p,
-                cache_indices=state_indices_tensor_p,
-                metadata=conv_metadata,
-                query_start_loc=query_start_loc_p).transpose(
-                    0, 1)[:num_prefill_tokens]
+            Bx = causal_conv1d_fn(Bx_p,
+                                  conv_weights,
+                                  self.conv.bias,
+                                  activation=None,
+                                  conv_states=conv_state,
+                                  has_initial_state=has_initial_states_p,
+                                  cache_indices=state_indices_tensor_p,
+                                  metadata=conv_metadata,
+                                  query_start_loc=query_start_loc_p).transpose(
+                                      0, 1)[:num_prefill_tokens]
 
             C_p = C_p.view(1, num_prefill_tokens, -1)
             y = C_p * Bx
@@ -231,13 +230,12 @@ class ShortConv(CustomOp):
         contextualized_states, _ = self.out_proj(hidden_states)
 
         return contextualized_states
-    
 
-    def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    def get_state_shape(self) -> tuple[tuple[int, ...]]:
         world_size = get_tensor_model_parallel_world_size()
         # contiguous along 'dim' axis
         conv_state_shape = (
             self.L_cache - 1,
             divide(self.conv_dim, world_size),
         )
-        return (conv_state_shape,)
+        return (conv_state_shape, )

@@ -30,6 +30,7 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import (DPMetadata, get_forward_context,
                                   set_forward_context)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.conv import ShortConv
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
@@ -51,7 +52,7 @@ from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec, MambaSpec,
-                                        SlidingWindowSpec, ShortConvSpec)
+                                        ShortConvSpec, SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
@@ -2333,8 +2334,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     raise NotImplementedError(
                         "Non-Attention backend is not supported by V1 "
                         "GPUModelRunner.")
-            elif isinstance(kv_cache_spec, MambaSpec) or isinstance(kv_cache_spec, ShortConvSpec):
-                # ShortConv uses many of the same attributes, excluding chunking logic from Mamba2
+            elif isinstance(kv_cache_spec, (MambaSpec, ShortConvSpec)):
+                # ShortConv uses many of the same attributes as Mamba2 path,
+                # except chunking
                 attn_backend_i = Mamba2AttentionBackend
             else:
                 raise ValueError(
@@ -2431,7 +2433,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             corresponding memory buffer for KV cache.
         """
         kv_caches: dict[str, torch.Tensor] = {}
-        has_attn, has_mamba = False, False
+        has_attn, has_static_cache_layers = False, False
         for i, kv_cache_group_spec in enumerate(
                 kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
@@ -2470,7 +2472,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         layer_name].view(dtype).view(kv_cache_shape).permute(
                             *inv_order)
                 elif isinstance(kv_cache_spec, (MambaSpec, ShortConvSpec)):
-                    has_fixed_state_layers = True
+                    has_static_cache_layers = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     dtype = kv_cache_spec.dtype
                     num_element_per_page = (kv_cache_spec.page_size_bytes //
@@ -2494,7 +2496,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     raise NotImplementedError
 
-        if has_attn and has_fixed_state_layers:
+        if has_attn and has_static_cache_layers:
             self._verify_hybrid_attention_mamba_layout(kv_cache_config,
                                                        kv_cache_raw_tensors)
 
@@ -2637,6 +2639,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     f"Unknown attention type: {attn_module.attn_type}")
 
         mamba_layers = get_layers_from_vllm_config(self.vllm_config, MambaBase)
+        short_conv_layers = get_layers_from_vllm_config(
+            self.vllm_config, ShortConv)
         if len(mamba_layers) > 0:
             if self.vllm_config.speculative_config is not None:
                 raise NotImplementedError(
@@ -2664,13 +2668,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         elif len(short_conv_layers) > 0:
             if self.vllm_config.speculative_config is not None:
                 raise NotImplementedError(
-                    "ShortConv's with speculative decoding is not supported yet.")
+                    "ShortConv with speculative decoding is not supported yet."
+                )
             if not self.vllm_config.model_config.enforce_eager:
                 raise NotImplementedError(
-                    "ShortConv's with cuda graph is not supported yet.")
+                    "ShortConv with cuda graph is not supported yet.")
             if self.vllm_config.cache_config.enable_prefix_caching:
                 raise NotImplementedError(
-                    "Prefix caching is not supported for ShortConv's yet.")
+                    "Prefix caching is not supported for ShortConv yet.")
             max_model_len = self.vllm_config.model_config.max_model_len
 
             page_size_padded = self._maybe_pad_fixed_state_page_size(
