@@ -193,13 +193,15 @@ def as_seq_cls_model(cls: _T) -> _T:
             config = vllm_config.model_config.hf_config
             quant_config = vllm_config.quant_config
 
-            self.score = RowParallelLinear(config.hidden_size,
-                                           config.num_labels,
-                                           quant_config=quant_config,
-                                           input_is_parallel=False,
-                                           bias=False,
-                                           prefix=maybe_prefix(
-                                               prefix, "score"))
+            self.score = RowParallelLinear(
+                config.hidden_size,
+                config.num_labels,
+                input_is_parallel=False,
+                bias=False,
+                params_dtype=torch.float32,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "score"),
+            )
 
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
@@ -214,9 +216,13 @@ def as_seq_cls_model(cls: _T) -> _T:
             self._pooler = ClassifierPooler(
                 vllm_config.model_config,
                 pooling=pooler.pooling,
-                classifier=lambda x: self.score(x)[0],
+                classifier=self._classifier,
                 act_fn=pooler.head.activation,
             )
+
+        def _classifier(self, x: torch.Tensor):
+            x, _ = self.score(x.float())
+            return x
 
         def forward(
             self,

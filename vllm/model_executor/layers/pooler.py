@@ -308,7 +308,8 @@ class PoolerIdentity(PoolerActivation):
 class PoolerNormalize(PoolerActivation):
 
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
-        return F.normalize(pooled_data, p=2, dim=-1)
+        x = F.normalize(pooled_data.float(), p=2, dim=-1)
+        return x.to(pooled_data.dtype)
 
 
 class PoolerClassify(PoolerActivation):
@@ -316,9 +317,9 @@ class PoolerClassify(PoolerActivation):
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
         num_labels = pooled_data.shape[-1]
         if num_labels < 2:
-            return F.sigmoid(pooled_data)
+            return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
 
-        return F.softmax(pooled_data, dim=-1)
+        return F.softmax(pooled_data.float(), dim=-1).to(pooled_data.dtype)
 
 
 class PoolerScore(PoolerActivation):
@@ -326,7 +327,7 @@ class PoolerScore(PoolerActivation):
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
         num_labels = pooled_data.shape[-1]
         if num_labels < 2:
-            return F.sigmoid(pooled_data)
+            return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
 
         return pooled_data
 
