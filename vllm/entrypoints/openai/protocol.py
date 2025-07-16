@@ -859,6 +859,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     'are supported.'
                 )
 
+            if data["tool_choice"] == "required" and isinstance(
+                    data["tools"], list) and len(data["tools"]) == 0:
+                raise ValueError('When using `tool_choice` as "required",'
+                                 ' `tools` must contain at least one tool')
+
             # ensure that if "tool_choice" is specified as an object,
             # it matches a valid tool
             correct_usage_message = 'Correct usage: `{"type": "function",' \
