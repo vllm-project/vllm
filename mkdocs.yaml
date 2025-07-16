@@ -3,6 +3,7 @@ site_url: https://docs.vllm.ai
 repo_url: https://github.com/vllm-project/vllm
 edit_uri: edit/main/docs/
 exclude_docs: |
+  argparse
   *.inc.md
   *.template.md
 theme:
@@ -47,6 +48,7 @@ theme:
 hooks:
   - docs/mkdocs/hooks/remove_announcement.py
   - docs/mkdocs/hooks/generate_examples.py
+  - docs/mkdocs/hooks/generate_argparse.py
   - docs/mkdocs/hooks/url_schemes.py
 
 # Required to stop api-autonav from raising an error
@@ -59,6 +61,7 @@ plugins:
   - search
   - autorefs
   - awesome-nav
+  - glightbox
   # For API reference generation
   - api-autonav:
       modules: ["vllm"]

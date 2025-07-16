@@ -86,6 +86,12 @@ class PallasAttentionBackend(AttentionBackend):
     # spill less likely. Meanwhile we make sure the page size is in [16, 256].
     @staticmethod
     def get_page_size(vllm_config: VllmConfig) -> int:
+        # TODO: This is a temporary fix for vmem OOM.
+        # For long model length, we use 16 page-size to avoid too much
+        # VMEM spill. A more robust solution should be implemented to
+        # handle VREG spills.
+        if vllm_config.model_config.max_model_len > 8192:
+            return 16
         page_size = next_power_of_2(
             vllm_config.model_config.max_model_len) // 16
         if page_size <= 16:
@@ -318,3 +324,9 @@ def kv_cache_update_op_non_xla(kv: torch.Tensor, slot_mapping: torch.Tensor,
                                page_size: int,
                                num_slices_per_block: int) -> torch.Tensor:
     return kv_cache
+
+
+def get_page_size_bytes(block_size: int, num_kv_heads: int, head_size: int,
+                        kv_cache_dtype: torch.dtype) -> int:
+    """Returns the size in bytes of one page of the KV cache."""
+    return block_size * num_kv_heads * head_size * kv_cache_dtype.itemsize

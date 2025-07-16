@@ -46,6 +46,13 @@ class HpuPlatform(Platform):
         return torch.no_grad()
 
     @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.hpu.set_device(device)
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
 
         scheduler_config = vllm_config.scheduler_config
