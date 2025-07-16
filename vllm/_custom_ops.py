@@ -653,11 +653,16 @@ def cutlass_blockwise_scaled_grouped_mm_sm100(
     b: torch.Tensor,
     scales_a: torch.Tensor,
     scales_b: torch.Tensor,
-    problem_sizes: torch.Tensor,
     expert_offsets: torch.Tensor,
+    problem_sizes: torch.Tensor,
+    a_strides: torch.Tensor,
+    b_strides: torch.Tensor,
+    c_strides: torch.Tensor,
+    per_act_block: bool,
 ):
     torch.ops._C.cutlass_blockwise_scaled_grouped_mm_sm100(
-        output, a, b, scales_a, scales_b, problem_sizes, expert_offsets)
+        output, a, b, scales_a, scales_b, expert_offsets, problem_sizes,
+        a_strides, b_strides, c_strides, per_act_block)
 
 
 def cutlass_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
@@ -764,6 +769,12 @@ def cutlass_sparse_scaled_mm_supported(cuda_device_capability: int) -> bool:
 
 def cutlass_group_gemm_supported(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_group_gemm_supported(cuda_device_capability)
+
+
+def cutlass_blockwise_group_gemm_supported(
+        cuda_device_capability: int) -> bool:
+    return torch.ops._C.cutlass_blockwise_group_gemm_supported(
+        cuda_device_capability)
 
 def cutlass_sparse_compress(a: torch.Tensor) \
     -> tuple[torch.Tensor, torch.Tensor]:

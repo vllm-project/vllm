@@ -11,7 +11,7 @@ from tests.kernels.utils import torch_moe
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-    block_scaled_cutlass_moe_fp8_sm90, cutlass_moe_fp8, run_cutlass_moe_fp8)
+    block_scaled_cutlass_moe_fp8, cutlass_moe_fp8, run_cutlass_moe_fp8)
 from vllm.model_executor.layers.fused_moe.fused_moe import (fused_experts,
                                                             fused_topk)
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -302,9 +302,9 @@ def run_8_bit(moe_tensors: MOETensors8Bit,
         **kwargs)
 
 
-def run_blocked_8_bit_sm90(moe_tensors: MOETensors8Bit,
-                           topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                           per_act_block: bool) -> torch.Tensor:
+def run_blocked_8_bit(moe_tensors: MOETensors8Bit, topk_weights: torch.Tensor,
+                      topk_ids: torch.Tensor,
+                      per_act_block: bool) -> torch.Tensor:
     assert not any([
         t is None for t in [
             moe_tensors.w1_q, moe_tensors.w2_q, moe_tensors.w1_scale,
@@ -312,10 +312,14 @@ def run_blocked_8_bit_sm90(moe_tensors: MOETensors8Bit,
         ]
     ])
 
-    w1_scale_t = (moe_tensors.w1_scale.transpose(1, 2).contiguous()
-                  if moe_tensors.w1_scale is not None else None)
-    w2_scale_t = (moe_tensors.w2_scale.transpose(1, 2).contiguous()
-                  if moe_tensors.w2_scale is not None else None)
+    capability = current_platform.get_device_capability().to_int()
+
+    # Hopper requires transposed scales for blockwise grouped gemm.
+    if capability == 90:
+        w1_scale_t = (moe_tensors.w1_scale.transpose(1, 2).contiguous()
+                      if moe_tensors.w1_scale is not None else None)
+        w2_scale_t = (moe_tensors.w2_scale.transpose(1, 2).contiguous()
+                      if moe_tensors.w2_scale is not None else None)
 
     kwargs = {
         'a': moe_tensors.a,
@@ -323,8 +327,8 @@ def run_blocked_8_bit_sm90(moe_tensors: MOETensors8Bit,
         'w2_q': moe_tensors.w2_q,  # type: ignore[union-attr]
         'topk_weights': topk_weights,
         'topk_ids': topk_ids,
-        'w1_scale': w1_scale_t,
-        'w2_scale': w2_scale_t,
+        'w1_scale': w1_scale_t if capability == 90 else moe_tensors.w1_scale,
+        'w2_scale': w2_scale_t if capability == 90 else moe_tensors.w2_scale,
         'a1_scale': moe_tensors.a_scale,
         'ab_strides1': moe_tensors.ab_strides1,
         'ab_strides2': moe_tensors.ab_strides2,
@@ -335,7 +339,7 @@ def run_blocked_8_bit_sm90(moe_tensors: MOETensors8Bit,
         'block_shape': [128, 128],
     }
 
-    return block_scaled_cutlass_moe_fp8_sm90(**kwargs)
+    return block_scaled_cutlass_moe_fp8(**kwargs)
 
 
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
@@ -589,10 +593,10 @@ def test_run_cutlass_moe_fp8(
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("per_act_block", [True, False])
 @pytest.mark.skipif(
-    (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
-        current_platform.get_device_capability()),
-    reason="Grouped gemm is not supported on this GPU type.")
-def test_blocked_cutlass_moe_8_bit_sm90(
+    (lambda x: x is None or not ops.cutlass_blockwise_group_gemm_supported(
+        x.to_int()))(current_platform.get_device_capability()),
+    reason="Blockwise grouped gemm is not supported on this GPU type.")
+def test_blocked_cutlass_moe_8_bit(
     m: int,
     n: int,
     k: int,
@@ -621,8 +625,8 @@ def test_blocked_cutlass_moe_8_bit_sm90(
         # Using a, w1 and w2 directly results in minor output differences.
         torch_output = torch_moe(mt.a_d, mt.w1_d, mt.w2_d, score, topk)
 
-        cutlass_output = run_blocked_8_bit_sm90(mt, topk_weights, topk_ids,
-                                                per_act_block)
+        cutlass_output = run_blocked_8_bit(mt, topk_weights, topk_ids,
+                                           per_act_block)
 
         # Uncomment for debugging
         # print("out torch:", torch_output)

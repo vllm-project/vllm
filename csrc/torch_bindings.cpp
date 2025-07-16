@@ -397,7 +397,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "cutlass_blockwise_scaled_grouped_mm_sm100(Tensor! output, "
       "Tensor a, Tensor b, Tensor scales_a, Tensor scales_b, "
-      "Tensor problem_sizes, Tensor expert_offsets) -> ()",
+      "Tensor expert_offsets, Tensor problem_sizes, Tensor a_strides, "
+      "Tensor b_strides, Tensor c_strides, bool per_act_block) -> ()",
       {stride_tag});
   // conditionally compiled so impl registration is in source file
 
@@ -437,6 +438,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // capability
   ops.def("cutlass_group_gemm_supported(int cuda_device_capability) -> bool");
   ops.impl("cutlass_group_gemm_supported", &cutlass_group_gemm_supported);
+
+  // Check if cutlass blockwise grouped gemm is supported for CUDA devices of
+  // the given capability
+  ops.def(
+      "cutlass_blockwise_group_gemm_supported(int cuda_device_capability"
+      ") -> bool");
+  ops.impl("cutlass_blockwise_group_gemm_supported",
+           &cutlass_blockwise_group_gemm_supported);
 
   // CUTLASS w8a8 grouped GEMM
   ops.def(

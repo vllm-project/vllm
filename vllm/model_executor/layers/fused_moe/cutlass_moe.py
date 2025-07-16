@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (_fp8_perm,
                                                         _fp8_quantize,
                                                         _resize_cache)
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -553,157 +554,7 @@ def cutlass_moe_fp4(a: torch.Tensor,
     return out.to(dtype=out_dtype)
 
 
-def _valid_cutlass_block_scaled_grouped_gemm(
-        w1: torch.Tensor, w2: torch.Tensor, inplace: bool, activation: str,
-        apply_router_weight_on_input: bool,
-        expert_map: Optional[torch.Tensor]) -> bool:
-
-    def _valid_cutlass_block_scaled_grouped_gemm_shape(N: int, K: int):
-        return N % 128 == 0 and K % 128 == 0
-
-    _, K, N = w2.size()
-    if not _valid_cutlass_block_scaled_grouped_gemm_shape(N, K):
-        logger.debug(
-            "CutlassBlockScaledGroupedGemm disabled: unalinged problem size.")
-        return False
-
-    if (w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn):
-        logger.debug(
-            "CutlassBlockScaledGroupedGemm disabled: invalid weight dtype(s).")
-        return False
-
-    if expert_map is not None:
-        logger.debug(
-            "CutlassBlockScaledGroupedGemm disabled: expert_parallel is"
-            " not supported.")
-        return False
-
-    if activation != "silu":
-        logger.debug(
-            "CutlassBlockScaledGroupedGemm disabled: only activation silu is"
-            " supported.")
-        return False
-
-    if apply_router_weight_on_input:
-        logger.debug("CutlassBlockScaledGroupedGemm disabled:"
-                     " apply_router_weight_on_input is not supported.")
-        return False
-
-    if inplace:
-        logger.debug(
-            "CutlassBlockScaledGroupedGemm disabled: inplace is not supported."
-        )
-        return False
-
-    return True
-
-
-def run_block_scaled_cutlass_moe_fp8_sm100(
-    a: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-) -> torch.Tensor:
-    w1_q = w1.transpose(1, 2)
-    w2_q = w2.transpose(1, 2)
-    w1_scale = w1_scale.transpose(1, 2)
-    w2_scale = w2_scale.transpose(1, 2)
-
-    assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
-    assert a.shape[0] == topk_ids.shape[
-        0], "a and topk_ids must have the same batch size"
-    assert w1_q.dtype == torch.float8_e4m3fn, "w1_q must be float8_e4m3fn"
-    assert w2_q.dtype == torch.float8_e4m3fn, "w2_q must be float8_e4m3fn"
-    assert a.shape[1] == w1_q.shape[1], "Hidden size mismatch w1"
-    assert w1_q.shape[2] == w2_q.shape[1] * 2, "Hidden size mismatch w2"
-    assert w1_q.shape[0] == w2_q.shape[0], "Expert number mismatch"
-    assert w1_q.shape[0] == w1_scale.shape[
-        0], "w1_scale expert number mismatch"
-    assert w1_q.shape[0] == w2_scale.shape[
-        0], "w2_scale expert number mismatch"
-    assert a.dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
-
-    out_dtype = a.dtype
-    num_experts = w1_q.size(0)
-    m = a.size(0)
-    k = w1_q.size(1)
-    n = w2_q.size(1)
-
-    expert_offsets = torch.empty((num_experts + 1, ),
-                                 dtype=torch.int32,
-                                 device="cuda")
-    problem_sizes1 = torch.empty((num_experts, 3),
-                                 dtype=torch.int32,
-                                 device="cuda")
-    problem_sizes2 = torch.empty((num_experts, 3),
-                                 dtype=torch.int32,
-                                 device="cuda")
-
-    topk = topk_ids.size(1)
-
-    a_q, a1_scale = _fp8_quantize(a,
-                                  A_scale=None,
-                                  per_act_token=False,
-                                  block_shape=[128, 128])
-    device = a_q.device
-
-    a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
-    c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
-
-    ops.get_cutlass_moe_mm_data(
-        topk_ids,
-        expert_offsets,
-        problem_sizes1,
-        problem_sizes2,
-        a_map,
-        c_map,
-        num_experts,
-        n,
-        k,
-    )
-
-    rep_a_q = a_q.view(dtype=torch.uint8)[a_map].view(dtype=a_q.dtype)
-    rep_a1_scales = a1_scale[a_map]
-
-    c1 = torch.empty((m * topk, n * 2), dtype=out_dtype, device=device)
-    c2 = torch.empty((m * topk, k), dtype=out_dtype, device=device)
-
-    ops.cutlass_blockwise_scaled_grouped_mm_sm100(
-        c1,
-        rep_a_q,
-        w1_q,
-        rep_a1_scales,
-        w1_scale,
-        problem_sizes1,
-        expert_offsets[:-1],
-    )
-
-    intermediate = torch.empty((m * topk, n), dtype=out_dtype, device=device)
-    torch.ops._C.silu_and_mul(intermediate, c1)
-
-    intermediate_q, a2_scale = _fp8_quantize(intermediate,
-                                             A_scale=None,
-                                             per_act_token=False,
-                                             block_shape=[128, 128])
-
-    ops.cutlass_blockwise_scaled_grouped_mm_sm100(
-        c2,
-        intermediate_q,
-        w2_q,
-        a2_scale,
-        w2_scale,
-        problem_sizes2,
-        expert_offsets[:-1],
-    )
-
-    return (c2[c_map].view(m, topk, k) *
-            topk_weights.view(m, topk, 1).to(out_dtype)).sum(dim=1)
-
-
-def run_block_scaled_cutlass_moe_fp8_sm90(
+def run_block_scaled_cutlass_moe_fp8(
     output: torch.Tensor,
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -734,6 +585,15 @@ def run_block_scaled_cutlass_moe_fp8_sm90(
     per-token 128-blocked scales (equivalent to block size 1x128). When
     it's False, the input is quantized with per-tensor scales.
     """
+
+    cuda_arch = current_platform.get_device_capability(
+        device_id=hidden_states.device.index).to_int()
+    assert cuda_arch == 90 or cuda_arch == 100, "Unsupported CUDA architecture"
+
+    if cuda_arch == 90:
+        blockwise_mm_kernel = ops.cutlass_blockwise_scaled_grouped_mm_sm90
+    else:
+        blockwise_mm_kernel = ops.cutlass_blockwise_scaled_grouped_mm_sm100
 
     if hidden_states.dtype == torch.float8_e4m3fn:
         a1q = hidden_states
@@ -816,21 +676,21 @@ def run_block_scaled_cutlass_moe_fp8_sm90(
     c2 = _resize_cache(workspace2, (M * topk, N))
     c3 = _resize_cache(workspace13, (M * topk, K))
 
-    if per_act_block:
-        a1q_scale = ops.transpose_cutlass_moe_a_scales(a1q_scale,
-                                                       expert_offsets,
-                                                       problem_sizes1)
-    else:
-        a1q_scale = a1q_scale.repeat(a1q.shape[1] // 128, a1q.shape[0])
+    if cuda_arch == 90:
+        if per_act_block:
+            a1q_scale = ops.transpose_cutlass_moe_a_scales(
+                a1q_scale, expert_offsets, problem_sizes1)
+        else:
+            a1q_scale = a1q_scale.repeat(a1q.shape[1] // 128, a1q.shape[0])
+    elif not per_act_block:
+        a1q_scale = a1q_scale.repeat(a1q.shape[0], a1q.shape[1] // 128)
 
     if expert_map is not None:
         c1.fill_(0)
 
-    ops.cutlass_blockwise_scaled_grouped_mm_sm90(c1, a1q, w1, a1q_scale,
-                                                 w1_scale, expert_offsets,
-                                                 problem_sizes1, ab_strides1,
-                                                 ab_strides1, c_strides1,
-                                                 per_act_block)
+    blockwise_mm_kernel(c1, a1q, w1, a1q_scale, w1_scale, expert_offsets,
+                        problem_sizes1, ab_strides1, ab_strides1, c_strides1,
+                        per_act_block)
 
     activation_callable(c2, c1)
 
@@ -841,27 +701,27 @@ def run_block_scaled_cutlass_moe_fp8_sm90(
         block_shape=[128, 128] if per_act_block else None,
     )
 
-    if per_act_block:
-        a2q_scale = ops.transpose_cutlass_moe_a_scales(a2q_scale,
-                                                       expert_offsets,
-                                                       problem_sizes2)
-    else:
-        a2q_scale = a2q_scale.repeat(a2q.shape[1] // 128, a2q.shape[0])
+    if cuda_arch == 90:
+        if per_act_block:
+            a2q_scale = ops.transpose_cutlass_moe_a_scales(
+                a2q_scale, expert_offsets, problem_sizes2)
+        else:
+            a2q_scale = a2q_scale.repeat(a2q.shape[1] // 128, a2q.shape[0])
+    elif not per_act_block:
+        a2q_scale = a2q_scale.repeat(a2q.shape[0], a2q.shape[1] // 128)
 
     if expert_map is not None:
         c3.fill_(0)
 
-    ops.cutlass_blockwise_scaled_grouped_mm_sm90(c3, a2q, w2, a2q_scale,
-                                                 w2_scale, expert_offsets,
-                                                 problem_sizes2, ab_strides2,
-                                                 ab_strides2, c_strides2,
-                                                 per_act_block)
+    blockwise_mm_kernel(c3, a2q, w2, a2q_scale, w2_scale, expert_offsets,
+                        problem_sizes2, ab_strides2, ab_strides2, c_strides2,
+                        per_act_block)
 
     output.copy_(ops.shuffle_rows(c3, c_map).view(M * topk, K),
                  non_blocking=True)
 
 
-class CutlassExpertsBlockedFp8SM90(mk.FusedMoEPermuteExpertsUnpermute):
+class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
@@ -950,7 +810,7 @@ class CutlassExpertsBlockedFp8SM90(mk.FusedMoEPermuteExpertsUnpermute):
         activation_callable = lambda i, o: self.activation(activation, i, o)
         if expert_tokens_meta is not None:
             assert expert_tokens_meta.expert_num_tokens is None, "PPLX is not supported in blocked CUTLASS MoE"  # noqa: E501
-        return run_block_scaled_cutlass_moe_fp8_sm90(
+        return run_block_scaled_cutlass_moe_fp8(
             output, hidden_states, w1, w2, topk_ids, activation_callable,
             global_num_experts, expert_map, w1_scale, w2_scale, a1q_scale,
             a2_scale, self.ab_strides1, self.ab_strides2, self.c_strides1,
@@ -958,7 +818,7 @@ class CutlassExpertsBlockedFp8SM90(mk.FusedMoEPermuteExpertsUnpermute):
             self.per_act_block)
 
 
-def block_scaled_cutlass_moe_fp8_sm90(
+def block_scaled_cutlass_moe_fp8(
     a: torch.Tensor,
     w1_q: torch.Tensor,
     w2_q: torch.Tensor,
@@ -997,6 +857,16 @@ def block_scaled_cutlass_moe_fp8_sm90(
         Shape: [num_experts] or [num_experts, 2N]
     - w2_scale (torch.Tensor): The fp32 scale to dequantize w2_q.
         Shape: [num_experts] or [num_experts, K]
+    - block_shape (list[int]): The block shape of the weights.
+    - ab_strides1 (torch.Tensor): The input/weights strides of the first mm.
+        Shape: [num_experts]
+    - ab_strides2 (torch.Tensor): The input/weights strides of the second mm.
+        Shape: [num_experts]
+    - c_strides1 (torch.Tensor): The output strides of the first mm.
+        Shape: [num_experts]
+    - c_strides2 (torch.Tensor): The output strides of the second mm.
+    - activation (str): The activation function applied to the intermediate
+                        result.
     - a1_scale (Optional[torch.Tensor]): The optional fp32 scale to quantize a.
         Shape: scalar or [M]
     - a2_scale (Optional[torch.Tensor]): The optional fp32 scale to
@@ -1005,6 +875,8 @@ def block_scaled_cutlass_moe_fp8_sm90(
     - apply_router_weight_on_input (bool): When true, the topk weights are
         applied directly on the inputs. This is only applicable when topk is 1.
     - global_num_experts (int): The total number of experts.
+    - per_act_block (bool): Whether to quantize the input per-block or
+                            per-tensor.
 
     Returns:
     - torch.Tensor: The 16-bit output tensor after applying the MoE layer.
@@ -1014,7 +886,7 @@ def block_scaled_cutlass_moe_fp8_sm90(
 
     fn = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
-        CutlassExpertsBlockedFp8SM90(
+        CutlassExpertsBlockedFp8(
             max_experts_per_worker=global_num_experts,
             out_dtype=out_dtype,
             per_act_block=per_act_block,

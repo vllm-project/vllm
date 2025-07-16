@@ -166,6 +166,19 @@ bool cutlass_group_gemm_supported(int64_t cuda_device_capability) {
   return false;
 }
 
+bool cutlass_blockwise_group_gemm_supported(int64_t cuda_device_capability) {
+  // Blockwise CUTLASS grouped FP8 kernels need at least CUDA 12.3
+  // and SM90/SM100 (Hopper/Blackwell)
+
+#if defined CUDA_VERSION
+  if (cuda_device_capability == 90 || cuda_device_capability == 100) {
+    return CUDA_VERSION >= 12030;
+  }
+#endif
+
+  return false;
+}
+
 void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
                        torch::Tensor const& b, torch::Tensor const& a_scales,
                        torch::Tensor const& b_scales,

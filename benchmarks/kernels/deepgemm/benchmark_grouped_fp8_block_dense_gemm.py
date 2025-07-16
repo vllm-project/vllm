@@ -15,7 +15,7 @@ from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-    block_scaled_cutlass_moe_fp8_sm90,
+    block_scaled_cutlass_moe_fp8,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk,
@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_dequantize
+from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 
 vllm_config = VllmConfig(parallel_config=ParallelConfig(
@@ -264,7 +265,7 @@ def benchmark_shape(e: int,
 
     # === vLLM CUTLASS Implementation ===
     def vllm_cutlass_gemm():
-        return block_scaled_cutlass_moe_fp8_sm90(
+        return block_scaled_cutlass_moe_fp8(
                     a,
                     w1,
                     w2,
@@ -583,5 +584,6 @@ def run_benchmarks(verbose: bool = False):
 
 
 if __name__ == "__main__":
+    assert current_platform.is_device_capability(90), "This benchmark requires SM90" # noqa: E501
     with set_current_vllm_config(vllm_config):
         run_benchmarks(verbose=False)
