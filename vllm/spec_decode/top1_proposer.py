@@ -54,8 +54,6 @@ class Top1Proposer(SpeculativeProposer):
         proposal_len = execute_model_req.num_lookahead_slots
         seq_group_metadata_list = execute_model_req.seq_group_metadata_list
         
-        # Use original proposal_len (removing temporary override)
-
         # Split speculative- and non-speculative- sequences.
         (
             proposal_lens,
@@ -63,7 +61,6 @@ class Top1Proposer(SpeculativeProposer):
             nonzero_proposal_len_indices,
         ) = self._split_by_proposal_len(seq_group_metadata_list, proposal_len)
         
-
         if nonzero_proposal_len_seqs:
             # Speculate tokens using the draft worker for the speculative
             # sequences.
@@ -215,41 +212,6 @@ class Top1Proposer(SpeculativeProposer):
         assert new_maybe_sampler_output
         return (new_proposal_lens, new_maybe_sampler_output,
                 new_nonzero_proposal_len_indices)
-
-    def sampler_output_from_logits(
-        self,
-        logits: torch.Tensor,
-        sample_len: int,
-        entropy_threshold: float,
-    ) -> Tuple[List[SamplerOutput], bool]:
-        """Convert logits to SamplerOutput objects.
-        
-        This wraps the existing logic but skips the full model call.
-        """
-        # TODO: Implement proper logits to SamplerOutput conversion
-        # For now, create a simple greedy sampling version
-        batch_size, seq_len, vocab_size = logits.shape
-        
-        sampler_outputs = []
-        for step in range(min(sample_len, seq_len)):
-            step_logits = logits[:, step, :]  # [B, vocab_size]
-            probs = torch.softmax(step_logits, dim=-1)
-            
-            # Greedy sampling
-            sampled_token_ids = torch.argmax(step_logits, dim=-1)  # [B]
-            sampled_token_probs = probs.gather(-1, sampled_token_ids.unsqueeze(-1)).squeeze(-1)
-            
-            step_logprobs = torch.log_softmax(step_logits, dim=-1)
-            sampled_logprobs = step_logprobs.gather(-1, sampled_token_ids.unsqueeze(-1)).squeeze(-1)
-            
-            sampler_outputs.append(SamplerOutput(
-                outputs=None,  # Will be filled later
-                sampled_token_ids=sampled_token_ids,
-                sampled_token_probs=sampled_token_probs,
-                logprobs=sampled_logprobs,
-            ))
-        
-        return sampler_outputs, False
 
     def _merge_outputs(
         self,

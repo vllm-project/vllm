@@ -380,7 +380,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # in the subsequent step.
         self.previous_hidden_states: Optional[HiddenStates] = None
         self._disable_logprobs = disable_logprobs
-        og_stats = disable_log_stats
+        self._disable_log_stats = disable_log_stats
         self._num_spec_prefill_steps = num_spec_prefill_steps
 
     def init_device(self) -> None:
@@ -928,9 +928,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # Get proposed tokens.
         proposal_token_ids = proposals.proposal_token_ids[spec_indices]
 
-        # Draft model at early layers tends to be more confident than target
-        proposal_probs = proposal_probs / 5.0
-
         # Sampler arguments
         sampler_extra_kwargs: Dict[str, Any] = {}
         if self.generators and isinstance(self.spec_decode_sampler,
@@ -949,34 +946,6 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             **sampler_extra_kwargs,
         )
         
-        # Add the new logging statements:
-        if not self._disable_log_stats:
-            logger.info(f"[SPEC_DEBUG] Draft tokens: {proposal_token_ids.tolist()}")
-            logger.info(f"[SPEC_DEBUG] Accepted tokens: {accepted_token_ids.tolist()}")
-            accepted_mask = accepted_token_ids >= 0
-            logger.info(f"[SPEC_DEBUG] Acceptance mask: {accepted_mask.tolist()}")
-
-        # Track acceptance rate for debugging
-        self._track_acceptance_rate(proposal_token_ids, accepted_token_ids)
-        
-        # Debug acceptance ratios if enabled
-        if True:
-            # proposal_probs shape: [B, k, vocab]
-            # proposal_verifier_probs shape: [B, k+1, vocab] (includes bonus token)
-            # proposal_token_ids shape: [B, k]
-            b, k = proposal_token_ids.shape
-            for i in range(b):
-                ratios = []
-                for t in range(k):
-                    tok = proposal_token_ids[i, t].item()
-                    if tok == -1:
-                        continue
-                    # Get probabilities for the proposed token
-                    p_draft = proposal_probs[i, t, tok].item()
-                    p_target = proposal_verifier_probs[i, t, tok].item()
-                    ratio = p_target / p_draft if p_draft > 0 else 0
-                    ratios.append(ratio)
-                print(f"[seq {i}] per-token acceptance ratio: {ratios}")
         # Append output tokens from non-speculative sequences to
         # the accepted token ids tensor.
         non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len +
