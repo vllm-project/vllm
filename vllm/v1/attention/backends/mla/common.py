@@ -394,7 +394,7 @@ def use_cudnn_prefill() -> bool:
 
 
 # Currently 394MB, this can be tuned based on GEMM sizes used.
-# Choosen to be the same as sglang:
+# Chosen to be the same as sglang:
 #  https://github.com/sgl-project/sglang/blob/766392c6bda2558b61ce6d1c1bfd8081a549e1f1/python/sglang/global_config.py#L37
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 394 * 1024 * 1024
 
