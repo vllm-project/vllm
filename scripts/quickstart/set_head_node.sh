@@ -17,6 +17,21 @@ input_min=768
 input_max=20480
 output_max=16896
 
+# Change to fp8_inc if want to use fp8 kv cache
+KV_CACHE_DTYPE=auto
+
+# INC FP8 quantization
+export INC_MEASUREMENT_DUMP_PATH_PREFIX=
+export QUANT_CONFIG=
+if [ -n "$QUANT_CONFIG" ]; then
+    export VLLM_REQUANT_FP8_INC=1
+    export VLLM_ENABLE_RUNTIME_DEQUANT=1
+    export VLLM_HPU_MARK_SCALES_AS_CONST=false
+    export VLLM_MOE_N_SLICE=1
+else
+    export VLLM_MOE_N_SLICE=8
+fi
+
 export HCCL_SOCKET_IFNAME=$GLOO_SOCKET_IFNAME
 export PT_HPU_ENABLE_LAZY_COLLECTIVES=true
 export PT_HPUGRAPH_DISABLE_TENSOR_CACHE=1
@@ -41,7 +56,6 @@ export HABANA_VISIBLE_MODULES="0,1,2,3,4,5,6,7"
 export PT_HPUGRAPH_DISABLE_TENSOR_CACHE=1
 export PT_HPU_LAZY_MODE=1
 
-export VLLM_MOE_N_SLICE=8
 export VLLM_EP_SIZE=16
 
 block_size=128

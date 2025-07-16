@@ -30,6 +30,21 @@ max_num_seqs=128
 host=0.0.0.0
 max_model_len=16384
 
+# Change to fp8_inc if want to use fp8 kv cache
+KV_CACHE_DTYPE=auto
+
+# INC FP8 quantization
+export INC_MEASUREMENT_DUMP_PATH_PREFIX=
+export QUANT_CONFIG=
+if [ -n "$QUANT_CONFIG" ]; then
+    export VLLM_REQUANT_FP8_INC=1
+    export VLLM_ENABLE_RUNTIME_DEQUANT=1
+    export VLLM_HPU_MARK_SCALES_AS_CONST=false
+    export VLLM_MOE_N_SLICE=1
+else
+    export VLLM_MOE_N_SLICE=8
+fi
+
 
 while getopts hw:u:p:l:b:c:s flag; do
     case $flag in
@@ -96,7 +111,6 @@ export HABANA_VISIBLE_MODULES="0,1,2,3,4,5,6,7"
 export PT_HPUGRAPH_DISABLE_TENSOR_CACHE=1
 export PT_HPU_LAZY_MODE=1
 
-export VLLM_MOE_N_SLICE=8
 export VLLM_EP_SIZE=8
 
 block_size=128
@@ -172,7 +186,7 @@ python3 -m vllm.entrypoints.openai.api_server --host $host --port $vllm_port \
 --model $model_path \
 --device hpu \
 --dtype bfloat16 \
---kv-cache-dtype fp8_inc \
+--kv-cache-dtype $KV_CACHE_DTYPE \
 --tensor-parallel-size 8 \
 --trust-remote-code  \
 --max-model-len $max_model_len \
