@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from enum import Enum, auto
 from typing import Optional
 
 import torch
@@ -12,13 +13,19 @@ from vllm.v1.sample.logits_processor import (BatchUpdate, LogitsProcessor,
 
 MODEL_NAME = "facebook/opt-125m"
 DUMMY_LOGITPROC_ENTRYPOINT = "dummy_logitproc"
-DUMMY_LOGITPROC_FQN = (
+DUMMY_LOGITPROC_FQCN = (
     "tests.v1.sample.logits_processors.utils:DummyLogitsProcessor")
 DUMMY_LOGITPROC_ARG = "target_token"
-LOGITPROC_SOURCE_ENTRYPOINT = "entrypoint"
-LOGITPROC_SOURCE_FQCN = "fqcn"
 TEMP_GREEDY = 0.0
 MAX_TOKENS = 20
+
+
+class LogitprocSource(Enum):
+    """How to source a logitproc for testing purposes"""
+    LOGITPROC_SOURCE_ENTRYPOINT = auto()
+    LOGITPROC_SOURCE_FQCN = auto()
+    LOGITPROC_SOURCE_CLASS = auto()
+
 
 # Sample prompts.
 prompts = [

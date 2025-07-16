@@ -9,7 +9,7 @@ import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
 from tests.v1.sample.logits_processors.utils import (
-    DUMMY_LOGITPROC_ARG, DUMMY_LOGITPROC_ENTRYPOINT, DUMMY_LOGITPROC_FQN,
+    DUMMY_LOGITPROC_ARG, DUMMY_LOGITPROC_ENTRYPOINT, DUMMY_LOGITPROC_FQCN,
     MAX_TOKENS, MODEL_NAME, TEMP_GREEDY, prompts)
 
 
@@ -35,7 +35,7 @@ def default_server_args():
     ],
             [
                 "--logits-processors-fqns",
-                DUMMY_LOGITPROC_FQN + "," + DUMMY_LOGITPROC_FQN
+                DUMMY_LOGITPROC_FQCN + "," + DUMMY_LOGITPROC_FQCN
             ]])
 def server(default_server_args, request):
     if request.param:

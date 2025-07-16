@@ -4,10 +4,14 @@ import random
 
 import pytest
 
-from tests.v1.sample.logits_processors.utils import (
-    DUMMY_LOGITPROC_ARG, DUMMY_LOGITPROC_ENTRYPOINT, DUMMY_LOGITPROC_FQN,
-    LOGITPROC_SOURCE_ENTRYPOINT, LOGITPROC_SOURCE_FQCN, MAX_TOKENS, MODEL_NAME,
-    TEMP_GREEDY, prompts)
+# yapf: disable
+from tests.v1.sample.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
+                                                     DUMMY_LOGITPROC_FQCN,
+                                                     MAX_TOKENS, MODEL_NAME,
+                                                     TEMP_GREEDY,
+                                                     DummyLogitsProcessor,
+                                                     LogitprocSource, prompts)
+# yapf: enable
 from vllm import LLM, SamplingParams
 
 # Create a mixture of requests which do and don't utilize the dummy logitproc
@@ -23,9 +27,12 @@ sampling_params_list = [
 ]
 
 
-@pytest.mark.parametrize("logitproc_source",
-                         [LOGITPROC_SOURCE_FQCN, LOGITPROC_SOURCE_ENTRYPOINT])
-def test_custom_logitsprocs_py(logitproc_source: str):
+@pytest.mark.parametrize("logitproc_source", [
+    LogitprocSource.LOGITPROC_SOURCE_FQCN,
+    LogitprocSource.LOGITPROC_SOURCE_CLASS,
+    LogitprocSource.LOGITPROC_SOURCE_ENTRYPOINT
+])
+def test_custom_logitsprocs_py(logitproc_source: LogitprocSource):
     """Test Python interface for passing custom logitsprocs
     
     Construct an `LLM` instance which loads a custom logitproc that has a
@@ -42,17 +49,20 @@ def test_custom_logitsprocs_py(logitproc_source: str):
     * Requests which activate the custom logitproc, only output `target_token`
 
     Args:
-      logitproc_source: what source (entrypoint or fully-qualified class name)
-                        the user pulls the logitproc from
+      logitproc_source: what source (entrypoint, fully-qualified class name
+                        (FQCN), or class object) the user pulls the
+                        logitproc from
     """
     random.seed(40)
 
     # Choose LLM args based on logitproc source
-    kwargs = ({
-        "logits_processors_entrypoints": [DUMMY_LOGITPROC_ENTRYPOINT]
-    } if logitproc_source == LOGITPROC_SOURCE_ENTRYPOINT else {
-        "logits_processors": [DUMMY_LOGITPROC_FQN]
-    })
+    kwargs = {}  # Loading logitsprocs entrypoints is automatic
+    if logitproc_source == LogitprocSource.LOGITPROC_SOURCE_FQCN:
+        # Load logitproc based on fully-qualified class name (FQCN)
+        kwargs["logits_processors"] = [DUMMY_LOGITPROC_FQCN]
+    elif logitproc_source == LogitprocSource.LOGITPROC_SOURCE_CLASS:
+        # Load logitproc with provided constructor
+        kwargs["logits_processors"] = [DummyLogitsProcessor]
 
     # Create a vLLM instance and load custom logitproc
     llm_logitproc = LLM(
