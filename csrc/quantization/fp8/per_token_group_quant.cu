@@ -4,7 +4,44 @@
 #include <cmath>
 #include "vec_dtypes.cuh"
 
-#include "utils.h"
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
+
+#include <torch/all.h>
+
+#ifndef _DISPATCH_CASE_F16
+  #define _DISPATCH_CASE_F16(c_type, ...) \
+    case at::ScalarType::Half: {          \
+      using c_type = nv_half;             \
+      return __VA_ARGS__();               \
+    }
+#endif
+
+#ifndef _DISPATCH_CASE_BF16
+  #define _DISPATCH_CASE_BF16(c_type, ...) \
+    case at::ScalarType::BFloat16: {       \
+      using c_type = nv_bfloat16;          \
+      return __VA_ARGS__();                \
+    }
+#endif
+
+#ifndef DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FLOAT_FP16
+  #define DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FLOAT_FP16(pytorch_dtype, c_type, \
+                                                     ...)                   \
+    [&]() -> bool {                                                         \
+      switch (pytorch_dtype) {                                              \
+        case at::ScalarType::Float: {                                       \
+          using c_type = float;                                             \
+          return __VA_ARGS__();                                             \
+        }                                                                   \
+          _DISPATCH_CASE_F16(c_type, __VA_ARGS__)                           \
+          _DISPATCH_CASE_BF16(c_type, __VA_ARGS__)                          \
+        default:                                                            \
+          TORCH_CHECK(false, "Failed to dispatch data type");               \
+          return false;                                                     \
+      }                                                                     \
+    }()
+#endif
 
 __device__ __forceinline__ float GroupReduceMax(float val, const int tid) {
   unsigned mask = 0xffff;
@@ -104,13 +141,13 @@ void sgl_per_token_group_quant_8bit(torch::Tensor input, torch::Tensor output_q,
                                     torch::Tensor output_s, int64_t group_size,
                                     double eps, double min_8bit,
                                     double max_8bit, bool scale_ue8m0 = false) {
-  CHECK_INPUT(input);
-  CHECK_INPUT(output_q);
+  TORCH_CHECK(input.is_contiguous());
+  TORCH_CHECK(output_q.is_contiguous());
 
   const int num_groups = input.numel() / group_size;
 
-  CHECK_EQ(input.numel() % group_size, 0);
-  CHECK_EQ(output_s.dim(), 2);
+  TORCH_CHECK(input.numel() % group_size == 0);
+  TORCH_CHECK(output_s.dim() == 2);
 
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
