@@ -63,7 +63,7 @@ ARG PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL=https://download.pytorch.org/whl/nightly
 ARG PIP_KEYRING_PROVIDER=disabled
 ARG UV_KEYRING_PROVIDER=${PIP_KEYRING_PROVIDER}
 
-# Flag enables build-in KV-connector dependency libs into docker images
+# Flag enables built-in KV-connector dependency libs into docker images
 ARG INSTALL_KV_CONNECTORS=false
 
 #################### BASE BUILD IMAGE ####################
@@ -207,6 +207,19 @@ ARG SCCACHE_ENDPOINT
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
 ARG SCCACHE_S3_NO_CREDENTIALS=0
+
+# Flag to control whether to use pre-built vLLM wheels
+ARG VLLM_USE_PRECOMPILED
+# TODO: in setup.py VLLM_USE_PRECOMPILED is sensitive to truthiness, it will take =0 as "true", this should be fixed
+ENV VLLM_USE_PRECOMPILED=""
+RUN if [ "${VLLM_USE_PRECOMPILED}" = "1" ]; then \
+        export VLLM_USE_PRECOMPILED=1 && \
+        echo "Using precompiled wheels"; \
+    else \
+        unset VLLM_USE_PRECOMPILED && \
+        echo "Leaving VLLM_USE_PRECOMPILED unset to build wheels from source"; \
+    fi
+
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
@@ -379,38 +392,38 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 ARG FLASHINFER_CUDA128_INDEX_URL="https://download.pytorch.org/whl/cu128/flashinfer"
 ARG FLASHINFER_CUDA128_WHEEL="flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl"
 ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
-ARG FLASHINFER_GIT_REF="v0.2.6.post1"
+ARG FLASHINFER_GIT_REF="v0.2.8rc1"
+# Flag to control whether to use pre-built FlashInfer wheels (set to false to force build from source)
+# TODO: Currently disabled because the pre-built wheels are not available for FLASHINFER_GIT_REF
+ARG USE_FLASHINFER_PREBUILT_WHEEL=false
 RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
   . /etc/environment
   if [ "$TARGETPLATFORM" != "linux/arm64" ]; then
       # FlashInfer already has a wheel for PyTorch 2.7.0 and CUDA 12.8. This is enough for CI use
-      if [[ "$CUDA_VERSION" == 12.8* ]]; then
+      if [[ "$CUDA_VERSION" == 12.8* ]] && [[ "$USE_FLASHINFER_PREBUILT_WHEEL" == "true" ]]; then
           uv pip install --system ${FLASHINFER_CUDA128_INDEX_URL}/${FLASHINFER_CUDA128_WHEEL}
       else
-          export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0a 10.0a 12.0'
-          git clone ${FLASHINFER_GIT_REPO} --single-branch --branch ${FLASHINFER_GIT_REF} --recursive
-          # Needed to build AOT kernels
-          (cd flashinfer && \
-              python3 -m flashinfer.aot && \
-              uv pip install --system --no-build-isolation . \
-          )
-          rm -rf flashinfer
-
-          # Default arches (skipping 10.0a and 12.0 since these need 12.8)
+          # Exclude CUDA arches for older versions (11.x and 12.0-12.7)
           # TODO: Update this to allow setting TORCH_CUDA_ARCH_LIST as a build arg.
-          TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
           if [[ "${CUDA_VERSION}" == 11.* ]]; then
-              TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
+              FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
+          elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then
+              FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
+          else
+              # CUDA 12.8+ supports 10.0a and 12.0
+              FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"
           fi
-          echo "🏗️  Building FlashInfer for arches: ${TORCH_CUDA_ARCH_LIST}"
+          echo "🏗️  Building FlashInfer for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
 
           git clone --depth 1 --recursive --shallow-submodules \
-            --branch v0.2.6.post1 \
-            https://github.com/flashinfer-ai/flashinfer.git flashinfer
+            --branch ${FLASHINFER_GIT_REF} \
+            ${FLASHINFER_GIT_REPO} flashinfer
 
+          # Needed to build AOT kernels
           pushd flashinfer
-            python3 -m flashinfer.aot
-            TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}" \
+            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
+              python3 -m flashinfer.aot
+            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
               uv pip install --system --no-build-isolation .
           popd
 

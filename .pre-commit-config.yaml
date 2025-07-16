@@ -21,7 +21,7 @@ repos:
   - id: ruff-format
     files: ^(.buildkite|benchmarks|examples)/.*
 - repo: https://github.com/crate-ci/typos
-  rev: v1.32.0
+  rev: v1.34.0
   hooks:
   - id: typos
 - repo: https://github.com/PyCQA/isort
@@ -166,7 +166,7 @@ repos:
     language: python
     types: [python]
     pass_filenames: true
-    files: vllm/config.py|tests/test_config.py
+    files: vllm/config.py|tests/test_config.py|vllm/entrypoints/openai/cli_args.py
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion

@@ -141,6 +141,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "BaichuanForCausalLM": _HfExamplesInfo("baichuan-inc/Baichuan2-7B-chat",
                                          trust_remote_code=True),
+    "BailingMoeForCausalLM": _HfExamplesInfo("inclusionAI/Ling-lite-1.5",
+                                         trust_remote_code=True),
     "BambaForCausalLM": _HfExamplesInfo("ibm-ai-platform/Bamba-9B",
                                         extras={"tiny": "hmellor/tiny-random-BambaForCausalLM"}),  # noqa: E501
     "BloomForCausalLM": _HfExamplesInfo("bigscience/bloom-560m",
@@ -218,6 +220,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "MiniCPM3ForCausalLM": _HfExamplesInfo("openbmb/MiniCPM3-4B",
                                          trust_remote_code=True),
+    "MiniMaxForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01-hf",
+                                          min_transformers_version="4.53"),
     "MiniMaxText01ForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01",
                                                 trust_remote_code=True,
                                                 revision="a59aa9cbc53b9fb8742ca4e9e1531b9802b6fdc3"),  # noqa: E501
@@ -246,6 +250,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Phi3SmallForCausalLM": _HfExamplesInfo("microsoft/Phi-3-small-8k-instruct",
                                             trust_remote_code=True,
                                             v0_only=True),
+    "Phi4FlashForCausalLM": _HfExamplesInfo("microsoft/Phi-4-mini-flash-reasoning", # noqa: E501
+                                        trust_remote_code=True,
+                                        v0_only=True,
+                                        max_model_len=10240),
     "PhiMoEForCausalLM": _HfExamplesInfo("microsoft/Phi-3.5-MoE-instruct",
                                          trust_remote_code=True),
     "Plamo2ForCausalLM": _HfExamplesInfo("pfnet/plamo-2-1b",
@@ -319,9 +327,15 @@ _EMBEDDING_EXAMPLE_MODELS = {
 _CROSS_ENCODER_EXAMPLE_MODELS = {
     # [Text-only]
     "BertForSequenceClassification": _HfExamplesInfo("cross-encoder/ms-marco-MiniLM-L-6-v2", v0_only=True),  # noqa: E501
+    "GemmaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-gemma", # noqa: E501
+                                                      v0_only=True,
+                                                      hf_overrides={"architectures": ["GemmaForSequenceClassification"], # noqa: E501
+                                                                    "classifier_from_token": ["Yes"], # noqa: E501
+                                                                    "method": "no_post_processing"}), # noqa: E501
+    "LlamaForSequenceClassification": _HfExamplesInfo("Skywork/Skywork-Reward-V2-Llama-3.2-1B"), # noqa: E501
+    "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base", v0_only=True), # noqa: E501
     "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base", v0_only=True),  # noqa: E501
     "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3", v0_only=True),  # noqa: E501
-    "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base", v0_only=True),  # noqa: E501
 }
 
 _MULTIMODAL_EXAMPLE_MODELS = {
@@ -407,7 +421,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                       hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]}),  # noqa: E501
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-Audio-7B-Instruct"),  # noqa: E501
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-VL-2B-Instruct"),  # noqa: E501
-    "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-VL-3B-Instruct"),  # noqa: E501
+    "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-VL-3B-Instruct", # noqa: E501
+                                                          max_model_len=4096),
     "Qwen2_5OmniModel": _HfExamplesInfo("Qwen/Qwen2.5-Omni-3B"),
     "Qwen2_5OmniForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-Omni-7B-AWQ"),  # noqa: E501
     "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B"),
@@ -425,7 +440,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                          tokenizer="Isotr0py/Florence-2-tokenizer",  # noqa: E501
                                                          trust_remote_code=True),  # noqa: E501
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
+    "VoxtralForConditionalGeneration": _HfExamplesInfo("mistralai/Voxtral-Mini-3B-2507", tokenizer_mode="mistral"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
+
+    # [Cross-encoder]
+    "JinaVLForRanking": _HfExamplesInfo("jinaai/jina-reranker-m0"),   # noqa: E501
 }
 
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
@@ -446,6 +465,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                             trust_remote_code=True,
                                             speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
                                             tokenizer="meta-llama/Llama-3.1-8B-Instruct"),
+    "EagleLlama4ForCausalLM": _HfExamplesInfo(
+        "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
+        trust_remote_code=True,
+        speculative_model="morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
+        tokenizer="meta-llama/Llama-4-Scout-17B-16E-Instruct"),  # noqa: E501
     "EagleMiniCPMForCausalLM": _HfExamplesInfo("openbmb/MiniCPM-1B-sft-bf16",
                                             trust_remote_code=True,
                                             is_available_online=False,
