@@ -315,6 +315,7 @@ class MultiHeadAttention(nn.Module):
             } else _Backend.TORCH_SDPA
         if self.attn_backend == _Backend.XFORMERS and current_platform.is_cuda() and current_platform.has_device_capability(100):
             # currently, xformers does not support blackwell architecture
+            # TODO: remove this once xformers supports blackwell
             self.attn_backend = _Backend.TORCH_SDPA
 
     def forward(
