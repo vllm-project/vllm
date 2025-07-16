@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections import defaultdict
-from concurrent.futures import CancelledError, Future
-from typing import Optional, Sequence, Union, cast
+from concurrent.futures import  Future
+from typing import Union
 
 from vllm.executor.ray_distributed_executor import (  # noqa
     RayDistributedExecutor as RayDistributedExecutorV0)
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.logger import init_logger, logger
+from vllm.logger import init_logger
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 
-init_logger("vllm")
+logger = init_logger(__name__)
 
 class FutureWrapper(Future):
     """A wrapper around a Ray output reference to meet the interface
@@ -27,6 +27,20 @@ class FutureWrapper(Future):
             raise NotImplementedError("timeout is not supported")
         return self.ref.get()
 
+class FutureWrapperWithAggregation(Future):
+    def __init__(self, refs, aggregator: KVOutputAggregator):
+        super().__init__()
+        self.refs = refs
+        self.aggregator = aggregator
+    
+    def result(self, timeout=None):
+        if timeout is not None:
+            raise NotImplementedError("timeout is not supported")
+
+        # get all refs and aggregate the outputs and return the first one
+        outputs = [ref.get() for ref in self.refs]
+        return self.aggregator.aggregate(outputs)
+
 
 class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
     """Ray distributed executor using Ray Compiled Graphs."""
@@ -36,13 +50,7 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
         
         # KV connector setup
         self.has_connector = self.vllm_config.kv_transfer_config is not None
-
-        # Complete transfer tracker. Used by to track finished requests
-        # [req_id -> n_finished_workers]
-        self._recv_remaining_count = defaultdict[str,
-                                                 int](lambda: self.parallel_config.world_size)
-        self._send_remaining_count = defaultdict[str,
-                                                 int](lambda: self.parallel_config.world_size)
+        self.kv_output_aggregator = KVOutputAggregator(self.parallel_config.world_size)
 
     @property
     def max_concurrent_batches(self) -> int:
@@ -53,79 +61,6 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
             return 2
         return self.parallel_config.pipeline_parallel_size
 
-    def _aggregate_workers_output(
-            self, outputs: list[ModelRunnerOutput]) -> ModelRunnerOutput:
-        # aggregate finished_sending, finished_recving from all workers
-
-        finished_sending = set[str]()
-        finished_recving = set[str]()
-        for output in outputs:
-            # update finished_sending
-            for req_id in output.finished_sending or []:
-                new_count = self._send_remaining_count[req_id] - 1
-                if new_count == 0:
-                    # got response from all workers, report back to scheduler
-                    finished_sending.add(req_id)
-                    del self._send_remaining_count[req_id]
-                else:
-                    self._send_remaining_count[req_id] = new_count
-
-            # update finished_recving
-            for req_id in output.finished_recving or []:
-                new_count = self._recv_remaining_count[req_id] - 1
-                if new_count == 0:
-                    # got response from all workers, report back to scheduler
-                    finished_recving.add(req_id)
-                    del self._recv_remaining_count[req_id]
-                else:
-                    self._recv_remaining_count[req_id] = new_count
-
-        # select output of the worker specified by output_rank
-        output = outputs[0]
-
-        # set the aggregated finished_sending / finished_recving
-        if finished_sending:
-            output.finished_sending = finished_sending
-        if finished_recving:
-            output.finished_recving = finished_recving
-
-        return output
-
-    def _async_aggregate_workers_output(
-        self, output_futures: Sequence[Union[Future[ModelRunnerOutput], FutureWrapper]]
-    ) -> Future[ModelRunnerOutput]:
-        """Takes a list of futures and returns a single future which resolves
-        to the respective list of outputs."""
-        result_future: Future[ModelRunnerOutput] = Future()
-
-        outputs: list[Optional[ModelRunnerOutput]] = [None
-                                                      ] * len(output_futures)
-
-        def make_callback(idx):
-
-            def callback(fut):
-                if result_future.done():
-                    return
-
-                try:
-                    outputs[idx] = fut.result()
-                except CancelledError:
-                    result_future.cancel()
-                except Exception as e:
-                    result_future.set_exception(e)
-
-                # Check if all outputs are ready
-                if all(outputs):
-                    result_future.set_result(
-                        self._aggregate_workers_output(
-                            cast(list[ModelRunnerOutput], outputs)))
-
-            return callback
-
-        for i, output_future in enumerate(output_futures):
-            output_future.add_done_callback(make_callback(i))
-
-        return result_future
 
     def execute_model(
         self,
@@ -159,8 +94,7 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
         if self.max_concurrent_batches == 1:
             # Block and get results from all workers
             outputs = [ref.get() for ref in refs]
-            return self._aggregate_workers_output(outputs)
+            return self.kv_output_aggregator.aggregate(outputs)
         else:
             # Return a future that will aggregate outputs from all workers
-            output_futures = [FutureWrapper(ref) for ref in refs]
-            return self._async_aggregate_workers_output(output_futures)
+            return FutureWrapperWithAggregation(refs, self.kv_output_aggregator)

@@ -3,12 +3,16 @@
 """
 KV cache helper for store.
 """
+from concurrent.futures import CancelledError, Future
+from collections import defaultdict
+from typing import Sequence, Optional, cast
 import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
+from vllm.v1.outputs import ModelRunnerOutput   
 
 logger = init_logger(__name__)
 
@@ -107,3 +111,90 @@ def get_kv_connector_cache_layout():
             "layout to HND for better xfer performance.")
             return "HND"
     return "NHD"
+
+
+
+
+class KVOutputAggregator:
+    """Utility class to aggregate the output of all workers into a single output corresponding to Rank 0 for scheduler."""
+    
+    def __init__(self, world_size: int):
+        self.world_size = world_size
+        # Complete transfer tracker. Used by to track finished requests
+        # [req_id -> n_finished_workers]
+        self._recv_remaining_count = defaultdict[str,
+                                                 int](lambda: world_size)
+        self._send_remaining_count = defaultdict[str,
+                                                 int](lambda: world_size)
+        
+    def aggregate(self, outputs: list[ModelRunnerOutput]) -> ModelRunnerOutput:
+        # aggregate finished_sending, finished_recving from all workers
+
+        finished_sending = set[str]()
+        finished_recving = set[str]()
+        for output in outputs:
+            # update finished_sending
+            for req_id in output.finished_sending or []:
+                new_count = self._send_remaining_count[req_id] - 1
+                if new_count == 0:
+                    # got response from all workers, report back to scheduler
+                    finished_sending.add(req_id)
+                    del self._send_remaining_count[req_id]
+                else:
+                    self._send_remaining_count[req_id] = new_count
+
+            # update finished_recving
+            for req_id in output.finished_recving or []:
+                new_count = self._recv_remaining_count[req_id] - 1
+                if new_count == 0:
+                    # got response from all workers, report back to scheduler
+                    finished_recving.add(req_id)
+                    del self._recv_remaining_count[req_id]
+                else:
+                    self._recv_remaining_count[req_id] = new_count
+
+        # select output of the worker specified by output_rank
+        output = outputs[0]
+
+        # set the aggregated finished_sending / finished_recving
+        if finished_sending:
+            output.finished_sending = finished_sending
+        if finished_recving:
+            output.finished_recving = finished_recving
+
+        return output
+    
+    
+    def async_aggregate(self, output_futures: Sequence[Future[ModelRunnerOutput]]) -> Future[ModelRunnerOutput]:
+        """Takes a list of futures and returns a single future which resolves
+        to the respective list of outputs."""
+        result_future: Future[ModelRunnerOutput] = Future()
+
+        outputs: list[Optional[ModelRunnerOutput]] = [None
+                                                      ] * len(output_futures)
+
+        def make_callback(idx):
+
+            def callback(fut):
+                if result_future.done():
+                    return
+
+                try:
+                    outputs[idx] = fut.result()
+                except CancelledError:
+                    result_future.cancel()
+                except Exception as e:
+                    result_future.set_exception(e)
+
+                # Check if all outputs are ready
+                if all(outputs):
+                    result_future.set_result(
+                        self.aggregate(
+                            cast(list[ModelRunnerOutput], outputs)))
+
+            return callback
+
+        for i, output_future in enumerate(output_futures):
+            output_future.add_done_callback(make_callback(i))
+
+        return result_future
