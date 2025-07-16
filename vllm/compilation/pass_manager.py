@@ -40,7 +40,7 @@ class PostGradPassManager(CustomGraphPass):
     def __call__(self, graph: fx.Graph):
         shape = get_pass_context().runtime_shape
         for pass_ in self.passes:
-            if pass_.is_applicable(self.splitting_ops, shape):
+            if pass_.is_applicable(shape):
                 pass_(graph)
 
         # always run fix_functionalization last
@@ -48,7 +48,6 @@ class PostGradPassManager(CustomGraphPass):
 
     def configure(self, config: VllmConfig):
         self.pass_config = config.compilation_config.pass_config
-        self.splitting_ops = config.compilation_config.splitting_ops
         if self.pass_config.enable_noop:
             self.passes += [NoOpEliminationPass(config)]
 
