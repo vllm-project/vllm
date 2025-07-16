@@ -1919,6 +1919,9 @@ class ParallelConfig:
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
+    use_nvshmem_all_reduce: bool = True
+    """Use NVSHMEM for all-reduce."""
+
     tokenizer_pool_config: Optional[TokenizerPoolConfig] = None
     """This parameter is deprecated and will be removed in a future release.
     Please remove it from your configs"""

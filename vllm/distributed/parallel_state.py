@@ -924,6 +924,11 @@ def set_custom_all_reduce(enable: bool):
     _ENABLE_CUSTOM_ALL_REDUCE = enable
 
 
+def set_nvshmem_all_reduce(enable: bool):
+    global _ENABLE_NVSHMEM_ALL_REDUCE
+    _ENABLE_NVSHMEM_ALL_REDUCE = enable
+
+
 def init_distributed_environment(
     world_size: int = -1,
     rank: int = -1,
