@@ -152,8 +152,8 @@ class EngineCore:
         kv_cache_configs = [
             get_kv_cache_config(vllm_config, kv_cache_spec_one_worker,
                                 available_gpu_memory_one_worker)
-            for kv_cache_spec_one_worker, available_gpu_memory_one_worker
-            in zip(kv_cache_specs, available_gpu_memory)
+            for kv_cache_spec_one_worker, available_gpu_memory_one_worker in
+            zip(kv_cache_specs, available_gpu_memory)
         ]
 
         # Since we use a shared centralized controller, we need the

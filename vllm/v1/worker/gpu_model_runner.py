@@ -123,7 +123,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 cache_config.cache_dtype]
 
         self.is_multimodal_model = model_config.is_multimodal_model
-        self.is_pooling_model = model_config.is_pooling_model
+        self.is_pooling_model = model_config.pooler_config is not None
         self.model_supports_multimodal_raw_input = (
             model_config.model_supports_multimodal_raw_input)
         self.max_model_len = model_config.max_model_len
@@ -328,8 +328,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         Args:
             scheduler_output: The scheduler output.
         """
-        
-        # nothing to be reordered when the mdoel is attention free
         if self.model_config.is_attention_free:
             return False
 
@@ -1059,14 +1057,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             curr_group_outputs = self.model.get_multimodal_embeddings(
                 **batched_mm_inputs)
 
-            if curr_group_outputs:
-                sanity_check_mm_encoder_outputs(
-                    curr_group_outputs,
-                    expected_num_items=len(grouped_mm_inputs),
-                )
+            sanity_check_mm_encoder_outputs(
+                curr_group_outputs,
+                expected_num_items=len(grouped_mm_inputs),
+            )
 
-                for output in curr_group_outputs:
-                    encoder_outputs.append(output)
+            for output in curr_group_outputs:
+                encoder_outputs.append(output)
 
         # Cache the encoder outputs.
         for (req_id, input_id, pos_info), output in zip(

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional
@@ -66,6 +65,7 @@ class KVCacheBlocks:
 
 
 class KVCacheManager:
+
     def __init__(
         self,
         kv_cache_config: KVCacheConfig,

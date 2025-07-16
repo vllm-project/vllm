@@ -384,6 +384,10 @@ class Processor:
             tokenizer = None
         else:
             tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
+            max_input_id = max(prompt_ids, default=0)
+            if max_input_id > tokenizer.max_token_id:
+                raise ValueError(
+                    f"Token id {max_input_id} is out of vocabulary")
 
         prompt_ids = prompt_inputs["prompt_token_ids"]
         if not prompt_ids:
@@ -391,12 +395,6 @@ class Processor:
                 pass  # Mllama may have empty encoder inputs for text-only data
             else:
                 raise ValueError(f"The {prompt_type} prompt cannot be empty")
-
-        if tokenizer:
-            max_input_id = max(prompt_ids, default=0)
-            if max_input_id > tokenizer.max_token_id:
-                raise ValueError(
-                    f"Token id {max_input_id} is out of vocabulary")
 
         max_prompt_len = self.model_config.max_model_len
         if len(prompt_ids) > max_prompt_len:

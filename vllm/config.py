@@ -1514,10 +1514,6 @@ class ModelConfig:
     @property
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
-    
-    @property
-    def is_pooling_model(self) -> bool: 
-        return self.registry.is_pooling_model(self.architectures)
 
     @property
     def is_cross_encoder(self) -> bool:

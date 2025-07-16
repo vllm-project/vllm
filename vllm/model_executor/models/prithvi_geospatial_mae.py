@@ -184,7 +184,6 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree,
         if not isinstance(pixel_values, torch.Tensor):
             raise ValueError(f"Incorrect type of pixel_values. "
                              f"Got type: {type(pixel_values)}")
-        # pixel_values = torch.unbind(pixel_values, dim=0)[0]
 
         location_coords = kwargs.pop("location_coords", None)
         if not isinstance(location_coords, torch.Tensor):
@@ -201,7 +200,7 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree,
         # to be calculated. However, due to the mandatory token ids in
         # the input prompt we pass one token and the size of the dummy
         #  embedding tensors must reflect that.
-        return torch.empty(input_ids.shape)
+        return torch.empty((input_ids.shape[0], 0))
 
     def forward(
         self,
