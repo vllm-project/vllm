@@ -271,7 +271,7 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.quant_config = quant_config
         self.model = Qwen3Model(vllm_config=vllm_config,
                                 prefix=maybe_prefix(prefix, "model"))
-        
+
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
                 self.lm_head = self.model.embed_tokens
@@ -302,15 +302,13 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                    inputs_embeds)
         return hidden_states
-    
 
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int]:  
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int]:
         num_layers = len(self.model.layers)
         return (2, num_layers // 2, num_layers - 3)
 
-    def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:  
+    def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
         self.model.aux_hidden_state_layers = layers
-
 
     def compute_logits(
         self,

@@ -73,15 +73,17 @@ class LlamaModel(nn.Module):
         ])
         self.fc = torch.nn.Linear(self.config.hidden_size * 2,
                                   self.config.hidden_size,
-                                  bias=getattr(self.config, "fusion_bias", False))
-        
-        # HASS variant support
-        self.has_embedding_layernorms = getattr(self.config, "add_para_norm", False)
+                                  bias=getattr(self.config, "fusion_bias",
+                                               False))
+
+        # HASH variant support
+        self.has_embedding_layernorms = getattr(self.config, "add_para_norm",
+                                                False)
         if self.has_embedding_layernorms:
-            self.embedding_layernorm = RMSNorm(self.config.hidden_size, 
+            self.embedding_layernorm = RMSNorm(self.config.hidden_size,
                                                eps=self.config.rms_norm_eps)
-            self.hidden_states_layernorm = RMSNorm(self.config.hidden_size,
-                                                   eps=self.config.rms_norm_eps)
+            self.hidden_states_layernorm = RMSNorm(
+                self.config.hidden_size, eps=self.config.rms_norm_eps)
 
     def forward(
         self,
@@ -90,12 +92,12 @@ class LlamaModel(nn.Module):
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_embeds = self.embed_tokens(input_ids)
-        
-        # Apply HASS normalization if enabled
+
+        # Apply HASH normalization if enabled
         if self.has_embedding_layernorms:
             input_embeds = self.embedding_layernorm(input_embeds)
             hidden_states = self.hidden_states_layernorm(hidden_states)
-        
+
         hidden_states = self.fc(
             torch.cat((input_embeds, hidden_states), dim=-1))
         residual = None
@@ -140,7 +142,7 @@ class LlamaModel(nn.Module):
                 # Skip weights that don't exist in the model
                 if name not in params_dict:
                     continue
-                    
+
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)

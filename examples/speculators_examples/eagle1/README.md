@@ -8,7 +8,7 @@ The example scripts use the `VLLM_DISABLE_COMPILE_CACHE=1` environment variable.
 
 1. **CUDA Graph Caching**: vLLM caches CUDA graphs by default and reuses them for subsequent model runs to improve performance.
 
-2. **Model Definition Conflicts**: When two models with the same class definition but different architectures (e.g., Eagle vs HASS variants) are run consecutively, the cached CUDA graph from the first model is incorrectly reused for the second model.
+2. **Model Definition Conflicts**: When two models with the same class definition but different architectures (e.g., Eagle vs Eagle with layernorms) are run consecutively, the cached CUDA graph from the first model is incorrectly reused for the second model.
 
 3. **Torch.compile Errors**: This cache reuse causes torch.compile errors because the cached graph expects a different number of parameters than what the second model actually has.
 
@@ -17,12 +17,14 @@ The example scripts use the `VLLM_DISABLE_COMPILE_CACHE=1` environment variable.
 ## Example Commands
 
 ### Recommended Approach (with compile cache disabled):
+
 ```bash
 VLLM_USE_V1=1 VLLM_DISABLE_COMPILE_CACHE=1 vllm serve nm-testing/eagle-llama3.1-8b-instruct-converted-0717 --port 5000
 ```
 
 ### Alternative Approach (not recommended):
 You can also use `--enforce-eager` to completely disable torch.compile:
+
 ```bash
 VLLM_USE_V1=1 vllm serve nm-testing/eagle-llama3.1-8b-instruct-converted-0717 --enforce-eager --port 5000
 ```

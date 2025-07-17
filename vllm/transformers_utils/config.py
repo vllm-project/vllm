@@ -43,7 +43,8 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              Telechat2Config, UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
-from vllm.transformers_utils.configs.speculators_eagle import is_speculators_eagle_config
+from vllm.transformers_utils.configs.speculators_eagle import (
+    is_speculators_eagle_config)
 from vllm.transformers_utils.utils import check_gguf_file
 
 if envs.VLLM_USE_MODELSCOPE:
@@ -362,7 +363,7 @@ def get_config(
                 **kwargs,
             )
             return config
-        
+
         config_dict, _ = PretrainedConfig.get_config_dict(
             model,
             revision=revision,

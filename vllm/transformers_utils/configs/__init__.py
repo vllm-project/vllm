@@ -7,8 +7,6 @@ from vllm.transformers_utils.configs.dbrx import DbrxConfig
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 from vllm.transformers_utils.configs.exaone import ExaoneConfig
-from vllm.transformers_utils.configs.speculators_eagle import (
-    SpeculatorsEagleConfig, extract_speculators_info)
 # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
 # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
 # `FalconConfig` class from the official HuggingFace transformers library.
@@ -28,6 +26,8 @@ from vllm.transformers_utils.configs.nvlm_d import NVLM_D_Config
 from vllm.transformers_utils.configs.ovis import OvisConfig
 from vllm.transformers_utils.configs.skyworkr1v import SkyworkR1VChatConfig
 from vllm.transformers_utils.configs.solar import SolarConfig
+from vllm.transformers_utils.configs.speculators_eagle import (
+    SpeculatorsEagleConfig, extract_speculators_info)
 from vllm.transformers_utils.configs.telechat2 import Telechat2Config
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 

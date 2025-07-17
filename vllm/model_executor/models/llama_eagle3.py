@@ -50,7 +50,8 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         )
 
         self.hidden_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.norm_before_residual = getattr(config, "norm_before_residual", False)
+        self.norm_before_residual = getattr(config, "norm_before_residual",
+                                            False)
 
     def forward(
         self,

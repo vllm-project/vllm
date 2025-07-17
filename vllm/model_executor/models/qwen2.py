@@ -358,7 +358,8 @@ class Qwen2Model(nn.Module):
                     self.layers[self.start_layer:self.end_layer]):
                 if idx in self.aux_hidden_state_layers:
                     aux_hidden_states.append(hidden_states + residual)
-                hidden_states, residual = layer(positions, hidden_states, residual)
+                hidden_states, residual = layer(positions, hidden_states,
+                                                residual)
         else:
             for layer in self.layers[self.start_layer:self.end_layer]:
                 hidden_states, residual = layer(
@@ -373,7 +374,7 @@ class Qwen2Model(nn.Module):
                 "residual": residual
             })
         hidden_states, _ = self.norm(hidden_states, residual)
-        if len(aux_hidden_states) > 0:   
+        if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
 
