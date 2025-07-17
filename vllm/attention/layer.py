@@ -26,13 +26,15 @@ from vllm.utils import direct_register_custom_op
 try:
     from xformers import ops as xops
 
-    if current_platform.is_cuda() and current_platform.has_device_capability(100):
+    if current_platform.is_cuda() and current_platform.has_device_capability(
+            100):
         # Xformers FA is not compatible with B200
         USE_XFORMERS_OPS = False
     else:
         USE_XFORMERS_OPS = True
 except ImportError:
     USE_XFORMERS_OPS = False
+
 
 class Attention(nn.Module):
     """Attention layer.
