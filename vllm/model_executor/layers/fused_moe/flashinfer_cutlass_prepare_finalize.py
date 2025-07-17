@@ -69,7 +69,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-        extra_prepare_args: Optional[dict] = None,
+        extra_prepare_args: dict,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 
@@ -101,14 +101,11 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
-    def finalize(self,
-                 output: torch.Tensor,
-                 fused_expert_output: torch.Tensor,
-                 topk_weights: torch.Tensor,
-                 topk_ids: torch.Tensor,
+    def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
+                 topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  apply_router_weight_on_input: bool,
                  weight_and_reduce_impl: mk.TopKWeightAndReduce,
-                 extra_finalize_args: Optional[dict] = None) -> None:
+                 extra_finalize_args: dict) -> None:
         assert 'use_dp' in extra_finalize_args
         assert 'local_tokens' in extra_finalize_args
         use_dp = extra_finalize_args['use_dp']

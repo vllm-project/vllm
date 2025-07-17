@@ -140,7 +140,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: Optional[torch.Tensor],
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: Optional[bool],
-        extra_expert_args: Optional[dict],
+        extra_expert_args: dict,
     ):
         assert 'g1_alphas' in extra_expert_args
         assert 'g2_alphas' in extra_expert_args

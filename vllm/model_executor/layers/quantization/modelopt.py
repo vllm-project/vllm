@@ -752,14 +752,19 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         logger.debug_once("FlashInferExperts")
         # default to TP/EP case only
 
-        experts_kwargs = {
+        experts_kwargs: dict[str, Any] = {
             "use_nvfp4_w4a4": True,
             "use_dp": moe_parallel_config.dp_size > 1,
         }
-        experts_kwargs["ep_rank"] = moe_parallel_config.ep_rank
-        experts_kwargs["ep_size"] = moe_parallel_config.ep_size
-        experts_kwargs["tp_rank"] = moe_parallel_config.tp_rank
-        experts_kwargs["tp_size"] = moe_parallel_config.tp_size
+        experts_kwargs: dict[str, Any] = {
+            "use_nvfp4_w4a4": True,
+            "use_dp": moe_parallel_config.dp_size > 1,
+            "ep_rank": moe_parallel_config.ep_rank,
+            "ep_size": moe_parallel_config.ep_size,
+            "tp_rank": moe_parallel_config.tp_rank,
+            "tp_size": moe_parallel_config.tp_size,
+        }
+
         from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
             FlashInferExperts)
         experts = FlashInferExperts(**experts_kwargs)
