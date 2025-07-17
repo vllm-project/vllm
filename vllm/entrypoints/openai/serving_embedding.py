@@ -45,6 +45,7 @@ def _get_embedding(
 
 class EmbeddingMixin(OpenAIServing):
 
+    @override
     async def _preprocess(
         self,
         ctx: ServeContext,
@@ -97,6 +98,7 @@ class EmbeddingMixin(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
+    @override
     def _build_response(
         self,
         ctx: ServeContext,
@@ -194,7 +196,7 @@ class OpenAIServingEmbedding(EmbeddingMixin):
         pooling_params = ctx.request.to_pooling_params()
 
         try:
-            pooling_params.verify(self.model_config)
+            pooling_params.verify("embed", self.model_config)
         except ValueError as e:
             return self.create_error_response(str(e))
 
