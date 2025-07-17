@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -122,11 +121,7 @@ class LlamaModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            remapped_name = remap_speculators_weight_name(name)
-            if remapped_name is None:
-                continue
-            name = remapped_name
-            
+            name = remap_speculators_weight_name(name)
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -187,7 +182,7 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
         model_weights = {}
         for name, loaded_weight in weights:
             remapped_name = remap_speculators_weight_name(name)
-            if remapped_name is None:
-                continue
-            model_weights[remapped_name] = loaded_weight
+            if "lm_head" not in remapped_name:
+                name = "model." + name
+            model_weights[name] = loaded_weight
         loader.load_weights(model_weights.items())
