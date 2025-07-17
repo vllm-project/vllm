@@ -1,68 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
+"""This example demonstrates instantiating vLLM with a custom logits processor
+class object.
 
-import torch
+For testing purposes, a dummy logits processor is employed which, if
+`target_token` is passed as a keyword argument to `SamplingParams.extra_args`,
+will mask out all tokens except `target_token`.
+
+A batch is constructed with `temperature=0.0` and 50% of requests specifying
+`target_token`, and for these requests - and *only* these requests - we
+expect the `target_token` to be decoded in each step, yielding an output
+similar to that shown below:
+
+Generated Outputs:
+------------------------------------------------------------
+Prompt:    'Hello, my name is'
+Output:    " ' ' ' ' ' ' ' ' ' ' ' ' ' ' ' '"
+------------------------------------------------------------
+Prompt:    'The president of the United States is'
+Output:    " not a racist. He is a racist.\nHe's a racist because he"
+------------------------------------------------------------
+Prompt:    'The capital of France is'
+Output:    ' also also also also also also also also also also also also also
+             also also also'
+------------------------------------------------------------
+Prompt:    'The future of AI is'
+Output:    ' in the hands of the people.\n\nThe future of AI is in the'
+------------------------------------------------------------
+"""
 
 from vllm import LLM, SamplingParams
-from vllm.v1.sample.logits_processor import (
-    BatchUpdate,
-    LogitsProcessor,
-    MoveDirectionality,
-)
-
-
-def make_dummy_logitproc_type():
-    class DummyLogitsProcessor(LogitsProcessor):
-        """Fake logit processor to support unit testing and examples"""
-
-        def __init__(self, _):
-            super().__init__()
-            self.req_info = {}
-
-        def is_argmax_invariant(self) -> bool:
-            """Never impacts greedy sampling"""
-            return False
-
-        def update_state(self, batch_update: Optional[BatchUpdate]):
-            if not batch_update:
-                return
-
-            # Process added requests.
-            for index, params, _ in batch_update.added:
-                if isinstance(params, SamplingParams) and params.extra_args:
-                    target_token = params.extra_args.get("target_token", None)
-                else:
-                    target_token = None
-                self.req_info[index] = target_token
-
-            if self.req_info:
-                # Process removed requests.
-                for index in batch_update.removed:
-                    self.req_info.pop(index, None)
-
-                # Process moved requests, unidirectional (a->b) and swap (a<->b)
-                for adx, bdx, direct in batch_update.moved:
-                    if direct == MoveDirectionality.SWAP:
-                        (self.req_info[adx], self.req_info[bdx]) = (
-                            self.req_info[bdx],
-                            self.req_info[adx],
-                        )
-                    else:
-                        self.req_info[bdx] = self.req_info[adx]
-
-        def apply(self, logits: torch.Tensor) -> torch.Tensor:
-            for bdx in range(logits.shape[0]):
-                if (target_token := self.req_info[bdx]) is not None:
-                    mask = torch.ones_like(logits[bdx, :], dtype=torch.bool)
-                    mask[target_token] = False
-                    logits[bdx, mask] = float("-inf")
-
-            return logits
-
-    return DummyLogitsProcessor
-
+from vllm.test_utils import DummyLogitsProcessor
 
 # Sample prompts.
 prompts = [
@@ -84,7 +53,7 @@ def main():
     # Create an LLM.
     llm = LLM(
         model="facebook/opt-125m",
-        logits_processors=[make_dummy_logitproc_type()],
+        logits_processors=[DummyLogitsProcessor],
     )
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects
