@@ -67,7 +67,7 @@ def _create_pooling_model_cls(
                     delattr(self, attr)
 
             # If the model already defines a pooler instance, don't overwrite it
-            if not getattr(self, "_pooler", None):
+            if not getattr(self, "pooler", None):
                 self._init_pooler(vllm_config, prefix=prefix)
 
         def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
