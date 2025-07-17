@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 from vllm import SamplingParams
-from vllm.v1.sample.logits_processor.interface import LogitsProcessor
-from vllm.v1.sample.logits_processor.state import (BatchUpdate,
-                                                   MoveDirectionality)
+from vllm.v1.sample.logits_processor.interface import (BatchUpdate,
+                                                       LogitsProcessor,
+                                                       MoveDirectionality)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

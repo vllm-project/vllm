@@ -1,13 +1,56 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Optional
+from collections.abc import Sequence
+from dataclasses import dataclass
+from enum import Enum
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
+from vllm import PoolingParams, SamplingParams
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.sample.logits_processor.state import BatchUpdate
+
+
+class MoveDirectionality(Enum):
+    # One-way i1->i2 req move within batch
+    UNIDIRECTIONAL = 0
+    # Two-way i1<->i2 req swap within batch
+    SWAP = 1
+
+
+# (index, params, output_tok_ids, prompt_tok_ids) tuples for new
+# requests added to the batch.
+AddedRequest = tuple[int, Union[SamplingParams, PoolingParams], list[int],
+                     list[int]]
+
+# (index 1, index 2, directionality) tuples representing
+# one-way moves or two-way swaps of requests in batch
+MovedRequest = tuple[int, int, MoveDirectionality]
+
+# Batch indices of any removed requests.
+RemovedRequest = int
+
+
+@dataclass(frozen=True)
+class BatchUpdate:
+    """Persistent batch state change info for logitsprocs"""
+    batch_size: int  # Current num reqs in batch
+
+    # Metadata for requests added to, removed from, and moved
+    # within the persistent batch.
+    #
+    # Note: each added request is represented as
+    # (index, params, output_tok_ids)
+    # Key assumption: output_tok_ids is a reference to the
+    # request's running output tokens list; in this way
+    # the logits processors always see the latest list of
+    # generated tokens
+    removed: Sequence[RemovedRequest]
+    moved: Sequence[MovedRequest]
+    added: Sequence[AddedRequest]
 
 
 class LogitsProcessor(ABC):

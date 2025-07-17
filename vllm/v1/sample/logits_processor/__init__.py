@@ -11,12 +11,12 @@ from vllm.config import VllmConfig
 from vllm.v1.sample.logits_processor.builtin import (LogitBiasLogitsProcessor,
                                                      MinPLogitsProcessor,
                                                      MinTokensLogitsProcessor)
-from vllm.v1.sample.logits_processor.interface import LogitsProcessor
+from vllm.v1.sample.logits_processor.interface import (BatchUpdate,
+                                                       LogitsProcessor,
+                                                       MoveDirectionality)
 from vllm.v1.sample.logits_processor.load import logger
-from vllm.v1.sample.logits_processor.state import (BatchUpdate,
-                                                   BatchUpdateBuilder,
-                                                   LogitsProcessors,
-                                                   MoveDirectionality)
+from vllm.v1.sample.logits_processor.state import (BatchUpdateBuilder,
+                                                   LogitsProcessors)
 
 LOGITSPROCS_GROUP = 'vllm.logits_processors'
 
