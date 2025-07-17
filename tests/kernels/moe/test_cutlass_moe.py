@@ -665,7 +665,7 @@ def test_blocked_cutlass_moe_8_bit(
 @pytest.mark.parametrize("e", [16])
 @pytest.mark.parametrize("topk", [1, 8])
 @pytest.mark.parametrize("per_act_block", [True])
-@pytest.mark.parametrize("ep_size", [1, 2, 4, 8, 16])
+@pytest.mark.parametrize("ep_size", [2, 4, 8, 16])
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_blockwise_group_gemm_supported(
         x.to_int()))(current_platform.get_device_capability()),

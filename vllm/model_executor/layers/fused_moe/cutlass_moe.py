@@ -770,8 +770,8 @@ class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
-        workspace1 = (M * topk, max(N * 2, K))
-        workspace2 = (M * topk, N)
+        workspace1 = (M * topk, max(N, K))
+        workspace2 = (M * topk, N // 2)
         output = (M * topk, K)
         return (workspace1, workspace2, output,
                 self.out_dtype if self.out_dtype is not None else a.dtype)
