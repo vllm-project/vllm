@@ -45,12 +45,12 @@ The final path is constructed by joining this root directory with the `dump_stat
 
 #### Example
 
-If we download the measurements to `/path/to/vllm-fork/scripts/nc_workspace_measure_kvache`, we got below files:
+If we download the measurements to `/path/to/vllm-fork/scripts/nc_workspace_measure_kvcache`, we got below files:
 
 ```bash
 user:vllm-fork$ pwd
 /path/to/vllm-fork
-user:vllm-fork$ ls -l  ./scripts/nc_workspace_measure_kvache
+user:vllm-fork$ ls -l  ./scripts/nc_workspace_measure_kvcache
 -rw-r--r-- 1 user Software-SG 1949230 May 15 08:05 inc_measure_output_hooks_maxabs_0_8.json
 -rw-r--r-- 1 user Software-SG  254451 May 15 08:05 inc_measure_output_hooks_maxabs_0_8_mod_list.json
 -rw-r--r-- 1 user Software-SG 1044888 May 15 08:05 inc_measure_output_hooks_maxabs_0_8.npz
@@ -60,8 +60,8 @@ user:vllm-fork$ ls -l  ./scripts/nc_workspace_measure_kvache
 Then, we export `INC_MEASUREMENT_DUMP_PATH_PREFIX=/path/to/vllm-fork`, and INC will parse the full as below:
 
 ```
-dump_stats_path (from config): "scripts/nc_workspace_measure_kvache/inc_measure_output"
-Resulting full path: "/path/to/vllm-fork/scripts/nc_workspace_measure_kvache/inc_measure_output_hooks_maxabs_0_8.npz"
+dump_stats_path (from config): "scripts/nc_workspace_measure_kvcache/inc_measure_output"
+Resulting full path: "/path/to/vllm-fork/scripts/nc_workspace_measure_kvcache/inc_measure_output_hooks_maxabs_0_8.npz"
 ```
 
 > [!CAUTION]
@@ -76,7 +76,7 @@ Resulting full path: "/path/to/vllm-fork/scripts/nc_workspace_measure_kvache/inc
 
 ```bash
 cd vllm-fork
-huggingface-cli download Yi30/inc-woq-2282samples-514-g2  --local-dir ./scripts/nc_workspace_measure_kvache
+huggingface-cli download Yi30/inc-woq-2282samples-514-g2  --local-dir ./scripts/nc_workspace_measure_kvcache
 ```
 
 - Running the Benchmark
@@ -92,7 +92,7 @@ bash ./scripts/single_16k_len_inc.sh
 
 ```bash
 cd vllm-fork
-huggingface-cli download Yi30/inc-woq-default-pile-one-cache-412-g2  --local-dir ./scripts/nc_workspace_measure_kvache
+huggingface-cli download Yi30/inc-woq-default-pile-one-cache-412-g2  --local-dir ./scripts/nc_workspace_measure_kvcache
 ```
 
 - Running the Benchmark

@@ -20,5 +20,5 @@
             "block2batch_matmul"
         ]
     },
-    "dump_stats_path": "./scripts/nc_workspace_measure_kvache/inc_measure_output"
+    "dump_stats_path": "./scripts/nc_workspace_measure_kvcache/inc_measure_output"
 }

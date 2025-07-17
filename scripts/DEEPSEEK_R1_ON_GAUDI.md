@@ -96,7 +96,7 @@ pip install git+https://github.com/intel/neural-compressor.git@r1-woq
 
 ```bash
 # download from huggingface
-huggingface-cli download Yi30/inc-woq-full-pile-512-1024-331  --local-dir ./scripts/nc_workspace_measure_kvache
+huggingface-cli download Yi30/inc-woq-full-pile-512-1024-331  --local-dir ./scripts/nc_workspace_measure_kvcache
 ```
 
 or

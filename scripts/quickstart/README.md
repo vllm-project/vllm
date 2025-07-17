@@ -179,7 +179,7 @@ To run DeepSeek-R1 with INC FP8 quantization in single-node case, you need to fo
 For example, if you want to run DeepSeek-R1-0528, with tp-size 8, you can download measurement files with:
 ```bash
 cd vllm-fork
-huggingface-cli download Yi30/ds-r1-0528-default-pile-g2-0529  --local-dir ./scripts/nc_workspace_measure_kvache
+huggingface-cli download Yi30/ds-r1-0528-default-pile-g2-0529  --local-dir ./scripts/nc_workspace_measure_kvcache
 ```
 
 2. Configure environment variables.
@@ -211,12 +211,12 @@ export QUANT_CONFIG=/path/to/vllm-fork/scripts/quant_configs/inc_quant_per_chann
 The environment variable `INC_MEASUREMENT_DUMP_PATH_PREFIX` specifies the root directory where measurement statistics were saved.
 The final path is constructed by joining this root directory with the `dump_stats_path` defined in the quantization JSON file specified by the `QUANT_CONFIG` environment variable.
 
-If we download the measurements to `/path/to/vllm-fork/scripts/nc_workspace_measure_kvache`, we got below files:
+If we download the measurements to `/path/to/vllm-fork/scripts/nc_workspace_measure_kvcache`, we got below files:
 
 ```bash
 user:vllm-fork$ pwd
 /path/to/vllm-fork
-user:vllm-fork$ ls -l  ./scripts/nc_workspace_measure_kvache
+user:vllm-fork$ ls -l  ./scripts/nc_workspace_measure_kvcache
 -rw-r--r-- 1 user Software-SG 1949230 May 15 08:05 inc_measure_output_hooks_maxabs_0_8.json
 -rw-r--r-- 1 user Software-SG  254451 May 15 08:05 inc_measure_output_hooks_maxabs_0_8_mod_list.json
 -rw-r--r-- 1 user Software-SG 1044888 May 15 08:05 inc_measure_output_hooks_maxabs_0_8.npz
@@ -226,8 +226,8 @@ user:vllm-fork$ ls -l  ./scripts/nc_workspace_measure_kvache
 Then, we export `INC_MEASUREMENT_DUMP_PATH_PREFIX=/path/to/vllm-fork`, and INC will parse the full as below:
 
 ```
-dump_stats_path (from config): "scripts/nc_workspace_measure_kvache/inc_measure_output"
-Resulting full path: "/path/to/vllm-fork/scripts/nc_workspace_measure_kvache/inc_measure_output_hooks_maxabs_0_8.npz"
+dump_stats_path (from config): "scripts/nc_workspace_measure_kvcache/inc_measure_output"
+Resulting full path: "/path/to/vllm-fork/scripts/nc_workspace_measure_kvcache/inc_measure_output_hooks_maxabs_0_8.npz"
 ```
 
 ##### Manually start vllm
@@ -372,13 +372,13 @@ To run DeepSeek-R1 with INC FP8 quantization in multi-nodes case, you need to fo
 For example, if you want to run DeepSeek-R1-0528, with tp-size 16, you can download measurement files with:
 ```bash
 cd vllm-fork
-huggingface-cli download Yi30/ds-r1-0528-default-pile-g2-ep16-0610  --local-dir ./scripts/nc_workspace_measure_kvache
+huggingface-cli download Yi30/ds-r1-0528-default-pile-g2-ep16-0610  --local-dir ./scripts/nc_workspace_measure_kvcache
 ```
 
 For case running DeepSeek-R1-0528 with tp-size 16, we have downloaded and kept the measurement files of `Yi30/ds-r1-0528-default-pile-g2-ep16-0610` to `scripts/measure_kvcache/ds-r1-0528-g2-tp16`. You can just copy to target folder:
 ```bash
 cd vllm-fork
-cp -r ./scripts/measure_kvcache/ds-r1-0528-g2-tp16 ./scripts/nc_workspace_measure_kvache
+cp -r ./scripts/measure_kvcache/ds-r1-0528-g2-tp16 ./scripts/nc_workspace_measure_kvcache
 ```
 
 2. Configure environment variables.
@@ -410,12 +410,12 @@ export QUANT_CONFIG=/path/to/vllm-fork/scripts/quant_configs/inc_quant_per_chann
 The environment variable `INC_MEASUREMENT_DUMP_PATH_PREFIX` specifies the root directory where measurement statistics were saved.
 The final path is constructed by joining this root directory with the `dump_stats_path` defined in the quantization JSON file specified by the `QUANT_CONFIG` environment variable.
 
-If we download the measurements to `/path/to/vllm-fork/scripts/nc_workspace_measure_kvache`, we got below files:
+If we download the measurements to `/path/to/vllm-fork/scripts/nc_workspace_measure_kvcache`, we got below files:
 
 ```bash
 user:vllm-fork$ pwd
 /path/to/vllm-fork
-user:vllm-fork$ ls -l  ./scripts/nc_workspace_measure_kvache
+user:vllm-fork$ ls -l  ./scripts/nc_workspace_measure_kvcache
 -rw-r--r-- 1 root root    1136822 Jul  4 13:30 inc_measure_output_hooks_maxabs_0_16.json
 -rw-r--r-- 1 root root     611732 Jul  4 13:30 inc_measure_output_hooks_maxabs_0_16.npz
 -rw-r--r-- 1 root root     155379 Jul  4 13:30 inc_measure_output_hooks_maxabs_0_16_mod_list.json
@@ -425,8 +425,8 @@ user:vllm-fork$ ls -l  ./scripts/nc_workspace_measure_kvache
 Then, we export `INC_MEASUREMENT_DUMP_PATH_PREFIX=/path/to/vllm-fork`, and INC will parse the full as below:
 
 ```
-dump_stats_path (from config): "scripts/nc_workspace_measure_kvache/inc_measure_output"
-Resulting full path: "/path/to/vllm-fork/scripts/nc_workspace_measure_kvache/inc_measure_output_hooks_maxabs_0_16.npz"
+dump_stats_path (from config): "scripts/nc_workspace_measure_kvcache/inc_measure_output"
+Resulting full path: "/path/to/vllm-fork/scripts/nc_workspace_measure_kvcache/inc_measure_output_hooks_maxabs_0_16.npz"
 ```
 ##### Manually start vllm
 

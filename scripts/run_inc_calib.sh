@@ -5,10 +5,10 @@ QUANT_CONFIG_FILE="scripts/quant_configs/inc_measure_with_fp8kv_config.json"
 timestamp=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="prepare.pile.512.${timestamp}.log"
 
-# remove ./scripts/nc_workspace_measure_kvache if needed
-if [ -e ./scripts/nc_workspace_measure_kvache ]; then
-    echo "The directory ./scripts/nc_workspace_measure_kvache already exists, removing it..."
-    rm -rf ./scripts/nc_workspace_measure_kvache
+# remove ./scripts/nc_workspace_measure_kvcache if needed
+if [ -e ./scripts/nc_workspace_measure_kvcache ]; then
+    echo "The directory ./scripts/nc_workspace_measure_kvcache already exists, removing it..."
+    rm -rf ./scripts/nc_workspace_measure_kvcache
 fi
 
 
