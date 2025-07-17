@@ -147,7 +147,7 @@ async def get_request(
         current_request_rate = _get_current_request_rate(ramp_up_strategy,
                                                       ramp_up_start_rps,
                                                       ramp_up_end_rps,
-                                                      len(delay_ts),
+                                                      request_index,
                                                       total_requests,
                                                       request_rate)
         request_rates.append(current_request_rate)
