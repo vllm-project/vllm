@@ -10,13 +10,14 @@ from transformers import PreTrainedTokenizerBase
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage)
 from vllm.logger import init_logger
-from vllm.reasoning import ReasoningParser
+from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 logger = init_logger(__name__)
 
 # Adapted from GraniteReasoningParser
 
 
+@ReasoningParserManager.register_module("nemotron")
 class NemotronReasoningParser(ReasoningParser):
     """
     Reasoning parser for Nvidia Nemotron.
@@ -33,7 +34,7 @@ class NemotronReasoningParser(ReasoningParser):
         self.reasoning_regex = re.compile(r"<think>(.*?)</think>(.*)",
                                           re.DOTALL)
 
-        self.think_start = "<think>"
+        self.reasoning_start = "<think>"
         self.response_start = "</think>"
         self.response_start_len = len(self.response_start)
 
@@ -130,7 +131,7 @@ class NemotronReasoningParser(ReasoningParser):
             bool: True if any of the possible reasoning start seqs match.
         """
 
-        return self.think_start.startswith(text)
+        return self.reasoning_start.startswith(text)
 
     def _is_response_start_substr(self, text: str) -> bool:
         """Check if a text matches one of the possible start response seqs.
@@ -308,7 +309,7 @@ class NemotronReasoningParser(ReasoningParser):
             current_chunk = current_text[current_chunk_start:current_chunk_end]
             # Check to see if the start of reasoning seq if complete
             if start_reasoning_content is None:
-                if current_chunk == self.think_start[:-1]:
+                if current_chunk == self.reasoning_start[:-1]:
                     start_reasoning_content = current_chunk_end + 1
                     current_chunk_start = current_chunk_end + 1
 
