@@ -57,6 +57,7 @@ ignore_patterns = [
     "benchmarks/**",
     "build/**",
     "examples/**",
+    "vllm/collect_env.py",
 ]
 
 [tool.ruff]
