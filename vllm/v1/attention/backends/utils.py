@@ -4,7 +4,8 @@ import abc
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Generic, Optional, TypeVar
+from typing import (TYPE_CHECKING, ClassVar, Generic, Optional, TypeAlias,
+                    TypeVar)
 
 import numpy as np
 import torch
@@ -63,6 +64,10 @@ class CommonAttentionMetadata:
         # Fill unused with -1. Needed for reshape_and_cache in full cuda graph
         # mode.
         self.slot_mapping[self.num_actual_tokens:].fill_(-1)
+
+
+UbatchSlice: TypeAlias = tuple[slice, slice]
+UBatchSlices: TypeAlias = list[UbatchSlice]
 
 
 def slice_query_start_locs(
