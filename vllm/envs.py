@@ -121,6 +121,7 @@ if TYPE_CHECKING:
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: Optional[int] = None
     VLLM_USE_DEEP_GEMM: bool = False
+    VLLM_USE_FUSED_MOE_ROUTER: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -867,6 +868,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM":
     lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "0"))),
+
+    # Use the fused grouped top-k MoE expert selection router
+    "VLLM_USE_FUSED_MOE_ROUTER":
+    lambda: bool(int(os.getenv("VLLM_USE_FUSED_MOE_ROUTER", "1"))),
 
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.
