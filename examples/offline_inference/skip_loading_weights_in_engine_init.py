@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from vllm import LLM, RequestOutput, SamplingParams
 
 # Sample prompts.
@@ -26,7 +27,7 @@ def print_prompts_and_outputs(outputs: list[RequestOutput]) -> None:
 def main():
     # Create an LLM without loading real weights
     llm = LLM(
-        model="facebook/opt-13b",
+        model="Qwen/Qwen3-0.6B",
         load_format="dummy",
         enforce_eager=True,
         tensor_parallel_size=4,
