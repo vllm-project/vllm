@@ -138,7 +138,7 @@ async def get_request(
         input_requests = list(input_requests)
 
     total_requests = len(input_requests)
-    request_index = 0
+    assert total_requests > 0, "No requests provided."
 
     # Precompute delays among requests to minimize request send laggings
     request_rates = []
@@ -163,7 +163,7 @@ async def get_request(
     # Calculate the cumulative delay time from the first sent out requests.
     for i in range(1, len(delay_ts)):
         delay_ts[i] += delay_ts[i - 1]
-    if ramp_up_strategy is None:
+    if ramp_up_strategy is None and delay_ts[-1] != float("inf"):
         # When ramp_up_strategy is not set, we assume the request rate is fixed
         # and all requests should be sent in target_total_delay_s, the following
         # logic would re-scale delay time to ensure the final delay_ts
@@ -176,7 +176,7 @@ async def get_request(
         # from different random seeds. 
         target_total_delay_s = total_requests / request_rate
         normalize_factor = target_total_delay_s / delay_ts[-1]
-        delay_ts = [delay * normalize_factor for delay in delay_ts]    
+        delay_ts = [delay * normalize_factor for delay in delay_ts]
 
     start_ts = time.time()
     request_index = 0
