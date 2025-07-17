@@ -148,72 +148,78 @@ def test_reasoning(
     assert content == param_dict["content"]
 
 
-# Additional tests for verifying the correctness of nemotron streaming; this
-# is complicated because nemotron uses multiple tokens to indicate when thinking
+# Additional tests for verifying the correctness of granite streaming; this
+# is complicated because granite uses multiple tokens to indicate when thinking
 # is starting / when it's starting its response, so skipping special tokens
 # is awkward.
+
+INCOMPLETE_START_REASONING = "<thin"
+INCOMPLETE_START_RESPONSE = "</thin"
+DELTA_START_REASONING = "k>"
+DELTA_START_RESPONSE = "k>"
 
 ### Handling the start of reasoning
 STREAMING_1 = {
     "previous_text": None,
-    "current_text": "<thin",
-    "delta_text": "<thin",
+    "current_text": f"{INCOMPLETE_START_REASONING}",
+    "delta_text": f"{INCOMPLETE_START_REASONING}",
     "reasoning_content": None,
     "content": None,
 }
 # When we fail, we should give what was previously being silenced first
 STREAMING_2 = {
-    "previous_text": "<thin",
-    "current_text": "<thin is",
+    "previous_text": f"{INCOMPLETE_START_REASONING}",
+    "current_text": f"{INCOMPLETE_START_REASONING} is",
     "delta_text": " is",
     "reasoning_content": None,
-    "content": "<thin is",
+    "content": f"{INCOMPLETE_START_REASONING} is",
 }
 # But then after the first one, we should only add the delta text to content
 STREAMING_3 = {
-    "previous_text": "<thin is",
+    "previous_text": f"{INCOMPLETE_START_REASONING} is",
     "current_text": " words",
-    "delta_text": " <thin is words",
+    "delta_text": f" {INCOMPLETE_START_REASONING} is words",
     "reasoning_content": None,
     "content": " words",
 }
 # But then after the first one, we should only add the delta text to content
 STREAMING_4 = {
-    "previous_text": "<thin",
-    "current_text": "<think>",
-    "delta_text": "k>",
+    "previous_text": INCOMPLETE_START_REASONING,
+    "current_text": START_REASONING,
+    "delta_text": DELTA_START_REASONING,
     "reasoning_content": None,
     "content": None,
 }
 # Reasoning started successfully; parse reasoning content
 STREAMING_5 = {
-    "previous_text": "<think>",
-    "current_text": "<think> foo",
+    "previous_text": f"{START_REASONING}",
+    "current_text": f"{START_REASONING} foo",
     "delta_text": " foo",
     "reasoning_content": " foo",
     "content": None,
 }
 # Response special sequence has started, but not finished.
 STREAMING_6 = {
-    "previous_text": "<think> foo",
-    "current_text": "<think> foo </th",
-    "delta_text": " </th",
+    "previous_text": f"{START_REASONING} foo",
+    "current_text": f"{START_REASONING} foo {INCOMPLETE_START_RESPONSE}",
+    "delta_text": f" {INCOMPLETE_START_RESPONSE}",
     "reasoning_content": " ",
     "content": None,
 }
 # Response special sequence started, but was broken; the reasoning
 # content should be the content that was previously unused.
 STREAMING_7 = {
-    "previous_text": "<think> foo </th",
-    "current_text": "<think> foo </th </thin",
-    "delta_text": " </thin",
-    "reasoning_content": "</th ",
+    "previous_text": f"{START_REASONING} foo {INCOMPLETE_START_RESPONSE}",
+    "current_text":
+    f"{START_REASONING} foo {INCOMPLETE_START_RESPONSE} {INCOMPLETE_START_RESPONSE}",  # noqa: E501
+    "delta_text": f" {INCOMPLETE_START_RESPONSE}",
+    "reasoning_content": f"{INCOMPLETE_START_RESPONSE} ",
     "content": None,
 }
 # Response special sequence is ongoing
 STREAMING_8 = {
-    "previous_text": "<think> foo </think>",
-    "current_text": "<think> foo </think> bar",
+    "previous_text": f"{START_REASONING} foo {START_RESPONSE}",
+    "current_text": f"{START_REASONING} foo {START_RESPONSE} bar",
     "delta_text": " bar",
     "reasoning_content": None,
     "content": " bar",
@@ -221,40 +227,41 @@ STREAMING_8 = {
 # The delta text has everything; we should be able to correctly parse both
 STREAMING_9 = {
     "previous_text": None,
-    "current_text": "<think> foo </think> bar",
-    "delta_text": "<think> foo </think> bar",
+    "current_text": f"{START_REASONING} foo {START_RESPONSE} bar",
+    "delta_text": f"{START_REASONING} foo {START_RESPONSE} bar",
     "reasoning_content": " foo ",
     "content": " bar",
 }
 ## The Response is ongoing, and the delta mixes reasoning content / content
 STREAMING_10 = {
-    "previous_text": "<think> foo",
-    "current_text": "<think> foo bar </think> baz",
-    "delta_text": " bar </think> baz",
+    "previous_text": f"{START_REASONING} foo",
+    "current_text": f"{START_REASONING} foo bar {START_RESPONSE} baz",
+    "delta_text": f" bar {START_RESPONSE} baz",
     "reasoning_content": " bar ",
     "content": " baz",
 }
 # The delta text starts a new substring that might be a response special seq
 STREAMING_11 = {
-    "previous_text": "<think> This is a reasoning section ",
-    "current_text": "<think> This is a reasoning section </th",
-    "delta_text": "</th",
+    "previous_text": f"{START_REASONING} This is a reasoning section ",
+    "current_text":
+    f"{START_REASONING} This is a reasoning section {INCOMPLETE_START_RESPONSE}",  # noqa: E501
+    "delta_text": f"{INCOMPLETE_START_RESPONSE}",
     "reasoning_content": None,
     "content": None,
 }
 # The delta text is finishing the response special seq
 STREAMING_12 = {
-    "previous_text": "<think> foo </th",
-    "current_text": "<think> foo </think>",
-    "delta_text": "ink>",
+    "previous_text": f"{START_REASONING} foo {INCOMPLETE_START_RESPONSE}",
+    "current_text": f"{START_REASONING} foo {START_RESPONSE}",
+    "delta_text": DELTA_START_RESPONSE,
     "reasoning_content": None,
     "content": None,
 }
 STREAMING_13 = {
-    "previous_text": "<think> foo </th",
-    "current_text": "<think> foo </th bar",
+    "previous_text": f"{START_REASONING} foo {INCOMPLETE_START_RESPONSE}",
+    "current_text": f"{START_REASONING} foo {INCOMPLETE_START_RESPONSE} bar",
     "delta_text": " bar",
-    "reasoning_content": "</th bar",
+    "reasoning_content": f"{INCOMPLETE_START_RESPONSE} bar",
     "content": None,
 }
 
