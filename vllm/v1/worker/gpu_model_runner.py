@@ -319,6 +319,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.capture_mixed_batches = self.cudagraph_mode != CUDAGraphMode.NONE
         self.no_piecewise_compilation = self.compilation_config.level != \
             CompilationLevel.PIECEWISE or self.model_config.enforce_eager
+        
+        self.uniform_decode_query_len = 1 if not self.speculative_config else \
+            1 + self.speculative_config.num_speculative_tokens
 
         # Cudagraph dispatcher for runtime cudagraph dispatching.
         self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
@@ -769,7 +772,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         return (attn_metadata, attention_cuda_graphs, logits_indices,
                 spec_decode_metadata, num_scheduled_tokens,
-                spec_decode_common_attn_metadata)
+                spec_decode_common_attn_metadata,
+                max_num_scheduled_tokens)
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -1291,7 +1295,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Prepare the decoder inputs.
         (attn_metadata, attention_cuda_graphs, logits_indices,
          spec_decode_metadata, num_scheduled_tokens_np,
-         spec_decode_common_attn_metadata) = (
+         spec_decode_common_attn_metadata, max_query_len) = (
              self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.cudagraph_mode != CUDAGraphMode.NONE
@@ -1359,10 +1363,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         cudagraph_runtime_style = self.cudagraph_dispatcher.\
             get_cudagraph_runtime_style(attention_cuda_graphs)
         # Note: When cudagraph_mode is FULL and
-        # compilation_config.separate_attention_routine is True, as in FA2,
-        # this flag helps to determine the correct routine for the full
-        # cudagraph.
-        is_pure_decode = num_scheduled_tokens == self.input_batch.num_reqs
+        # compilation_config.cudagraph_separate_routine is True, this
+        # flag helps to determine the correct cudagraph routine (optimized
+        # for attention ops).
+        uniform_batch = max_query_len == self.uniform_decode_query_len and \
+            num_scheduled_tokens == self.input_batch.num_reqs*max_query_len
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
@@ -1375,7 +1380,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.maybe_setup_kv_connector(scheduler_output)
 
             model = self.cudagraph_dispatcher.dispatch(cudagraph_runtime_style,
-                                                       is_pure_decode)
+                                                       uniform_batch)
 
             model_output = model(
                 input_ids=input_ids,
@@ -1938,7 +1943,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         cudagraph_runtime_style: CUDAGraphRuntimeStyle = (
             CUDAGraphRuntimeStyle.NONE),
         force_attention: bool = False,
-        is_pure_decode: bool = False,
+        uniform_batch: bool = False,
         skip_eplb: bool = False,
         is_profile: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1946,28 +1951,47 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Padding for DP
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
         num_tokens += num_pad
+        
+        # If cudagraph_separate_routine is enabled when use full cudagraph,
+        # we need to manually activate the correct routine of attention backend
+        # for mixed prefill-decode batches and uniform decode batches
+        # separately during capturing. Uniform batch means that all
+        # requests have identical query length, except possibly a single,
+        # shorter dummy request in the batch (account for padding when
+        # cudagraph capturing).
+        # An example of uniform batch is common pure decode, where
+        # max_query_len == 1. Another case is speculative decode,
+        # where max_query_len == 1 + num_spec_decode_tokens.
 
+        # When setting max_query_len = 1, we switch to and capture the optimized
+        # routine of FA2 for pure decode, i.e., Flashdecode + an optimization
+        # for GQA/MQA.
+        max_query_len = self.uniform_decode_query_len if uniform_batch else \
+                                                                num_tokens
+                                                                
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
         assert num_tokens <= self.scheduler_config.max_num_batched_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
-        num_reqs = min(num_tokens, max_num_reqs)
-        min_tokens_per_req = num_tokens // num_reqs
-        num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
-        num_scheduled_tokens_list[-1] += num_tokens % num_reqs
+        if uniform_batch:
+            num_reqs = (num_tokens+self.uniform_decode_query_len-1) // \
+                self.uniform_decode_query_len
+            assert num_reqs <= max_num_reqs, \
+                "Do not capture num_reqs > max_num_reqs for uniform batch"
+            num_scheduled_tokens_list = [max_query_len] * num_reqs
+            if num_tokens % max_query_len != 0:
+                num_scheduled_tokens_list[-1] = num_tokens % max_query_len
+        else:
+            num_reqs = min(num_tokens, max_num_reqs)
+            min_tokens_per_req = num_tokens // num_reqs
+            num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
+            num_scheduled_tokens_list[-1] += num_tokens % num_reqs
+        
         assert sum(num_scheduled_tokens_list) == num_tokens
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
-
-        # If separate_attention_routine for attention backend is enabled when
-        # use full cudagraph, we need to manually activate the correct routine
-        # for mixed prefill-decode batches and pure decode batches separately
-        # during capturing.
-        # For example, below code switches to the optimized routine of FA2
-        # for pure decoding, i.e., Flashdecode + an optimization for GQA/MQA.
-        max_query_len = 1 if is_pure_decode else num_tokens
 
         attn_metadata: Optional[dict[str, Any]] = None
 
@@ -2040,7 +2064,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_tokens_across_dp=num_tokens_across_dp,
                     cudagraph_runtime_style=cudagraph_runtime_style):
                 model = self.cudagraph_dispatcher.dispatch(
-                    cudagraph_runtime_style, is_pure_decode)
+                    cudagraph_runtime_style, uniform_batch)
                 outputs = model(
                     input_ids=input_ids,
                     positions=positions,
@@ -2300,10 +2324,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     attn_cuda_graphs else CUDAGraphRuntimeStyle.PIECEWISE
 
                 # Skip capturing batch sizes of 1 in mix prefill-decode if
-                # separate_attention_routine is on. As bs=1 can treat as a
-                # pure decode.
+                # cudagraph_separate_routine is on. As bs=1 can treat as a
+                # uniform batch.
                 start_idx = 0
-                if self.compilation_config.separate_attention_routine \
+                if self.compilation_config.cudagraph_separate_routine \
                     and len(self.cudagraph_batch_sizes) > 0 \
                     and self.cudagraph_batch_sizes[0] == 1:
                     start_idx = 1
@@ -2312,22 +2336,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self._capture_cudagraphs(
                     compilation_cases,
                     cudagraph_runtime_style=cudagraph_runtime_style,
-                    is_pure_decode=False)
+                    uniform_batch=False)
 
-            if self.compilation_config.separate_attention_routine:
-                # Capture full cudagraph for pure decode.
+            if self.compilation_config.cudagraph_separate_routine:
+                # Capture full cudagraph for uniform batches (pure decode/
+                # speculative decode).
                 cudagraph_runtime_style = CUDAGraphRuntimeStyle.FULL
 
-                max_num_reqs = self.scheduler_config.max_num_seqs
+                max_num_tokens = self.scheduler_config.max_num_seqs * \
+                        self.uniform_decode_query_len
                 decode_cudagraph_batch_sizes = [
-                    x for x in self.cudagraph_batch_sizes if x <= max_num_reqs
+                    x for x in self.cudagraph_batch_sizes if x <= max_num_tokens
                 ]
                 compilation_cases_decode = list(
                     reversed(decode_cudagraph_batch_sizes))
                 self._capture_cudagraphs(
                     compilation_cases=compilation_cases_decode,
                     cudagraph_runtime_style=cudagraph_runtime_style,
-                    is_pure_decode=True)
+                    uniform_batch=True)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
@@ -2339,14 +2365,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _capture_cudagraphs(self, compilation_cases: list[int],
                             cudagraph_runtime_style: CUDAGraphRuntimeStyle,
-                            is_pure_decode: bool):
+                            uniform_batch: bool):
         # Only rank 0 should print progress bar during capture
         if is_global_first_rank():
             compilation_cases = tqdm(
                 compilation_cases,
                 disable=not self.load_config.use_tqdm_on_load,
                 desc="Capturing CUDA graphs ({})".format(
-                    "pure decode" if is_pure_decode else "mix prefill-decode"))
+                    "decode" if uniform_batch else "mix prefill-decode"))
         # We skip EPLB here since we don't want to record dummy metrics
         for num_tokens in compilation_cases:
             for _ in range(self.compilation_config.cudagraph_num_of_warmups):
@@ -2361,11 +2387,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     num_tokens,
                     cudagraph_runtime_style=CUDAGraphRuntimeStyle.NONE,
                     force_attention=force_attention,
-                    is_pure_decode=is_pure_decode,
+                    uniform_batch=uniform_batch,
                     skip_eplb=True)
             self._dummy_run(num_tokens,
                             cudagraph_runtime_style=cudagraph_runtime_style,
-                            is_pure_decode=is_pure_decode,
+                            uniform_batch=uniform_batch,
                             skip_eplb=True)
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
@@ -2427,11 +2453,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
                 if attn_cg == AttentionCGSupport.NEVER:
                     raise ValueError(
-                        f"Full CUDAGraph not supported for "
-                        f"{attn_backend_i.__name__}. Set "
-                        f"CompilationConfig.cudagraph_mode to `NONE` "
-                        f"or `PIECEWISE`, or use a different"
-                        f" attention backend.")
+                        f"Full CUDAGraph for {attn_backend_i.__name__} is "
+                        f"no supported. Set CompilationConfig.cudagraph_mode "
+                        f"to `NONE` or `PIECEWISE`, or use a different "
+                        f"attention backend.")
 
                 if len(self.compilation_config.splitting_ops) == 0:
                     assert attn_cg in [
@@ -2444,40 +2469,40 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         f"or use a different attention backend.")
 
                 # check if the attention backends compatible with
-                # CompilationConfig.separate_attention_routine
+                # CompilationConfig.cudagraph_separate_routine
                 if attn_cg == AttentionCGSupport.ALWAYS_UNIFIED and \
-                    self.compilation_config.separate_attention_routine:
+                    self.compilation_config.cudagraph_separate_routine:
                     logger.warning_once(
                         f"Full CUDAGraph support for {attn_backend_i.__name__}"
                         f" is {AttentionCGSupport.ALWAYS_UNIFIED}, which expect"
-                        f"CompilationConfig.separate_attention_rountine as "
+                        f"CompilationConfig.cudagraph_separate_routine as "
                         f"False. Set it to False now.")
-                    self.compilation_config.separate_attention_routine = \
+                    self.compilation_config.cudagraph_separate_routine = \
                                                                     False
 
                 if attn_cg == AttentionCGSupport.PURE_DECODE_ONLY and \
-                    not self.compilation_config.separate_attention_routine:
+                    not self.compilation_config.cudagraph_separate_routine:
 
                     logger.warning_once(
                         f"Full CUDAGraph support for {attn_backend_i.__name__}"
                         f" is {AttentionCGSupport.PURE_DECODE_ONLY}, which "
-                        f"expect CompilationConfig.separate_attention_rountine"
+                        f"expect CompilationConfig.cudagraph_separate_routine"
                         f"as True. Set it to True now.")
-                    self.compilation_config.separate_attention_routine = \
+                    self.compilation_config.cudagraph_separate_routine = \
                                                                     True
 
                 # when AttentionCGSupport.ALWAYS_SEPARATE, we don't change
-                # the separate_attention_routine flag, but should inform
+                # the cudagraph_separate_routine flag, but should inform
                 # the user that this flag can be turned on to obtain
                 # better performance.
                 if attn_cg == AttentionCGSupport.ALWAYS_SEPARATE and \
-                    not self.compilation_config.separate_attention_routine:
+                    not self.compilation_config.cudagraph_separate_routine:
                     logger.warning_once(
-                        f"Full CUDAGraph for {attn_backend_i.__name__} "
-                        f"supports capturing separate attention routine "
-                        f"for pure decode and mix prefill-decode batches. "
-                        f"You can turn on CompilationConfig.separate_"
-                        f"attention_routine to obtain better performance.")
+                        f"{attn_backend_i.__name__} generally performs better "
+                        f"when capturing full cudagraph for mix prefill-"
+                        f"decode batches and pure decode batches in separate. "
+                        f"To enable this behavior turn on "
+                        f"CompilationConfig.cudagraph_separate_routine.")
 
                 # for attn_cg is pure decode only, and no piecewise compilation,
                 # we skip capturing mix prefill-decode (general) batches.
@@ -2485,19 +2510,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     if self.no_piecewise_compilation:
                         logger.warning_once(
                             f"Skipping capturing mixed prefill-decode batches, "
-                            f"since backend {attn_backend_i.__name__} only "
+                            f"since backend {attn_backend_i.__name__} "
                             f"supports full cudagraph for pure decode only and "
-                            f"vllm piecewise compilation is no enabled.")
+                            f"vllm piecewise compilation is disabled.")
                         self.capture_mixed_batches = False
                     else:
-                        assert all(op in self.compilation_config.splitting_ops
-                            for op in ["vllm.unified_attention",
-                                       "vllm.unified_attention_with_output"]),\
-                        "Invalid splitting_ops for piecewise compilation"
+                        assert self.compilation_config.is_attention_splitting,\
+                        "Invalid splitting_ops for piecewise compilation "
                         "with cudagraph_mode `FULL` for backend "
                         f"{attn_backend_i.__name__}, which support "
-                        "cudagraph on pure decode only. Please include "
-                        "attention ops in compilation_config.splitting_ops"
+                        "cudagraph only for pure decode. Please include "
+                        "attention ops in compilation_config.splitting_ops."
 
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)

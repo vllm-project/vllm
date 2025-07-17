@@ -10,14 +10,14 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-class DispatchKey(NamedTuple):
+class CudagraphKey(NamedTuple):
     """
     Key for dispatching cudagraphs.
     """
     cudagraph_runtime_style: CUDAGraphRuntimeStyle
-    # Be aware that is_pure_decode should be default None
+    # Be aware that uniform_batch should be default None
     # for both piecewise cudagraphs and no cudagraphs.
-    is_pure_decode: Optional[bool] = None
+    uniform_batch: Optional[bool] = None
 
 
 class CudagraphDispatcher:
@@ -35,21 +35,20 @@ class CudagraphDispatcher:
         # runner have been done.
 
         # Dict to store cudagraph candidates for runtime dispatching.
-        self.cudagraph_candidates: dict[DispatchKey, Any] = {}
+        self.cudagraph_candidates: dict[CudagraphKey, Any] = {}
 
         # Verify if correctly piecewise compilation for attention.
         piecewise_compilation = not vllm_config.model_config.enforce_eager\
             and self.compilation_config.level == CompilationLevel.PIECEWISE
         self.piecewise_attn_compilation = piecewise_compilation and\
-            all(op in self.compilation_config.splitting_ops for op in [
-            "vllm.unified_attention", "vllm.unified_attention_with_output"])
+            self.compilation_config.is_attention_splitting
 
     def after_load_model(self, model: Callable):
         # add original model to cudagraph_candidates for profile run.
         assert model is not None, "model should not be None"
         self.model = model
         self.cudagraph_candidates.update(
-            {DispatchKey(CUDAGraphRuntimeStyle.NONE): self.model})
+            {CudagraphKey(CUDAGraphRuntimeStyle.NONE): self.model})
         logger.debug("Cudagraph candidates for NONE style initialized")
 
     def maybe_initialize_cudagraph(self, create_mixed_batch_full_cg: bool):
@@ -60,14 +59,14 @@ class CudagraphDispatcher:
         if self.compilation_config.level == CompilationLevel.PIECEWISE\
                 and len(self.compilation_config.splitting_ops)>0:
             self.cudagraph_candidates.update(
-                {DispatchKey(CUDAGraphRuntimeStyle.PIECEWISE): self.model})
+                {CudagraphKey(CUDAGraphRuntimeStyle.PIECEWISE): self.model})
             logger.debug("Piecewise cudagraph initialized")
 
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
             # create full cudagraph for mix prefill-decode/general batches
             if create_mixed_batch_full_cg:
                 self.cudagraph_candidates.update({
-                    DispatchKey(CUDAGraphRuntimeStyle.FULL, False):
+                    CudagraphKey(CUDAGraphRuntimeStyle.FULL, False):
                     CUDAGraphWrapper(self.model,
                                      self.vllm_config,
                                      runtime_style=CUDAGraphRuntimeStyle.FULL,
@@ -75,19 +74,19 @@ class CudagraphDispatcher:
                                          usage_str="full/mixed"))
                 })
                 logger.debug("Full cudagraph for mixed batches initialized")
-            # always create full cudagraph for pure decode batches if speparate
-            # attention routine.
-            if self.compilation_config.separate_attention_routine:
+            # always create full cudagraph for uniform batches if cudagraph
+            # separate routine is enabled.
+            if self.compilation_config.cudagraph_separate_routine:
                 self.cudagraph_candidates.update({
-                    DispatchKey(CUDAGraphRuntimeStyle.FULL, True):
+                    CudagraphKey(CUDAGraphRuntimeStyle.FULL, True):
                     CUDAGraphWrapper(self.model,
                                      self.vllm_config,
                                      runtime_style=CUDAGraphRuntimeStyle.FULL,
                                      cudagraph_options=CUDAGraphOptions(
-                                         usage_str="full/pure-decode"))
+                                         usage_str="full/uniform"))
                 })
                 logger.debug(
-                    "Full cudagraph for pure decode batches initialized")
+                    "Full cudagraph for uniform batches initialized")
 
     def get_cudagraph_runtime_style(
             self, attn_cuda_graphs: bool) -> CUDAGraphRuntimeStyle:  # noqa
@@ -116,7 +115,7 @@ class CudagraphDispatcher:
         return CUDAGraphRuntimeStyle.NONE
 
     def dispatch(self, cudagraph_runtime_style: CUDAGraphRuntimeStyle,
-                 is_pure_decode: bool) -> Any:
+                    uniform_batch: bool) -> Any:
         assert self.model is not None, ("No model have been assigned"
                                         "to cudagraph dispatcher")
         # if no cudagraph candidates, just skip dispatching.
@@ -129,16 +128,16 @@ class CudagraphDispatcher:
         if cudagraph_runtime_style in [
                 CUDAGraphRuntimeStyle.NONE, CUDAGraphRuntimeStyle.PIECEWISE
         ]:
-            dispatchkey = DispatchKey(cudagraph_runtime_style)
-            selected_model = self.cudagraph_candidates.get(dispatchkey, None)
+            key = CudagraphKey(cudagraph_runtime_style)
+            selected_model = self.cudagraph_candidates.get(key, None)
         else:
             # for full cudagraph, select between mixed batches
-            # or pure decode batches
-            decode_case = self.compilation_config.separate_attention_routine\
-                and is_pure_decode
-            dispatchkey = DispatchKey(cudagraph_runtime_style, decode_case)
-            selected_model = self.cudagraph_candidates.get(dispatchkey, None)
+            # or uniform batches
+            uniform_batch = uniform_batch and\
+                self.compilation_config.cudagraph_separate_routine
+            key = CudagraphKey(cudagraph_runtime_style, uniform_batch)
+            selected_model = self.cudagraph_candidates.get(key, None)
         assert selected_model is not None, (
             f"cudagraph_candidates is not correctly initialized for key: "
-            f"{dispatchkey}")
+            f"{key}")
         return selected_model

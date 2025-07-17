@@ -4034,13 +4034,17 @@ class CompilationConfig:
         - [`custom_ops`][vllm.config.CompilationConfig.custom_ops]
         - [`splitting_ops`][vllm.config.CompilationConfig.splitting_ops]
     - CudaGraph capture:
+        - [`use_cudagraph`][vllm.config.CompilationConfig.use_cudagraph]
         - [`cudagraph_mode`][vllm.config.CompilationConfig.cudagraph_mode]
         - [`cudagraph_capture_sizes`]
         [vllm.config.CompilationConfig.cudagraph_capture_sizes]
         - [`cudagraph_num_of_warmups`]
         [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
+        - [`cudagraph_separate_routine`]
+        [vllm.config.CompilationConfig.cudagraph_separate_routine]
         - [`cudagraph_copy_inputs`]
         [vllm.config.CompilationConfig.cudagraph_copy_inputs]
+        - [`full_cuda_graph`][vllm.config.CompilationConfig.full_cuda_graph]
     - Inductor compilation:
         - [`use_inductor`][vllm.config.CompilationConfig.use_inductor]
         - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
@@ -4101,6 +4105,8 @@ class CompilationConfig:
     splitting_ops: Optional[list[str]] = None
     """A list of ops to split the full graph into subgraphs, used in piecewise
     compilation."""
+    is_attention_splitting: bool = False
+    """A flag to indicate if the splitting_ops contains all attention ops."""
 
     # Inductor capture
     use_inductor: bool = True
@@ -4155,6 +4161,19 @@ class CompilationConfig:
     compilation (level=PIECEWISE and non-empty splitting_ops), full
     cudagraphs are supported with and without compilation.
     """
+    use_cudagraph: Optional[bool] = None
+    """Whether to use cudagraph inside compilation.
+    - False: cudagraph inside compilation is not used.
+    - True: cudagraph inside compilation is used. It requires
+        that all input buffers have fixed addresses, and all
+        splitting ops write their outputs to input buffers.
+    In the vLLM V1 Engine, this flag only applies for
+    CompilationLevel.PIECEWISE (aka -O3).
+    Note that this is orthogonal to the cudagraph capture logic
+    outside of compilation.
+    Warning: This flag is deprecated and will be removed in future releases.
+    Please use cudagraph_mode instead.
+    """
     cudagraph_num_of_warmups: int = 0
     """Number of warmup runs for cudagraph.
     It means the first several runs will be treated as warmup runs.
@@ -4169,8 +4188,18 @@ class CompilationConfig:
     cudagraph. If the caller can guarantee that the same input buffers
     are always used, it can set this to False. Otherwise, it should
     set this to True, and the compiler will copy the input to an
-    internally managed buffer. Default is False."""
-    separate_attention_routine: bool = False
+    internally managed buffer. Default is False. 
+    Note that this flag is only effective when cudagraph_mode is PIECEWISE.
+    """
+    full_cuda_graph: Optional[bool] = None
+    """whether to use a full cuda graph for the entire forward pass rather than
+    splitting certain operations such as attention into subgraphs. Thus this
+    flag cannot be used together with splitting_ops. This may provide
+    performance benefits for smaller models.
+    Warning: This flag is deprecated and will be removed in future releases.
+    Please use cudagraph_mode instead.
+    """
+    cudagraph_separate_routine: bool = False
     """
     Enable distinct attention routines for mixed and pure-decode batches during
     full cuda graph capturing. This is because some attention backends like
@@ -4385,9 +4414,9 @@ class CompilationConfig:
 
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called
-        if self.separate_attention_routine:
+        if self.cudagraph_separate_routine:
             assert self.cudagraph_mode == CUDAGraphMode.FULL, (
-                "separate_attention_routine requires "
+                "cudagraph_separate_routine requires "
                 "cudagraph_mode be CUDAGraphMode.FULL")
 
         if self.splitting_ops is None:
@@ -4405,6 +4434,8 @@ class CompilationConfig:
             assert self.cudagraph_mode != CUDAGraphMode.PIECEWISE, (
                 "Cannot use piecewise CUDAGraph without splitting ops.")
             self.splitting_ops = []
+        self.is_attention_splitting = all(op in self.splitting_ops for op in [
+            "vllm.unified_attention", "vllm.unified_attention_with_output"])
 
 
 @config
@@ -4679,6 +4710,35 @@ class VllmConfig:
             if self.compilation_config.level is None:
                 self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
+
+        if self.compilation_config.use_cudagraph is not None:
+            logger.warning(
+                "`use_cudagraph` is deprecated and will be removed in the "
+                "future release. Switch to use `cudagraph_mode` instead.")
+            if self.compilation_config.use_cudagraph:
+                if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+                    self.compilation_config.cudagraph_mode =\
+                            CUDAGraphMode.PIECEWISE
+                # otherwise, keep the cudagraph_mode as is
+            else:
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        
+        if self.compilation_config.full_cuda_graph is not None:
+            logger.warning(
+                "`full_cuda_graph` is deprecated and will be removed in the "
+                "future release. Switch to use `cudagraph_mode` instead.")
+            if self.compilation_config.use_cudagraph is not None and \
+                self.compilation_config.full_cuda_graph:
+                assert self.compilation_config.use_cudagraph, (
+                    "`use_cudagraph` must be True when `full_cuda_graph` "
+                    "is True.")
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+                self.compilation_config.use_cudagraph = True
+            elif self.compilation_config.full_cuda_graph:
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+                self.compilation_config.use_cudagraph = True
+            # other cases, keep the cudagraph_mode as is
+            
 
         # For V0 or other cases, default to level 0 with no compilation
         if self.compilation_config.level is None:
