@@ -1701,7 +1701,12 @@ class EngineArgs:
 @dataclass
 class AsyncEngineArgs(EngineArgs):
     """Arguments for asynchronous vLLM engine."""
-    disable_log_requests: bool = False
+    # Request logging is disabled by default.  ``--disable-log-requests`` is
+    # kept for backwards compatibility but has no effect.  ``--enable-legacy-
+    # log-requests`` can be used to restore the previous behaviour of logging
+    # each request.
+    disable_log_requests: bool = True
+    enable_legacy_log_requests: bool = False
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser,
@@ -1714,9 +1719,33 @@ class AsyncEngineArgs(EngineArgs):
             parser = EngineArgs.add_cli_args(parser)
         parser.add_argument('--disable-log-requests',
                             action='store_true',
-                            help='Disable logging requests.')
+                            default=None,
+                            help='[DEPRECATED] Request logging is disabled by '
+                            'default.')
+        parser.add_argument('--enable-legacy-log-requests',
+                            action='store_true',
+                            help='Enable legacy request logging behavior.')
         current_platform.pre_register_and_update(parser)
         return parser
+
+    @classmethod
+    def from_cli_args(cls, args: argparse.Namespace):
+        engine_args = super().from_cli_args(args)
+
+        if args.enable_legacy_log_requests:
+            engine_args.disable_log_requests = False
+        else:
+            if args.disable_log_requests is None:
+                logger.warning(
+                    "Request logging is disabled by default. Use "
+                    "--enable-legacy-log-requests to restore the previous "
+                    "behaviour.")
+                engine_args.disable_log_requests = True
+            else:
+                engine_args.disable_log_requests = True
+
+        engine_args.enable_legacy_log_requests = args.enable_legacy_log_requests
+        return engine_args
 
 
 def _raise_or_fallback(feature_name: str, recommend_to_remove: bool):
