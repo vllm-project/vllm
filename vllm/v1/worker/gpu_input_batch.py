@@ -69,7 +69,7 @@ class InputBatch:
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
-        logitsprocs: LogitsProcessors,
+        logitsprocs: Optional[LogitsProcessors] = None,
         is_spec_decode: bool = False,
         logits_processing_needs_token_ids: bool = False,
     ):
@@ -228,8 +228,12 @@ class InputBatch:
 
         self.req_output_token_ids: list[Optional[list[int]]] = []
 
+        # Build logits processors. If specified by user, load custom
+        # logitsprocs constructors.
+        self.logitsprocs = logitsprocs or LogitsProcessors(None)
+
         # This is updated each time the batch constituents change.
-        self.sampling_metadata = self._make_sampling_metadata(logitsprocs)
+        self.sampling_metadata = self._make_sampling_metadata()
 
         self.pooling_params: dict[str, PoolingParams] = {}
 
@@ -579,30 +583,19 @@ class InputBatch:
         del self._req_ids[self.num_reqs:]
         del self.req_output_token_ids[self.num_reqs:]
 
-    @property
-    def _logitsprocs(self) -> Optional[LogitsProcessors]:
-        if not self.sampling_metadata:
-            return None
-        return self.sampling_metadata.logitsprocs
-
     def refresh_metadata(self):
         """Apply batch updates, reset input batch at end of step
         
         * Apply batch add/remove/permute to logits procs' states
         * If batch state is modified, update sampling metadata
         """
-        if not (old_logitsprocs := self._logitsprocs):
-            raise RuntimeError("Expected input batch sampling metadata "
-                               "to be initialized.")
         batch_update = self.batch_update_builder.get_and_reset(self.num_reqs)
-        for logit_proc in old_logitsprocs.all:
+        for logit_proc in self.logitsprocs.all:
             logit_proc.update_state(batch_update)
         if batch_update:
-            self.sampling_metadata = self._make_sampling_metadata(
-                old_logitsprocs)
+            self.sampling_metadata = self._make_sampling_metadata()
 
-    def _make_sampling_metadata(
-            self, logitsprocs: LogitsProcessors) -> SamplingMetadata:
+    def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
         if not self.all_greedy:
             temperature = copy_slice(self.temperature_cpu_tensor,
@@ -660,7 +653,7 @@ class InputBatch:
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
-            logitsprocs=logitsprocs,
+            logitsprocs=self.logitsprocs,
         )
 
     @property

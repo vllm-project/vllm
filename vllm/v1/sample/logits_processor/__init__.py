@@ -2,21 +2,25 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
 import itertools
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.v1.sample.logits_processor.builtin import (LogitBiasLogitsProcessor,
                                                      MinPLogitsProcessor,
                                                      MinTokensLogitsProcessor)
 from vllm.v1.sample.logits_processor.interface import (BatchUpdate,
                                                        LogitsProcessor,
                                                        MoveDirectionality)
-from vllm.v1.sample.logits_processor.load import logger
 from vllm.v1.sample.logits_processor.state import (BatchUpdateBuilder,
                                                    LogitsProcessors)
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+
+logger = init_logger(__name__)
 
 LOGITSPROCS_GROUP = 'vllm.logits_processors'
 

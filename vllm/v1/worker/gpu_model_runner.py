@@ -191,11 +191,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
 
-        # Build logits processors. If specified by user, load custom
-        # logitsprocs constructors.
-        self.logitsprocs: LogitsProcessors = build_logitsprocs(
-            vllm_config, self.device, self.pin_memory)
-
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
         # `initialize_kv_cache` based on the kv cache config. However, as in
@@ -214,7 +209,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.cache_config.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
-            logitsprocs=self.logitsprocs,
+            logitsprocs=build_logitsprocs(self.vllm_config, self.device,
+                                          self.pin_memory),
         )
 
         self.use_cuda_graph = (
@@ -2369,7 +2365,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 vocab_size=self.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
                 is_spec_decode=bool(self.vllm_config.speculative_config),
-                logitsprocs=self.logitsprocs,
+                logitsprocs=self.input_batch.logitsprocs,
             )
 
     def _allocate_kv_cache_tensors(
