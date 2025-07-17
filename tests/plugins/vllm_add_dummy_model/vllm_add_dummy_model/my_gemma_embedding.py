@@ -15,6 +15,9 @@ from vllm.sequence import IntermediateTensors
 
 
 class MyGemma2Embedding(nn.Module):
+
+    is_pooling_model = True
+
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

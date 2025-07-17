@@ -24,6 +24,10 @@ from .utils import AutoWeightsLoader, maybe_prefix
 
 
 class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP):
+
+    is_pooling_model = True
+    pooler: SimplePooler
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -35,8 +39,6 @@ class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP):
             "up_proj",
         ],
     }
-
-    pooler: SimplePooler
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

@@ -562,6 +562,8 @@ def _is_moe_layer(name: str):
 
 class JambaForSequenceClassification(JambaForCausalLM):
 
+    is_pooling_model = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 

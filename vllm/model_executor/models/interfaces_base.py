@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import (TYPE_CHECKING, Optional, Protocol, Union, overload,
-                    runtime_checkable)
+from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
+                    Union, overload, runtime_checkable)
 
 import torch
 import torch.nn as nn
@@ -131,8 +131,24 @@ def is_text_generation_model(
 class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
     """The interface required for all pooling models in vLLM."""
 
+    is_pooling_model: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports pooling.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
     pooler: "Pooler"
     """The pooler is only called on TP rank 0."""
+
+
+# We can't use runtime_checkable with ClassVar for issubclass checks
+# so we need to treat the class as an instance and use isinstance instead
+@runtime_checkable
+class _VllmModelForPoolingType(Protocol):
+    is_pooling_model: Literal[True]
 
 
 @overload
@@ -152,6 +168,6 @@ def is_pooling_model(
         return False
 
     if isinstance(model, type):
-        return isinstance(model, VllmModelForPooling)
+        return isinstance(model, _VllmModelForPoolingType)
 
     return isinstance(model, VllmModelForPooling)

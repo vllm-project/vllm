@@ -629,6 +629,13 @@ class SupportsCrossEncoding(Protocol):
     supports_cross_encoding: ClassVar[Literal[True]] = True
 
 
+# We can't use runtime_checkable with ClassVar for issubclass checks
+# so we need to treat the class as an instance and use isinstance instead
+@runtime_checkable
+class _SupportsCrossEncodingType(Protocol):
+    supports_cross_encoding: Literal[True]
+
+
 @overload
 def supports_cross_encoding(
         model: type[object]) -> TypeIs[type[SupportsCrossEncoding]]:
@@ -643,9 +650,8 @@ def supports_cross_encoding(model: object) -> TypeIs[SupportsCrossEncoding]:
 def _supports_cross_encoding(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
-
     if isinstance(model, type):
-        return isinstance(model, SupportsCrossEncoding)
+        return isinstance(model, _SupportsCrossEncodingType)
 
     return isinstance(model, SupportsCrossEncoding)
 
@@ -658,8 +664,9 @@ def supports_cross_encoding(
 
 def has_step_pooler(model: Union[type[object], object]) -> bool:
     """Check if the model uses step pooler."""
-    return is_pooling_model(model) and any(
-        type(module).__name__ == "StepPooler" for module in model.modules())
+    from vllm.model_executor.layers.pooler import StepPooler
+
+    return is_pooling_model(model) and isinstance(model.pooler, StepPooler)
 
 
 class SupportsQuant:

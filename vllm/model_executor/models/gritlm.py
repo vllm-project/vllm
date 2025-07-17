@@ -194,6 +194,8 @@ class GritLM(LlamaForCausalLM, SupportsV0Only):
     - "<|user|>\nPROMPT\n<|assistant|>\n"
     """
 
+    is_pooling_model = True
+
     def __init__(
         self,
         vllm_config: VllmConfig,

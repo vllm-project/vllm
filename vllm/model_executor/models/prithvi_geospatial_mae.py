@@ -116,7 +116,9 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
     dummy_inputs=PrithviGeoSpatialMAEInputBuilder)
 class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal,
                            SupportsV0Only):
-    """ Prithvi Masked Autoencoder"""
+    """Prithvi Masked Autoencoder"""
+
+    is_pooling_model = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:

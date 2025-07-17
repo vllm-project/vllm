@@ -71,6 +71,8 @@ class JinaVLForSequenceClassification(Qwen2VLForConditionalGeneration,
                                       SupportsCrossEncoding,
                                       SupportsMultiModal,
                                       SupportsScoreTemplate):
+
+    is_pooling_model = True
     weight_mapper = WeightsMapper(
         orig_to_new_prefix={
             "score.0.": "score.dense.",

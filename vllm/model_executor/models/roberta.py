@@ -164,6 +164,7 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
        _pooler: An instance of Pooler used for pooling operations.
    """
 
+    is_pooling_model = True
     jina_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             'emb_ln': "embeddings.LayerNorm",

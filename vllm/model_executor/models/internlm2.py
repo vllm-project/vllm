@@ -403,6 +403,8 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
 
 class InternLM2ForRewardModel(InternLM2ForCausalLM):
 
+    is_pooling_model = True
+
     def __init__(
         self,
         *,

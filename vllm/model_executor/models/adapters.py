@@ -48,6 +48,8 @@ def _create_pooling_model_cls(
 
     class ModelForPooling(orig_cls, VllmModelForPooling):
 
+        is_pooling_model = True
+
         def __init__(
             self,
             *,
