@@ -71,10 +71,14 @@ def register_model_loader(load_format: str):
         >>>
         >>> @register_model_loader("my_loader")
         ... class MyModelLoader(BaseModelLoader):
-        ...     pass
+        ...     def download_model(self):
+        ...         pass
+        ...
+        ...     def load_weights(self):
+        ...         pass
         >>>
         >>> load_config = LoadConfig(load_format="my_loader")
-        >>> get_model_loader("load_config")
+        >>> type(get_model_loader(load_config))
         <class 'MyModelLoader'>
     """  # noqa: E501
 
