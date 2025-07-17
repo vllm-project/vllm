@@ -388,48 +388,33 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 # -rw-rw-r-- 1 mgoin mgoin 205M Jun  9 18:03 flashinfer_python-0.2.6.post1-cp39-abi3-linux_x86_64.whl
 # $ # upload the wheel to a public location, e.g. https://wheels.vllm.ai/flashinfer/v0.2.6.post1/flashinfer_python-0.2.6.post1-cp39-abi3-linux_x86_64.whl
 
-# Allow specifying a version, Git revision or local .whl file
-ARG FLASHINFER_CUDA128_INDEX_URL="https://download.pytorch.org/whl/cu128/flashinfer"
-ARG FLASHINFER_CUDA128_WHEEL="flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl"
+# Install FlashInfer from source
 ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
 ARG FLASHINFER_GIT_REF="v0.2.8rc1"
-# Flag to control whether to use pre-built FlashInfer wheels (set to false to force build from source)
-# TODO: Currently disabled because the pre-built wheels are not available for FLASHINFER_GIT_REF
-ARG USE_FLASHINFER_PREBUILT_WHEEL=false
 RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
   . /etc/environment
-  if [ "$TARGETPLATFORM" != "linux/arm64" ]; then
-      # FlashInfer already has a wheel for PyTorch 2.7.0 and CUDA 12.8. This is enough for CI use
-      if [[ "$CUDA_VERSION" == 12.8* ]] && [[ "$USE_FLASHINFER_PREBUILT_WHEEL" == "true" ]]; then
-          uv pip install --system ${FLASHINFER_CUDA128_INDEX_URL}/${FLASHINFER_CUDA128_WHEEL}
-      else
-          # Exclude CUDA arches for older versions (11.x and 12.0-12.7)
-          # TODO: Update this to allow setting TORCH_CUDA_ARCH_LIST as a build arg.
-          if [[ "${CUDA_VERSION}" == 11.* ]]; then
-              FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
-          elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then
-              FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
-          else
-              # CUDA 12.8+ supports 10.0a and 12.0
-              FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"
-          fi
-          echo "🏗️  Building FlashInfer for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
-
-          git clone --depth 1 --recursive --shallow-submodules \
-            --branch ${FLASHINFER_GIT_REF} \
-            ${FLASHINFER_GIT_REPO} flashinfer
-
-          # Needed to build AOT kernels
-          pushd flashinfer
-            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-              python3 -m flashinfer.aot
-            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-              uv pip install --system --no-build-isolation .
-          popd
-
-          rm -rf flashinfer
-      fi \
-  fi
+    git clone --depth 1 --recursive --shallow-submodules \
+        --branch ${FLASHINFER_GIT_REF} \
+        ${FLASHINFER_GIT_REPO} flashinfer
+    # Exclude CUDA arches for older versions (11.x and 12.0-12.7)
+    # TODO: Update this to allow setting TORCH_CUDA_ARCH_LIST as a build arg.
+    if [[ "${CUDA_VERSION}" == 11.* ]]; then
+        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
+    elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then
+        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
+    else
+        # CUDA 12.8+ supports 10.0a and 12.0
+        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"
+    fi
+    echo "🏗️  Building FlashInfer for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
+    # Needed to build AOT kernels
+    pushd flashinfer
+        TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
+            python3 -m flashinfer.aot
+        TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
+            uv pip install --system --no-build-isolation .
+    popd
+    rm -rf flashinfer
 BASH
 COPY examples examples
 COPY benchmarks benchmarks
@@ -521,10 +506,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         uv pip install --system -r requirements/kv_connectors.txt; \
     fi; \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        uv pip install --system accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.42.0' 'timm==0.9.10' boto3 runai-model-streamer runai-model-streamer[s3]; \
+        BITSANDBYTES_VERSION="0.42.0"; \
     else \
-        uv pip install --system accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.46.1' 'timm==0.9.10' boto3 runai-model-streamer runai-model-streamer[s3]; \
-    fi
+        BITSANDBYTES_VERSION="0.46.1"; \
+    fi; \
+    uv pip install --system accelerate hf_transfer 'modelscope!=1.15.0' "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm==0.9.10' boto3 runai-model-streamer runai-model-streamer[s3]
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 
