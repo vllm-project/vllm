@@ -47,10 +47,12 @@ from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
 if TYPE_CHECKING:
     from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization import QuantizationMethods
+    from vllm.model_executor.model_loader import LoadFormats
     from vllm.usage.usage_lib import UsageContext
 else:
     ExecutorBase = Any
     QuantizationMethods = Any
+    LoadFormats = Any
     UsageContext = Any
 
 logger = init_logger(__name__)
@@ -276,7 +278,7 @@ class EngineArgs:
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     download_dir: Optional[str] = LoadConfig.download_dir
-    load_format: str = LoadConfig.load_format
+    load_format: Union[str, LoadFormats] = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype

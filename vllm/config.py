@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizationConfig)
-    from vllm.model_executor.model_loader import BaseModelLoader
+    from vllm.model_executor.model_loader import LoadFormats
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
     ConfigType = type[DataclassInstance]
@@ -78,6 +78,7 @@ else:
     QuantizationConfig = Any
     QuantizationMethods = Any
     BaseModelLoader = Any
+    LoadFormats = Any
     TensorizerConfig = Any
     ConfigType = type
     HfOverrides = Union[dict[str, Any], Callable[[type], type]]
@@ -1735,7 +1736,7 @@ class CacheConfig:
 class LoadConfig:
     """Configuration for loading the model weights."""
 
-    load_format: str = "auto"
+    load_format: Union[str, LoadFormats] = "auto"
     """The format of the model weights to load:\n
     - "auto" will try to load the weights in the safetensors format and fall
     back to the pytorch bin format if safetensors format is not available.\n
@@ -1806,12 +1807,10 @@ class LoadConfig:
 
     def __post_init__(self):
         self.load_format = self.load_format.lower()
-        from vllm.model_executor.model_loader.registry import (
-            ModelLoaderRegistry)
+        from vllm.model_executor.model_loader import get_supported_load_formats
 
-        assert self.load_format in \
-            ModelLoaderRegistry.get_supported_load_formats(), \
-            f"Load format `{self.load_format}` is not supported"
+        if self.load_format not in get_supported_load_formats():
+            raise ValueError(f"{self.load_format} is not supported")
 
         if self.ignore_patterns is not None and len(self.ignore_patterns) > 0:
             logger.info(
