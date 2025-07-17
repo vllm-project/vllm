@@ -144,13 +144,6 @@ class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
     """The pooler is only called on TP rank 0."""
 
 
-# We can't use runtime_checkable with ClassVar for issubclass checks
-# so we need to treat the class as an instance and use isinstance instead
-@runtime_checkable
-class _VllmModelForPoolingType(Protocol):
-    is_pooling_model: Literal[True]
-
-
 @overload
 def is_pooling_model(model: type[object]) -> TypeIs[type[VllmModelForPooling]]:
     ...
@@ -167,7 +160,4 @@ def is_pooling_model(
     if not is_vllm_model(model):
         return False
 
-    if isinstance(model, type):
-        return isinstance(model, _VllmModelForPoolingType)
-
-    return isinstance(model, VllmModelForPooling)
+    return getattr(model, "is_pooling_model", False)
