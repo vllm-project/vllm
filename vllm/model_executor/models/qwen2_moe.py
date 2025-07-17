@@ -53,7 +53,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -448,8 +448,7 @@ class Qwen2MoeModel(nn.Module):
                     if weight_name not in name:
                         continue
                     name = name.replace(weight_name, param_name)
-                    if "layers.13.mlp.experts.w2_weight" in name:
-                        pass
+
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
                         continue
@@ -494,7 +493,7 @@ class Qwen2MoeModel(nn.Module):
         return loaded_params
 
 
-class Qwen2MoeForCausalLM(nn.Module, SupportsPP):
+class Qwen2MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
 
     fall_back_to_pt_during_load = False
     packed_modules_mapping = {
