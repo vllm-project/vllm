@@ -378,10 +378,14 @@ class TestNixlHandshake:
         raise TimeoutError("Took too long to complete async handshake.")
 
 
+# NOTE: resource cleanup in mp backend is a bit finicky, so the order in which
+# we put here is important. First run ray, it will clean up the resources, then
+# run mp tests.
+@pytest.mark.parametrize("distributed_executor_backend", ["ray", "mp"])
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FakeNixlWrapper)
-def test_abort_timeout_on_prefiller(monkeypatch):
+def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
     """
     Test lifecycle of an aborted Remote Prefill request hitting the timeout.
     -----> P 
@@ -404,6 +408,7 @@ def test_abort_timeout_on_prefiller(monkeypatch):
         enforce_eager=True,
         gpu_memory_utilization=0.5,
         kv_transfer_config=kv_transfer_config,
+        distributed_executor_backend=distributed_executor_backend,
     )
     remote_prefill_opts = {
         "do_remote_decode": True,
