@@ -21,86 +21,111 @@ jobs:
               rocm: {
                 keywords: [
                   // Core ROCm/AMD terms
-                  'rocm', 'roc', 'amd', 'hip',
-                  
+                  "rocm",
+                  "roc",
+                  "amd",
+                  "hip",
+
                   // GPU Models - Instinct Series
-                  'mi300', 'mi300x', 'mi300a', 'mi250x', 'mi250', 
-                  'mi210x', 'mi210', 'mi325x', 'mi350x', 'mi355x',
-                  
+                  "mi300",
+                  "mi300x",
+                  "mi300a",
+                  "mi250x",
+                  "mi250",
+                  "mi210x",
+                  "mi210",
+                  "mi325x",
+                  "mi350x",
+                  "mi355x",
+                  "mi308",
+
                   // GPU Models - Radeon Series
-                  'amd radeon rx 9070', 'amd radeon rx 9070 xt', 'amd radeon rx 9070 gre',
-                  'amd radeon ai pro r9700', 'amd radeon rx 9060 xt',
-                  'amd radeon rx 7900 xtx', 'amd radeon rx 7900 xt', 'amd radeon rx 7900 gre',
-                  'amd radeon rx 7800 xt',
-                  
+                  "amd radeon rx 9070",
+                  "amd radeon rx 9070 xt",
+                  "amd radeon rx 9070 gre",
+                  "amd radeon ai pro r9700",
+                  "amd radeon rx 9060 xt",
+                  "amd radeon rx 7900 xtx",
+                  "amd radeon rx 7900 xt",
+                  "amd radeon rx 7900 gre",
+                  "amd radeon rx 7800 xt",
+
                   // GPU Models - Pro Series
-                  'amd radeon pro w7900', 'amd radeon pro w7900 dual slot',
-                  'amd radeon pro w7800', 'amd radeon pro w7800 48gb',
-                  'amd radeon pro w7700', 'amd radeon pro v710', 'amd radeon pro v620',
-                  'amd radeon pro w6800',
-                  
+                  "amd radeon pro w7900",
+                  "amd radeon pro w7900 dual slot",
+                  "amd radeon pro w7800",
+                  "amd radeon pro w7800 48gb",
+                  "amd radeon pro w7700",
+                  "amd radeon pro v710",
+                  "amd radeon pro v620",
+                  "amd radeon pro w6800",
+
                   // GPU Models - Full Instinct Names
-                  'amd instinct mi325x', 'amd instinct mi300x', 'amd instinct mi300a',
-                  'amd instinct mi250x', 'amd instinct mi250', 'amd instinct mi210',
-                  'amd instinct mi350x', 'amd instinct mi355x',
-                  
+                  "amd instinct mi325x",
+                  "amd instinct mi300x",
+                  "amd instinct mi300a",
+                  "amd instinct mi250x",
+                  "amd instinct mi250",
+                  "amd instinct mi210",
+                  "amd instinct mi350x",
+                  "amd instinct mi355x",
+
                   // Architecture codes
-                  'cdna3', 'cdna2', 'cdna4', 'cdna',
-                  'gfx942', 'gfx90a', 'gfx1100', 'gfx1101', 'gfx1201', 'gfx1200',
-                  'gfx1030', 'gfx950', 'gfx908',
-                  'rdna4', 'rdna3', 'rdna2',
-                  
+                  "cdna3",
+                  "cdna2",
+                  "cdna4",
+                  "cdna",
+                  "gfx942",
+                  "gfx90a",
+                  "gfx1100",
+                  "gfx1101",
+                  "gfx1201",
+                  "gfx1200",
+                  "gfx1030",
+                  "gfx950",
+                  "gfx908",
+                  "rdna4",
+                  "rdna3",
+                  "rdna2",
+
                   // Libraries and tools
-                  'composable kernel', 'aiter', 'rccl', 'migraphx', 'hipgraph'
+                  "composable kernel",
+                  // "aiter", // problem at 13192 aiter is used in langchain
+                  "rccl",
+                  "migraphx",
+                  "hipgraph",
                 ],
                 exclusions: [
-                  // More flexible patterns to match the original exclusion logic
-                  'rocm used to build pytorch',
-                  'rocm used to build pytorch: n/a',
-                  'rocm used to build pytorch: none', 
-                  'rocm used to build pytorch: 0.0.0',
-                  'rocm used to build pytorch: not available'
-                ]
-              }
-              
-              // Add more label configurations here:
-              // cuda: {
-              //   keywords: ['cuda', 'nvidia', 'gpu', 'tensorrt'],
-              //   exclusions: []
-              // },
-              // performance: {
-              //   keywords: ['slow', 'performance', 'speed', 'optimization'],
-              //   exclusions: []
-              // }
+                  "rocm used to build pytorch: none",
+                  "rocm used to build pytorch: 0\\.0\\.0",
+                  "rocm used to build pytorch: not available",
+                  "ROCM Version: Could not collect",
+                  "ROCM used to build PyTorch: N\\/A",
+                  "ROCM used to build PyTorch : N\\/A",
+                ],
+              },
             };
-
-            // Helper function to create regex from keywords and exclusions
-            function createRegex(keywords, exclusions = []) {
-              // Escape both keywords and exclusions for literal matching
-              const escapedKeywords = keywords
-                .map(keyword => keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-              const escapedExclusions = exclusions
-                .map(exclusion => exclusion.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-              
-              const keywordPattern = escapedKeywords.join('|');
-              
-              if (escapedExclusions.length === 0) {
-                return new RegExp(`\\b(${keywordPattern})\\b`, 'i');
-              }
-
-              const exclusionPattern = escapedExclusions.join('|');
-              return new RegExp(`\\b(?!.*(?:${exclusionPattern}))(${keywordPattern})\\b`, 'i');
-            }
 
             // Helper function to check if label should be added
             async function processLabel(labelName, config) {
-              const regex = createRegex(config.keywords, config.exclusions);
-              const body = context.payload.issue.body || "";
+              const body = context.payload.issue.body || "" ;
               const title = context.payload.issue.title || "";
+              const fullText = title + " " + body
               
-              const hit = regex.test(title) || regex.test(body);
+              const keywordPattern = labelConfig[labelName].keywords.join("|");
+              const excludePattern = labelConfig[labelName].exclusions.join("|");
+
+              const kwRegexLine = `\\b(${keywordPattern})\\b`;
+              const excludeRegexLine = `\\b(${excludePattern})\\b`;
               
-              if (hit) {
+              // check the issue title and body
+              const kwRegex = new RegExp(kwRegexLine, "gi");
+              const excludeRegex = new RegExp(excludeRegexLine, "gi");
+
+              const hit = kwRegex.test(fullText);
+              const excludeHit = excludeRegex.test(fullText);
+              
+              if (hit && !excludeHit) {
                 const existingLabels = context.payload.issue.labels.map(l => l.name);
                 
                 if (!existingLabels.includes(labelName)) {
