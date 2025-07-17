@@ -290,6 +290,15 @@ class ResponsesRequest(OpenAIBaseModel):
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."),
     )
+    cache_salt: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit). Not supported by vLLM engine V0."))
     # --8<-- [end:responses-extra-params]
 
     _DEFAULT_SAMPLING_PARAMS = {
@@ -349,6 +358,19 @@ class ResponsesRequest(OpenAIBaseModel):
     def validate_prompt(cls, data):
         if data.get("prompt") is not None:
             raise ValueError("prompt template is not supported")
+        return data
+
+    @model_validator(mode="before")
+    def check_cache_salt_support(cls, data):
+        if data.get("cache_salt") is not None:
+            if not envs.VLLM_USE_V1:
+                raise ValueError(
+                    "Parameter 'cache_salt' is not supported with "
+                    "this instance of vLLM, which uses engine V0.")
+            if not isinstance(data["cache_salt"],
+                              str) or not data["cache_salt"]:
+                raise ValueError("Parameter 'cache_salt' must be a "
+                                 "non-empty string if provided.")
         return data
 
 
@@ -1004,6 +1026,16 @@ class CompletionRequest(OpenAIBaseModel):
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
 
+    cache_salt: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit). Not supported by vLLM engine V0."))
+
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.")
@@ -1180,6 +1212,20 @@ class CompletionRequest(OpenAIBaseModel):
                 "At least one of `prompt` or `prompt_embeds` must be set.")
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data):
+        if data.get("cache_salt") is not None:
+            if not envs.VLLM_USE_V1:
+                raise ValueError(
+                    "Parameter 'cache_salt' is not supported with "
+                    "this instance of vLLM, which uses engine V0.")
+            if not isinstance(data["cache_salt"],
+                              str) or not data["cache_salt"]:
+                raise ValueError("Parameter 'cache_salt' must be a "
+                                 "non-empty string if provided.")
+        return data
+
 
 class EmbeddingCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
@@ -1190,10 +1236,6 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     dimensions: Optional[int] = None
     user: Optional[str] = None
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
-
-    # --8<-- [start:embedding-pooling-params]
-    additional_data: Optional[Any] = None
-    # --8<-- [end:embedding-pooling-params]
 
     # --8<-- [start:embedding-extra-params]
     add_special_tokens: bool = Field(
@@ -1213,8 +1255,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     # --8<-- [end:embedding-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(dimensions=self.dimensions,
-                             additional_data=self.additional_data)
+        return PoolingParams(dimensions=self.dimensions)
 
 
 class EmbeddingChatRequest(OpenAIBaseModel):
@@ -1225,10 +1266,6 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     dimensions: Optional[int] = None
     user: Optional[str] = None
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
-
-    # --8<-- [start:chat-embedding-pooling-params]
-    additional_data: Optional[Any] = None
-    # --8<-- [end:chat-embedding-pooling-params]
 
     # --8<-- [start:chat-embedding-extra-params]
     add_special_tokens: bool = Field(
@@ -1277,8 +1314,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         return data
 
     def to_pooling_params(self):
-        return PoolingParams(dimensions=self.dimensions,
-                             additional_data=self.additional_data)
+        return PoolingParams(dimensions=self.dimensions)
 
 
 EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
@@ -1293,10 +1329,6 @@ class ScoreRequest(OpenAIBaseModel):
     text_1: Union[list[str], str, ScoreMultiModalParam]
     text_2: Union[list[str], str, ScoreMultiModalParam]
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
-
-    # --8<-- [start:score-pooling-params]
-    additional_data: Optional[Any] = None
-    # --8<-- [end:score-pooling-params]
 
     # --8<-- [start:score-extra-params]
 
@@ -1316,8 +1348,7 @@ class ScoreRequest(OpenAIBaseModel):
     # --8<-- [end:score-extra-params]
 
     def to_pooling_params(self, *, use_cross_encoder: bool = False):
-        return PoolingParams(use_cross_encoder=use_cross_encoder,
-                             additional_data=self.additional_data)
+        return PoolingParams(use_cross_encoder=use_cross_encoder)
 
 
 class RerankRequest(OpenAIBaseModel):
@@ -1326,10 +1357,6 @@ class RerankRequest(OpenAIBaseModel):
     documents: Union[list[str], ScoreMultiModalParam]
     top_n: int = Field(default_factory=lambda: 0)
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
-
-    # --8<-- [start:rerank-pooling-params]
-    additional_data: Optional[Any] = None
-    # --8<-- [end:rerank-pooling-params]
 
     # --8<-- [start:rerank-extra-params]
 
@@ -1349,8 +1376,7 @@ class RerankRequest(OpenAIBaseModel):
     # --8<-- [end:rerank-extra-params]
 
     def to_pooling_params(self, *, use_cross_encoder: bool = False):
-        return PoolingParams(use_cross_encoder=use_cross_encoder,
-                             additional_data=self.additional_data)
+        return PoolingParams(use_cross_encoder=use_cross_encoder)
 
 
 class RerankDocument(BaseModel):
@@ -1488,10 +1514,6 @@ class ClassificationRequest(OpenAIBaseModel):
     truncate_prompt_tokens: Optional[int] = None
     user: Optional[str] = None
 
-    # --8<-- [start:classification-pooling-params]
-    additional_data: Optional[Any] = None
-    # --8<-- [end:classification-pooling-params]
-
     # --8<-- [start:classification-extra-params]
     priority: int = Field(
         default=0,
@@ -1504,7 +1526,7 @@ class ClassificationRequest(OpenAIBaseModel):
     # --8<-- [end:classification-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(additional_data=self.additional_data)
+        return PoolingParams()
 
 
 class ClassificationData(OpenAIBaseModel):
@@ -1907,6 +1929,16 @@ class DetokenizeResponse(OpenAIBaseModel):
     prompt: str
 
 
+class TokenizerInfoResponse(OpenAIBaseModel):
+    """
+    Response containing tokenizer configuration 
+    equivalent to tokenizer_config.json
+    """
+
+    model_config = ConfigDict(extra="allow")
+    tokenizer_class: str
+
+
 class LoadLoRAAdapterRequest(BaseModel):
     lora_name: str
     lora_path: str
@@ -1971,7 +2003,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     """
 
     stream: Optional[bool] = False
-    """When set, it will enable output to be streamed in a similar fashion 
+    """When set, it will enable output to be streamed in a similar fashion
     as the Chat Completion endpoint.
     """
     # --8<-- [start:transcription-extra-params]
@@ -2233,9 +2265,9 @@ class TranslationRequest(OpenAIBaseModel):
     """
 
     stream: Optional[bool] = False
-    """Custom field not present in the original OpenAI definition. When set, 
+    """Custom field not present in the original OpenAI definition. When set,
     it will enable output to be streamed in a similar fashion as the Chat
-    Completion endpoint. 
+    Completion endpoint.
     """
     # Flattened stream option to simplify form data.
     stream_include_usage: Optional[bool] = False

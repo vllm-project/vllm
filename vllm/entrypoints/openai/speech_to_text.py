@@ -24,7 +24,6 @@ from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader import get_model_cls
 from vllm.model_executor.models import SupportsTranscription
 from vllm.outputs import RequestOutput
 from vllm.utils import PlaceholderModule
@@ -78,6 +77,7 @@ class OpenAISpeechToText(OpenAIServing):
 
     @cached_property
     def model_cls(self) -> type[SupportsTranscription]:
+        from vllm.model_executor.model_loader import get_model_cls
         model_cls = get_model_cls(self.model_config)
         return cast(type[SupportsTranscription], model_cls)
 
@@ -112,6 +112,7 @@ class OpenAISpeechToText(OpenAIServing):
             prompt = self.model_cls.get_generation_prompt(
                 audio=chunk,
                 stt_config=self.asr_config,
+                model_config=self.model_config,
                 language=lang,
                 task_type=self.task_type,
                 request_prompt=request.prompt)

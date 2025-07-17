@@ -4,6 +4,7 @@ mkdocs-material
 mkdocstrings-python
 mkdocs-gen-files
 mkdocs-awesome-nav
+mkdocs-glightbox
 python-markdown-math
 regex
 ruff
@@ -16,6 +17,7 @@ cloudpickle
 fastapi
 msgspec
 openai
+partial-json-parser
 pillow
 psutil
 pybase64
