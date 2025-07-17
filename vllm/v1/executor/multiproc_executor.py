@@ -273,10 +273,8 @@ class MultiprocExecutor(Executor):
         output = outputs[self.output_rank]
 
         # set the aggregated finished_sending / finished_recving
-        if finished_sending:
-            output.finished_sending = finished_sending
-        if finished_recving:
-            output.finished_recving = finished_recving
+        output.finished_sending = finished_sending if finished_sending else None
+        output.finished_recving = finished_recving if finished_recving else None
 
         return output
 
