@@ -4,18 +4,17 @@
 from enum import Enum, auto
 
 MODEL_NAME = "facebook/opt-125m"
-DUMMY_LOGITPROC_ENTRYPOINT = "dummy_logitproc"
-DUMMY_LOGITPROC_FQCN = ("vllm.test_utils:DummyLogitsProcessor")
 DUMMY_LOGITPROC_ARG = "target_token"
 TEMP_GREEDY = 0.0
 MAX_TOKENS = 20
 
 
-class LogitprocSource(Enum):
+class CustomLogitprocSource(Enum):
     """How to source a logitproc for testing purposes"""
-    LOGITPROC_SOURCE_ENTRYPOINT = auto()
-    LOGITPROC_SOURCE_FQCN = auto()
-    LOGITPROC_SOURCE_CLASS = auto()
+    LOGITPROC_SOURCE_NONE = auto()  # No custom logitproc
+    LOGITPROC_SOURCE_ENTRYPOINT = auto()  # Via entrypoint
+    LOGITPROC_SOURCE_FQCN = auto()  # Via fully-qualified class name (FQCN)
+    LOGITPROC_SOURCE_CLASS = auto()  # Via provided class object
 
 
 # Sample prompts.

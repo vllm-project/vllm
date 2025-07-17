@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
+import vllm.envs as envs
 from vllm.v1.sample.logits_processor import LogitsProcessor
 from vllm.v1.sample.logits_processor.impls import (LogitBiasLogitsProcessor,
                                                    MinPLogitsProcessor,
@@ -92,8 +93,12 @@ def _load_logitsprocs_by_fqcns(
 
 def _load_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
     """Load all installed logit processor plugins"""
+
     import sys
-    if sys.version_info < (3, 10):
+
+    if envs.VLLM_MOCK_LP_ENTRYPOINT:
+        from vllm.test_utils import entry_points
+    elif sys.version_info < (3, 10):
         from importlib_metadata import entry_points
     else:
         from importlib.metadata import entry_points

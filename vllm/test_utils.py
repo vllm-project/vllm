@@ -138,6 +138,10 @@ MODELS_ON_S3 = [
 
 MODEL_WEIGHTS_S3_BUCKET = "s3://vllm-ci-model-weights"
 
+DUMMY_LOGITPROC_ENTRYPOINT = "dummy_logitproc"
+
+DUMMY_LOGITPROC_FQCN = "vllm.test_utils:DummyLogitsProcessor"
+
 
 class DummyLogitsProcessor(LogitsProcessor):
     """Fake logit processor to support unit testing and examples"""
@@ -184,3 +188,17 @@ class DummyLogitsProcessor(LogitsProcessor):
                 logits[bdx, mask] = float('-inf')
 
         return logits
+
+
+class EntryPoint:
+    """Fake entrypoint class"""
+
+    def __init__(self):
+        self.name = DUMMY_LOGITPROC_ENTRYPOINT
+        self.value = DUMMY_LOGITPROC_FQCN
+
+    def load(self):
+        return DummyLogitsProcessor
+
+
+entry_points = lambda group: [EntryPoint()]

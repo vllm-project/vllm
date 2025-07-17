@@ -9,9 +9,9 @@ import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
 from tests.v1.sample.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
-                                                     DUMMY_LOGITPROC_FQCN,
                                                      MAX_TOKENS, MODEL_NAME,
                                                      TEMP_GREEDY, prompts)
+from vllm.test_utils import DUMMY_LOGITPROC_FQCN
 
 
 @pytest.fixture(scope="module")
