@@ -192,68 +192,74 @@ class FusedMoEParallelConfig:
     def make(tp_size_: int, dp_size_: int,
              vllm_parallel_config: ParallelConfig) -> "FusedMoEParallelConfig":
         """
-        Determine MoE parallel configuration. Based on the input tp_size_,
-        dp_size_, ep_size_ and vllm's parallel config, determine what
+        Determine MoE parallel configuration. Based on the input `tp_size_`,
+        `dp_size_` and vllm's parallel config, determine what
         level's of parallelism to use in the fused moe layer.
 
         Args:
-            tp_size_ (int): tp_size passed into the FusedMoE constructor.
-            dp_size_ (int): dp_size passed into the FusedMoE constructor.
-            ep_size_ (int): ep_size passed into the FusedMoE constructor.
-            vllm_parallel_config (ParallelConfig): vllm's parallel config
-            object.
+            tp_size_ (int): `tp_size` passed into the FusedMoE constructor.
+            dp_size_ (int): `dp_size` passed into the FusedMoE constructor.
+            vllm_parallel_config (ParallelConfig): vLLM's parallel config
+                object which contains the `enable_expert_parallel` flag.
 
         Examples:
-        When there is no parallelism requested, i.e. tp_size_ = dp_size_ = 1,
-        we simply return the sizes unaltered and the ranks set to 0.
+            When there is no parallelism requested,
+            i.e. `tp_size_` = `dp_size_` = 1, we simply return the sizes
+            unaltered and the ranks set to 0.
 
-        Expert Parallelism is considered only when either dp_size_ or tp_size_
-        is non trivial.
+            Expert Parallelism is considered only when either `dp_size_` or
+            `tp_size_` is non trivial.
 
-        When TP = 2, DP = 1 and EP = False, the configuration on different
-        devices,
+            When TP = 2, DP = 1 and EP = False, the configuration on different
+            devices:
+
             - device 0 : TP = {2, 0} DP = {1, 0} EP = {1, 0} //
-                         legend : {size, rank}
+                legend : {size, rank}
             - device 1 : TP = {2, 1} DP = {1, 0} EP = {1, 0}
             - Comment : Tensors are sharded across 2 devices.
 
-        When TP = 1, DP = 2 and EP = False, the configuration on different
-        devices,
+            When TP = 1, DP = 2 and EP = False, the configuration on different
+                devices:
+
             - device 0 : TP = {2, 0} DP = {2, 0} EP = {1, 0}
             - device 1 : TP = {2, 1} DP = {2, 1} EP = {1, 0}
             - Comment: There are 2 engine instances and the tensors are sharded
-              across 2 decvices.
+                across 2 decvices.
 
-        When TP = 2, DP = 2 and EP = False, the configuration on different
-        devices,
+            When TP = 2, DP = 2 and EP = False, the configuration on different
+                devices:
+
             - device 0: TP = {4, 0} DP = {2, 0} EP = {1, 0}
             - device 1: TP = {4, 1} DP = {2, 0} EP = {1, 0}
             - device 2: TP = {4, 2} DP = {2, 1} EP = {1, 0}
             - device 3: TP = {4, 3} DP = {2, 1} EP = {1, 0}
             - Comment: There are 2 engine instances and the tensors are sharded
-              across 4 devices.
+                across 4 devices.
 
-        When, TP = 2, DP = 1 and EP = True, the configuration on different
-        devices,
+            When, TP = 2, DP = 1 and EP = True, the configuration on different
+                devices:
+
             - device 0: TP = {1, 0} DP = {1, 0} EP = {2, 0}
             - device 1: TP = {1, 0} DP = {1, 0} EP = {2, 1}
             - Comment: The experts are split between the 2 devices.
 
-        When, TP = 1, DP = 2 and EP = True, the configuration on different
-        devices,
+            When, TP = 1, DP = 2 and EP = True, the configuration on different
+                devices:
+
             - device 0: TP = {1, 0} DP = {2, 0} EP = {2, 0}
             - device 1: TP = {1, 0} DP = {2, 1} EP = {2, 1}
             - Comment: There are 2 engine instances and the experts are split
-              between the 2 devices.
+                between the 2 devices.
 
-        When TP = 2, DP = 2 and EP = True, the configuration on different
-        devices,
+            When TP = 2, DP = 2 and EP = True, the configuration on different
+                devices:
+
             - device 0: TP = {1, 0} DP = {2, 0} EP = {4, 0}
             - device 1: TP = {1, 0} DP = {2, 0} EP = {4, 1}
             - device 2: TP = {1, 0} DP = {2, 1} EP = {4, 2}
             - device 3: TP = {1, 0} DP = {2, 1} EP = {4, 3}
             - Comment: There are 2 engine instances and the experts are split
-              between the 4 devices.
+                between the 4 devices.
         """
 
         def flatten_tp_across_dp(dp_rank: int):
