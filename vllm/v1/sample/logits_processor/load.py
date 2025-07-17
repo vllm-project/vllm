@@ -9,9 +9,9 @@ import torch
 
 import vllm.envs as envs
 from vllm.v1.sample.logits_processor import LogitsProcessor
-from vllm.v1.sample.logits_processor.impls import (LogitBiasLogitsProcessor,
-                                                   MinPLogitsProcessor,
-                                                   MinTokensLogitsProcessor)
+from vllm.v1.sample.logits_processor.builtin import (LogitBiasLogitsProcessor,
+                                                     MinPLogitsProcessor,
+                                                     MinTokensLogitsProcessor)
 from vllm.v1.sample.logits_processor.state import LogitsProcessors
 
 if TYPE_CHECKING:
