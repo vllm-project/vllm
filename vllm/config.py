@@ -2662,7 +2662,7 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update({
                 "n_predict": n_predict,
-                "architectures": ["Glm4MoeMTPForCausalLM"]
+                "architectures": ["Glm4MoeMTPModel"]
             })
         if hf_config.architectures[0] == "MiMoForCausalLM":
             hf_config.model_type = "mimo_mtp"
