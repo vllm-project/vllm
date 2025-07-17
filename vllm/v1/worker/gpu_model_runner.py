@@ -2618,7 +2618,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # TODO: Support other attention modules, e.g., cross-attention
             if attn_module.attn_type == AttentionType.DECODER:
                 use_local_attention = (self.attention_chunk_size is not None
-                                       and attn_module.use_irope)
+                                       and getattr(attn_module.backend,
+                                                   "use_irope", False))
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
