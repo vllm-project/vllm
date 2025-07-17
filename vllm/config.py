@@ -2770,8 +2770,14 @@ class SpeculativeConfig:
                 # Automatically detect the method
                 if self.method in ('eagle', 'eagle3'):
                     pass
+                elif hasattr(self.draft_model_config.hf_config, 
+                           "speculators_model_type") and \
+                        self.draft_model_config.hf_config.speculators_model_type in ("eagle", "eagle3"):
+                    self.method = self.draft_model_config.hf_config.speculators_model_type
                 elif "eagle-" in self.draft_model_config.model.lower() or \
                         "eagle3-" in self.draft_model_config.model.lower():
+                    self.method = "eagle"
+                elif self.draft_model_config.hf_config.model_type == "eagle":
                     self.method = "eagle"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
@@ -2989,14 +2995,33 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
-        if self.method == "eagle3" and self.target_model_config and \
-            "llama" not in self.target_model_config.hf_text_config.model_type:
+        if (
+            self.method == "eagle3"
+            and self.target_model_config
+            and self.draft_model_config
+            and hasattr(self.draft_model_config.hf_text_config, "speculators_version")
+        ):
+            # Speculators model detected
+            if ("llama" not in self.target_model_config.hf_text_config.model_type
+                and "qwen" not in self.target_model_config.hf_text_config.model_type):
+                raise ValueError(
+                    "Eagle3 is only supported for Llama and Qwen models "
+                    "in speculators format. "
+                    f"Got {self.target_model_config.hf_text_config.model_type=}"
+                )
+            return self
+
+        if (
+            self.method == "eagle3"
+            and self.target_model_config
+            and "llama" not in self.target_model_config.hf_text_config.model_type
+        ):
             raise ValueError(
                 "Eagle3 is only supported for Llama models. "
-                f"Got {self.target_model_config.hf_text_config.model_type=}")
+                f"Got {self.target_model_config.hf_text_config.model_type=}"
+            )
 
         return self
-
     @property
     def num_lookahead_slots(self) -> int:
         """The number of additional slots the scheduler should allocate per
