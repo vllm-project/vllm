@@ -69,6 +69,11 @@ def slice_query_start_locs(
     query_start_loc: torch.Tensor,
     req_slice: slice,
 ) -> torch.Tensor:
+    """
+    Creates a new query_start_loc that corresponds to the requests in req_slice.
+    Note: This function creates a new tensor to hold the new query_start_locs.
+    This will break cudagraph compatibility.
+    """
     return query_start_loc[req_slice.start: req_slice.stop + 1] -\
         query_start_loc[req_slice.start]
 
