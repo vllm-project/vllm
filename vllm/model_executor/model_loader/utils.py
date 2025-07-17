@@ -223,7 +223,7 @@ def resolve_transformers_arch(model_config: ModelConfig,
                 "implementation. Some features may not be supported and "
                 "performance may not be optimal.", arch)
             # Check if text-config is `self`. If not most probably it is
-            # a composite config, i.e. mutlimodal
+            # a composite config, i.e. multimodal
             if model_config.hf_config.get_text_config(
             ) != model_config.hf_config:
                 architectures[i] = "TransformersForMultimodalLM"
