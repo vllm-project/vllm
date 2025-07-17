@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -9,6 +9,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
+from vllm.model_executor.layers.fused_moe.utils import extract_required_args
 from vllm.utils.flashinfer import (flashinfer_cutlass_fused_moe,
                                    has_flashinfer_cutlass_fused_moe)
 
@@ -140,18 +141,16 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: Optional[torch.Tensor],
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: Optional[bool],
-        extra_expert_args: dict,
+        extra_expert_args: Optional[dict[str, Any]],
     ):
-        assert 'g1_alphas' in extra_expert_args
-        assert 'g2_alphas' in extra_expert_args
-        assert 'a1_gscale' in extra_expert_args
-        assert 'a2_gscale' in extra_expert_args
-        assert 'out_dtype' in extra_expert_args
-        g1_alphas: torch.Tensor = extra_expert_args['g1_alphas']
-        g2_alphas: torch.Tensor = extra_expert_args['g2_alphas']
-        a1_gscale: torch.Tensor = extra_expert_args['a1_gscale']
-        a2_gscale: torch.Tensor = extra_expert_args['a2_gscale']
-        out_dtype: torch.dtype = extra_expert_args['out_dtype']
+        assert extra_expert_args is not None, \
+            "extra_expert_args must be provided"
+        required_keys = [
+            'g1_alphas', 'g2_alphas', 'a1_gscale', 'a2_gscale', 'out_dtype'
+        ]
+
+        g1_alphas, g2_alphas, a1_gscale, a2_gscale, out_dtype = (
+            extract_required_args(extra_expert_args, required_keys))
 
         # Flashinfer CUTLASS kernel takes scalar global scales,
         # min because inv_scale.

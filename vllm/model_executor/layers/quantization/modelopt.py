@@ -755,10 +755,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         experts_kwargs: dict[str, Any] = {
             "use_nvfp4_w4a4": True,
             "use_dp": moe_parallel_config.dp_size > 1,
-        }
-        experts_kwargs: dict[str, Any] = {
-            "use_nvfp4_w4a4": True,
-            "use_dp": moe_parallel_config.dp_size > 1,
             "ep_rank": moe_parallel_config.ep_rank,
             "ep_size": moe_parallel_config.ep_size,
             "tp_rank": moe_parallel_config.tp_rank,

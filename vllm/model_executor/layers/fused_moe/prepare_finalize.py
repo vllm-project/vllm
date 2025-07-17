@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -38,7 +38,7 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-        skip_quant: Optional[bool] = False,
+        extra_prepare_args: Optional[dict[str, Any]],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor],
                Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
                Optional[torch.Tensor]]:
@@ -50,7 +50,9 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1"
             a1.mul_(topk_weights.to(a1.dtype))
 
-        if skip_quant:
+        if (extra_prepare_args is not None
+                and extra_prepare_args.get("skip_quant", True)):
+            # Skip quantization if explicitly requested
             return a1, None, None, None, None
 
         a1q, a1q_scale = moe_kernel_quantize_input(
@@ -59,17 +61,13 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
 
         return a1q, a1q_scale, None, None, None
 
-    def finalize(
-        self,
-        output: torch.Tensor,
-        fused_expert_output: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        apply_router_weight_on_input: bool,
-        weight_and_reduce_impl: mk.TopKWeightAndReduce,
-        skip_weight_reduce: Optional[bool] = False,
-    ) -> None:
-        if skip_weight_reduce:
+    def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
+                 topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+                 apply_router_weight_on_input: bool,
+                 weight_and_reduce_impl: mk.TopKWeightAndReduce,
+                 extra_finalize_args: Optional[dict[str, Any]]) -> None:
+        if (extra_finalize_args is not None
+                and extra_finalize_args.get("skip_weight_reduce", True)):
             assert output.shape == fused_expert_output.shape
             output.copy_(fused_expert_output)
         else:

@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from math import prod
-from typing import Optional, final
+from typing import Any, Optional, final
 
 import torch
 
@@ -150,17 +150,12 @@ class FusedMoEPrepareAndFinalize(ABC):
 
     @abstractmethod
     def prepare(
-        self,
-        a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        apply_router_weight_on_input: bool,
+        self, a1: torch.Tensor, a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor], topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor, num_experts: int,
+        expert_map: Optional[torch.Tensor], apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-        extra_prepare_args: Optional[dict] = None,
+        extra_prepare_args: Optional[dict[str, Any]]
     ) -> tuple[torch.Tensor, Optional[torch.Tensor],
                Optional[ExpertTokensMetadata], Optional[torch.Tensor],
                Optional[torch.Tensor]]:
@@ -191,16 +186,11 @@ class FusedMoEPrepareAndFinalize(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def finalize(
-        self,
-        output: torch.Tensor,
-        fused_expert_output: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        apply_router_weight_on_input: bool,
-        weight_and_reduce_impl: TopKWeightAndReduce,
-        extra_finalize_args: Optional[dict] = None,
-    ) -> None:
+    def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
+                 topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+                 apply_router_weight_on_input: bool,
+                 weight_and_reduce_impl: TopKWeightAndReduce,
+                 extra_finalize_args: Optional[dict[str, Any]]) -> None:
         """
         Perform any combine plus apply weights and perform a reduction on the
         fused experts output.
@@ -377,7 +367,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
-        extra_expert_args: Optional[dict],
+        extra_expert_args: Optional[dict[str, Any]],
     ):
         """
         This function computes the intermediate result of a Mixture of Experts
@@ -463,27 +453,18 @@ class FusedMoEModularKernel(torch.nn.Module):
                 f"{fused_experts.activation_formats[0]}")
 
     def _do_fused_experts(
-            self,
-            fused_out: Optional[torch.Tensor],
-            a1: torch.Tensor,
-            a1q: torch.Tensor,
-            w1: torch.Tensor,
-            w2: torch.Tensor,
-            topk_weights: torch.Tensor,
-            topk_ids: torch.Tensor,
-            activation: str,
-            global_num_experts: int,
-            local_num_experts: int,
+            self, fused_out: Optional[torch.Tensor], a1: torch.Tensor,
+            a1q: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor,
+            topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+            activation: str, global_num_experts: int, local_num_experts: int,
             expert_map: Optional[torch.Tensor],
-            w1_scale: Optional[torch.Tensor],
-            w2_scale: Optional[torch.Tensor],
-            w1_zp: Optional[torch.Tensor],
-            w2_zp: Optional[torch.Tensor],
+            w1_scale: Optional[torch.Tensor], w2_scale: Optional[torch.Tensor],
+            w1_zp: Optional[torch.Tensor], w2_zp: Optional[torch.Tensor],
             a1q_scale: Optional[torch.Tensor],
             a2_scale: Optional[torch.Tensor],
             expert_tokens_meta: Optional[ExpertTokensMetadata],
             apply_router_weight_on_input: bool,
-            extra_expert_args: Optional[dict] = None) -> torch.Tensor:
+            extra_expert_args: Optional[dict[str, Any]]) -> torch.Tensor:
 
         _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
 
@@ -550,7 +531,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         a2_scale: Optional[torch.Tensor],
         expert_tokens_meta: Optional[ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
-        extra_expert_args: Optional[dict] = None,
+        extra_expert_args: Optional[dict[str, Any]],
     ) -> torch.Tensor:
 
         _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
@@ -637,7 +618,11 @@ class FusedMoEModularKernel(torch.nn.Module):
         if extra_expert_args is not None and 'm' in extra_expert_args:
             m = extra_expert_args.get('m')
 
-        chunked_extra_expert_args = extra_expert_args
+        if extra_expert_args is not None:
+            chunked_extra_expert_args = extra_expert_args
+        else:
+            chunked_extra_expert_args = {}
+
         for chunk_idx in range(num_chunks):
             c_a1q, c_a1q_scale, c_a2_scale, c_topk_ids, c_topk_weights = (
                 slice_input_tensors(chunk_idx))

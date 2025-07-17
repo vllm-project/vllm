@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ CUTLASS based Fused MoE kernels."""
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import torch
 
@@ -15,7 +15,8 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (_fp8_perm,
                                                         _fp8_quantize,
-                                                        _resize_cache)
+                                                        _resize_cache,
+                                                        extract_required_args)
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -301,7 +302,8 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
               a2_scale: Optional[torch.Tensor], workspace13: torch.Tensor,
               workspace2: torch.Tensor,
               expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-              apply_router_weight_on_input: bool):
+              apply_router_weight_on_input: bool,
+              extra_expert_args: Optional[dict[str, Any]]):
         assert w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
         assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
 
@@ -625,27 +627,14 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
               a2_scale: torch.Tensor, workspace13: Optional[torch.Tensor],
               workspace2: Optional[torch.Tensor],
               expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-              apply_router_weight_on_input: bool, extra_expert_args: dict):
-        assert 'g1_alphas' in extra_expert_args
-        assert 'g2_alphas' in extra_expert_args
-        assert 'a1_gscale' in extra_expert_args
-        assert 'a2_gscale' in extra_expert_args
-        assert 'm' in extra_expert_args
-        assert 'n' in extra_expert_args
-        assert 'k' in extra_expert_args
-        assert 'e' in extra_expert_args
-        assert 'device' in extra_expert_args
-
-        g1_alphas = extra_expert_args['g1_alphas']
-        g2_alphas = extra_expert_args['g2_alphas']
-        a1_gscale = extra_expert_args['a1_gscale']
-        a2_gscale = extra_expert_args['a2_gscale']
-        m = extra_expert_args['m']
-        n = extra_expert_args['n']
-        k = extra_expert_args['k']
-        e = extra_expert_args['e']
-        device = extra_expert_args['device']
-
+              apply_router_weight_on_input: bool,
+              extra_expert_args: Optional[dict[str, Any]]):
+        required_keys = [
+            "g1_alphas", "g2_alphas", "a1_gscale", "a2_gscale", "m", "n", "k",
+            "e", "device"
+        ]
+        (g1_alphas, g2_alphas, a1_gscale, a2_gscale, m, n, k, e,
+         device) = extract_required_args(extra_expert_args, required_keys)
         run_cutlass_moe_fp4(
             output=output,
             a=hidden_states,
