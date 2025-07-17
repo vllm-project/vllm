@@ -94,7 +94,7 @@ class BenchmarkDataset(ABC):
         """
         content = [{"text": prompt, "type": "text"}]
         if mm_content is not None:
-            content.append(mm_content)
+            content.extend(mm_content)
         return [{"role": "user", "content": content}]
 
     def load_data(self) -> None:
