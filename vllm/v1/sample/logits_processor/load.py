@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 LOGITSPROCS_GROUP = 'vllm.logits_processors'
 
-_builtin_logitsprocs_classes: list[type[LogitsProcessor]] = [
+BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
     MinTokensLogitsProcessor,
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
@@ -52,15 +52,15 @@ def _load_logitsprocs_by_fqcns(
     if not logits_processors:
         return []
 
-    logger.info(
+    logger.debug(
         "%s additional custom logits processors specified, checking whether "
         "they need to be loaded.", len(logits_processors))
 
     classes: list[type[LogitsProcessor]] = []
     for ldx, logitproc in enumerate(logits_processors):
         if isinstance(logitproc, type):
-            logger.info(" - Already loaded logit processor: %s",
-                        logitproc.__name__)
+            logger.debug(" - Already-loaded logit processor: %s",
+                         logitproc.__name__)
             if not issubclass(logitproc, LogitsProcessor):
                 raise ValueError(
                     f"{logitproc.__name__} is not a subclass of LogitsProcessor"
@@ -68,25 +68,27 @@ def _load_logitsprocs_by_fqcns(
             classes.append(logitproc)
             continue
 
-        logger.info("- Loading logits processor %s", logitproc)
+        logger.debug("- Loading logits processor %s", logitproc)
+        module_path, qualname = logitproc.split(":")
+
         try:
-            module_path, qualname = logitproc.split(":")
             # Load module
             module = importlib.import_module(module_path)
-            # Walk down dotted name to get logitproc class
-            obj = module
-            for attr in qualname.split("."):
-                obj = getattr(obj, attr)
-            if not isinstance(obj, type):
-                raise ValueError("Loaded logit processor must be a type.")
-            if not issubclass(obj, LogitsProcessor):
-                raise ValueError(
-                    f"{obj.__name__} must be a subclass of LogitsProcessor")
-            classes.append(obj)
         except Exception as e:
-            logger.exception("Failed to load %sth logits processor %s", ldx,
-                             logitproc)
-            raise e
+            raise RuntimeError(
+                f"Failed to load {ldx}th LogitsProcessor plugin {logitproc}"
+            ) from e
+
+        # Walk down dotted name to get logitproc class
+        obj = module
+        for attr in qualname.split("."):
+            obj = getattr(obj, attr)
+        if not isinstance(obj, type):
+            raise ValueError("Loaded logit processor must be a type.")
+        if not issubclass(obj, LogitsProcessor):
+            raise ValueError(
+                f"{obj.__name__} must be a subclass of LogitsProcessor")
+        classes.append(obj)
 
     return classes
 
@@ -110,17 +112,17 @@ def _load_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
         return []
 
     # Load logitsprocs plugins
-    logger.info("Loading installed logitsprocs plugins (group %s):",
-                LOGITSPROCS_GROUP)
+    logger.debug("Loading installed logitsprocs plugins (group %s):",
+                 LOGITSPROCS_GROUP)
     classes: list[type[LogitsProcessor]] = []
     for entrypoint in installed_logitsprocs_plugins:
         try:
-            logger.info("- Loading logitproc plugin entrypoint=%s target=%s",
-                        entrypoint.name, entrypoint.value)
+            logger.debug("- Loading logitproc plugin entrypoint=%s target=%s",
+                         entrypoint.name, entrypoint.value)
             classes.append(entrypoint.load())
         except Exception as e:
-            logger.exception("Failed to load plugin %s", entrypoint)
-            raise e
+            raise RuntimeError(
+                f"Failed to load LogitsProcessor plugin {entrypoint}") from e
     return classes
 
 
@@ -155,4 +157,4 @@ def build_logitsprocs(vllm_config: "VllmConfig", device: torch.device,
     custom_logitsprocs_classes = vllm_config.logits_processors or []
     return LogitsProcessors(
         ctor(vllm_config, device, is_pin_memory) for ctor in itertools.chain(
-            _builtin_logitsprocs_classes, custom_logitsprocs_classes))
+            BUILTIN_LOGITS_PROCESSORS, custom_logitsprocs_classes))

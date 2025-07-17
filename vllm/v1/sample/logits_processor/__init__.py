@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.v1.sample.logits_processor.core import LogitsProcessor
 from vllm.v1.sample.logits_processor.impls import (LogitBiasLogitsProcessor,
                                                    MinPLogitsProcessor,
                                                    MinTokensLogitsProcessor)
+from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 from vllm.v1.sample.logits_processor.load import (build_logitsprocs,
                                                   load_custom_logitsprocs)
 from vllm.v1.sample.logits_processor.state import (BatchUpdate,

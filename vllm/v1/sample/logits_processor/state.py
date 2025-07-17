@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Optional, Union
 from vllm import PoolingParams, SamplingParams
 
 if TYPE_CHECKING:
-    from vllm.v1.sample.logits_processor.core import LogitsProcessor
+    from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 
 
 class MoveDirectionality(Enum):
@@ -163,7 +163,6 @@ class BatchUpdateBuilder:
         return batch_update
 
 
-@dataclass
 class LogitsProcessors:
     """Encapsulates initialized logitsproc objects."""
     argmax_invariant: list["LogitsProcessor"] = field(

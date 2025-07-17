@@ -13,7 +13,8 @@ if TYPE_CHECKING:
 class LogitsProcessor(ABC):
 
     @abstractmethod
-    def __init__(self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool) -> None:
+    def __init__(self, vllm_config: "VllmConfig", device: torch.device,
+                 is_pin_memory: bool) -> None:
         raise NotImplementedError
 
     @abstractmethod

@@ -51,7 +51,7 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
                         cuda_device_count_stateless, get_cpu_memory,
                         get_open_port, is_torch_equal_or_newer, random_uuid,
                         resolve_obj_by_qualname)
-from vllm.v1.sample.logits_processor.core import LogitsProcessor
+from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 
 # yapf: enable
 
