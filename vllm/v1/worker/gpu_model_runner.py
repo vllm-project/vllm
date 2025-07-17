@@ -1556,6 +1556,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
             num_nans_in_logits=num_nans_in_logits,
         )
 

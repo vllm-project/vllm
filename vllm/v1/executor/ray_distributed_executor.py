@@ -15,7 +15,7 @@ logger = init_logger(__name__)
 
 
 class FutureWrapper(Future):
-    """A wrapper around a Ray output reference to meet the interface
+    """A wrapper around Ray output reference to meet the interface
     of .execute_model(): The top level (core busy loop) expects .result() api 
     to block and return a single output.
     
