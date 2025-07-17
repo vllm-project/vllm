@@ -215,9 +215,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         self,
         moe_parallel_config: FusedMoEParallelConfig,
     ):
-        raise NotImplementedError(
-            f"{self.__class__.__name__} must select appropriate experts "
-            "implementation based on the moe_parallel_config")
+        pass
 
     @abstractmethod
     def apply(

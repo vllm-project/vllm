@@ -255,7 +255,7 @@ def _validate_scale_shape(
 
 
 def extract_required_args(
-    extra_args: dict[str, Any],
+    extra_args: Optional[dict[str, Any]],
     required_keys: list[str],
 ) -> tuple[Any, ...]:
     if extra_args is None:

@@ -88,8 +88,16 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return TopKWeightAndReduceDelegate()
 
     def workspace_shapes(
-        self, a: torch.Tensor, aq: torch.Tensor, M: int, N: int, K: int,
-        topk: int, global_num_experts: int, local_num_experts: int
+        self,
+        a: torch.Tensor,
+        aq: torch.Tensor,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
