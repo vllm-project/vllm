@@ -57,6 +57,7 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
     from ray.util.placement_group import PlacementGroup
+    from ray.runtime_env import RuntimeEnv
     from transformers.configuration_utils import PretrainedConfig
 
     import vllm.model_executor.layers.quantization as me_quant
@@ -73,6 +74,7 @@ if TYPE_CHECKING:
 else:
     DataclassInstance = Any
     PlacementGroup = Any
+    RuntimeEnv = Any
     PretrainedConfig = Any
     ExecutorBase = Any
     QuantizationConfig = Any
@@ -1901,6 +1903,9 @@ class ParallelConfig:
 
     placement_group: Optional["PlacementGroup"] = None
     """ray distributed model workers placement group."""
+
+    runtime_env: Optional["RuntimeEnv"] = None
+    """ray runtime environment for distributed workers"""
 
     distributed_executor_backend: Optional[Union[DistributedExecutorBackend,
                                                  type["ExecutorBase"]]] = None

@@ -1088,12 +1088,14 @@ class EngineArgs:
         # we are in a Ray actor. If so, then the placement group will be
         # passed to spawned processes.
         placement_group = None
+        runtime_env = None
         if is_in_ray_actor():
             import ray
 
             # This call initializes Ray automatically if it is not initialized,
             # but we should not do this here.
             placement_group = ray.util.get_current_placement_group()
+            runtime_env = ray.get_runtime_context().runtime_env
 
         data_parallel_external_lb = self.data_parallel_rank is not None
         if data_parallel_external_lb:
@@ -1170,6 +1172,7 @@ class EngineArgs:
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             placement_group=placement_group,
+            runtime_env=runtime_env,
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
