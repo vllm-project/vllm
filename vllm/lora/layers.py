@@ -1164,10 +1164,6 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                                                       posinf=pos_inf,
                                                       neginf=neg_inf))
 
-        # HPU needs special handling to prune out dummy samples.
-        if current_platform.is_hpu():
-            lora_logits = lora_logits[:logits.shape[0], :]
-
         logits[:,
                self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
                lora_logits.shape[1]] = lora_logits

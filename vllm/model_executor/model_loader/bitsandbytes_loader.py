@@ -199,10 +199,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         if self.pre_quant:
             if self.load_8bit:
-                if current_platform.is_hpu():
-                    raise ValueError(
-                        "currently hpu supports 4bit quantization only")
-
                 return self._quantized_8bit_generator(
                     hf_weights_files, use_safetensors,
                     quant_state_dict), quant_state_dict
@@ -306,10 +302,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                         in temp_state_dict):
                 quant_state = _parse_quant_state(mapped_weight_name,
                                                  temp_state_dict)
-                if current_platform.is_hpu():
-                    assert quant_state.quant_type == "nf4", (
-                        "currently hpu supports nf4 quant_type only")
-
                 quant_state_dict[mapped_weight_name] = quant_state
                 yield org_weight_name, weight_tensor
             else:
@@ -380,8 +372,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                                                       ...]
 
                 # bitsandbytes requires data in GPU
-                if (weight_sub_tensor.is_cuda
-                        or weight_sub_tensor.device.type == "hpu"):
+                if weight_sub_tensor.is_cuda:
                     loaded_weight = weight_sub_tensor
                 else:
                     loaded_weight = weight_sub_tensor.to(
