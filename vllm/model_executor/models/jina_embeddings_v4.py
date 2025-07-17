@@ -35,8 +35,6 @@ VISION_END_TOKEN_ID = 151653
 
 PoolingMetadata = Union[V0PoolingMetadata, V1PoolingMetadata]
 
-# Triton kernel for optimized vision token extraction
-
 
 @MULTIMODAL_REGISTRY.register_processor(Qwen2VLMultiModalProcessor,
                                         info=Qwen2VLProcessingInfo,

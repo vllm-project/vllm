@@ -155,9 +155,9 @@ def compute_vllm_embeddings(
 
     for output in outputs:
         # Extract based on token type
-        if 151652 in output.prompt_token_ids:  # VISION_START_TOKEN_ID
-            img_start = output.prompt_token_ids.index(151652)
-            img_end = output.prompt_token_ids.index(151653)
+        if VISION_START_TOKEN_ID in output.prompt_token_ids:
+            img_start = output.prompt_token_ids.index(VISION_START_TOKEN_ID)
+            img_end = output.prompt_token_ids.index(VISION_END_TOKEN_ID)
             embedding_data = output.outputs.data[img_start : img_end + 1]
         else:
             embedding_data = output.outputs.data
