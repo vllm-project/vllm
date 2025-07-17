@@ -734,7 +734,7 @@ class ModelConfig:
             self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
-        if self.registry.is_multimodal_model(self.architecture):
+        if self.registry.is_multimodal_model(self.architectures):
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
                 media_io_kwargs=self.media_io_kwargs,

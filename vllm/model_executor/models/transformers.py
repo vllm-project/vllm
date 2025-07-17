@@ -448,6 +448,8 @@ class TransformersModel(nn.Module):
                 config, sliding_window=config.interleaved_sliding_window)
 
         # Set correct attn and init on "meta" to delay allocating GPU tensors
+        # TODO: @raushan, use the public `model.set_attn_implementation()` method
+        # after v4.54.0 is released
         self.text_config._attn_implementation = "vllm"
         with init_on_device_without_buffers("meta"), config_override:
             # FIXME(Isotr0py): We need to refactor this part in the future to
@@ -637,15 +639,15 @@ class TransformersModel(nn.Module):
             inputs_embeds = inputs_embeds[None, ...]
 
         if self.model_config.uses_mrope:
-            positions = positions[:, None]
+            position_ids = positions[:, None]
         else:
-            positions = positions[None, ...]
+            position_ids = positions[None, ...]
 
         hidden_states = self.model(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
             use_cache=False,
-            position_ids=positions,
+            position_ids=position_ids,
             attention_instances=self.attention_instances,
             return_dict=False)[0][0, ...]  # we remove batch dimension for now
 
