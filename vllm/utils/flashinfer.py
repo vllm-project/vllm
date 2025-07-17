@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import importlib
+import importlib.util
 from typing import Any, Callable, NoReturn
 
 from vllm.logger import init_logger
@@ -19,11 +20,9 @@ logger = init_logger(__name__)
 @functools.cache
 def has_flashinfer() -> bool:
     """Return ``True`` if FlashInfer is available."""
-    try:
-        import flashinfer  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    # Use find_spec to check if the module exists without importing it
+    # This avoids potential CUDA initialization side effects
+    return importlib.util.find_spec("flashinfer") is not None
 
 
 def _missing(*_: Any, **__: Any) -> NoReturn:
@@ -42,69 +41,60 @@ def _get_submodule(module_name: str) -> Any | None:
         return None
 
 
-# Initialize FlashInfer components
-if not has_flashinfer():
-    _cutlass_fused_moe_impl: Callable[..., Any] | None = None
-    _fp4_quantize_impl: Callable[..., Any] | None = None
-    _fp4_swizzle_blockscale_impl: Callable[..., Any] | None = None
-    _autotune_impl: Callable[..., Any] | None = None
-else:
-    # Import main flashinfer module
-    _fi = importlib.import_module("flashinfer")  # type: ignore
+# General lazy import wrapper
+def _lazy_import_wrapper(module_name: str,
+                         attr_name: str,
+                         fallback_fn: Callable[..., Any] = _missing):
+    """Create a lazy import wrapper for a specific function."""
 
-    # Import fused_moe submodule
-    _fused_moe_mod = _get_submodule("flashinfer.fused_moe")
-    _cutlass_fused_moe_impl = getattr(_fused_moe_mod, "cutlass_fused_moe",
-                                      None) if _fused_moe_mod else None
+    @functools.cache
+    def _get_impl():
+        if not has_flashinfer():
+            return None
+        mod = _get_submodule(module_name)
+        return getattr(mod, attr_name, None) if mod else None
 
-    # Import fp4_quant functions
-    _fp4_quantize_impl = getattr(_fi, "fp4_quantize", None) if _fi else None
-    _fp4_swizzle_blockscale_impl = getattr(_fi, "fp4_swizzle_blockscale",
-                                           None) if _fi else None
+    def wrapper(*args, **kwargs):
+        impl = _get_impl()
+        if impl is None:
+            return fallback_fn(*args, **kwargs)
+        return impl(*args, **kwargs)
 
-    # Import autotuner submodule
-    _autotuner_mod = _get_submodule("flashinfer.autotuner")
-    _autotune_impl = getattr(_autotuner_mod, "autotune",
-                             None) if _autotuner_mod else None
+    return wrapper
+
+
+# Create lazy wrappers for each function
+flashinfer_cutlass_fused_moe = _lazy_import_wrapper("flashinfer.fused_moe",
+                                                    "cutlass_fused_moe")
+fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
+fp4_swizzle_blockscale = _lazy_import_wrapper("flashinfer",
+                                              "fp4_swizzle_blockscale")
+
+# Special case for autotune since it returns a context manager
+autotune = _lazy_import_wrapper(
+    "flashinfer.autotuner",
+    "autotune",
+    fallback_fn=lambda *args, **kwargs: contextlib.nullcontext())
 
 
 @functools.cache
 def has_flashinfer_cutlass_fused_moe() -> bool:
     """Return ``True`` if FlashInfer CUTLASS fused MoE is available."""
-    return all([
-        _cutlass_fused_moe_impl,
-        _fp4_quantize_impl,
-        _fp4_swizzle_blockscale_impl,
-    ])
+    if not has_flashinfer():
+        return False
 
+    # Check if all required functions are available
+    required_functions = [
+        ("flashinfer.fused_moe", "cutlass_fused_moe"),
+        ("flashinfer", "fp4_quantize"),
+        ("flashinfer", "fp4_swizzle_blockscale"),
+    ]
 
-def flashinfer_cutlass_fused_moe(*args, **kwargs):
-    """FlashInfer CUTLASS fused MoE kernel."""
-    if _cutlass_fused_moe_impl is None:
-        return _missing(*args, **kwargs)
-    return _cutlass_fused_moe_impl(*args, **kwargs)
-
-
-def fp4_quantize(*args, **kwargs):
-    """FlashInfer FP4 quantization."""
-    if _fp4_quantize_impl is None:
-        return _missing(*args, **kwargs)
-    return _fp4_quantize_impl(*args, **kwargs)
-
-
-def fp4_swizzle_blockscale(*args, **kwargs):
-    """FlashInfer FP4 swizzle blockscale."""
-    if _fp4_swizzle_blockscale_impl is None:
-        return _missing(*args, **kwargs)
-    return _fp4_swizzle_blockscale_impl(*args, **kwargs)
-
-
-def autotune(*args, **kwargs):
-    """FlashInfer autotuner."""
-    if _autotune_impl is None:
-        # return a null context since autotune is a context manager
-        return contextlib.nullcontext()
-    return _autotune_impl(*args, **kwargs)
+    for module_name, attr_name in required_functions:
+        mod = _get_submodule(module_name)
+        if not mod or not hasattr(mod, attr_name):
+            return False
+    return True
 
 
 __all__ = [
