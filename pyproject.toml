@@ -57,6 +57,7 @@ ignore_patterns = [
     "benchmarks/**",
     "build/**",
     "examples/**",
+    "tests/**",
     "vllm/collect_env.py",
 ]
 
@@ -143,6 +144,7 @@ skip_glob = [
     ".buildkite/*",
     "benchmarks/*",
     "examples/*",
+    "tests/*",
 ]
 use_parentheses = true
 skip_gitignore = true
