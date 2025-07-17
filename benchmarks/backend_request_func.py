@@ -375,6 +375,11 @@ async def async_request_openai_chat_completions(
             elif isinstance(mm_content, dict):
                 # Only single-image case. Append the one image.
                 content_list.append(mm_content)
+            else:
+                raise TypeError(
+                    "multi_modal_content must be a list or a dict, but got "
+                    f"{type(mm_content).__name__}"
+                )
 
             messages = [{"role": "user", "content": content_list}]
         else:
