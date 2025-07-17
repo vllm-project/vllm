@@ -200,7 +200,7 @@ class FusedMoEParallelConfig:
             tp_size_ (int): `tp_size` passed into the FusedMoE constructor.
             dp_size_ (int): `dp_size` passed into the FusedMoE constructor.
             vllm_parallel_config (ParallelConfig): vLLM's parallel config
-            object which contains the `enable_expert_parallel` flag.
+                object which contains the `enable_expert_parallel` flag.
 
         Examples:
             When there is no parallelism requested, i.e. `tp_size_` = `dp_size_` = 1,
