@@ -8,12 +8,12 @@ from transformers import PretrainedConfig
 
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 
-# Map speculators weight names to vLLM names
+# Map speculators weight names to vLLM names (without model. prefix)
 SPECULATORS_WEIGHT_MAP = {
-    "fusion_fc.weight": "model.fc.weight",
-    "fusion_fc.bias": "model.fc.bias",
-    "embedding_layernorm.weight": "model.embedding_layernorm.weight",
-    "pre_lm_head_layernorm.weight": "model.hidden_states_layernorm.weight",
+    "fusion_fc.weight": "fc.weight",
+    "fusion_fc.bias": "fc.bias",
+    "embedding_layernorm.weight": "embedding_layernorm.weight",
+    "pre_lm_head_layernorm.weight": "hidden_states_layernorm.weight",
 }
 
 # Constants for speculators format
@@ -348,14 +348,17 @@ def extract_speculators_info(model_path: Union[str, os.PathLike]) -> Optional[di
         return None
 
 
-def remap_speculators_weight_name(name: str) -> Optional[str]:
-    """Remap speculators format weight names to vLLM names.
+def remap_speculators_weight_name(name: str) -> str:
+    """Remap weight names to vLLM format.
     
-    Returns None for weights that should be skipped.
+    Handles both speculators format and original Eagle format.
+    Returns the remapped name for weights in speculators format,
+    or the original name if no remapping is needed.
     """
+    # Check if this is a speculators format weight
     if name in SPECULATORS_WEIGHT_MAP:
         return SPECULATORS_WEIGHT_MAP[name]
     elif name.startswith("transformer."):
-        # Replace "transformer." with "model.layers.0."
-        return "model.layers.0." + name[len("transformer."):]
+        # Replace "transformer." with "layers.0."
+        return "layers.0." + name[len("transformer."):]
     return name
