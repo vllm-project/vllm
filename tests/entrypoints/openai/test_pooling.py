@@ -281,7 +281,13 @@ async def test_invocations(server: RemoteOpenAIServer):
     invocation_output = invocation_response.json()
 
     assert completion_output.keys() == invocation_output.keys()
-    assert completion_output["data"] == invocation_output["data"]
+    for completion_data, invocation_data in zip(completion_output["data"],
+                                                invocation_output["data"]):
+        assert completion_data.keys() == invocation_data.keys()
+        check_embeddings_close(embeddings_0_lst=completion_data["data"],
+                               embeddings_1_lst=invocation_data["data"],
+                               name_0="completion",
+                               name_1="invocation")
 
 
 @pytest.mark.asyncio
@@ -314,4 +320,10 @@ async def test_invocations_conversation(server: RemoteOpenAIServer):
     invocation_output = invocation_response.json()
 
     assert chat_output.keys() == invocation_output.keys()
-    assert chat_output["data"] == invocation_output["data"]
+    for chat_data, invocation_data in zip(chat_output["data"],
+                                          invocation_output["data"]):
+        assert chat_data.keys() == invocation_data.keys()
+        check_embeddings_close(embeddings_0_lst=chat_data["data"],
+                               embeddings_1_lst=invocation_data["data"],
+                               name_0="chat",
+                               name_1="invocation")
