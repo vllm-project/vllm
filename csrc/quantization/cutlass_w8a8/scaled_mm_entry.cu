@@ -167,12 +167,14 @@ bool cutlass_group_gemm_supported(int64_t cuda_device_capability) {
 }
 
 bool cutlass_blockwise_group_gemm_supported(int64_t cuda_device_capability) {
-  // Blockwise CUTLASS grouped FP8 kernels need at least CUDA 12.3
-  // and SM90/SM100 (Hopper/Blackwell)
+  // Blockwise CUTLASS grouped FP8 kernels need SM90/SM100 (Hopper/Blackwell)
+  // and CUDA 12.3/12.8 (respectively)
 
 #if defined CUDA_VERSION
-  if (cuda_device_capability == 90 || cuda_device_capability == 100) {
+  if (cuda_device_capability == 90) {
     return CUDA_VERSION >= 12030;
+  } else if (cuda_device_capability == 100) {
+    return CUDA_VERSION >= 12080;
   }
 #endif
 
