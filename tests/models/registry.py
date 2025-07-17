@@ -291,7 +291,6 @@ _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5", v0_only=True),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2", v0_only=True),  # noqa: E501
-    "GPT2ForSequenceClassification": _HfExamplesInfo("nie3e/sentiment-polish-gpt2-small"),  # noqa: E501
     "GritLM": _HfExamplesInfo("parasail-ai/GritLM-7B-vllm"),
     "GteModel": _HfExamplesInfo("Snowflake/snowflake-arctic-embed-m-v2.0",
                                                trust_remote_code=True),
@@ -322,12 +321,27 @@ _EMBEDDING_EXAMPLE_MODELS = {
                                             is_available_online=False),  # noqa: E501
 }
 
-_CROSS_ENCODER_EXAMPLE_MODELS = {
-    # [Text-only]
+_SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
+    # [Decoder-only]
+    "GPT2ForSequenceClassification": _HfExamplesInfo("nie3e/sentiment-polish-gpt2-small"),  # noqa: E501
+
+    # [Cross-encoder]
     "BertForSequenceClassification": _HfExamplesInfo("cross-encoder/ms-marco-MiniLM-L-6-v2", v0_only=True),  # noqa: E501
     "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base", v0_only=True), # noqa: E501
     "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base", v0_only=True),  # noqa: E501
     "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3", v0_only=True),  # noqa: E501
+}
+
+_AUTOMATIC_CONVERTED_MODELS = {
+    # Use as_seq_cls_model for automatic conversion
+    "GemmaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-gemma",  # noqa: E501
+                                                      v0_only=True,
+                                                      hf_overrides={"architectures": ["GemmaForSequenceClassification"], # noqa: E501
+                                                                    "classifier_from_token": ["Yes"],  # noqa: E501
+                                                                    "method": "no_post_processing"}),  # noqa: E501
+    "LlamaForSequenceClassification": _HfExamplesInfo("Skywork/Skywork-Reward-V2-Llama-3.2-1B"),  # noqa: E501
+    "Qwen2ForSequenceClassification": _HfExamplesInfo("jason9693/Qwen2.5-1.5B-apeach"),  # noqa: E501
+    "Qwen3ForSequenceClassification": _HfExamplesInfo("tomaarsen/Qwen3-Reranker-0.6B-seq-cls"),  # noqa: E501
 }
 
 _MULTIMODAL_EXAMPLE_MODELS = {
@@ -439,17 +453,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "JinaVLForRanking": _HfExamplesInfo("jinaai/jina-reranker-m0"),   # noqa: E501
 }
 
-_AUTOMATIC_CONVERTED_MODELS = {
-    # Use as_seq_cls_model for automatic conversion
-    "GemmaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-gemma",  # noqa: E501
-                                                      v0_only=True,
-                                                      hf_overrides={"architectures": ["GemmaForSequenceClassification"], # noqa: E501
-                                                                    "classifier_from_token": ["Yes"],  # noqa: E501
-                                                                    "method": "no_post_processing"}),  # noqa: E501
-    "LlamaForSequenceClassification": _HfExamplesInfo("Skywork/Skywork-Reward-V2-Llama-3.2-1B"),  # noqa: E501
-    "Qwen2ForSequenceClassification": _HfExamplesInfo("jason9693/Qwen2.5-1.5B-apeach"),  # noqa: E501
-    "Qwen3ForSequenceClassification": _HfExamplesInfo("tomaarsen/Qwen3-Reranker-0.6B-seq-cls"),  # noqa: E501
-}
 
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "EAGLEModel": _HfExamplesInfo("JackFram/llama-68m",
@@ -491,7 +494,7 @@ _TRANSFORMERS_MODELS = {
 _EXAMPLE_MODELS = {
     **_TEXT_GENERATION_EXAMPLE_MODELS,
     **_EMBEDDING_EXAMPLE_MODELS,
-    **_CROSS_ENCODER_EXAMPLE_MODELS,
+    **_SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS,
     **_MULTIMODAL_EXAMPLE_MODELS,
     **_SPECULATIVE_DECODING_EXAMPLE_MODELS,
     **_TRANSFORMERS_MODELS,
