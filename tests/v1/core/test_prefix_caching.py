@@ -11,11 +11,12 @@ import torch
 from vllm.distributed.kv_events import AllBlocksCleared, BlockRemoved
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
-from vllm.utils import sha256
+from vllm.utils import sha256, sha256_cbor_64bit
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
 from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
-                                         KVCacheBlock, hash_block_tokens)
+                                         KVCacheBlock, hash_block_tokens,
+                                         init_none_hash)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, SlidingWindowSpec)
 
@@ -91,7 +92,7 @@ def make_kv_cache_config_hybrid_model(block_size: int,
     )
 
 
-@pytest.mark.parametrize("hash_algo", ["sha256", "hash"])
+@pytest.mark.parametrize("hash_algo", ["sha256", "sha256_cbor_64bit", "hash"])
 def test_prefill(hash_algo):
     manager = KVCacheManager(
         make_kv_cache_config(16, 11),
@@ -101,7 +102,8 @@ def test_prefill(hash_algo):
     )
 
     # choose the hash function according to the parameter
-    hash_fn = sha256 if hash_algo == "sha256" else hash
+    hash_fn = (sha256_cbor_64bit if hash_algo == "sha256_cbor_64bit" else
+               sha256 if hash_algo == "sha256" else hash)
 
     # Complete 3 blocks (48 tokens)
     common_token_ids = [i for i in range(3) for _ in range(16)]
@@ -696,12 +698,14 @@ def test_basic_prefix_caching_disabled():
     assert not blocks
 
 
-@pytest.mark.parametrize("hash_fn", [sha256, hash])
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor_64bit, hash])
 def test_cache_blocks(hash_fn):
     """
     This is a unit test that tests the correctness of the _cache_full_blocks
     function of KVCacheManager.
     """
+    init_none_hash(hash_fn)
+
     block_size = 4
     block_pool = BlockPool(
         num_gpu_blocks=5,

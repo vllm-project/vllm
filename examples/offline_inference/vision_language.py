@@ -98,7 +98,7 @@ def run_blip2(questions: list[str], modality: str) -> ModelRequestData:
     # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262 #noqa
     prompts = [f"Question: {question} Answer:" for question in questions]
     engine_args = EngineArgs(
-        model="Salesforce/blip2-opt-6.7b",
+        model="Salesforce/blip2-opt-2.7b",
         limit_mm_per_prompt={modality: 1},
     )
 
@@ -429,6 +429,75 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Nemontron_VL
+def run_nemotron_vl(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    assert modality == "image"
+    placeholder = "<image>"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [
+        [{"role": "user", "content": f"{placeholder}\n{question}"}]
+        for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    # Stop tokens for InternVL
+    # models variants may have different stop tokens
+    # please refer to the model card for the correct "stop words":
+    # https://huggingface.co/OpenGVLab/InternVL2-2B/blob/main/conversation.py
+    stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|end|>"]
+    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
+    stop_token_ids = [token_id for token_id in stop_token_ids if token_id is not None]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        stop_token_ids=stop_token_ids,
+    )
+
+
+# Keye-VL
+def run_keye_vl(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "Kwai-Keye/Keye-VL-8B-Preview"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        trust_remote_code=True,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    if modality == "image":
+        placeholder = "<|image_pad|>"
+    elif modality == "video":
+        placeholder = "<|video_pad|>"
+
+    prompts = [
+        (
+            f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+            f"{question}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Kimi-VL
 def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -646,6 +715,7 @@ def run_mistral3(questions: list[str], modality: str) -> ModelRequestData:
         max_num_seqs=2,
         tensor_parallel_size=2,
         limit_mm_per_prompt={modality: 1},
+        ignore_patterns=["consolidated.safetensors"],
     )
 
     prompts = [f"<s>[INST]{question}\n[IMG][/INST]" for question in questions]
@@ -939,7 +1009,7 @@ def run_pixtral_hf(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# Qwen
+# Qwen-VL
 def run_qwen_vl(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
@@ -1154,6 +1224,8 @@ model_example_map = {
     "h2ovl_chat": run_h2ovl,
     "idefics3": run_idefics3,
     "internvl_chat": run_internvl,
+    "nemotron_vl": run_nemotron_vl,
+    "keye_vl": run_keye_vl,
     "kimi_vl": run_kimi_vl,
     "llava": run_llava,
     "llava-next": run_llava_next,

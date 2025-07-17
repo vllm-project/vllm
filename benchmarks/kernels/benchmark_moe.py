@@ -86,6 +86,9 @@ def benchmark_config(
             (num_experts, 2 * shard_intermediate_size), dtype=torch.float32
         )
         w2_scale = torch.randn((hidden_size, num_experts), dtype=torch.float32)
+    if use_deep_gemm:
+        # we use the default block shape for deepgemm
+        block_quant_shape = [128, 128]
     if use_fp8_w8a8:
         if block_quant_shape:
             block_n, block_k = block_quant_shape[0], block_quant_shape[1]
@@ -583,6 +586,11 @@ def main(args: argparse.Namespace):
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
+    elif config.architectures[0] in ("HunYuanMoEV1ForCausalLM"):
+        E = config.num_experts
+        topk = config.moe_topk[0]
+        intermediate_size = config.moe_intermediate_size[0]
+        shard_intermediate_size = 2 * intermediate_size // args.tp_size
     else:
         # Support for llama4
         config = config.get_text_config()
@@ -620,7 +628,7 @@ def main(args: argparse.Namespace):
             4096,
         ]
     else:
-        batch_sizes = [args.batch_size]
+        batch_sizes = args.batch_size
 
     use_deep_gemm = bool(args.use_deep_gemm)
 
@@ -728,7 +736,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--use-deep-gemm", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--batch-size", type=int, required=False)
+    parser.add_argument("--batch-size", type=int, nargs="+", required=False)
     parser.add_argument("--tune", action="store_true")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--model-prefix", type=str, required=False)

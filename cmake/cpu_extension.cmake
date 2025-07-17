@@ -12,9 +12,8 @@ endif()
 #
 # Define environment variables for special configurations
 #
-if(DEFINED ENV{VLLM_CPU_AVX512BF16})
-    set(ENABLE_AVX512BF16 ON)
-endif()
+set(ENABLE_AVX512BF16 $ENV{VLLM_CPU_AVX512BF16})
+set(ENABLE_AVX512VNNI $ENV{VLLM_CPU_AVX512VNNI})
 
 include_directories("${CMAKE_SOURCE_DIR}/csrc")
 
@@ -107,10 +106,19 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
     endif()
 
     find_isa(${CPUINFO} "avx512_vnni" AVX512VNNI_FOUND)
-    if (AVX512VNNI_FOUND)
-        list(APPEND CXX_COMPILE_FLAGS "-mavx512vnni")
-        set(ENABLE_AVX512VNNI ON) 
-    endif() 
+    if (AVX512VNNI_FOUND OR ENABLE_AVX512VNNI)
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+            CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
+            list(APPEND CXX_COMPILE_FLAGS "-mavx512vnni")
+            set(ENABLE_AVX512VNNI ON)
+        else()
+            set(ENABLE_AVX512VNNI OFF)
+            message(WARNING "Disable AVX512-VNNI ISA support, requires gcc/g++ >= 12.3")
+        endif()
+    else()
+        set(ENABLE_AVX512VNNI OFF)
+        message(WARNING "Disable AVX512-VNNI ISA support, no avx512_vnni found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AVX512VNNI=1.")
+    endif()
     
 elseif (AVX2_FOUND)
     list(APPEND CXX_COMPILE_FLAGS "-mavx2")
@@ -157,16 +165,31 @@ else()
 endif()
 
 #
-# Build oneDNN for W8A8 GEMM kernels (only for x86-AVX512 platforms)
-#
-if (AVX512_FOUND AND NOT AVX512_DISABLED)
+# Build oneDNN for W8A8 GEMM kernels (only for x86-AVX512 /ARM platforms)
+# Flag to enable ACL kernels for AARCH64 platforms
+if ( VLLM_BUILD_ACL STREQUAL "ON")
+    set(USE_ACL ON)
+else()
+    set(USE_ACL OFF)
+endif()
+
+if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR ASIMD_FOUND)
     FetchContent_Declare(
         oneDNN
         GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
-        GIT_TAG  v3.7.1
+        GIT_TAG  v3.8.1
         GIT_PROGRESS TRUE
         GIT_SHALLOW TRUE
     )
+
+    if(USE_ACL)
+        find_library(ARM_COMPUTE_LIBRARY NAMES arm_compute PATHS $ENV{ACL_ROOT_DIR}/build/)
+        if(NOT ARM_COMPUTE_LIBRARY)
+            message(FATAL_ERROR "Could not find ARM Compute Library: please set ACL_ROOT_DIR")
+        endif()
+        set(ONEDNN_AARCH64_USE_ACL "ON")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,-rpath,$ENV{ACL_ROOT_DIR}/build/")
+        endif()
 
     set(ONEDNN_LIBRARY_TYPE "STATIC")
     set(ONEDNN_BUILD_DOC "OFF")
@@ -256,6 +279,13 @@ elseif(POWER10_FOUND)
         "csrc/cpu/quant.cpp"
         ${VLLM_EXT_SRC})
 endif()
+if (ASIMD_FOUND)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/quant.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
+message(STATUS "CPU extension source files: ${VLLM_EXT_SRC}")
 
 #
 # Define extension targets

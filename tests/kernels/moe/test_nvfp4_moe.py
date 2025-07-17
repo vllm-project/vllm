@@ -14,7 +14,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.platforms import current_platform
 
 if not current_platform.has_device_capability(100):
-    pytest.skip(reason="Nvfp4 Requires compute capability of 10 or above.",
+    pytest.skip("Nvfp4 Requires compute capability of 10 or above.",
                 allow_module_level=True)
 
 MNK_FACTORS = [

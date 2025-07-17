@@ -8,12 +8,13 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.machete_utils import (
-    MACHETE_SUPPORTED_GROUP_SIZES, check_machete_supports_shape,
+    check_machete_supports_shape, query_machete_supported_group_sizes,
     query_machete_supported_quant_types)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32, unpack_quantized_values_into_int32)
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            permute_param_layout_)
+from vllm.platforms import current_platform
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -27,6 +28,12 @@ class MacheteLinearKernel(MPLinearKernel):
     @classmethod
     def can_implement(cls,
                       c: MPLinearLayerConfig) -> tuple[bool, Optional[str]]:
+        # Machete uses CUTLASS, so it can only be compatible with Nvidia
+        if not current_platform.is_cuda():
+            return False, "Machete only supported on CUDA"
+
+        if not current_platform.is_device_capability(90):
+            return False, "Machete requires compute capability of 90 (Hopper)"
 
         if c.has_g_idx and\
             c.partition_weight_shape[0] != c.full_weight_shape[0]:
@@ -40,10 +47,10 @@ class MacheteLinearKernel(MPLinearKernel):
                            "Machete, supported types are: "\
                            f"{query_machete_supported_quant_types(c.zero_points)}"
 
-        if c.group_size not in MACHETE_SUPPORTED_GROUP_SIZES:
+        if c.group_size not in query_machete_supported_group_sizes(c.act_type):
             return False, f"Group size ({c.group_size}) not supported by "\
                             "Machete, supported group sizes are: "\
-                            f"{MACHETE_SUPPORTED_GROUP_SIZES}"
+                            f"{query_machete_supported_group_sizes(c.act_type)}"
 
         return check_machete_supports_shape(c.partition_weight_shape[0],
                                             c.partition_weight_shape[1])
@@ -118,6 +125,11 @@ class MacheteLinearKernel(MPLinearKernel):
 
         if c.has_g_idx:
             x_2d = self.act_perm(x_2d)
+
+        if c.zero_points:
+            assert w_zp is not None
+        else:
+            w_zp = None
 
         output = ops.machete_mm(a=x_2d,
                                 b_q=w_q,

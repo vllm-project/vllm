@@ -12,6 +12,7 @@ from torch.distributed.distributed_c10d import is_nccl_available
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils import cuda_device_count_stateless
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
@@ -163,6 +164,7 @@ class RocmPlatform(Platform):
     device_type: str = "cuda"
     dispatch_key: str = "CUDA"
     ray_device_key: str = "GPU"
+    dist_backend: str = "nccl"
     # rocm shares the same device control env var as CUDA
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
 
@@ -238,6 +240,13 @@ class RocmPlatform(Platform):
             logger.info("%s is not supported in AMD GPUs.", selected_backend)
         logger.info("Using ROCmFlashAttention backend.")
         return "vllm.attention.backends.rocm_flash_attn.ROCmFlashAttentionBackend"  # noqa: E501
+
+    @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.cuda.set_device(device)
 
     @classmethod
     @lru_cache(maxsize=8)
@@ -446,3 +455,7 @@ class RocmPlatform(Platform):
 
         pg._register_backend(device, backend_type, backend_class)
         return pg
+
+    @classmethod
+    def device_count(cls) -> int:
+        return cuda_device_count_stateless()

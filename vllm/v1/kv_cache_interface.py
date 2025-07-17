@@ -159,6 +159,7 @@ class SlidingWindowSpec(AttentionSpec):
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtype: torch.dtype
+    page_size_padded: Optional[int] = None
 
     def __post_init__(self):
         self.num_elements = sum(prod(shape) for shape in self.shapes)
@@ -169,7 +170,11 @@ class MambaSpec(KVCacheSpec):
 
     @property
     def page_size_bytes(self) -> int:
-        return self.num_elements * get_dtype_size(self.dtype)
+        page_size = self.num_elements * get_dtype_size(self.dtype)
+        if self.page_size_padded is not None:
+            assert self.page_size_padded >= page_size
+            return self.page_size_padded
+        return page_size
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         # We allocate 1 block for each request now, so max_memory_usage_bytes is
