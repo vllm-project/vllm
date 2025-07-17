@@ -154,6 +154,10 @@ class KVOutputAggregator:
         output = outputs[output_rank]
 
         # set the aggregated finished_sending / finished_recving
+        # if output.finished_sending/recving is not empty, but the other ranks
+        # still have unfinished send/recv, we want to set the aggregated
+        # finished_sending/recving to None until all ranks have finished
+        # send/recv
         output.finished_sending = finished_sending if finished_sending else None
         output.finished_recving = finished_recving if finished_recving else None
 
