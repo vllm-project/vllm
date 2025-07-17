@@ -62,6 +62,11 @@ __global__ void per_token_group_quant_8bit_kernel(
     scale_output = output_s + global_group_id;
   }
 
+  // shared memory to cache each group's data to avoid double DRAM reads.
+  extern __shared__ __align__(16) char smem_raw[];
+  T* smem = reinterpret_cast<T*>(smem_raw);
+  T* smem_group = smem + local_group_id * group_size;
+
   constexpr uint32_t vec_size = 16 / sizeof(T);
   using vec_t = vllm::vec_n_t<T, vec_size>;
 
@@ -70,6 +75,9 @@ __global__ void per_token_group_quant_8bit_kernel(
   for (int32_t i = lane_id; i < num_vec_elems; i += 16) {
     vec_t input_vec =
         *reinterpret_cast<const vec_t*>(group_input + i * vec_size);
+
+    // cache to shared memory
+    *reinterpret_cast<vec_t*>(smem_group + i * vec_size) = input_vec;
 
 #pragma unroll
     for (uint32_t j = 0; j < vec_size; ++j) {
@@ -92,9 +100,11 @@ __global__ void per_token_group_quant_8bit_kernel(
     *scale_output = y_s_quant;
   }
 
+  __syncthreads();
+
   for (int32_t i = lane_id; i < num_vec_elems; i += 16) {
     vec_t input_vec =
-        *reinterpret_cast<const vec_t*>(group_input + i * vec_size);
+        *reinterpret_cast<const vec_t*>(smem_group + i * vec_size);
 
 #pragma unroll
     for (uint32_t j = 0; j < vec_size; ++j) {
@@ -145,17 +155,19 @@ void per_token_group_quant_8bit(torch::Tensor input, torch::Tensor output_q,
   do {                                                                     \
     dim3 grid(num_blocks);                                                 \
     dim3 block(num_threads);                                               \
+    size_t smem_bytes =                                                    \
+        static_cast<size_t>(groups_per_block) * group_size * sizeof(T);    \
     if (is_column_major) {                                                 \
       if (scale_ue8m0) {                                                   \
         per_token_group_quant_8bit_kernel<T, DST_DTYPE, true, true>        \
-            <<<grid, block, 0, stream>>>(                                  \
+            <<<grid, block, smem_bytes, stream>>>(                         \
                 static_cast<T*>(input.data_ptr()), output_q.data_ptr(),    \
                 static_cast<float*>(output_s.data_ptr()), group_size,      \
                 num_groups, groups_per_block, (float)eps, (float)min_8bit, \
                 (float)max_8bit, scale_num_rows, scale_stride);            \
       } else {                                                             \
         per_token_group_quant_8bit_kernel<T, DST_DTYPE, true, false>       \
-            <<<grid, block, 0, stream>>>(                                  \
+            <<<grid, block, smem_bytes, stream>>>(                         \
                 static_cast<T*>(input.data_ptr()), output_q.data_ptr(),    \
                 static_cast<float*>(output_s.data_ptr()), group_size,      \
                 num_groups, groups_per_block, (float)eps, (float)min_8bit, \
@@ -164,14 +176,14 @@ void per_token_group_quant_8bit(torch::Tensor input, torch::Tensor output_q,
     } else {                                                               \
       if (scale_ue8m0) {                                                   \
         per_token_group_quant_8bit_kernel<T, DST_DTYPE, false, true>       \
-            <<<grid, block, 0, stream>>>(                                  \
+            <<<grid, block, smem_bytes, stream>>>(                         \
                 static_cast<T*>(input.data_ptr()), output_q.data_ptr(),    \
                 static_cast<float*>(output_s.data_ptr()), group_size,      \
                 num_groups, groups_per_block, (float)eps, (float)min_8bit, \
                 (float)max_8bit);                                          \
       } else {                                                             \
         per_token_group_quant_8bit_kernel<T, DST_DTYPE, false, false>      \
-            <<<grid, block, 0, stream>>>(                                  \
+            <<<grid, block, smem_bytes, stream>>>(                         \
                 static_cast<T*>(input.data_ptr()), output_q.data_ptr(),    \
                 static_cast<float*>(output_s.data_ptr()), group_size,      \
                 num_groups, groups_per_block, (float)eps, (float)min_8bit, \
