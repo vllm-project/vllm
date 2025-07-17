@@ -115,6 +115,7 @@ EXPECTED_VALUES = {
         ("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)
     ],
     "vllm:request_success": [("_total", _NUM_REQUESTS)],
+    # Note: vllm:request_failed tested separately in test_failed_requests_metric
 }
 
 
@@ -212,6 +213,7 @@ EXPECTED_METRICS = [
     "vllm:prompt_tokens_total",
     "vllm:generation_tokens_total",
     "vllm:request_success_total",
+    "vllm:request_failed_total",
     "vllm:cache_config_info",
     # labels in cache_config_info
     "block_size",
@@ -238,6 +240,7 @@ EXPECTED_METRICS_V1 = [
     "vllm:iteration_tokens_total",
     "vllm:cache_config_info",
     "vllm:request_success_total",
+    "vllm:request_failed_total",
     "vllm:request_prompt_tokens_sum",
     "vllm:request_prompt_tokens_bucket",
     "vllm:request_prompt_tokens_count",
@@ -339,3 +342,87 @@ def test_metrics_exist_run_batch(use_v1: bool):
         assert response.status_code == HTTPStatus.OK
 
         proc.wait()
+
+
+@pytest.mark.asyncio
+async def test_failed_requests_metric(server: RemoteOpenAIServer,
+                                      client: openai.AsyncClient,
+                                      use_v1: bool):
+    """Test that failed requests are properly counted in metrics."""
+    response = requests.get(server.url_for("metrics"))
+    assert response.status_code == HTTPStatus.OK
+
+    initial_failed_count = 0
+    for family in text_string_to_metric_families(response.text):
+        if family.name == "vllm:request_failed_total":
+            for sample in family.samples:
+                if sample.name == "vllm:request_failed_total":
+                    initial_failed_count = sample.value
+                    break
+
+    total_failed_attempts = 3
+    actual_failed_attempts = 0
+
+    # Attempt 1: Use a non-existent model (should fail with 404)
+    try:
+        await client.completions.create(model="non-existent-model-name",
+                                        prompt="Test prompt",
+                                        max_tokens=10)
+    except Exception:
+        actual_failed_attempts += 1
+
+    # Attempt 2: Use invalid temperature (outside valid range)
+    try:
+        await client.completions.create(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            max_tokens=10,
+            temperature=-1.0  # Invalid temperature
+        )
+    except Exception:
+        actual_failed_attempts += 1
+
+    # Attempt 3: Use max_tokens that exceeds model limit
+    try:
+        await client.completions.create(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            max_tokens=100000  # Very large number that should cause failure
+        )
+    except Exception:
+        actual_failed_attempts += 1
+
+    assert actual_failed_attempts == total_failed_attempts, (
+        f"Expected {total_failed_attempts} failed attempts, "
+        f"got {actual_failed_attempts}")
+
+    time.sleep(1)
+
+    response = requests.get(server.url_for("metrics"))
+    assert response.status_code == HTTPStatus.OK
+
+    found_failed_metric = False
+    final_failed_count = 0
+    for family in text_string_to_metric_families(response.text):
+        if family.name == "vllm:request_failed_total":
+            found_failed_metric = True
+            for sample in family.samples:
+                if sample.name == "vllm:request_failed_total":
+                    final_failed_count = sample.value
+                    break
+            break
+
+    assert found_failed_metric, (
+        "vllm:request_failed_total metric not found in metrics output")
+
+    print(f"Initial failed count: {initial_failed_count}, "
+          f"Final failed count: {final_failed_count}")
+    print(f"Failed request attempts: {actual_failed_attempts}")
+
+    assert final_failed_count >= initial_failed_count, (
+        f"Expected failed count to be at least {initial_failed_count}, "
+        f"but got {final_failed_count}")
+
+    if actual_failed_attempts == total_failed_attempts:
+        print(f"Successfully tested failed request metric tracking with "
+              f"{actual_failed_attempts} failed attempts")

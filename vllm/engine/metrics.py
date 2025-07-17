@@ -22,6 +22,12 @@ else:
 if TYPE_CHECKING:
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
+try:
+    from vllm.entrypoints.openai.api_server import (
+        get_api_failed_requests_count)
+except ImportError:
+    get_api_failed_requests_count = None
+
 logger = init_logger(__name__)
 
 prometheus_client.disable_created_metrics()
@@ -198,6 +204,10 @@ class Metrics:
             name="vllm:request_success_total",
             documentation="Count of successfully processed requests.",
             labelnames=labelnames + [Metrics.labelname_finish_reason])
+        self.counter_request_failed = self._counter_cls(
+            name="vllm:request_failed_total",
+            documentation="Count of failed requests (engine and API level).",
+            labelnames=labelnames)
 
         # Speculative decoding stats
         self.gauge_spec_decode_draft_acceptance_rate = self._gauge_cls(
@@ -478,6 +488,8 @@ class PrometheusStatLogger(StatLoggerBase):
         self.labels = labels
         self.metrics = self._metrics_cls(labelnames=list(labels.keys()),
                                          vllm_config=vllm_config)
+        # Track previous API failed count for incremental logging
+        self.last_api_failed_count = 0
 
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
@@ -558,6 +570,25 @@ class PrometheusStatLogger(StatLoggerBase):
         self._log_counter_labels(self.metrics.counter_request_success,
                                  finished_reason_counter,
                                  Metrics.labelname_finish_reason)
+        # Log failed requests (engine-level failures)
+        engine_failed_count = len(stats.failed_requests)
+        # Clear the list to avoid double-counting on subsequent calls
+        stats.failed_requests.clear()
+
+        # Log API-level failures (if available)
+        api_failed_increment = 0
+        if get_api_failed_requests_count is not None:
+            current_api_failed_count = get_api_failed_requests_count()
+            # Only count the incremental increase since last collection
+            api_failed_increment = (current_api_failed_count -
+                                    self.last_api_failed_count)
+            self.last_api_failed_count = current_api_failed_count
+
+        # Log total failed requests (engine + API increments)
+        total_failed_increment = engine_failed_count + api_failed_increment
+        if total_failed_increment > 0:
+            self._log_counter(self.metrics.counter_request_failed,
+                              total_failed_increment)
         self._log_histogram(self.metrics.histogram_num_prompt_tokens_request,
                             stats.num_prompt_tokens_requests)
         self._log_histogram(
