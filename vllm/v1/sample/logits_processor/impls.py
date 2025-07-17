@@ -52,7 +52,7 @@ class MinPLogitsProcessor(LogitsProcessor):
 
         needs_update = False
         # Process added requests.
-        for index, params, _ in batch_update.added:
+        for index, params, _, _ in batch_update.added:
             min_p = params.min_p if isinstance(params, SamplingParams) else 0.0
             if self.min_p_cpu[index] != min_p:
                 needs_update = True
@@ -128,7 +128,7 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
 
         # Process added requests.
         needs_update = bool(batch_update.added)
-        for index, params, _ in batch_update.added:
+        for index, params, _, _ in batch_update.added:
             if isinstance(params, SamplingParams) and (lb :=
                                                        params.logit_bias):
                 self.biases[index] = lb
@@ -211,7 +211,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         if batch_update:
             # Process added requests.
             needs_update |= bool(batch_update.added)
-            for index, params, output_tok_ids in batch_update.added:
+            for index, params, output_tok_ids, _ in batch_update.added:
                 if (isinstance(params, SamplingParams)
                         and (min_tokens := params.min_tokens)
                         and len(output_tok_ids) < min_tokens):

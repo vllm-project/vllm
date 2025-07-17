@@ -54,6 +54,7 @@ class LogitsProcsRequestParams:
     workload_index: int
     logitproc_type: LogitprocType  # Logitproc enabled, specified by str id
     out_tokens: list[int]  # Output tokens required for min tokens test
+    prompt_tokens: list[int]  # Dummy prompt tokens placeholder
     params: SamplingParams  # Settings customized for logitproc
 
     def __init__(self, workload_index: int, logitproc_type: LogitprocType):
@@ -64,12 +65,14 @@ class LogitsProcsRequestParams:
         # don't matter *for these tests* so use 0 as a dummy value
         self.out_tokens = ([0] *
                            (MIN_TOKENS_LEN_THRESHOLD * random.randint(0, 2)))
+        self.prompt_tokens = []
         self.params = _sampling_params_from_logitproc(logitproc_type)
 
     def __str__(self):
         """For debugging"""
         summ = ', '.join(f'{k}={v}' for k, v in vars(self).items())
         return f"MyClass({summ})"
+
 
 def _generate_fake_sampling_metadata(
     num_output_tokens: int,
@@ -88,7 +91,7 @@ def _generate_fake_sampling_metadata(
                               vocab_size,
                               size=np.random.randint(
                                   1, MAX_NUM_PROMPT_TOKENS)).tolist())
-    logitsprocs = build_logitsprocs(   
+    logitsprocs = build_logitsprocs(
         vllm_config=VllmConfig(),
         device=device,
         is_pin_memory=PIN_MEMORY_AVAILABLE,
@@ -462,7 +465,8 @@ def _generate_fake_step_update(
         # Replace as many removed requests as possible with added requests
         add_remove_idx = batch_update_builder.pop_removed()
         batch_update_builder.added.append(
-            (add_remove_idx, add_req_params.params, add_req_params.out_tokens))
+            (add_remove_idx, add_req_params.params, add_req_params.out_tokens,
+             add_req_params.prompt_tokens))
         persistent_batch[add_remove_idx] = add_req_params
 
     # Append remaining added requests to end of batch
@@ -470,7 +474,8 @@ def _generate_fake_step_update(
                                        num_step_add_replace):(wdx +
                                                               num_step_add)]
     batch_update_builder.added.extend([
-        (adx + batch_size, add_req_params.params, add_req_params.out_tokens)
+        (adx + batch_size, add_req_params.params, add_req_params.out_tokens,
+         add_req_params.prompt_tokens)
         for adx, add_req_params in enumerate(add_reqs_append)
     ])
     persistent_batch.extend(add_reqs_append)

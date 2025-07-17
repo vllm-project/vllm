@@ -159,7 +159,7 @@ class DummyLogitsProcessor(LogitsProcessor):
             return
 
         # Process added requests.
-        for index, params, _ in batch_update.added:
+        for index, params, _, _ in batch_update.added:
             if isinstance(params, SamplingParams) and params.extra_args:
                 target_token = params.extra_args.get("target_token", None)
             else:

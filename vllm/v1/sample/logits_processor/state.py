@@ -19,9 +19,10 @@ class MoveDirectionality(Enum):
     SWAP = 1
 
 
-# (index, params, output_tok_ids) tuples for new
+# (index, params, output_tok_ids, prompt_tok_ids) tuples for new
 # requests added to the batch.
-AddedRequest = tuple[int, Union[SamplingParams, PoolingParams], list[int]]
+AddedRequest = tuple[int, Union[SamplingParams, PoolingParams], list[int],
+                     list[int]]
 # (index 1, index 2, directionality) tuples representing
 # one-way moves or two-way swaps of requests in batch
 MovedRequest = tuple[int, int, MoveDirectionality]
