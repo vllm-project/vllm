@@ -294,8 +294,7 @@ class ServingScores(OpenAIServing):
         request_id: str,
         raw_request: Optional[Request] = None,
         truncate_prompt_tokens: Optional[int] = None,
-    ) -> list[PoolingRequestOutput]:
-
+    ) -> Union[list[PoolingRequestOutput], ErrorResponse]:
         (
             lora_request,
             prompt_adapter_request,
@@ -382,6 +381,8 @@ class ServingScores(OpenAIServing):
                 raw_request,
                 request.truncate_prompt_tokens,
             )
+            if isinstance(final_res_batch, ErrorResponse):
+                return final_res_batch
 
             return self.request_output_to_score_response(
                 final_res_batch,
