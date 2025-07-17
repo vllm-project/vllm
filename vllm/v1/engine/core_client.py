@@ -922,7 +922,6 @@ class DPAsyncMPClient(AsyncMPClient):
                         buf = first_req_rcv_socket.recv(
                             flags=zmq.NOBLOCK).result()
 
-                        # Check if this is a scale up notification
                         decoded = msgspec.msgpack.decode(buf)
                         if isinstance(decoded, (list, tuple)) and len(
                                 decoded) == 2 and decoded[0] == "SCALE_DP":
@@ -934,15 +933,12 @@ class DPAsyncMPClient(AsyncMPClient):
                             await socket.send(scale_msg)
                             continue
 
-                        # Regular request notification - send a message to
-                        # notify the coordinator that
                         # we're sending a request while the engines are
                         # paused, so that it can wake the others up
                         # (to run dummy EP loop).
-                        logger.info(
-                            "Received first request, waking up engines")
+                        assert decoded[0] == "FIRST_REQ"
+                        target_eng_index = decoded[1]
                         self.engines_running = True
-                        target_eng_index = int.from_bytes(buf, "little")
                         msg = msgspec.msgpack.encode(
                             (target_eng_index, self.current_wave))
                         await socket.send(msg)
@@ -978,7 +974,8 @@ class DPAsyncMPClient(AsyncMPClient):
                                     chosen_engine)
         if not self.engines_running:
             # Notify coordinator that we're sending a request
-            await self.first_req_send_socket.send(chosen_engine)
+            req_msg = msgspec.msgpack.encode(("FIRST_REQ", chosen_engine))
+            await self.first_req_send_socket.send(req_msg)
 
         await to_await
 
@@ -1207,9 +1204,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                                                  new_data_parallel_size)
 
         self._ensure_stats_update_task()
-        scale_up_marker = msgspec.msgpack.encode(
+        scale_down_marker = msgspec.msgpack.encode(
             ("SCALE_DP", new_data_parallel_size))
-        await self.first_req_send_socket.send(scale_up_marker)
+        await self.first_req_send_socket.send(scale_down_marker)
 
         self.vllm_config.parallel_config.data_parallel_size = \
             new_data_parallel_size
