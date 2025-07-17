@@ -23,6 +23,10 @@ class TestModelLoader(BaseModelLoader):
         pass
 
 
+class InValidModelLoader:
+    pass
+
+
 @pytest.mark.parametrize(
     "load_format, loader_cls",
     [
@@ -41,3 +45,11 @@ def test_customized_model_loader(load_format, loader_cls):
     model_loader = get_model_loader(test_load_config)
     assert type(model_loader).__name__ == TestModelLoader.__name__
     assert load_format in ModelLoaderRegistry.get_supported_load_formats()
+
+
+def test_invalid_model_loader():
+    with pytest.raises(TypeError):
+        ModelLoaderRegistry.register(
+            load_format="test",
+            loader_cls=InValidModelLoader,
+        )

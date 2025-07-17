@@ -89,8 +89,8 @@ class ModelLoaderRegistry:
                 loader_cls, BaseModelLoader):
             model_loader_cls = loader_cls
         else:
-            msg = ("`model_cls` should be a string or `BaseModelLoader`, "
-                   f"not a {type(model_loader_cls)}")
+            msg = ("`loader_cls` should be a string or `BaseModelLoader`, "
+                   f"not a {type(loader_cls)}")
             raise TypeError(msg)
 
         cls._model_loaders[load_format] = model_loader_cls
