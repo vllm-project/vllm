@@ -13,10 +13,13 @@ from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
 from ..utils import create_new_process_for_each_test
-from .registry import HF_EXAMPLE_MODELS
+from .registry import AUTO_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
 
 
-@pytest.mark.parametrize("model_arch", HF_EXAMPLE_MODELS.get_supported_archs())
+@pytest.mark.parametrize(
+    "model_arch",
+    HF_EXAMPLE_MODELS.get_supported_archs()
+    & AUTO_EXAMPLE_MODELS.get_supported_archs())
 @create_new_process_for_each_test()
 def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
     """The reason for using create_new_process_for_each_test is to avoid 
