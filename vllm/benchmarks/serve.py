@@ -163,7 +163,7 @@ async def get_request(
     # Calculate the cumulative delay time from the first sent out requests.
     for i in range(1, len(delay_ts)):
         delay_ts[i] += delay_ts[i - 1]
-    if ramp_up_strategy is None and delay_ts[-1] != float("inf"):
+    if ramp_up_strategy is None and delay_ts[-1] != 0:
         # When ramp_up_strategy is not set, we assume the request rate is fixed
         # and all requests should be sent in target_total_delay_s, the following
         # logic would re-scale delay time to ensure the final delay_ts
