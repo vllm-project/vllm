@@ -362,5 +362,5 @@ NemotronReasoningParser = get_string_based_reasoning_parser(
     seq_boundary_start="<",
     seq_boundary_end=">",
 )
-ReasoningParserManager.register_reasoning_parser("nemotron",
-                                                 NemotronReasoningParser)
+ReasoningParserManager.register_module(name="nemotron",
+                                       module=NemotronReasoningParser)
