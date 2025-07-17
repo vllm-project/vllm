@@ -952,7 +952,27 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
 
         per_act_token = (
             self.input_quant.strategy == QuantizationStrategy.TOKEN)
-
+        per_channel_quant = (
+            self.weight_quant.strategy == QuantizationStrategy.CHANNEL)
+        if topk_ids.shape[0] <= 8:
+            from vllm.model_executor.layers.fused_moe import fused_experts
+            return fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                inplace=True,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                use_fp8_w8a8=True,
+                per_channel_quant=per_channel_quant,
+                global_num_experts=global_num_experts,
+                expert_map=None if self.disable_expert_map else expert_map,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale)
         if self.fused_experts is None:
             # If no modular kernel is provided, use cutlass_moe_fp8
             from vllm.model_executor.layers.fused_moe.cutlass_moe import (
