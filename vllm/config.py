@@ -4434,8 +4434,9 @@ class CompilationConfig:
             assert self.cudagraph_mode != CUDAGraphMode.PIECEWISE, (
                 "Cannot use piecewise CUDAGraph without splitting ops.")
             self.splitting_ops = []
-        self.is_attention_splitting = all(op in self.splitting_ops for op in [
-            "vllm.unified_attention", "vllm.unified_attention_with_output"])
+        self.is_attention_splitting = all(
+            op in self.splitting_ops for op in
+            ["vllm.unified_attention", "vllm.unified_attention_with_output"])
 
 
 @config
@@ -4722,7 +4723,7 @@ class VllmConfig:
                 # otherwise, keep the cudagraph_mode as is
             else:
                 self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-        
+
         if self.compilation_config.full_cuda_graph is not None:
             logger.warning(
                 "`full_cuda_graph` is deprecated and will be removed in the "
@@ -4738,7 +4739,6 @@ class VllmConfig:
                 self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
                 self.compilation_config.use_cudagraph = True
             # other cases, keep the cudagraph_mode as is
-            
 
         # For V0 or other cases, default to level 0 with no compilation
         if self.compilation_config.level is None:

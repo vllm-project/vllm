@@ -319,7 +319,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.capture_mixed_batches = self.cudagraph_mode != CUDAGraphMode.NONE
         self.no_piecewise_compilation = self.compilation_config.level != \
             CompilationLevel.PIECEWISE or self.model_config.enforce_eager
-        
+
         self.uniform_decode_query_len = 1 if not self.speculative_config else \
             1 + self.speculative_config.num_speculative_tokens
 
@@ -589,7 +589,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
     ) -> tuple[dict[str,
                     Any], bool, torch.Tensor, Optional[SpecDecodeMetadata],
-               np.ndarray, Optional[CommonAttentionMetadata]]:
+               np.ndarray, Optional[CommonAttentionMetadata], int]:
         """
         :return: tuple[
             attn_metadata: layer-to-attention_metadata mapping,
@@ -772,8 +772,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         return (attn_metadata, attention_cuda_graphs, logits_indices,
                 spec_decode_metadata, num_scheduled_tokens,
-                spec_decode_common_attn_metadata,
-                max_num_scheduled_tokens)
+                spec_decode_common_attn_metadata, max_num_scheduled_tokens)
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -1295,8 +1294,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Prepare the decoder inputs.
         (attn_metadata, attention_cuda_graphs, logits_indices,
          spec_decode_metadata, num_scheduled_tokens_np,
-         spec_decode_common_attn_metadata, max_query_len) = (
-             self._prepare_inputs(scheduler_output))
+         spec_decode_common_attn_metadata,
+         max_query_len) = (self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.cudagraph_mode != CUDAGraphMode.NONE
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -1951,7 +1950,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Padding for DP
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
         num_tokens += num_pad
-        
+
         # If cudagraph_separate_routine is enabled when use full cudagraph,
         # we need to manually activate the correct routine of attention backend
         # for mixed prefill-decode batches and uniform decode batches
@@ -1968,7 +1967,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # for GQA/MQA.
         max_query_len = self.uniform_decode_query_len if uniform_batch else \
                                                                 num_tokens
-                                                                
+
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
@@ -1987,7 +1986,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             min_tokens_per_req = num_tokens // num_reqs
             num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
             num_scheduled_tokens_list[-1] += num_tokens % num_reqs
-        
+
         assert sum(num_scheduled_tokens_list) == num_tokens
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
@@ -2346,7 +2345,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_num_tokens = self.scheduler_config.max_num_seqs * \
                         self.uniform_decode_query_len
                 decode_cudagraph_batch_sizes = [
-                    x for x in self.cudagraph_batch_sizes if x <= max_num_tokens
+                    x for x in self.cudagraph_batch_sizes
+                    if x <= max_num_tokens
                 ]
                 compilation_cases_decode = list(
                     reversed(decode_cudagraph_batch_sizes))

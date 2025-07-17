@@ -18,10 +18,11 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils import cdiv
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
-from vllm.v1.attention.backends.utils import (AttentionCGSupport,
-    AttentionMetadataBuilder, CommonAttentionMetadata, PerLayerParameters,
-    get_kv_cache_layout, get_per_layer_parameters,
+from vllm.v1.attention.backends.utils import (
+    AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
+    PerLayerParameters, get_kv_cache_layout, get_per_layer_parameters,
     infer_global_hyperparameters, reorder_batch_to_split_decodes_and_prefills,
     split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -233,7 +234,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._prefill_wrapper = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
 
-        compilation_config = self.vllm_config.compilation_config
+        compilation_config = vllm_config.compilation_config
+        max_num_pages_per_req = cdiv(vllm_config.model_config.max_model_len,
+                                     self.kv_cache_spec.block_size)
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        max_num_pages = max_num_reqs * max_num_pages_per_req
         self.enable_cuda_graph = (
             compilation_config.cudagraph_mode == CUDAGraphMode.FULL)
         if self.enable_cuda_graph:
@@ -242,7 +247,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self._decode_wrappers_cudagraph: dict[
                 int, BatchDecodeWithPagedKVCacheWrapper] = {}
             self._decode_cudagraph_max_bs = min(
-                runner.max_num_reqs, compilation_config.max_capture_size)
+                max_num_reqs, compilation_config.max_capture_size)
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
@@ -254,16 +259,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.kv_cache_spec = kv_cache_spec
 
         # Preparing persistent buffers
-        self.paged_kv_indptr = torch.zeros(self.runner.max_num_reqs + 1,
+        self.paged_kv_indptr = torch.zeros(max_num_reqs + 1,
                                            dtype=torch.int32,
-                                           device=self.runner.device)
+                                           device=self.device)
         self.paged_kv_indices = torch.zeros(
-            block_table.get_device_tensor().numel(),  # max num pages possible
+            max_num_pages,  # max num pages possible
             dtype=torch.int32,
-            device=self.runner.device)
-        self.paged_kv_last_page_len = torch.zeros(self.runner.max_num_reqs,
+            device=self.device)
+        self.paged_kv_last_page_len = torch.zeros(max_num_reqs,
                                                   dtype=torch.int32,
-                                                  device=self.runner.device)
+                                                  device=self.device)
 
     def reorder_batch(self, input_batch: InputBatch,
                       scheduler_output: SchedulerOutput) -> bool:
@@ -450,6 +455,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> FlashInferMetadata:
+        num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens =\
             split_decodes_and_prefills(common_attn_metadata)

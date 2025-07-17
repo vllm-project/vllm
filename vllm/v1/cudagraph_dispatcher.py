@@ -85,8 +85,7 @@ class CudagraphDispatcher:
                                      cudagraph_options=CUDAGraphOptions(
                                          usage_str="full/uniform"))
                 })
-                logger.debug(
-                    "Full cudagraph for uniform batches initialized")
+                logger.debug("Full cudagraph for uniform batches initialized")
 
     def get_cudagraph_runtime_style(
             self, attn_cuda_graphs: bool) -> CUDAGraphRuntimeStyle:  # noqa
@@ -115,7 +114,7 @@ class CudagraphDispatcher:
         return CUDAGraphRuntimeStyle.NONE
 
     def dispatch(self, cudagraph_runtime_style: CUDAGraphRuntimeStyle,
-                    uniform_batch: bool) -> Any:
+                 uniform_batch: bool) -> Any:
         assert self.model is not None, ("No model have been assigned"
                                         "to cudagraph dispatcher")
         # if no cudagraph candidates, just skip dispatching.

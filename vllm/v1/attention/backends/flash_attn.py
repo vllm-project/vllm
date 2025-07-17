@@ -186,7 +186,7 @@ class FlashAttentionMetadataBuilder(
             self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL)
 
         if self.use_full_cuda_graph and self.aot_schedule:
-            self.max_cudagraph_size=self.compilation_config.max_capture_size
+            self.max_cudagraph_size = self.compilation_config.max_capture_size
 
             if self.max_cudagraph_size > 992:
                 # This condition derives from FA3's internal heuristic.
