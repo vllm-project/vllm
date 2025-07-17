@@ -677,6 +677,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
+        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
         num_dp = self.num_dispatchers
@@ -889,6 +890,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
+        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
         num_dp = self.num_dispatchers
