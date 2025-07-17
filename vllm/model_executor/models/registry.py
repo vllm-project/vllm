@@ -460,11 +460,19 @@ class _ModelRegistry:
             return _try_inspect_model_cls(model_arch, self.models[model_arch])
 
         if model_arch.endswith("ForSequenceClassification"):
-            arch = model_arch.replace("ForSequenceClassification",
-                                      "ForCausalLM")
-            if arch not in self.models:
+            causal_lm_arch = model_arch.replace("ForSequenceClassification",
+                                                "ForCausalLM")
+            if causal_lm_arch not in self.models:
                 return None
-            info = _try_inspect_model_cls(model_arch, self.models[arch])
+
+            info = _try_inspect_model_cls(causal_lm_arch,
+                                          self.models[causal_lm_arch])
+
+            # Create a copy to avoid mutating the cached object
+            import copy
+            info = copy.copy(info)
+
+            info.architecture = model_arch
             info.supports_cross_encoding = True
             return info
 
