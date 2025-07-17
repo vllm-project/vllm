@@ -95,9 +95,7 @@ def test_chatglm3_lora_tp4_fully_sharded_loras(chatglm3_lora_files):
                    tensor_parallel_size=4,
                    trust_remote_code=True,
                    fully_sharded_loras=True,
-                   enable_chunked_prefill=True,
-                   gpu_memory_utilization=0.85,
-                   cpu_offload_gb=10)
+                   enable_chunked_prefill=True)
     output1 = do_sample(llm, chatglm3_lora_files, lora_id=1)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
         assert output1[i] == EXPECTED_LORA_OUTPUT[i]
