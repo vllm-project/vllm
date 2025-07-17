@@ -122,7 +122,8 @@ class CPUWorker(Worker):
     def _get_autobind_cpu_ids(self, cpu_num_per_core: int) -> str:
         """
         Return CPU ids to bind based on NUMA nodes. 
-        Currently for rank N, only CPU ids on NUMA node N will be selected.
+        Currently for rank N, only CPU ids on the N-th node in available NUMA 
+        node list will be selected.
         Args:
             cpu_num_per_core: max number of CPUs to be used per physical core. 
         """
@@ -162,15 +163,24 @@ class CPUWorker(Worker):
             x for x in logical_cpu_list if x.id in allowed_cpu_id_list
         ]
 
-        # Get CPUs on NUMA node `local_rank`
-        logical_cpu_list = [
-            x for x in logical_cpu_list if x.numa_node == self.local_rank
-        ]
-        assert len(logical_cpu_list) != 0, (
-            f"No allowed CPU on NUMA node {self.local_rank}. "
+        # Get allowed NUMA nodes
+        allowed_numa_nodes = set()
+        for x in logical_cpu_list:
+            allowed_numa_nodes.add(x.numa_node)  # type: ignore
+        allowed_numa_nodes = sorted(allowed_numa_nodes)  # type: ignore
+        assert len(allowed_numa_nodes) >= self.parallel_config.world_size, (
+            f"No enough allowed NUMA nodes to bind threads of "
+            f"{self.parallel_config.world_size} CPUWorkers. "
+            f"Allowed NUMA nodes are {allowed_numa_nodes}. "
             f"Allowed CPU ids are {allowed_cpu_id_list}. "
-            "Their NUMA nodes can be got via `lscpu`. "
             "Please try to bind threads manually.")
+
+        # Get CPUs on NUMA node `allowed_numa_nodes[local_rank]``
+        selected_numa_node = allowed_numa_nodes[
+            self.local_rank]  # type: ignore
+        logical_cpu_list = [
+            x for x in logical_cpu_list if x.numa_node == selected_numa_node
+        ]
 
         # Select at most cpu_num_per_core CPUs from each physical core
         core_to_cpus: dict[int, list[LogicalCPUInfo]] = {}
