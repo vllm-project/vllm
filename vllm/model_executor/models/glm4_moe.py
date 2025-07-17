@@ -53,7 +53,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .deepseek_v2 import get_spec_layer_idx_from_weight_name
 from .interfaces import SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -672,3 +671,15 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP):
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+
+def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
+                                        weight_name: str) -> Optional[int]:
+    if hasattr(config,
+               "num_nextn_predict_layers") and (config.num_nextn_predict_layers
+                                                > 0):
+        layer_idx = config.num_hidden_layers
+        for i in range(config.num_nextn_predict_layers):
+            if weight_name.startswith(f"layers.{layer_idx+i}."):
+                return layer_idx + i
+    return None

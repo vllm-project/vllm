@@ -2658,12 +2658,13 @@ class SpeculativeConfig:
                 "architectures": ["DeepSeekMTPModel"]
             })
         if hf_config.architectures[0] == "Glm4MoeForCausalLM":
-            hf_config.model_type = "glm4_moe_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
-            hf_config.update({
-                "n_predict": n_predict,
-                "architectures": ["Glm4MoeMTPModel"]
-            })
+            if n_predict:  # GLM-MoE have both MTP and Not MTP model
+                hf_config.update({
+                    "model_type": "glm4_moe_mtp",
+                    "n_predict": n_predict,
+                    "architectures": ["Glm4MoeMTPModel"]
+                })
         if hf_config.architectures[0] == "MiMoForCausalLM":
             hf_config.model_type = "mimo_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
