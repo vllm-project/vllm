@@ -49,7 +49,7 @@ from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors, ParallelSampleSequenceGroup,
                            PoolingSequenceGroupOutput, Sequence, SequenceGroup,
                            SequenceGroupBase, SequenceGroupMetadata,
-                           SequenceGroupOutput, SequenceStatus)
+                           SequenceGroupOutput, SequenceStatus, PoolerOutput)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.detokenizer import Detokenizer
@@ -1055,10 +1055,11 @@ class LLMEngine:
                         else:
                             seq_group.metrics.model_execute_time = (
                                 o.model_execute_time)
-
+            print(f"Full outputs: {outputs}")
+            # print(f"Output for seq_group {seq_group.seq_id}: {output}")
             if self.model_config.runner_type == "pooling":
                 self._process_sequence_group_outputs(seq_group, output)
-            else:
+            elif not self.model_config.is_middle_blocks:
                 self.output_processor.process_prompt_logprob(seq_group, output)
                 if seq_group_meta.do_sample:
                     self.output_processor.process_outputs(
@@ -1168,13 +1169,23 @@ class LLMEngine:
         return None
 
     def _advance_to_next_step(
-            self, output: SamplerOutput,
+            self, output: Union[SamplerOutput, PoolerOutput],
             seq_group_metadata_list: List[SequenceGroupMetadata],
             scheduled_seq_groups: List[ScheduledSequenceGroup]) -> None:
         """Given model output from a single run, append the tokens to the
         sequences. This is normally done inside output processor, but it is
         required if the worker is to perform async forward pass to next step.
         """
+        # For pooling models, we don't need to advance step by step
+        # If class of output is PoolingSequenceGroupOutput,
+        # then we can skip this step
+        # if isinstance(output, PoolerOutput):
+        #     # Pooling models process entire sequences at once
+        #     # No need to advance tokens step by step
+        #     # Change the group state to decode
+        #     for seq in seq_group.seqs:
+        #         seq.stage
+            
         for seq_group_metadata, sequence_group_outputs, scheduled_seq_group in \
             zip(seq_group_metadata_list, output, scheduled_seq_groups):
             seq_group = scheduled_seq_group.seq_group
@@ -1193,7 +1204,7 @@ class LLMEngine:
                                     is not None else 0)
                 seq_group.update_num_computed_tokens(token_chunk_size)
 
-            if seq_group_metadata.do_sample:
+            if seq_group_metadata.do_sample and not isinstance(output, PoolerOutput):
                 assert len(sequence_group_outputs.samples) == 1, (
                     "Async output processor expects a single sample"
                     " (i.e sampling_params.n == 1)")
@@ -1212,6 +1223,24 @@ class LLMEngine:
                 else:
                     seq.append_token_id(sample.output_token, sample.logprobs,
                                         sample.output_embed)
+    def advance_to_next_step_middle_block(self,
+                             data: torch.Tensor,
+                             seq_group_metadata_list: List[SequenceGroupMetadata],
+                             scheduled_seq_groups: List[ScheduledSequenceGroup]) -> None:
+        """Advance the sequences to the next step with the given data.
+        This is used for middle block execution, where the model output is
+        already available and we need to append it to the sequences.
+        """
+        if not isinstance(data, torch.Tensor):
+            raise TypeError(
+                f"data must be a torch.Tensor, got {type(data)}")
+        for seq_group_metadata, scheduled_seq_group in \
+            zip(seq_group_metadata_list, scheduled_seq_groups):
+            seq_group = scheduled_seq_group.seq_group
+
+            # Update prompt embeds using the data
+            seq = seq_group.seqs[0]
+            seq.append_input_embeds(data)
 
     def step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
@@ -1312,6 +1341,7 @@ class LLMEngine:
 
             # Maybe switch from async mode to sync mode
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
+                print("Process outputs")
                 self._process_model_outputs(ctx=ctx)
 
             if (self.scheduler_config.is_multi_step
@@ -1356,6 +1386,7 @@ class LLMEngine:
                 outputs = self.model_executor.execute_model(
                     execute_model_req=execute_model_req)
                 self._skip_scheduling_next_step = False
+                print(f"Outputs: {outputs}")
             except InputProcessingError as e:
                 # The input for this request cannot be processed, so we must
                 # abort it. If there are remaining requests in the batch that
@@ -1409,7 +1440,8 @@ class LLMEngine:
             if outputs and allow_async_output_proc:
                 assert len(outputs) == 1, (
                     "Async postprocessor expects only a single output set")
-
+                print(f"Seq group metadata list: {seq_group_metadata_list}")
+                print(f"Scheduler outputs: {scheduler_outputs}")
                 self._advance_to_next_step(
                     outputs[0], seq_group_metadata_list,
                     scheduler_outputs.scheduled_seq_groups)
@@ -1440,6 +1472,14 @@ class LLMEngine:
             # queued control plane messages, such as add/remove lora adapters.
             logger.debug("Stopping remote worker execution loop.")
             self.model_executor.stop_remote_worker_execution_loop()
+        
+        if self.model_config.is_middle_blocks:
+            # If the model has middle blocks, we need to return the outputs
+            # for the middle blocks.
+            if len(ctx.output_queue) > 0:
+                # Process the outputs for the middle blocks
+                self._process_model_outputs(ctx=ctx)
+            return ctx.request_outputs, seq_group_metadata_list, scheduler_outputs.scheduled_seq_groups
 
         return ctx.request_outputs
 
@@ -1478,21 +1518,27 @@ class LLMEngine:
     def _has_remaining_steps(
         self, seq_group_metadata_list: Optional[List[SequenceGroupMetadata]]
     ) -> bool:
+        print(f"Is multi-step: {self.scheduler_config.is_multi_step}")
+        print(f"Seq group metadata list: {seq_group_metadata_list}")
         if (not self.scheduler_config.is_multi_step
                 or not seq_group_metadata_list):
+            print("Not multi-step or no seq groups, skipping remaining steps check.")
             return False
 
         # TODO(will) this is a sanity check for nowto make sure that all the
         # seqs are on the same steps. Eventually we will want to do some sort of
         # dynamic scheduling when doing multi-step decoding.
         ref_remaining_steps = seq_group_metadata_list[0].state.remaining_steps
+        print(
+            f"Checking remaining steps: {ref_remaining_steps} for "
+            f"{len(seq_group_metadata_list)} seq groups.")
         if any([
                 seq_group.state.remaining_steps != ref_remaining_steps
                 for seq_group in seq_group_metadata_list[1:]
         ]):
             raise AssertionError("All running sequence groups should "
                                  "have the same remaining steps.")
-
+        
         return ref_remaining_steps > 0
 
     def _cache_scheduler_outputs_for_multi_step(

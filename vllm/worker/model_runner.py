@@ -50,7 +50,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.prompt_adapter.worker_manager import (
     LRUCacheWorkerPromptAdapterManager)
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
+from vllm.sequence import IntermediateTensors, PoolerOutput, PoolingSequenceGroupOutput, SequenceGroupMetadata
 from vllm.utils import (DeviceMemoryProfiler, GiB_bytes, PyObjectCache,
                         async_tensor_h2d, flatten_2d_lists,
                         is_pin_memory_available, supports_dynamo,
@@ -2065,12 +2065,12 @@ class MiddleModelRunner(GPUModelRunnerBase[ModelInputForGPU]):
         #         model_input.query_lens, self.device, self.pin_memory,
         #         generators, self.sampling_metadata_cache)
         # else:
-        sampling_metadata = None
-        is_prompt = (seq_group_metadata_list[0].is_prompt
-                     if seq_group_metadata_list else None)
+        # sampling_metadata = None
+        # is_prompt = (seq_group_metadata_list[0].is_prompt
+        #              if seq_group_metadata_list else None)
         return dataclasses.replace(model_input,
-                                   sampling_metadata=sampling_metadata,
-                                   is_prompt=is_prompt,
+                                #    sampling_metadata=sampling_metadata,
+                                #    is_prompt=is_prompt,
                                    virtual_engine=virtual_engine)
 
     @torch.inference_mode()
@@ -2081,7 +2081,7 @@ class MiddleModelRunner(GPUModelRunnerBase[ModelInputForGPU]):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
         **kwargs,
-    ) -> Optional[IntermediateTensors]:
+    ) -> Optional[PoolerOutput]:
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
 
@@ -2264,9 +2264,14 @@ class MiddleModelRunner(GPUModelRunnerBase[ModelInputForGPU]):
 
         if not self.is_driver_worker:
             return None
-        
-
-        return hidden_or_intermediate_states
+        # Create PoolerOutput from the hidden or intermediate states.
+        # The data should be just the hidden states
+        output: List[PoolerOutput] = [PoolerOutput(outputs=[
+            PoolingSequenceGroupOutput(
+                data=hidden_or_intermediate_states
+            )
+        ])]
+        return output
 
     def need_recv_kv(self, model_input, kv_caches) -> bool:
         """Check if we need to receive kv-cache from the other worker.

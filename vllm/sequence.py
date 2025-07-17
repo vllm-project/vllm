@@ -324,6 +324,27 @@ class SequenceData(msgspec.Struct,
     def mrope_position_delta(self, new_mrope_position_delta):
         self._mrope_position_delta = new_mrope_position_delta
 
+    def append_input_embeds(self,
+                            input_embeds: torch.Tensor,
+                            # token_embed: Optional[torch.Tensor] = None
+                            ) -> None:
+        self.prompt_embeds = input_embeds
+        self._prompt_embeds = input_embeds
+        # if token_embed is not None:
+        #     # Do not pass in with batch or sequence dimensions
+        #     assert token_embed.ndim == 1
+        #     token_embed = token_embed.detach().cpu().unsqueeze(0)
+        #     if self._output_embeds is None:
+        #         self._output_embeds = token_embed
+        #     else:
+        #         self._output_embeds = torch.cat(
+        #             (self._output_embeds, token_embed), dim=0)
+        #     assert self._cached_all_token_embeds is not None
+        #     self._cached_all_token_embeds = torch.cat(
+        #         (self._cached_all_token_embeds,
+        #          token_embed.to(device=self._cached_all_token_embeds.device)),
+        #         dim=0)
+
     def append_token_id(self,
                         token_id: int,
                         logprob: float,
@@ -631,6 +652,13 @@ class Sequence:
         self.output_logprobs.append(logprobs)
         self.data.append_token_id(token_id, logprobs[token_id].logprob,
                                   token_embed)
+    def append_input_embeds(self, input_embeds: torch.Tensor) -> None:
+        """Append input embeddings to the sequence data."""
+        self.data.append_input_embeds(input_embeds)
+        # # If the sequence is in prefill stage, we need to reset the
+        # # number of computed tokens.
+        # if self.data.stage == SequenceStage.PREFILL:
+        #     self.data.reset_state_for_recompute()
 
     def get_len(self) -> int:
         return self.data.get_len()
