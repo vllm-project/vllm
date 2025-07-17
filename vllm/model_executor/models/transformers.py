@@ -17,7 +17,7 @@
 """Wrapper around `transformers` models"""
 from collections.abc import Iterable
 from contextlib import nullcontext
-from typing import Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 import regex as re
 import torch
@@ -310,7 +310,8 @@ class TransformersModel(nn.Module):
 
         for i in range(start, end):
             sliding_window = None
-            if global_attention_layers is not None and i not in global_attention_layers:
+            if global_attention_layers is not None and (
+                    i not in global_attention_layers):
                 assert self.config.interleaved_sliding_window is not None
                 sliding_window = self.config.interleaved_sliding_window
             attention_instances[i] = Attention(
@@ -410,11 +411,12 @@ class TransformersModel(nn.Module):
     def compute_additional_head(
         self,
         hidden_states: torch.Tensor,
-        **kwargs,
+        additional_heads_data: Optional[dict[str, Any]],
     ) -> Optional[torch.Tensor]:
         if get_pp_group().is_last_rank and hasattr(self.model,
                                                    "compute_additional_head"):
-            return self.model.compute_additional_head(hidden_states, **kwargs)
+            return self.model.compute_additional_head(hidden_states,
+                                                      additional_heads_data)
         return None
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -515,10 +517,11 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
     def compute_additional_head(
         self,
         hidden_states: torch.Tensor,
-        **kwargs,
+        additional_heads_data: Optional[dict[str, Any]],
     ) -> Optional[torch.Tensor]:
         if hasattr(self.model, "compute_additional_head"):
-            return self.model.compute_additional_head(hidden_states, **kwargs)
+            return self.model.compute_additional_head(hidden_states,
+                                                      additional_heads_data)
         return None
 
     def load_weights(self, weights: Iterable[tuple[str,

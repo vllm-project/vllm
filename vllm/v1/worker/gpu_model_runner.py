@@ -1429,11 +1429,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if run_additional_heads:
             assert hasattr(self.model, "compute_additional_head")
-            additional_heads_data = [
+            additional_heads_data: Optional[list[Optional[dict[str, Any]]]] = [
                 self.input_batch.additional_heads_data.get(i, None)
                 for i in range(self.input_batch.num_reqs)
             ]
-            if not any(additional_heads_data):
+            if additional_heads_data is not None and not any(
+                    additional_heads_data):
                 additional_heads_data = None
 
             # NOTE: In theory not all logit indices need additional
@@ -1592,7 +1593,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             get_kv_transfer_group().clear_connector_metadata()
 
         self.eplb_step()
-
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
