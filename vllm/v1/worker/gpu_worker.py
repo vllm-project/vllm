@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
+import copy
 import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 import torch.distributed
@@ -12,11 +13,12 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
-from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
+from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
+                                          get_kv_transfer_group,
+                                          has_kv_transfer_group)
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -25,7 +27,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
@@ -80,6 +82,8 @@ class Worker(WorkerBase):
             self.profiler = None
 
     def sleep(self, level: int = 1) -> None:
+        from vllm.device_allocator.cumem import CuMemAllocator
+
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
 
         # Save the buffers before level 2 sleep
@@ -102,6 +106,8 @@ class Worker(WorkerBase):
             used_bytes / GiB_bytes)
 
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        from vllm.device_allocator.cumem import CuMemAllocator
+
         allocator = CuMemAllocator.get_instance()
         allocator.wake_up(tags)
 
@@ -116,6 +122,8 @@ class Worker(WorkerBase):
     def _maybe_get_memory_pool_context(self,
                                        tag: str) -> AbstractContextManager:
         if self.vllm_config.model_config.enable_sleep_mode:
+            from vllm.device_allocator.cumem import CuMemAllocator
+
             allocator = CuMemAllocator.get_instance()
             if tag == "weights":
                 assert allocator.get_current_usage() == 0, (
@@ -144,7 +152,7 @@ class Worker(WorkerBase):
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
             self.device = torch.device(f"cuda:{self.local_rank}")
-            torch.cuda.set_device(self.device)
+            current_platform.set_device(self.device)
 
             _check_if_gpu_supports_dtype(self.model_config.dtype)
             gc.collect()
@@ -171,7 +179,8 @@ class Worker(WorkerBase):
         # Initialize the distributed environment.
         init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
-                                            self.local_rank)
+                                            self.local_rank,
+                                            current_platform.dist_backend)
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -188,6 +197,9 @@ class Worker(WorkerBase):
     def load_model(self) -> None:
         with self._maybe_get_memory_pool_context(tag="weights"):
             self.model_runner.load_model()
+
+    def update_config(self, overrides: dict[str, Any]) -> None:
+        self.model_runner.update_config(overrides)
 
     def reload_weights(self) -> None:
         with self._maybe_get_memory_pool_context(tag="weights"):
@@ -249,7 +261,16 @@ class Worker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
-        with self._maybe_get_memory_pool_context(tag="kv_cache"):
+
+        if self.vllm_config.model_config.enable_sleep_mode:
+            from vllm.device_allocator.cumem import CuMemAllocator
+
+            allocator = CuMemAllocator.get_instance()
+            context = allocator.use_memory_pool(tag="kv_cache")
+        else:
+            from contextlib import nullcontext
+            context = nullcontext()
+        with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def compile_or_warm_up_model(self) -> None:
@@ -310,14 +331,33 @@ class Worker(WorkerBase):
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
+
         parallel_config = self.vllm_config.parallel_config
         if parallel_config.distributed_executor_backend != "external_launcher" \
             and not get_pp_group().is_last_rank:
             assert isinstance(output, IntermediateTensors)
             get_pp_group().send_tensor_dict(output.tensors,
                                             all_gather_group=get_tp_group())
-            return None
+            output = EMPTY_MODEL_RUNNER_OUTPUT
+
         assert isinstance(output, ModelRunnerOutput)
+        if has_kv_transfer_group():
+            finished_sending, finished_recving = (
+                get_kv_transfer_group().get_finished(
+                    scheduler_output.finished_req_ids))
+            if finished_sending or finished_recving:
+                if output is EMPTY_MODEL_RUNNER_OUTPUT:
+                    output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+                output.finished_sending = finished_sending
+                output.finished_recving = finished_recving
+
+            # Clear KVConnector state for this step.
+            get_kv_transfer_group().clear_connector_metadata()
+
+            # with a connector, the scheduler expects output from all workers
+            return output
+
+        # return output only from the driver worker
         return output if self.is_driver_worker else None
 
     def profile(self, is_start: bool = True):

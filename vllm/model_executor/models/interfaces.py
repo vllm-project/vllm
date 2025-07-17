@@ -5,10 +5,14 @@ from collections.abc import Iterable, MutableSequence
 from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
                     Union, overload, runtime_checkable)
 
+import numpy as np
 import torch
 from torch import Tensor
 from typing_extensions import Self, TypeIs
 
+from vllm.config import ModelConfig, SpeechToTextConfig
+from vllm.inputs import TokensPrompt
+from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -18,6 +22,8 @@ from .interfaces_base import is_pooling_model
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
+    from vllm.config import VllmConfig
+    from vllm.model_executor.models.utils import WeightsMapper
     from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
@@ -44,6 +50,13 @@ class SupportsMultiModal(Protocol):
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
     """
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        """
+        Get the placeholder text for the `i`th `modality` item in the prompt.
+        """
+        ...
 
     def get_multimodal_embeddings(self,
                                   **kwargs: object) -> MultiModalEmbeddings:
@@ -81,11 +94,22 @@ class SupportsMultiModal(Protocol):
     ) -> Tensor:
         ...
 
+    # TODO: Remove this overload once v0 is deprecated
     @overload
     def get_input_embeddings(
         self,
         input_ids: Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> Tensor:
+        ...
+
+    def get_input_embeddings(
+        self,
+        input_ids: Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        # Only necessary so that the v0 overload is valid
+        # TODO: Remove attn_metadata once v0 is deprecated
+        attn_metadata: Optional["AttentionMetadata"] = None,
     ) -> Tensor:
         """
         Returns the input embeddings merged from the text embeddings from 
@@ -120,6 +144,62 @@ def supports_multimodal(
         return isinstance(model, _SupportsMultiModalType)
 
     return isinstance(model, SupportsMultiModal)
+
+
+@runtime_checkable
+class SupportsScoreTemplate(Protocol):
+    """The interface required for all models that support score template."""
+
+    supports_score_template: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports score template.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+    @classmethod
+    def get_score_template(cls, query: str, document: str) -> Optional[str]:
+        """
+        Generate a full prompt by populating the score template with query and document content.
+        """ # noqa: E501
+        ...
+
+    @classmethod
+    def post_process_tokens(cls, prompt: TokensPrompt) -> None:
+        """
+        Perform architecture-specific manipulations on the input tokens.
+        """
+        ...
+
+
+# We can't use runtime_checkable with ClassVar for issubclass checks
+# so we need to treat the class as an instance and use isinstance instead
+@runtime_checkable
+class _SupportsScoreTemplateType(Protocol):
+    supports_score_template: Literal[True]
+
+
+@overload
+def supports_score_template(
+        model: type[object]) -> TypeIs[type[SupportsScoreTemplate]]:
+    ...
+
+
+@overload
+def supports_score_template(model: object) -> TypeIs[SupportsScoreTemplate]:
+    ...
+
+
+def supports_score_template(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsScoreTemplate]], TypeIs[SupportsScoreTemplate]]:
+
+    if isinstance(model, type):
+        return isinstance(model, _SupportsScoreTemplateType)
+
+    return isinstance(model, SupportsScoreTemplate)
 
 
 @runtime_checkable
@@ -402,6 +482,25 @@ class IsHybrid(Protocol):
         , also indicates that the model's hf_config has 
         'layers_block_type' """
 
+    @classmethod
+    def get_mamba_state_shape_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+        use_v1: bool = True,
+    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+        """Calculate shapes for Mamba's convolutional and state caches.
+
+        Args:
+            vllm_config: vLLM config
+            use_v1: Get shapes for V1 (or V0)
+
+        Returns:
+            Tuple containing:
+            - conv_state_shape: Shape for convolutional state cache
+            - temporal_state_shape: Shape for state space model cache
+        """
+        ...
+
 
 @runtime_checkable
 class _IsHybridType(Protocol):
@@ -560,26 +659,42 @@ def supports_cross_encoding(
 def has_step_pooler(model: Union[type[object], object]) -> bool:
     """Check if the model uses step pooler."""
     return is_pooling_model(model) and any(
-        type(module).__name__ == "StepPool" for module in model.modules())
+        type(module).__name__ == "StepPooler" for module in model.modules())
 
 
 class SupportsQuant:
     """The interface required for all models that support quantization."""
 
-    packed_modules_mapping: ClassVar[dict[str, list[str]]] = {}
+    hf_to_vllm_mapper: ClassVar[Optional["WeightsMapper"]] = None
+    packed_modules_mapping: ClassVar[Optional[dict[str, list[str]]]] = None
     quant_config: Optional[QuantizationConfig] = None
 
     def __new__(cls, *args, **kwargs) -> Self:
         instance = super().__new__(cls)
+
+        # find config passed in arguments
         quant_config = cls._find_quant_config(*args, **kwargs)
         if quant_config is not None:
+
+            # attach config to model for general use
             instance.quant_config = quant_config
-            instance.quant_config.packed_modules_mapping.update(
-                cls.packed_modules_mapping)
+
+            # apply model mappings to config for proper config-model matching
+            # NOTE: `TransformersForCausalLM` is not supported due to how this
+            # class defines `hf_to_vllm_mapper` as a post-init `@property`.
+            # After this is fixed, get `instance.hf_to_vllm_mapper` directly
+            if getattr(instance, "hf_to_vllm_mapper", None) is not None:
+                instance.quant_config.apply_vllm_mapper(
+                    instance.hf_to_vllm_mapper)
+            if getattr(instance, "packed_modules_mapping", None) is not None:
+                instance.quant_config.packed_modules_mapping.update(
+                    instance.packed_modules_mapping)
+
         return instance
 
     @staticmethod
     def _find_quant_config(*args, **kwargs) -> Optional[QuantizationConfig]:
+        """Find quant config passed through model constructor args"""
         from vllm.config import VllmConfig  # avoid circular import
 
         args_values = list(args) + list(kwargs.values())
@@ -599,16 +714,46 @@ class SupportsTranscription(Protocol):
 
     supports_transcription: ClassVar[Literal[True]] = True
 
+    supports_transcription_only: ClassVar[bool] = False
+    """
+    Transcription models can opt out of text generation by setting this to
+    `True`.
+    """
+
     @classmethod
-    def get_decoder_prompt(cls, language: str, task_type: str,
-                           prompt: str) -> str:
-        """Get the decoder prompt for the ASR model."""
+    def get_generation_prompt(cls, audio: np.ndarray,
+                              stt_config: SpeechToTextConfig,
+                              model_config: ModelConfig, language: str,
+                              task_type: str,
+                              request_prompt: str) -> PromptType:
+        """Get the prompt for the ASR model.
+        The model has control over the construction, as long as it
+        returns a valid PromptType."""
         ...
 
     @classmethod
     def validate_language(cls, language: str) -> bool:
         """Check if the model supports a specific ISO639_1 language."""
         ...
+
+    @classmethod
+    def get_speech_to_text_config(
+            cls, model_config: ModelConfig,
+            task_type: Literal["transcribe",
+                               "translate"]) -> SpeechToTextConfig:
+        """Get the speech to text config for the ASR model."""
+        ...
+
+    @classmethod
+    def get_num_audio_tokens(cls, audio_duration_s: float,
+                             stt_config: SpeechToTextConfig,
+                             model_config: ModelConfig) -> Optional[int]:
+        """
+        Map from audio duration to number of audio tokens produced by the ASR 
+        model, without running a forward pass.
+        This is used for estimating the amount of processing for this audio.
+        """
+        return None
 
 
 @overload

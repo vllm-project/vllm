@@ -58,9 +58,9 @@ assigned to your Google Cloud project for your immediate exclusive use.
 
 For more information about using TPUs with GKE, see:
 
-- <https://cloud.google.com/kubernetes-engine/docs/how-to/tpus>
-- <https://cloud.google.com/kubernetes-engine/docs/concepts/tpus>
-- <https://cloud.google.com/kubernetes-engine/docs/concepts/plan-tpus>
+- [About TPUs in GKE](https://cloud.google.com/kubernetes-engine/docs/concepts/tpus)
+- [Deploy TPU workloads in GKE Standard](https://cloud.google.com/kubernetes-engine/docs/how-to/tpus)
+- [Plan for TPUs in GKE](https://cloud.google.com/kubernetes-engine/docs/concepts/plan-tpus)
 
 ## Configure a new environment
 

@@ -1112,6 +1112,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             (self.max_batchsize_to_capture, self.get_max_block_per_batch()),
             dtype=np.int32)
 
+        self.cross_layer_shared_graph_block_tables = np.zeros(
+            (self.max_batchsize_to_capture, self.get_max_block_per_batch()),
+            dtype=np.int32)
+
         # Attention-free but stateful models like Mamba need a placeholder attn
         # backend, as the attention metadata is needed to manage internal state.
         # However we must bypass attention selection altogether for some models
@@ -1246,6 +1250,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         TensorizerLoader.save_model(
             self.model,
             tensorizer_config=tensorizer_config,
+            model_config=self.model_config,
         )
 
     def get_max_block_per_batch(self) -> int:
@@ -1586,6 +1591,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 if get_tensor_model_parallel_rank() == 0:
                     compilation_cases = tqdm(
                         list(compilation_cases),
+                        disable=not self.load_config.use_tqdm_on_load,
                         desc="Capturing CUDA graph shapes")
                 for batch_size, use_inputs_embeds in compilation_cases:
                     attn_metadata = (

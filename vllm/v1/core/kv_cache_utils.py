@@ -10,7 +10,7 @@ from typing import Any, Callable, NamedTuple, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import GiB_bytes, cdiv, sha256
+from vllm.utils import GiB_bytes, cdiv, sha256_cbor_64bit
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
                                         KVCacheTensor, SlidingWindowSpec)
@@ -46,18 +46,30 @@ class BlockHashWithGroupId(NamedTuple):
         return self.block_hash.hash_value
 
 
-# The hash seed for the first block of the prefix block sequence.
-#
-# Even if the hash function is the builtin hash(), we use sha256 to generate
-# the initial hash to simplify the code. This is not performance critical
-# as it is done one per process.
+# The hash seed for the first block of any prefix block sequence.
 #
 # We use a random value to avoid hash collisions or PYTHONHASHSEED environment
 # variable if set such that processes can share the seed if needed.
 # This aligns with the behavior of Python's hash() function, which also uses
 # a random seed if PYTHONHASHSEED is not set.
-NONE_HASH = int.from_bytes(os.urandom(32), byteorder="big") if os.getenv(
-    "PYTHONHASHSEED") is None else sha256(os.getenv("PYTHONHASHSEED"))
+#
+# The function `init_none_hash` initializes this variable globally.
+NONE_HASH: int
+
+
+def init_none_hash(hash_fn: Callable):
+    global NONE_HASH
+
+    hash_seed = os.getenv("PYTHONHASHSEED")
+    if hash_seed is None and hash_fn is sha256_cbor_64bit:
+        logger.warning(
+            "PYTHONHASHSEED is not set. This will lead to non-reproducible "
+            "block-hashes when using sha256_cbor_64bit as the hash function."
+            "Consider setting PYTHONHASHSEED to a fixed value for "
+            "reproducibility.")
+
+    NONE_HASH = (int.from_bytes(os.urandom(32), byteorder="big")
+                 if hash_seed is None else hash_fn(hash_seed))
 
 
 class PrefixCachingMetrics:
@@ -551,6 +563,10 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
         ValueError: If there is not enough memory available for the KV cache.
     """
 
+    # No need to check for available memory if the kv_cache_spec is empty
+    if not kv_cache_spec:
+        return
+
     if available_memory <= 0:
         raise ValueError("No available memory for the cache blocks. "
                          "Try increasing `gpu_memory_utilization` when "
@@ -737,6 +753,13 @@ def is_kv_cache_page_size_uniform(
     return len(page_sizes) == 1
 
 
+def is_kv_cache_type_attention_free(
+        kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
+
+    # kv_cache_spec is an empty dict for attention free models
+    return not kv_cache_spec
+
+
 def _get_kv_cache_config_uniform_page_size(
         vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec],
         available_memory: int) -> KVCacheConfig:
@@ -864,9 +887,11 @@ def _get_kv_cache_config_uniform_page_size(
         kv_cache_groups=kv_cache_groups,
     )
 
+    min_block_size = min(
+        [group.kv_cache_spec.block_size for group in kv_cache_groups])
+
     # Print the KV cache size and maximum concurrency.
-    num_tokens = num_blocks // len(
-        grouped_layers) * vllm_config.cache_config.block_size
+    num_tokens = num_blocks // len(grouped_layers) * min_block_size
     num_tokens_str = f"{num_tokens:,}"
     logger.info("GPU KV cache size: %s tokens", num_tokens_str)
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
@@ -875,6 +900,10 @@ def _get_kv_cache_config_uniform_page_size(
     logger.info("Maximum concurrency for %s tokens per request: %.2fx",
                 max_model_len_str, max_concurrency)
     return kv_cache_config
+
+
+def _get_kv_cache_config_attention_free() -> KVCacheConfig:
+    return KVCacheConfig(num_blocks=1, kv_cache_tensors=[], kv_cache_groups=[])
 
 
 def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
@@ -943,7 +972,11 @@ def get_kv_cache_config(
     if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
         unify_hybrid_kv_cache_specs(kv_cache_spec)
 
-    if is_kv_cache_type_uniform(kv_cache_spec):
+    if is_kv_cache_type_attention_free(kv_cache_spec):
+        # This returns a kv_cache config with 0 kv_cache groups and 1 block
+        # to allow for the KVCache manager to handle attention free models.
+        return _get_kv_cache_config_attention_free()
+    elif is_kv_cache_type_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for
         # most models. Allocate the same amount of memory for
         # each layer.
