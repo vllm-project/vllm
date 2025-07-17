@@ -385,13 +385,13 @@ def make_local_attention_virtual_batches(
         .view(virtual_batches, -1)
 
     query_start_loc_cpu = torch.from_numpy(cu_seqlens_q_local)
-    seq_lens_cpu = torch.from_numpy(seq_lens_np)
+    seq_lens_cpu = torch.from_numpy(seqlens_k_local)
 
     return CommonAttentionMetadata(
         query_start_loc_cpu=query_start_loc_cpu,
         query_start_loc=query_start_loc_cpu.to(device=device,
                                                non_blocking=True),
-        seq_lens_cpu=torch.from_numpy(seq_lens_np),
+        seq_lens_cpu=seq_lens_cpu,
         seq_lens=seq_lens_cpu.to(device=device, non_blocking=True),
         num_computed_tokens_cpu=torch.from_numpy(num_computed_tokens_local),
         num_reqs=len(seq_lens_cpu),
