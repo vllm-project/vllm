@@ -115,14 +115,14 @@ def make_metadata_with_slice(ubatch_slice, query_start_loc,
 
 
 def split_attn_metadata(
-    token_slices,
+    ubatch_slices,
     common_attn_metadata,
 ) -> list[CommonAttentionMetadata]:
     results = []
-    for token_slice in token_slices:
+    for ubatch_slice in ubatch_slices:
         results.append(
             make_metadata_with_slice(
-                token_slice, common_attn_metadata.query_start_loc,
+                ubatch_slice, common_attn_metadata.query_start_loc,
                 common_attn_metadata.query_start_loc_cpu,
                 common_attn_metadata.seq_lens,
                 common_attn_metadata.seq_lens_cpu,
