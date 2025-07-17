@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from array import array
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -195,6 +194,8 @@ class GritLM(LlamaForCausalLM, SupportsV0Only):
     - "<|user|>\nPROMPT\n<|assistant|>\n"
     """
 
+    is_pooling_model = True
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -214,11 +215,4 @@ class GritLM(LlamaForCausalLM, SupportsV0Only):
 
         super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
-        self._pooler = GritLMPooler(vllm_config.model_config)
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)
+        self.pooler = GritLMPooler(vllm_config.model_config)

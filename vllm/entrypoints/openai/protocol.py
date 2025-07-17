@@ -1237,10 +1237,6 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     user: Optional[str] = None
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
-    # --8<-- [start:embedding-pooling-params]
-    additional_data: Optional[Any] = None
-    # --8<-- [end:embedding-pooling-params]
-
     # --8<-- [start:embedding-extra-params]
     add_special_tokens: bool = Field(
         default=True,
@@ -1259,8 +1255,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     # --8<-- [end:embedding-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(dimensions=self.dimensions,
-                             additional_data=self.additional_data)
+        return PoolingParams(dimensions=self.dimensions)
 
 
 class EmbeddingChatRequest(OpenAIBaseModel):
@@ -1271,10 +1266,6 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     dimensions: Optional[int] = None
     user: Optional[str] = None
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
-
-    # --8<-- [start:chat-embedding-pooling-params]
-    additional_data: Optional[Any] = None
-    # --8<-- [end:chat-embedding-pooling-params]
 
     # --8<-- [start:chat-embedding-extra-params]
     add_special_tokens: bool = Field(
@@ -1323,8 +1314,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         return data
 
     def to_pooling_params(self):
-        return PoolingParams(dimensions=self.dimensions,
-                             additional_data=self.additional_data)
+        return PoolingParams(dimensions=self.dimensions)
 
 
 EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
@@ -1339,10 +1329,6 @@ class ScoreRequest(OpenAIBaseModel):
     text_1: Union[list[str], str, ScoreMultiModalParam]
     text_2: Union[list[str], str, ScoreMultiModalParam]
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
-
-    # --8<-- [start:score-pooling-params]
-    additional_data: Optional[Any] = None
-    # --8<-- [end:score-pooling-params]
 
     # --8<-- [start:score-extra-params]
 
@@ -1362,8 +1348,7 @@ class ScoreRequest(OpenAIBaseModel):
     # --8<-- [end:score-extra-params]
 
     def to_pooling_params(self, *, use_cross_encoder: bool = False):
-        return PoolingParams(use_cross_encoder=use_cross_encoder,
-                             additional_data=self.additional_data)
+        return PoolingParams(use_cross_encoder=use_cross_encoder)
 
 
 class RerankRequest(OpenAIBaseModel):
@@ -1372,10 +1357,6 @@ class RerankRequest(OpenAIBaseModel):
     documents: Union[list[str], ScoreMultiModalParam]
     top_n: int = Field(default_factory=lambda: 0)
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
-
-    # --8<-- [start:rerank-pooling-params]
-    additional_data: Optional[Any] = None
-    # --8<-- [end:rerank-pooling-params]
 
     # --8<-- [start:rerank-extra-params]
 
@@ -1395,8 +1376,7 @@ class RerankRequest(OpenAIBaseModel):
     # --8<-- [end:rerank-extra-params]
 
     def to_pooling_params(self, *, use_cross_encoder: bool = False):
-        return PoolingParams(use_cross_encoder=use_cross_encoder,
-                             additional_data=self.additional_data)
+        return PoolingParams(use_cross_encoder=use_cross_encoder)
 
 
 class RerankDocument(BaseModel):
@@ -1534,10 +1514,6 @@ class ClassificationRequest(OpenAIBaseModel):
     truncate_prompt_tokens: Optional[int] = None
     user: Optional[str] = None
 
-    # --8<-- [start:classification-pooling-params]
-    additional_data: Optional[Any] = None
-    # --8<-- [end:classification-pooling-params]
-
     # --8<-- [start:classification-extra-params]
     priority: int = Field(
         default=0,
@@ -1550,7 +1526,7 @@ class ClassificationRequest(OpenAIBaseModel):
     # --8<-- [end:classification-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(additional_data=self.additional_data)
+        return PoolingParams()
 
 
 class ClassificationData(OpenAIBaseModel):

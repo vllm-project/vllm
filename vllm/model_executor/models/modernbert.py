@@ -13,14 +13,16 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.pooler import (BasePooler, ClassifierPooler,
-                                               PoolingMethod, PoolingType)
+from vllm.model_executor.layers.pooler import (ClassifierPooler, Pooler,
+                                               PoolingMethod, PoolingTask,
+                                               PoolingType)
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.pooling_params import PoolingParams
+from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsCrossEncoding, SupportsV0Only
 from .utils import WeightsMapper, maybe_prefix
@@ -253,7 +255,7 @@ class ModernBertModel(nn.Module):
         return norm_outputs
 
 
-class ModernBertPooler(BasePooler):
+class ModernBertPooler(Pooler):
 
     def __init__(self, config: ModernBertConfig):
         super().__init__()
@@ -268,6 +270,9 @@ class ModernBertPooler(BasePooler):
                                  eps=config.norm_eps,
                                  bias=config.norm_bias)
 
+    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+        return self.pooling.get_pooling_params(task)
+
     def forward(
         self,
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
@@ -281,6 +286,8 @@ class ModernBertPooler(BasePooler):
 class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
                                           SupportsCrossEncoding):
 
+    is_pooling_model = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -288,7 +295,7 @@ class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
         self.model = ModernBertModel(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "modernbert"))
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-        self._pooler = ClassifierPooler(
+        self.pooler = ClassifierPooler(
             vllm_config.model_config,
             pooling=ModernBertPooler(config),
             classifier=self.classifier,
@@ -320,13 +327,6 @@ class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)
 
     def forward(
         self,
