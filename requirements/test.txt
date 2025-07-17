@@ -31,10 +31,6 @@ argcomplete==3.5.1
     # via datamodel-code-generator
 arrow==1.3.0
     # via isoduration
-async-timeout==5.0.1
-    # via
-    #   aiohttp
-    #   redis
 attrs==24.2.0
     # via
     #   aiohttp
@@ -145,11 +141,6 @@ eval-type-backport==0.2.2
     # via mteb
 evaluate==0.4.3
     # via lm-eval
-exceptiongroup==1.3.0
-    # via
-    #   anyio
-    #   hypothesis
-    #   pytest
 fastparquet==2024.11.0
     # via genai-perf
 fastrlock==0.8.2
@@ -183,8 +174,6 @@ fsspec==2024.9.0
     #   fastparquet
     #   huggingface-hub
     #   torch
-ftfy==6.3.1
-    # via open-clip-torch
 genai-perf==0.0.8
     # via -r requirements/test.in
 genson==1.3.0
@@ -219,7 +208,6 @@ huggingface-hub==0.33.0
     #   accelerate
     #   datasets
     #   evaluate
-    #   open-clip-torch
     #   peft
     #   sentence-transformers
     #   timm
@@ -426,8 +414,6 @@ nvidia-nvjitlink-cu12==12.8.61
     #   torch
 nvidia-nvtx-cu12==12.8.55
     # via torch
-open-clip-torch==2.32.0
-    # via -r requirements/test.in
 opencensus==0.11.4
     # via ray
 opencensus-context==0.1.3
@@ -629,7 +615,6 @@ referencing==0.35.1
 regex==2024.9.11
     # via
     #   nltk
-    #   open-clip-torch
     #   sacrebleu
     #   tiktoken
     #   transformers
@@ -680,7 +665,6 @@ sacrebleu==2.4.3
 safetensors==0.4.5
     # via
     #   accelerate
-    #   open-clip-torch
     #   peft
     #   timm
     #   transformers
@@ -711,6 +695,7 @@ setuptools==77.0.3
     # via
     #   mamba-ssm
     #   pytablewriter
+    #   torch
     #   triton
 shellingham==1.5.4
     # via typer
@@ -768,23 +753,16 @@ tiktoken==0.7.0
     #   lm-eval
     #   mistral-common
 timm==1.0.11
-    # via
-    #   -r requirements/test.in
-    #   open-clip-torch
+    # via -r requirements/test.in
 tokenizers==0.21.1
     # via
     #   -r requirements/test.in
     #   transformers
-toml==0.10.2
-    # via datamodel-code-generator
 tomli==2.2.1
-    # via
-    #   black
-    #   pytest
-    #   schemathesis
+    # via schemathesis
 tomli-w==1.2.0
     # via schemathesis
-torch==2.7.1+cu128
+torch==2.7.0+cu128
     # via
     #   -r requirements/test.in
     #   accelerate
@@ -794,7 +772,6 @@ torch==2.7.1+cu128
     #   lm-eval
     #   mamba-ssm
     #   mteb
-    #   open-clip-torch
     #   peft
     #   runai-model-streamer
     #   sentence-transformers
@@ -804,15 +781,14 @@ torch==2.7.1+cu128
     #   torchvision
     #   vector-quantize-pytorch
     #   vocos
-torchaudio==2.7.1+cu128
+torchaudio==2.7.0+cu128
     # via
     #   -r requirements/test.in
     #   encodec
     #   vocos
-torchvision==0.22.1+cu128
+torchvision==0.22.0+cu128
     # via
     #   -r requirements/test.in
-    #   open-clip-torch
     #   timm
 tqdm==4.66.6
     # via
@@ -822,7 +798,6 @@ tqdm==4.66.6
     #   lm-eval
     #   mteb
     #   nltk
-    #   open-clip-torch
     #   peft
     #   pqdm
     #   sentence-transformers
@@ -841,7 +816,7 @@ transformers==4.53.2
     #   transformers-stream-generator
 transformers-stream-generator==0.0.5
     # via -r requirements/test.in
-triton==3.3.1
+triton==3.3.0
     # via torch
 tritonclient==2.51.0
     # via
@@ -858,19 +833,14 @@ types-python-dateutil==2.9.0.20241206
     # via arrow
 typing-extensions==4.12.2
     # via
-    #   anyio
-    #   black
-    #   exceptiongroup
     #   huggingface-hub
     #   librosa
     #   mistral-common
     #   mteb
-    #   multidict
     #   pqdm
     #   pydantic
     #   pydantic-core
     #   pydantic-extra-types
-    #   rich
     #   torch
     #   typer
     #   typing-inspection
@@ -893,8 +863,6 @@ virtualenv==20.31.2
     # via ray
 vocos==0.1.0
     # via -r requirements/test.in
-wcwidth==0.2.13
-    # via ftfy
 webcolors==24.11.1
     # via jsonschema
 werkzeug==3.1.3
