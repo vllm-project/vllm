@@ -61,11 +61,9 @@ To address the above issues, I have designed and developed a local Tensor memory
 
 # Install vLLM
 
-??? console "Commands"
-
-    ```shell
-    pip install "vllm>=0.9.2"
-    ```
+```shell
+pip install "vllm>=0.9.2"
+```
 
 # Run xPyD
 
