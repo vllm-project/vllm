@@ -276,6 +276,9 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 
+# Workaround for #20384
+RUN apt-get update && apt-get install -y libnuma-dev && rm -rf /var/lib/apt/lists/*
+
 # Workaround for #17068
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
