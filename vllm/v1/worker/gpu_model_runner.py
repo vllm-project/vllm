@@ -201,10 +201,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             ).get_lora_tokenizer(None)
             reasoning_config = self.vllm_config.reasoning_config
             if reasoning_config is not None:
-                reasoning_config.think_start_token_id = \
+                reasoning_config.think_start_token_ids = \
                     tokenizer.convert_tokens_to_ids(
                         tokenizer.tokenize(reasoning_config.think_start_str))
-                reasoning_config.think_end_token_id = \
+                reasoning_config.think_end_token_ids = \
                     tokenizer.convert_tokens_to_ids(
                         tokenizer.tokenize(reasoning_config.think_end_str))
 

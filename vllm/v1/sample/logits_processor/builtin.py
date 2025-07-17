@@ -276,7 +276,7 @@ def process_dict_updates(
 
 
 class MaxThinkTokensLogitsProcessor(LogitsProcessor):
-    """A logits processor that limits the maximum number of thinking tokens."""
+    """Limits the number of tokens allowed inside a 'thinking' section."""
 
     def __init__(self, reasoning_config: ReasoningConfig, pin_memory: bool,
                  device: torch.device):
@@ -288,82 +288,68 @@ class MaxThinkTokensLogitsProcessor(LogitsProcessor):
           device (torch.device): Device to use for tensor operations.
         """
         super().__init__()
-        self.think_start_token_id = reasoning_config.think_start_token_id
-        self.think_end_token_id = reasoning_config.think_end_token_id
+        self.think_start_token_ids = reasoning_config.think_start_token_ids
+        self.think_end_token_ids = reasoning_config.think_end_token_ids
         self.pin_memory = pin_memory
         self.device = device
         self._state: dict[int, dict[str, Any]] = {}
 
-    def _find_first_token_index(self, target_list: list[int], token_id: int) -> int:
+    @staticmethod
+    def _find_last_sequence_index(target_list: list[int], token_ids: list[int]) -> int:
         """
-        Find the last occurrence of a single token in the list of tokens.
-
-        Args:
-          target_list (list[int]): The list of token IDs.
-          token_id (int): The token ID to find.
-        """
-        try:
-            return len(target_list) - target_list[::-1].index(token_id) - 1
-        except ValueError:
-            return -1
-
-    def _find_last_sequence_index(self, target_list: list[int], token_ids: list[int]) -> int:
-        """
-        Find the last occurrence of the sequence of token_ids in tokens.
+        Returns the index of the last occurrence of token_ids in target_list.
 
         Args:
           target_list (list[int]): The list of token IDs.
           token_ids (list[int]): The sequence of token IDs to find.
         """
-        index = self._find_first_token_index(target_list, token_ids[0])
-        if index != -1:
-            i = 1
-            for token_id in token_ids[1:]:
-                if index + i >= len(target_list) or target_list[index + i] != token_id:
-                    return -1
-                i += 1
-                index += 1
+        if not token_ids:
+            return -1
 
-        return index
+        for i in range(len(target_list) - len(token_ids), -1, -1):
+            if target_list[i:i + len(token_ids)] == token_ids:
+                return i
+        return -1
 
-    def _init_state_entry(self, prompt_tok_ids, max_think_tokens):
+    def _init_state_entry(self, prompt_tok_ids: list[int], max_think_tokens: int) -> dict[str, Any]:
+        """Initializes the tracking state for a given sequence index."""
         last_start = self._find_last_sequence_index(
-            prompt_tok_ids, self.think_start_token_id)
+            prompt_tok_ids, self.think_start_token_ids)
         last_end = self._find_last_sequence_index(
-            prompt_tok_ids, self.think_end_token_id)
+            prompt_tok_ids, self.think_end_token_ids)
         in_think = last_start > last_end
         think_count = len(prompt_tok_ids) - (last_start + 1) if in_think else 0
 
         return {
-            "in_think": in_think,
-            "in_end": False,
-            "think_count": think_count,
-            "end_count": 0,
+            "in_think": in_think,       # Currently in thinking mode
+            "in_end": False,            # Currently forcing end tokens
+            "think_count": think_count, # Number of tokens in thinking section
+            "end_count": 0,             # Number of end tokens forced so far
             "prompt_tok_ids": prompt_tok_ids,
             "output_tok_ids": [],
             "max_think_tokens": max_think_tokens,
         }
 
-    def _update_think_state(self, state):
+    def _update_think_state(self, state: dict[str, Any]):
+        """Updates the state based on generated output tokens."""
         output = state["output_tok_ids"]
         if not output:
             return
 
-        sliced_output1 = output[-1 + len(self.think_start_token_id):]
-        sliced_output2 = output[-1 + len(self.think_end_token_id):]
-
-        if self._find_last_sequence_index(sliced_output1, self.think_start_token_id) != -1:
+        # Check if recent output matches start or end sequences
+        if output[-len(self.think_start_token_ids):] == self.think_start_token_ids:
             state["in_think"] = True
             state["think_count"] = 0
-        elif self._find_last_sequence_index(sliced_output2, self.think_end_token_id) != -1:
+        elif output[-len(self.think_end_token_ids):] == self.think_end_token_ids:
             state["in_think"] = False
             state["think_count"] = 0
-        else:
+        elif state["in_think"]:
             state["think_count"] += 1
 
+        # Transition into end mode if thinking token limit exceeded
         if state["in_end"]:
             state["end_count"] += 1
-            if state["end_count"] >= len(self.think_end_token_id):
+            if state["end_count"] >= len(self.think_end_token_ids):
                 state["in_end"] = False
                 state["end_count"] = 0
         else:
@@ -406,20 +392,18 @@ class MaxThinkTokensLogitsProcessor(LogitsProcessor):
             return logits
 
         mask = torch.zeros(batch_size, dtype=torch.bool, device=logits.device)
-        end_token_id = self.think_end_token_id
+        force_token_ids = torch.full((batch_size,), -1, dtype=torch.long, device=logits.device)
 
-        for index in range(batch_size):
-            state = self._state.get(index)
-            if not state:
-                continue
-
-            force_end_token_id = None
-            if state["in_end"]:
-                force_end_token_id = self.think_end_token_id[state["end_count"]]
-                mask[index] = True
+        for i in range(batch_size):
+            state = self._state.get(i)
+            if state and state["in_end"]:
+                mask[i] = True
+                force_token_ids[i] = self.think_end_token_ids[state["end_count"]]
 
         if mask.any():
             logits[mask] = -float("inf")
-            logits[mask, force_end_token_id] = 0.0
+            row_indices = torch.arange(batch_size, device=logits.device)[mask]
+            col_indices = force_token_ids[mask]
+            logits[row_indices, col_indices] = 0.0
 
         return logits
