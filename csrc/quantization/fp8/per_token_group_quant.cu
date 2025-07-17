@@ -9,40 +9,7 @@
 #include <torch/all.h>
 
 #include "../vectorization.cuh"
-
-#ifndef _DISPATCH_CASE_F16
-  #define _DISPATCH_CASE_F16(c_type, ...) \
-    case at::ScalarType::Half: {          \
-      using c_type = nv_half;             \
-      return __VA_ARGS__();               \
-    }
-#endif
-
-#ifndef _DISPATCH_CASE_BF16
-  #define _DISPATCH_CASE_BF16(c_type, ...) \
-    case at::ScalarType::BFloat16: {       \
-      using c_type = nv_bfloat16;          \
-      return __VA_ARGS__();                \
-    }
-#endif
-
-#ifndef DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FLOAT_FP16
-  #define DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FLOAT_FP16(pytorch_dtype, c_type, \
-                                                     ...)                   \
-    [&]() -> bool {                                                         \
-      switch (pytorch_dtype) {                                              \
-        case at::ScalarType::Float: {                                       \
-          using c_type = float;                                             \
-          return __VA_ARGS__();                                             \
-        }                                                                   \
-          _DISPATCH_CASE_F16(c_type, __VA_ARGS__)                           \
-          _DISPATCH_CASE_BF16(c_type, __VA_ARGS__)                          \
-        default:                                                            \
-          TORCH_CHECK(false, "Failed to dispatch data type");               \
-          return false;                                                     \
-      }                                                                     \
-    }()
-#endif
+#include "../../dispatch_utils.h"
 
 __device__ __forceinline__ float GroupReduceMax(float val, const int tid) {
   unsigned mask = 0xffff;
@@ -213,17 +180,14 @@ void per_token_group_quant_8bit(torch::Tensor input, torch::Tensor output_q,
     }                                                                      \
   } while (0)
 
-  DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FLOAT_FP16(
-      input.scalar_type(), scalar_t, [&] {
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "per_token_group_quant_8bit", ([&] {
         if (dst_type == at::ScalarType::Char) {
           LAUNCH_KERNEL(scalar_t, int8_t);
-          return true;
         } else if (dst_type == at::ScalarType::Float8_e4m3fn) {
           LAUNCH_KERNEL(scalar_t, c10::Float8_e4m3fn);
-          return true;
         }
-        return false;
-      });
+      }));
 
 #undef LAUNCH_KERNEL
 }
