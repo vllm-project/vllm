@@ -200,7 +200,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                     enable_lm_head_weight_load = True
 
                 proposer_worker = MultiStepWorker(**draft_worker_kwargs)
-                if draft_model_config.hf_config.model_type == "deepseek_mtp":
+                if (draft_model_config.hf_config.model_type == "deepseek_mtp"
+                        or draft_model_config.hf_config.model_type
+                        == "glm4_moe_mtp"):
                     num_spec_prefill_steps = \
                         draft_model_config.hf_config.n_predict
 
