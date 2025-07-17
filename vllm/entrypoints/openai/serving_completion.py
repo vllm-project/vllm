@@ -23,6 +23,7 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
                                               ErrorResponse,
+                                              PromptTokenUsageInfo,
                                               RequestResponseMetadata,
                                               UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (
@@ -33,6 +34,7 @@ from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     is_text_tokens_prompt)
 # yapf: enable
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.utils import get_max_tokens
 from vllm.inputs.data import (EmbedsPrompt, TokensPrompt, is_embeds_prompt,
                               is_tokens_prompt)
 from vllm.logger import init_logger
@@ -55,6 +57,7 @@ class OpenAIServingCompletion(OpenAIServing):
         *,
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
+        enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
     ):
         super().__init__(engine_client=engine_client,
@@ -63,6 +66,7 @@ class OpenAIServingCompletion(OpenAIServing):
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids,
                          enable_force_include_usage=enable_force_include_usage)
+        self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.default_sampling_params = (
             self.model_config.get_diff_sampling_param())
         if self.default_sampling_params:
@@ -160,15 +164,22 @@ class OpenAIServingCompletion(OpenAIServing):
                     input_length = len(engine_prompt["prompt_token_ids"])
                 else:
                     assert_never(engine_prompt)
-                default_max_tokens = self.max_model_len - input_length
+
+                if self.default_sampling_params is None:
+                    self.default_sampling_params = {}
+
+                max_tokens = get_max_tokens(
+                    max_model_len=self.max_model_len,
+                    request=request,
+                    input_length=input_length,
+                    default_sampling_params=self.default_sampling_params)
 
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
-                        default_max_tokens, self.default_sampling_params)
+                        max_tokens, self.default_sampling_params)
                 else:
                     sampling_params = request.to_sampling_params(
-                        default_max_tokens,
-                        self.model_config.logits_processor_pattern,
+                        max_tokens, self.model_config.logits_processor_pattern,
                         self.default_sampling_params)
 
                 request_id_item = f"{request_id}-{i}"
@@ -305,6 +316,8 @@ class OpenAIServingCompletion(OpenAIServing):
         previous_num_tokens = [0] * num_choices * num_prompts
         has_echoed = [False] * num_choices * num_prompts
         num_prompt_tokens = [0] * num_prompts
+        num_cached_tokens = None
+        first_iteration = True
 
         stream_options = request.stream_options
         if stream_options:
@@ -319,6 +332,10 @@ class OpenAIServingCompletion(OpenAIServing):
             async for prompt_idx, res in result_generator:
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
+
+                if first_iteration:
+                    num_cached_tokens = res.num_cached_tokens
+                    first_iteration = False
 
                 if res.prompt is not None:
                     prompt_text = res.prompt
@@ -423,6 +440,10 @@ class OpenAIServingCompletion(OpenAIServing):
                 completion_tokens=total_completion_tokens,
                 total_tokens=total_prompt_tokens + total_completion_tokens)
 
+            if self.enable_prompt_tokens_details and num_cached_tokens:
+                final_usage_info.prompt_tokens_details = PromptTokenUsageInfo(
+                    cached_tokens=num_cached_tokens)
+
             if include_usage:
                 final_usage_chunk = CompletionStreamResponse(
                     id=request_id,
@@ -526,6 +547,10 @@ class OpenAIServingCompletion(OpenAIServing):
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
+
+        if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
+            usage.prompt_tokens_details = PromptTokenUsageInfo(
+                cached_tokens=final_res.num_cached_tokens)
 
         request_metadata.final_usage_info = usage
 

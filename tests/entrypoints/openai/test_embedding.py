@@ -14,6 +14,7 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from ...models.language.pooling.embed_utils import (
     run_embedding_correctness_test)
+from ...models.utils import check_embeddings_close
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
@@ -296,3 +297,75 @@ async def test_single_embedding_truncation_invalid(client: openai.AsyncOpenAI,
         assert "error" in response.object
         assert "truncate_prompt_tokens value is greater than max_model_len. "\
                "Please, select a smaller truncation size." in response.message
+
+
+@pytest.mark.asyncio
+async def test_invocations(server: RemoteOpenAIServer,
+                           client: openai.AsyncOpenAI):
+    input_texts = [
+        "The chef prepared a delicious meal.",
+    ]
+
+    request_args = {
+        "model": MODEL_NAME,
+        "input": input_texts,
+        "encoding_format": "float",
+    }
+
+    completion_response = await client.embeddings.create(**request_args)
+
+    invocation_response = requests.post(server.url_for("invocations"),
+                                        json=request_args)
+    invocation_response.raise_for_status()
+
+    completion_output = completion_response.model_dump()
+    invocation_output = invocation_response.json()
+
+    assert completion_output.keys() == invocation_output.keys()
+    for completion_data, invocation_data in zip(completion_output["data"],
+                                                invocation_output["data"]):
+        assert completion_data.keys() == invocation_data.keys()
+        check_embeddings_close(embeddings_0_lst=[completion_data["embedding"]],
+                               embeddings_1_lst=[invocation_data["embedding"]],
+                               name_0="completion",
+                               name_1="invocation")
+
+
+@pytest.mark.asyncio
+async def test_invocations_conversation(server: RemoteOpenAIServer):
+    messages = [{
+        "role": "user",
+        "content": "The cat sat on the mat.",
+    }, {
+        "role": "assistant",
+        "content": "A feline was resting on a rug.",
+    }, {
+        "role": "user",
+        "content": "Stars twinkle brightly in the night sky.",
+    }]
+
+    request_args = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "encoding_format": "float",
+    }
+
+    chat_response = requests.post(server.url_for("v1/embeddings"),
+                                  json=request_args)
+    chat_response.raise_for_status()
+
+    invocation_response = requests.post(server.url_for("invocations"),
+                                        json=request_args)
+    invocation_response.raise_for_status()
+
+    chat_output = chat_response.json()
+    invocation_output = invocation_response.json()
+
+    assert chat_output.keys() == invocation_output.keys()
+    for chat_data, invocation_data in zip(chat_output["data"],
+                                          invocation_output["data"]):
+        assert chat_data.keys() == invocation_data.keys()
+        check_embeddings_close(embeddings_0_lst=[chat_data["embedding"]],
+                               embeddings_1_lst=[invocation_data["embedding"]],
+                               name_0="chat",
+                               name_1="invocation")

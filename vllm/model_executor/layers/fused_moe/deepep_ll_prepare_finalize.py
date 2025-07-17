@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional, Union
 
 import deep_ep
@@ -6,8 +7,10 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
-    maybe_fix_scales, moe_kernel_quantize_input)
+    moe_kernel_quantize_input, normalize_batched_scales_shape)
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
@@ -42,20 +45,21 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def __init__(self,
                  buffer: deep_ep.Buffer,
                  max_tokens_per_rank: int,
-                 world_size: int,
-                 dp_size: int,
+                 num_dispatchers: int,
                  use_fp8_dispatch: bool = False):
         super().__init__()
 
         self.buffer = buffer
         self.max_tokens_per_rank = max_tokens_per_rank
-        self.world_size = world_size
-        self.dp_size = dp_size
         self.use_fp8_dispatch = use_fp8_dispatch
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
         self.handle = None
+        self.num_dispatchers_ = num_dispatchers
+
+    def num_dispatchers(self) -> int:
+        return self.num_dispatchers_
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -91,8 +95,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         assert isinstance(x, torch.Tensor)
 
-        assert not per_act_token_quant
-
         num_experts, max_tokens, hidden_dim = x.size()
 
         # TODO (varun): Optimization - Use a batched version of quant
@@ -104,7 +106,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         if quant_dtype is not None:
             assert x_scales is not None
-            x_scales = maybe_fix_scales(x_scales, num_experts)
+            x_scales = normalize_batched_scales_shape(x_scales, num_experts)
 
         return x, x_scales
 
@@ -119,8 +121,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
-               Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
+               Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
+               Optional[torch.Tensor]]:
 
         hidden_size = a1.size(1)
         assert hidden_size in self.SUPPORTED_HIDDEN_SIZES, \
@@ -158,12 +161,18 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_x, a1_scale, a2_scale, a1.dtype, quant_config.quant_dtype,
             quant_config.per_act_token_quant, quant_config.block_shape)
 
-        return (expert_x, expert_x_scale, expert_num_tokens, None, None)
+        expert_tokens_meta = mk.ExpertTokensMetadata(
+            expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None)
+
+        return (expert_x, expert_x_scale, expert_tokens_meta, None, None)
 
     def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
                  topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                 apply_router_weight_on_input: bool) -> None:
-
+                 apply_router_weight_on_input: bool,
+                 weight_and_reduce_impl: mk.TopKWeightAndReduce) -> None:
+        assert isinstance(
+            weight_and_reduce_impl, TopKWeightAndReduceDelegate
+        ), ("Weight application and reduction happens in the combine kernel.")
         assert self.handle is not None
 
         combine_topk_weights = topk_weights

@@ -835,6 +835,15 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             "model.": "language_model.model.",
         })
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<|vision_start|><|image_pad|><|vision_end|>"
+        if modality.startswith("video"):
+            return "<|vision_start|><|video_pad|><|vision_end|>"
+
+        raise ValueError("Only image or video modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: Qwen2_5_VLConfig = vllm_config.model_config.hf_config
@@ -965,7 +974,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         grid_thw_list = grid_thw.tolist()
 
         if image_input["type"] == "image_embeds":
-            image_embeds = image_input["image_embeds"]
+            image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
             image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
@@ -985,7 +994,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         grid_thw_list = grid_thw.tolist()
 
         if video_input["type"] == "video_embeds":
-            video_embeds = video_input["video_embeds"]
+            video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
             video_embeds = self.visual(pixel_values_videos,

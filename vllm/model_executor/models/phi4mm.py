@@ -902,6 +902,15 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         },
     )
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return f"<|image_{i}|>"
+        if modality.startswith("audio"):
+            return f"<|audio_{i}|>"
+
+        raise ValueError("Only image or audio modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config

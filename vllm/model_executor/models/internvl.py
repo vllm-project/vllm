@@ -1023,6 +1023,15 @@ class InternVLMultiModalProcessor(
 class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                         SupportsLoRA):
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+        if modality.startswith("video"):
+            return "<video>"
+
+        raise ValueError("Only image or video modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 

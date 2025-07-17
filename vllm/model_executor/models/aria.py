@@ -499,6 +499,13 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         },
     )
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<|fim_prefix|><|img|><|fim_suffix|>"
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(
         self,
         vllm_config: VllmConfig,

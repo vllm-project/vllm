@@ -434,22 +434,35 @@ def test_kv_cache_stride_order(monkeypatch, model_runner):
         assert all(not kv.is_contiguous() for kv in model_runner.kv_caches)
 
 
+def test_update_config(model_runner):
+    # Simple update
+    model_runner.update_config({"load_config": {"load_format": "dummy"}})
+    assert model_runner.load_config.load_format == "dummy"
+    # Raise error on non-existing config
+    with pytest.raises(AssertionError):
+        model_runner.update_config({"do_not_exist_config": "dummy"})
+
+
 def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
     # In this test, model_runner loads model + weights in one go, while
     # model_runner_2 loads dummy weights first then load real weights inplace
     model_runner.load_model()
     original_load_format = model_runner_2.load_config.load_format
-    model_runner_2.load_config.load_format = "dummy"
+    model_runner_2.update_config({"load_config": {"load_format": "dummy"}})
     model_runner_2.load_model()  # Initial model loading with dummy weights
     assert str(model_runner.get_model().state_dict()) != str(
         model_runner_2.get_model().state_dict())
-    model_runner_2.load_config.load_format = original_load_format
+    model_runner_2.update_config(
+        {"load_config": {
+            "load_format": original_load_format
+        }})
     model_runner_2.load_model()  # Load real weights inplace
     assert str(model_runner.get_model().state_dict()) == str(
         model_runner_2.get_model().state_dict())
 
 
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
+    torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     error_msg = f"{layer_1} must come before the current layer"
@@ -478,6 +491,7 @@ def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
 
 
 def test_init_kv_cache_with_kv_sharing_target_layer_not_exist():
+    torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     invalid_layer = "model.layers.0.cross_attn.attn"
@@ -506,6 +520,7 @@ def test_init_kv_cache_with_kv_sharing_target_layer_not_exist():
 
 
 def test_init_kv_cache_with_kv_sharing_target_same_as_current():
+    torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     error_msg = f"{layer_1} cannot be the same as the current layer"
@@ -534,6 +549,7 @@ def test_init_kv_cache_with_kv_sharing_target_same_as_current():
 
 
 def test_init_kv_cache_without_kv_sharing():
+    torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     vllm_config = get_vllm_config()
@@ -601,6 +617,7 @@ def test_init_kv_cache_without_kv_sharing():
 
 
 def test_init_kv_cache_with_kv_sharing_valid():
+    torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
     layer_1 = "model.layers.1.self_attn.attn"
     vllm_config = get_vllm_config()

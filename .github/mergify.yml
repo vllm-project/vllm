@@ -74,13 +74,22 @@ pull_request_rules:
       - files~=^vllm/multimodal/
       - files~=^tests/multimodal/
       - files~=^tests/models/multimodal/
-      - files~=^tests/models/*/audio_language/
-      - files~=^tests/models/*/vision_language/
       - files=tests/models/test_vision.py
   actions:
     label:
       add:
         - multi-modality
+
+- name: label-new-model
+  description: Automatically apply new-model label
+  conditions:
+    - and:
+      - files~=^vllm/model_executor/models/
+      - files=vllm/model_executor/models/registry.py
+  actions:
+    label:
+      add:
+        - new-model
 
 - name: label-performance
   description: Automatically apply performance label
@@ -156,8 +165,14 @@ pull_request_rules:
   conditions:
     - or:
       - files~=^vllm/spec_decode/
+      - files~=^vllm/v1/spec_decode/
       - files=vllm/model_executor/layers/spec_decode_base_sampler.py
       - files~=^tests/spec_decode/
+      - files~=^tests/v1/spec_decode/
+      - files~=^examples/.*(spec_decode|mlpspeculator|eagle|speculation).*\.py
+      - files~=^vllm/model_executor/models/.*eagle.*\.py
+      - files=vllm/model_executor/models/mlp_speculator.py
+      - files~=^vllm/transformers_utils/configs/(eagle|medusa|mlp_speculator)\.py
   actions:
     label:
       add:

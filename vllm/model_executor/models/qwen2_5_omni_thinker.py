@@ -144,8 +144,16 @@ class Qwen2_5OmniThinkerProcessingInfo(Qwen2AudioProcessingInfo,
     ) -> Qwen2_5OmniProcessor:
         if fps is not None:
             kwargs["fps"] = fps
+
+        # Monkey patch for Transformers v4.53
+        processor_class = Qwen2_5OmniProcessor
+        if processor_class.image_processor_class != "AutoImageProcessor":
+            processor_class.image_processor_class = "AutoImageProcessor"
+        if processor_class.video_processor_class != "AutoVideoProcessor":
+            processor_class.video_processor_class = "AutoVideoProcessor"
+
         processor = self.ctx.get_hf_processor(
-            Qwen2_5OmniProcessor,
+            processor_class,
             image_processor=self.get_image_processor(min_pixels=min_pixels,
                                                      max_pixels=max_pixels,
                                                      size=size,
@@ -716,6 +724,17 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             "thinker.model.": "language_model.model.",
             "thinker.": "",
         })
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<|vision_start|><|IMAGE|><|vision_end|>"
+        if modality.startswith("video"):
+            return "<|vision_start|><|VIDEO|><|vision_end|>"
+        if modality.startswith("audio"):
+            return f"Audio {i}: <|audio_bos|><|AUDIO|><|audio_eos|>"
+
+        raise ValueError("Only image, video or audio modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

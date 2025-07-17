@@ -118,6 +118,13 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal,
                            SupportsV0Only):
     """ Prithvi Masked Autoencoder"""
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return None
+
+        raise ValueError("Only image modality is supported")
+
     def _instantiate_model(self, config: dict) -> Optional[nn.Module]:
 
         # We might be able/need to support different tasks with this same model
