@@ -83,12 +83,13 @@ def slice_query_start_locs(
         query_start_loc[req_slice.start]
 
 
-def make_metadata_with_slice(ubatch_slice, query_start_loc,
-                             query_start_loc_cpu, seq_lens, seq_lens_cpu,
-                             num_computed_tokens_cpu, num_reqs,
-                             num_actual_tokens, max_query_len,
-                             block_table_tensor,
-                             slot_mapping) -> CommonAttentionMetadata:
+def _make_metadata_with_slice(
+        ubatch_slice: UbatchSlice, query_start_loc: torch.Tensor,
+        query_start_loc_cpu: torch.Tensor, seq_lens: torch.Tensor,
+        seq_lens_cpu: torch.Tensor, num_computed_tokens_cpu: torch.Tensor,
+        num_actual_tokens: int, max_query_len: int,
+        block_table_tensor: torch.Tensor,
+        slot_mapping: torch.Tensor) -> CommonAttentionMetadata:
 
     req_slice = ubatch_slice[0]
     token_slice = ubatch_slice[1]
@@ -125,19 +126,18 @@ def make_metadata_with_slice(ubatch_slice, query_start_loc,
 
 
 def split_attn_metadata(
-    ubatch_slices,
-    common_attn_metadata,
+    ubatch_slices: UBatchSlices,
+    common_attn_metadata: CommonAttentionMetadata,
 ) -> list[CommonAttentionMetadata]:
     results = []
     for ubatch_slice in ubatch_slices:
         results.append(
-            make_metadata_with_slice(
+            _make_metadata_with_slice(
                 ubatch_slice, common_attn_metadata.query_start_loc,
                 common_attn_metadata.query_start_loc_cpu,
                 common_attn_metadata.seq_lens,
                 common_attn_metadata.seq_lens_cpu,
                 common_attn_metadata.num_computed_tokens_cpu,
-                common_attn_metadata.num_reqs,
                 common_attn_metadata.num_actual_tokens,
                 common_attn_metadata.max_query_len,
                 common_attn_metadata.block_table_tensor,
