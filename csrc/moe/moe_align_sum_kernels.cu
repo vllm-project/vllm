@@ -221,6 +221,10 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
   int threads = 1024;
   threads = ((threads + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
 
+  // BlockScan uses 1024 threads and assigns one thread per expert.
+  TORCH_CHECK(padded_num_experts < 1024,
+              "padded_num_experts must be less than 1024"); 
+
   VLLM_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES(
       topk_ids.scalar_type(), "moe_align_block_size_kernel", [&] {
         // calc needed amount of shared mem for `cumsum` tensors
