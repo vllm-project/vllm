@@ -1917,7 +1917,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @contextmanager
     def suppress_gc_collect(self):
-        """Temporarily disable ``gc.collect`` to speed up CUDA graph capture."""
+        """
+        Temporarily disable ``gc.collect`` to speed up CUDA graph capture.
+        This is a workaround to avoid the overhead of garbage collection
+        during the graph capture with torch.compile.
+        """
         with patch("gc.collect", lambda: None):
             yield
 
