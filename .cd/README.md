@@ -15,18 +15,28 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
 | meta-llama/Llama-3.2-3B-Instruct          | 1 |
 | meta-llama/Llama-3.3-70B-Instruct         | 4 |
 | mistralai/Mistral-7B-Instruct-v0.2        | 1 |
-| mistralai/Mixtral-8x22B-Instruct-v0.1     | 4 |
 | mistralai/Mixtral-8x7B-Instruct-v0.1      | 2 |
+| mistralai/Mixtral-8x22B-Instruct-v0.1     | 4 |
+| Qwen/Qwen2.5-7B-Instruct                  | 1 |
+| Qwen/Qwen2.5-VL-7B-Instruct               | 1 |
 | Qwen/Qwen2.5-14B-Instruct                 | 1 |
 | Qwen/Qwen2.5-32B-Instruct                 | 1 |
 | Qwen/Qwen2.5-72B-Instruct                 | 4 |
-| Qwen/Qwen2.5-7B-Instruct                  | 1 |
 | meta-llama/Llama-3.2-11B-Vision-Instruct  | 1 |
 | meta-llama/Llama-3.2-90B-Vision-Instruct  | 4 |
 | ibm-granite/granite-8b-code-instruct-4k   | 1 |
 | ibm-granite/granite-20b-code-instruct-8k  | 1 |
 
 ## How to Use
+
+### 0. Clone the Repository
+
+Before proceeding with any of the steps below, make sure to clone the vLLM fork repository and navigate to the `.cd` directory. This ensures you have all necessary files and scripts for running the server or benchmarks.
+
+```bash
+git clone https://github.com/HabanaAI/vllm-fork.git
+cd vllm-fork/.cd/
+```
 
 ### 1. Run the server using Docker Compose
 
@@ -39,7 +49,6 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
    **Example usage:**
 
    ```bash
-   cd vllm-fork/.cd/
    MODEL="Qwen/Qwen2.5-14B-Instruct" \
    HF_TOKEN="<your huggingface token>" \
    DOCKER_IMAGE="<docker image url>" \
@@ -51,7 +60,6 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
    To easily initiate benchmark dedicated for a specific model using default parameters, use the `--profile benchmark up` option with Docker Compose:
 
    ```bash
-   cd vllm-fork/.cd/
    MODEL="Qwen/Qwen2.5-14B-Instruct" \
    HF_TOKEN="<your huggingface token>" \
    DOCKER_IMAGE="<docker image url>" \
@@ -78,7 +86,6 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
    **Example usage:**
 
    ```bash
-   cd vllm-fork/.cd/
    MODEL="Qwen/Qwen2.5-14B-Instruct" \
    HF_TOKEN="<your huggingface token>" \
    DOCKER_IMAGE="<docker image url>" \
@@ -99,7 +106,6 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
    **Example usage:**
 
    ```bash
-   cd vllm-fork/.cd/
    MODEL="Qwen/Qwen2.5-14B-Instruct" \
    HF_TOKEN="<your huggingface token>" \
    DOCKER_IMAGE="<docker image url>" \
@@ -119,7 +125,6 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
    **Example usage:**
 
    ```bash
-   cd vllm-fork/.cd/
    MODEL="Qwen/Qwen2.5-14B-Instruct" \
    HF_TOKEN="<your huggingface token>" \
    DOCKER_IMAGE="<docker image url>" \
