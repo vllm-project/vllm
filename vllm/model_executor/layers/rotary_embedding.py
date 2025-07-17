@@ -32,8 +32,10 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from vllm.envs import VLLM_USE_FLASHINFER_ROPE
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
+from vllm.utils import direct_register_custom_op
 
 if current_platform.is_cuda():
     from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
@@ -50,6 +52,51 @@ def _rotate_gptj(x: torch.Tensor) -> torch.Tensor:
     x2 = x[..., 1::2]
     x = torch.stack((-x2, x1), dim=-1)
     return x.flatten(-2)
+
+
+def _flashinfer_rotary_embedding(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+) -> None:
+    """Custom op wrapper for flashinfer's rotary embedding.
+    
+    This is an in-place operation that modifies query and key tensors directly.
+    """
+    from flashinfer.rope import apply_rope_with_cos_sin_cache_inplace
+
+    apply_rope_with_cos_sin_cache_inplace(
+        positions=positions,
+        query=query,
+        key=key,
+        head_size=head_size,
+        cos_sin_cache=cos_sin_cache,
+        is_neox=is_neox,
+    )
+
+
+def _flashinfer_rotary_embedding_fake(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+) -> None:
+    return
+
+
+# Register flashinfer rotary embedding custom op
+direct_register_custom_op(
+    op_name="flashinfer_rotary_embedding",
+    op_func=_flashinfer_rotary_embedding,
+    mutates_args=["query", "key"],  # These tensors are modified in-place
+    fake_impl=_flashinfer_rotary_embedding_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
 
 
 def _apply_rotary_emb_torch(
@@ -112,7 +159,8 @@ class RotaryEmbedding(CustomOp):
         self.dtype = dtype
 
         cache = self._compute_cos_sin_cache()
-        cache = cache.to(dtype)
+        if not VLLM_USE_FLASHINFER_ROPE:
+            cache = cache.to(dtype)
         self.cos_sin_cache: torch.Tensor
         self.register_buffer("cos_sin_cache", cache, persistent=False)
 
@@ -145,6 +193,7 @@ class RotaryEmbedding(CustomOp):
         offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """A PyTorch-native implementation of forward()."""
+        # print('Using native backend for RoPE')
         if offsets is not None:
             positions = positions + offsets
         positions = positions.flatten()
@@ -171,6 +220,32 @@ class RotaryEmbedding(CustomOp):
             key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
+    def _forward_cuda_flashinfer(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # print('Using FlashInfer backend for RoPE')
+
+        # # __setattr__ in nn.Module (called by `self.cos_sin_cache = ...`)
+        # # is expensive, so avoid calling it if possible
+        # if self.cos_sin_cache.device != query.device or \
+        #     self.cos_sin_cache.dtype != torch.float32:
+        #     # FlashInfer backend requires cache to be in FP32
+        #     self.cos_sin_cache = self.cos_sin_cache.to(query.device,
+        #                                             dtype=torch.float32)
+
+        torch.ops.vllm.flashinfer_rotary_embedding(
+            positions=positions,
+            query=query,
+            key=key,
+            head_size=self.head_size,
+            cos_sin_cache=self.cos_sin_cache,
+            is_neox=self.is_neox_style,
+        )
+        return query, key
+
     def forward_cuda(
         self,
         positions: torch.Tensor,
@@ -178,15 +253,20 @@ class RotaryEmbedding(CustomOp):
         key: Optional[torch.Tensor] = None,
         offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+
+        # Check if FlashInfer backend is requested, valid, and available
+        if VLLM_USE_FLASHINFER_ROPE and key is not None and offsets is None:
+            return self._forward_cuda_flashinfer(positions, query, key)
+        # print('Using vLLM native backend for RoPE')
+
         from vllm import _custom_ops as ops
 
-        # __setattr__ in nn.Module (called by `self.cos_sin_cache = ...`)
-        # is expensive, so avoid calling it if possible
-        if self.cos_sin_cache.device != query.device or \
-            self.cos_sin_cache.dtype != query.dtype:
-            self.cos_sin_cache = self.cos_sin_cache.to(query.device,
-                                                       dtype=query.dtype)
-
+        # # __setattr__ in nn.Module (called by `self.cos_sin_cache = ...`)
+        # # is expensive, so avoid calling it if possible
+        # if self.cos_sin_cache.device != query.device or \
+        #     self.cos_sin_cache.dtype != query.dtype:
+        #     self.cos_sin_cache = self.cos_sin_cache.to(query.device,
+        #                                                dtype=query.dtype)
         # ops.rotary_embedding()/batched_rotary_embedding()
         # are in-place operations that update the query and key tensors.
         if offsets is not None:

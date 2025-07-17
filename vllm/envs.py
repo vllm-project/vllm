@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
+    VLLM_USE_FLASHINFER_ROPE: Optional[bool] = None
     VLLM_FLASHINFER_FORCE_TENSOR_CORES: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
@@ -419,6 +420,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FLASHINFER_SAMPLER":
     lambda: bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
     if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ else None,
+
+    # If set, vllm will use flashinfer rope
+    "VLLM_USE_FLASHINFER_ROPE":
+    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_ROPE", "0"))),
 
     # If set, vllm will force flashinfer to use tensor cores;
     # otherwise will use heuristic based on model architecture.

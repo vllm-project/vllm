@@ -4620,6 +4620,13 @@ class VllmConfig:
                 True
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             self.compilation_config.custom_ops.append("+rms_norm")
+        if envs.VLLM_USE_FLASHINFER_ROPE:
+            self.compilation_config.custom_ops.append("+rotary_embedding")
+        # Enable rope custom op by default if nothing is specified
+        # if not any(op in ["-rotary_embedding", "none"]
+        #            for op in self.compilation_config.custom_ops):
+        #     self.compilation_config.custom_ops.append("+rotary_embedding")
+        #     print(f"Compilation config: {self.compilation_config.custom_ops}")
         if envs.VLLM_USE_V1 and self.model_config is not None and \
             not self.model_config.enforce_eager:
             # By default, V1 uses piecewise CUDA graphs. If full_cuda_graph
