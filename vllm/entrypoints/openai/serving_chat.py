@@ -613,8 +613,13 @@ class OpenAIServingChat(OpenAIServing):
                         previous_text = previous_texts[i]
                         previous_token_ids = all_previous_token_ids[i]
                         current_text = previous_text + delta_text
-                        current_token_ids = previous_token_ids + list(
-                            output.token_ids)
+
+                        # avoid the None + list error.
+                        if previous_token_ids:
+                            current_token_ids = previous_token_ids + list(
+                                output.token_ids)
+                        else:
+                            current_token_ids = list(output.token_ids)
 
                     # handle streaming deltas for tools with named tool_choice
                     if tool_choice_function_name:
@@ -1077,9 +1082,17 @@ class OpenAIServingChat(OpenAIServing):
                 else:
                     # FOR NOW make it a chat message; we will have to detect
                     # the type to make it later.
+                    ret_content = content
+
+                    # try to use content return from tool parser first,
+                    # tool parser may do some modify for the content.
+                    if (tool_call_info.content
+                            and len(tool_call_info.content) > 0):
+                        ret_content = tool_call_info.content
+
                     message = ChatMessage(role=role,
                                           reasoning_content=reasoning_content,
-                                          content=content)
+                                          content=ret_content)
 
             # undetermined case that is still important to handle
             else:
