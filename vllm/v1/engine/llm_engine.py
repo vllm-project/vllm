@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
+import time
 from collections.abc import Mapping
 from copy import copy
 from typing import Any, Callable, Optional, Union
@@ -28,12 +30,13 @@ from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import (PrometheusStatLogger, StatLoggerBase,
-                                     StatLoggerFactory)
+from vllm.v1.metrics.loggers import (StatLoggerBase, StatLoggerFactory,
+                                     setup_default_loggers)
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
-from vllm.v1.metrics.stats import IterationStats
+from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 logger = init_logger(__name__)
+_LOCAL_LOGGING_INTERVAL_SEC = 5
 
 _R = TypeVar("_R", default=Any)
 
@@ -69,9 +72,16 @@ class LLMEngine:
         self.cache_config = vllm_config.cache_config
 
         self.log_stats = log_stats
-        self.stat_logger: Optional[StatLoggerBase] = None
-        if self.log_stats:
-            self.stat_logger = PrometheusStatLogger(vllm_config)
+        # Set up stat loggers; independent set for each DP rank.
+        self.stat_loggers: list[list[StatLoggerBase]] = setup_default_loggers(
+            vllm_config=vllm_config,
+            log_stats=self.log_stats,
+            engine_num=vllm_config.parallel_config.data_parallel_size,
+            custom_stat_loggers=stat_loggers,
+        )
+        if self.stat_loggers:
+            for stat_logger in self.stat_loggers[0]:
+                stat_logger.log_engine_initialized()
 
         # important: init dp group before init the engine_core
         # In the decoupled engine case this is handled in EngineCoreProc.
@@ -112,6 +122,15 @@ class LLMEngine:
 
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
+
+        # Start background thread for periodic logging if log_stats enabled
+        self._log_active = False
+        self._log_thread: Optional[threading.Thread] = None
+        if self.log_stats:
+            self._log_active = True
+            self._log_thread = threading.Thread(target=self._log_loop,
+                                                daemon=True)
+            self._log_thread.start()
 
     @classmethod
     def from_vllm_config(
@@ -247,10 +266,13 @@ class LLMEngine:
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
 
         # 4) Record stats
-        if self.stat_logger is not None:
+        if self.stat_loggers is not None:
             assert outputs.scheduler_stats is not None
-            self.stat_logger.record(scheduler_stats=outputs.scheduler_stats,
-                                    iteration_stats=iteration_stats)
+            self._record_stats(
+                self.stat_loggers[outputs.engine_index],
+                scheduler_stats=outputs.scheduler_stats,
+                iteration_stats=iteration_stats,
+            )
 
         return processed_outputs.request_outputs
 
@@ -282,6 +304,23 @@ class LLMEngine:
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
+
+    @staticmethod
+    def _record_stats(
+        stat_loggers: list[StatLoggerBase],
+        scheduler_stats: Optional[SchedulerStats],
+        iteration_stats: Optional[IterationStats],
+    ):
+        for stat_logger in stat_loggers:
+            stat_logger.record(scheduler_stats=scheduler_stats,
+                               iteration_stats=iteration_stats)
+
+    def _log_loop(self):
+        while self._log_active:
+            for loggers in self.stat_loggers:
+                for stat_logger in loggers:
+                    stat_logger.log()
+            time.sleep(_LOCAL_LOGGING_INTERVAL_SEC)
 
     def get_metrics(self) -> list[Metric]:
         assert self.log_stats, "Stat logging disabled"
@@ -318,5 +357,8 @@ class LLMEngine:
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
     def __del__(self):
+        if self.log_stats and self._log_thread:
+            self._log_active = False
+            self._log_thread.join(timeout=10)
         if dp_group := getattr(self, "dp_group", None):
             stateless_destroy_torch_distributed_process_group(dp_group)
