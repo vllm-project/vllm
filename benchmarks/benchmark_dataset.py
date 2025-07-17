@@ -1198,29 +1198,40 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
     ) -> list[SampleRequest]:
         vocab_size = tokenizer.vocab_size
         prompts_per_prefix = num_requests // num_prefixes
+        if prompts_per_prefix == 0:
+            raise ValueError(
+                f"num_requests ({num_requests}) must be greater than or equal to"
+                f"num_prefixes ({num_prefixes})"
+            )
 
-        def _generate_random_text_part(length: int) -> tuple[str, list[int]]:
-            token_ids = np.random.randint(0, vocab_size, size=length).tolist()
-            decoded_text = tokenizer.decode(token_ids)
-            # Re-encoding and decoding is necessary to ensure the final
-            # token count is correct.
-            re_encoded_ids = tokenizer.encode(decoded_text, add_special_tokens=False)[
-                :length
-            ]
-            final_text = tokenizer.decode(re_encoded_ids)
-            return final_text, re_encoded_ids
+        def _generate_exact_length_tokens(target_length: int) -> list[int]:
+            """Generate tokens that decode and re-encode to exactly target_length."""
+            # Generate random tokens
+            tokens = np.random.randint(0, vocab_size, size=target_length).tolist()
+            text = tokenizer.decode(tokens)
+            re_encoded = tokenizer.encode(text, add_special_tokens=False)
+
+            if len(re_encoded) == target_length:
+                return re_encoded
+            elif len(re_encoded) < target_length:
+                # Recursively generate additional consistent tokens
+                needed = target_length - len(re_encoded)
+                extra_tokens = _generate_exact_length_tokens(needed)
+                return re_encoded + extra_tokens
+            else:
+                # Truncate to target length
+                return re_encoded[:target_length]
 
         requests = []
         for _ in range(num_prefixes):
-            decoded_prefix, re_encoded_prefix = _generate_random_text_part(prefix_len)
+            prefix_tokens = _generate_exact_length_tokens(prefix_len)
 
             for _ in range(prompts_per_prefix):
-                decoded_suffix, re_encoded_suffix = _generate_random_text_part(
-                    suffix_len
-                )
+                suffix_tokens = _generate_exact_length_tokens(suffix_len)
 
-                prompt = decoded_prefix + decoded_suffix
-                prompt_len = len(re_encoded_prefix) + len(re_encoded_suffix)
+                combined_tokens = prefix_tokens + suffix_tokens
+                prompt = tokenizer.decode(combined_tokens)
+                prompt_len = len(combined_tokens)
                 requests.append(
                     SampleRequest(
                         prompt=prompt,
@@ -1229,4 +1240,5 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
                     )
                 )
 
+        random.shuffle(requests)
         return requests
