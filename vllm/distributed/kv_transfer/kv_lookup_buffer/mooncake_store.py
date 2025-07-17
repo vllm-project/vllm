@@ -7,7 +7,6 @@ from this remote lookup buffer.
 """
 import json
 import os
-import time
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -73,7 +72,7 @@ class MooncakeStore(KVLookupBufferBase):
     ):
 
         try:
-            from mooncake import MooncakeDistributedStore
+            from mooncake.store import MooncakeDistributedStore
         except ImportError as e:
             raise ImportError(
                 "Please install mooncake by following the instructions at "
@@ -185,43 +184,3 @@ class MooncakeStore(KVLookupBufferBase):
             return tensor.to(device)
 
         return None
-
-    def put_unsafe(
-        self,
-        key: str,
-        value: Optional[torch.Tensor],
-    ) -> None:
-        """Put KVCache to Mooncake Store"""
-        value = value.cpu()
-        start_serde = time.time()
-        data_ptr = value.data_ptr()
-        element_size = value.element_size()
-        numel = value.numel()
-        total_size = element_size * numel
-        end_serde = time.time()
-        try:
-            self.store.put_unsafe(key, data_ptr, total_size)
-        except TypeError as err:
-            logger.error("Failed to put value into Mooncake Store: %s", err)
-            raise TypeError("Mooncake Store Put Type Error.") from err
-        end_put = time.time()
-        logger.debug(f"contiguous time: {end_serde - start_serde}, put time: {end_put - end_serde}")
-
-
-    def get_unsafe(self, key: str, shape, dtype=torch.bfloat16 ) -> Optional[torch.Tensor]:
-        """Get KVCache from Mooncake Store without type checking"""
-        start_get = time.time()
-        data = self.store.get(key)
-        end_get = time.time()
-        if data:
-            tensor = torch.frombuffer(data, dtype=dtype)
-            shape = (61, -1, 1, 576) if shape is None else shape
-            tensor = tensor.view(shape)
-            end_from_buffer = time.time()
-            logger.debug(f"from buffer time: {end_from_buffer - end_get}, get time: {end_get - start_get}")
-            return tensor
-        return None
-    
-    def is_exist(self, key: str) -> bool:
-        """Check if the key exists in the Mooncake Store"""
-        return self.store.isExist(key) == 1

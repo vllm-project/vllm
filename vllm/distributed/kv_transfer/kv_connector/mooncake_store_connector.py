@@ -73,7 +73,6 @@ class MooncakeStoreConnector(KVConnectorBase):
             dtype = torch.float8_e4m3fn
         else:
             dtype = torch.bfloat16
-        self.dtype = dtype
         self.padding_k_tensor = torch.zeros((self.block_size, self.k_v_head_size), dtype=dtype, device="hpu")
         self.padding_v_tensor = torch.zeros((self.block_size, self.v_head_size), dtype=dtype, device="hpu")
         self.cache_k = VLLMKVCache()
@@ -229,27 +228,7 @@ class MooncakeStoreConnector(KVConnectorBase):
 
         return hidden_or_intermediate_states, bypass_model_exec, model_input
 
-    def send_kv_caches_and_hidden_states_cpu(
-        self,
-        input_tokens_list: List[torch.Tensor],
-        kv_caches_send_list: List[torch.Tensor],
-        hidden_states_list: List[torch.Tensor],
-    ) -> None:
-        start_time = time.time()
-        if self.rank != 0:
-            # only the first rank will send kv cache
-            return
-        assert len(input_tokens_list) == len(kv_caches_send_list)
-        assert len(input_tokens_list) == len(hidden_states_list)
-        for idx, input_tokens in enumerate(input_tokens_list):
-            store_key_prefix = self.tensor_hash(input_tokens)
-            store_kvcache_key = f"{store_key_prefix}_{self.rank}"
-            store_hidden_key = f"{store_key_prefix}_hidden_{self.rank}"
-            
-            self.kv_store.put_unsafe(store_kvcache_key, kv_caches_send_list[idx])
-            self.kv_store.put_unsafe(store_hidden_key, hidden_states_list[idx])
-        logger.info(f"[rank{self.rank}]: KV send DONE. send {len(input_tokens_list)}, takes {time.time() - start_time} s")
-    
+
     def send_kv_caches_and_hidden_states_hpu(
         self,
         model_executable: torch.nn.Module,
@@ -261,10 +240,8 @@ class MooncakeStoreConnector(KVConnectorBase):
         if self.rank != 0:
             # only the first rank will send kv cache
             return
-        start_time = time.time()
         input_tokens_tensor_cpu = model_input.input_tokens.to("cpu") # shape: [batch_size, seq_len_padding_to_128]
         torch.hpu.synchronize()
-        logger.debug(f"input tokens tensor cpu time: {time.time() - start_time}")
         seq_lens = model_input.attn_metadata.seq_lens # 2D list
         start_layer = model_executable.model.start_layer
         end_layer = model_executable.model.end_layer
@@ -277,12 +254,10 @@ class MooncakeStoreConnector(KVConnectorBase):
         # 3. empty tensor
         # 4. hidden_or_intermediate_states [1, hidden_size]
         for idx, slen in enumerate(seq_lens):
-            start_time = time.time()
             if slen == 1: # we think this is a padding sequence, so we skip it
                 continue
             current_tokens_cpu = input_tokens_tensor_cpu[idx][:slen]
             store_key_prefix = self.tensor_hash(current_tokens_cpu)
-            logger.debug(f"hash takes time: {time.time() - start_time}")
             logger.debug(f"send token len: {slen}, token: {current_tokens_cpu}")
             keys, values = [], []
             start = 0
@@ -302,11 +277,9 @@ class MooncakeStoreConnector(KVConnectorBase):
             keys = torch.cat(keys, dim=0)
             # values = torch.cat(values, dim=0)
             # we pack kv together, only need send one tensor
-            kvcache_to_sent = keys.cpu()
-            logger.debug(f"kv cache reshape time: {time.time() - start_time}")
+            kvcache_to_sent = keys
             store_kvcache_key = f"{store_key_prefix}_{self.rank}"
-            # self.kv_store.put(store_kvcache_key, kvcache_to_sent)
-            self.kv_store.put_unsafe(store_kvcache_key, kvcache_to_sent)
+            self.kv_store.put(store_kvcache_key, kvcache_to_sent)
             
             logger.debug(f"put kv cache key: {store_kvcache_key}")
             
@@ -315,7 +288,6 @@ class MooncakeStoreConnector(KVConnectorBase):
                               hidden_or_intermediate_states[idx].unsqueeze(0).cpu())
             # ==== graph should end here ======
             htorch.core.mark_step()
-            logger.debug(f"kv cache reshape + put time: {time.time() - start_time}")
         logger.debug("[rank%d]: KV send DONE.", torch.distributed.get_rank())
 
 
@@ -383,11 +355,7 @@ class MooncakeStoreConnector(KVConnectorBase):
             load_key_prefix = self.tensor_hash(current_tokens)
             # For deepseek, we only need recv first rank
             load_kvcache_key = f"{load_key_prefix}_0"
-            shape = (61, num_blocks * 128, self.k_v_head_size)
-            while self.kv_store.is_exist(load_kvcache_key) is False:
-                time.sleep(0.1)
-            # remote_kv = self.kv_store.get(load_kvcache_key)
-            remote_kv = self.kv_store.get_unsafe(load_kvcache_key, shape, self.dtype)
+            remote_kv = self.kv_store.get(load_kvcache_key)
             hidden_key = f"{load_key_prefix}_hidden_0"
             hidden = self.kv_store.get(hidden_key)
             
@@ -453,28 +421,6 @@ class MooncakeStoreConnector(KVConnectorBase):
 
         return hidden_or_intermediate_states, bypass_model_exec, model_input
 
-    def recv_kv_caches_and_hidden_states_cpu(self, prefix:str) ->Tuple[
-        torch.Tensor, torch.Tensor]:
-        """Receive KV caches and hidden states from the KV store."""
-        if prefix is None:
-            raise ValueError("Prefix cannot be None.")
-
-        load_kvcache_key = f"{prefix}_0"
-        load_hidden_key = f"{prefix}_hidden_0"
-        while self.kv_store.is_exist(load_kvcache_key) is False:
-            time.sleep(0.01)
-        remote_kv = self.kv_store.get_unsafe(load_kvcache_key, shape = None, dtype=self.dtype)
-        # hidden_states always use bf16.
-        while self.kv_store.is_exist(load_hidden_key) is False:
-            time.sleep(0.01)
-        hidden = self.kv_store.get_unsafe(load_hidden_key, shape=(1,7168))
-
-        if remote_kv is None or hidden is None:
-            # didn't find any match.
-            logger.warning(f"Didn't find any match, load_key_prefix: {load_kvcache_key}")
-            return None, None
-
-        return remote_kv, hidden
 
 
     @staticmethod

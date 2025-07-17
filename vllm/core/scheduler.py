@@ -4,10 +4,6 @@ import enum
 import os
 import random
 import time
-import threading
-import torch 
-
-from queue import Queue
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Deque, Dict, Iterable, List, Optional
@@ -23,10 +19,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta,
                            SequenceStatus)
-from vllm.utils import Device, PyObjectCache, SharedDict
-from vllm.distributed import get_kv_transfer_group
-from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
-                                         HabanaMemoryProfiler, format_bytes)
+from vllm.utils import Device, PyObjectCache
+
 logger = init_logger(__name__)
 
 # Test-only. If configured, decode is preempted with
@@ -425,8 +419,6 @@ class Scheduler:
         lora_config: Optional[LoRAConfig],
         pipeline_parallel_size: int = 1,
         output_proc_callback: Optional[Callable] = None,
-        kv_cache_shared_dict: Optional[SharedDict] = None,
-        need_fetch_kv: bool = False,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
@@ -434,7 +426,6 @@ class Scheduler:
         # simple and NOT fair. It can lead to starvation of some
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
-        self.kv_cache_shared_dict = kv_cache_shared_dict
 
         version = "selfattn"
         if (self.scheduler_config.runner_type == "pooling"
@@ -460,14 +451,6 @@ class Scheduler:
             sliding_window=self.cache_config.sliding_window,
             enable_caching=self.cache_config.enable_prefix_caching)
 
-        # TODO: set via config.
-        self.need_fetch_kv = need_fetch_kv
-        self.fetching_thread_should_shutdown = False
-        # Sequence groups in FETCHING_KV state, before becoming waiting,
-        self.fetching_kv: Queue[SequenceGroup] = Queue()
-        self.fetching_thread = threading.Thread(target=self._fetch_kv_thread,)
-        if self.need_fetch_kv:
-            self.fetching_thread.start()
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.
         self.waiting: Deque[SequenceGroup] = deque()
@@ -526,65 +509,6 @@ class Scheduler:
         # will be stopped during schedule() call and added to this stop list
         # for processing and deallocation by the free_finished_seq_groups()
         self._async_stopped: List[SequenceGroup] = []
-        self.scheduler_profiler = HabanaHighLevelProfiler("scheduler_instance_0")
-
-    def _fetch_kv_thread(self):
-        assert self.kv_cache_shared_dict is not None
-        def hash_list(input):
-            import numpy as np
-            import hashlib
-            input_bytes = np.array(input).tobytes()
-            hash_object = hashlib.blake2b(input_bytes)
-            hash_hex = hash_object.hexdigest()
-            return int(hash_hex[:16], 16)
-        
-        def get_kv_and_hidden_states(prefix):
-            start = time.time()
-            kv_cache, hidden_states = get_kv_transfer_group().recv_kv_caches_and_hidden_states_cpu(prefix)
-            
-            return prefix, kv_cache, hidden_states
-        
-        def put_to_shared_dict(prefix, kv_cache, hidden_states):
-            # Store the kv_cache and hidden_states in the shared dict.
-            # TODO: need to check whether have memory copy!!!
-            start_time_stamp = time.time()
-            kv_cache_hpu = kv_cache.to("hpu", non_blocking=True)
-            hidden_states_hpu = hidden_states.to("hpu", non_blocking=True)
-            end_time_stamp = time.time()
-            self.kv_cache_shared_dict.add_item(prefix,
-                                               [kv_cache_hpu,
-                                                hidden_states_hpu])
-            if torch.distributed.get_rank() == 0:
-                logger.info(f"putting kv cache to shared dict, "
-                            f"takes: {end_time_stamp - start_time_stamp:.3f} seconds"
-                            f"start time: {start_time_stamp}, "
-                            f"end time: {end_time_stamp}")
-
-        while True:
-            if self.fetching_thread_should_shutdown:
-                logger.info("The fetching thread is shutting down.")
-                return
-            if not self.fetching_kv.empty():
-                self.scheduler_profiler.start('internal', 'fetching_kv')
-                seq_group = self.fetching_kv.get()
-                hash_prefix = hash_list(seq_group.prompt_token_ids)
-                prefix, kv_cache, hidden_states = get_kv_and_hidden_states(hash_prefix)
-                put_to_shared_dict(prefix, kv_cache, hidden_states)
-                if seq_group is not None:
-                    self.waiting.append(self.fetching_kv.get())
-                self.fetching_kv.task_done()
-                self.scheduler_profiler.end()
-            else:
-                time.sleep(0.1)
-
-    def shutdown(self):
-        self.fetching_thread_should_shutdown = True
-        """Shutdown the scheduler."""
-        if self.fetching_thread.is_alive():
-            self.fetching_thread.join(timeout=1.0)
-        else:
-            logger.warning("The fetching thread is not alive, "
-                           "but it should be.")
 
     @property
     def next_cache_id(self):
@@ -600,13 +524,8 @@ class Scheduler:
         return 1
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
-        if self.need_fetch_kv:
-            self.fetching_kv.put(seq_group)
-            # we put twice to avoid fetching kv empty status
-            self.fetching_kv.put(seq_group)
         # Add sequence groups to the waiting queue.
-        else:
-            self.waiting.append(seq_group)
+        self.waiting.append(seq_group)
 
     def _add_seq_group_to_running(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the running queue.
@@ -671,7 +590,7 @@ class Scheduler:
 
     def has_unfinished_seqs(self) -> bool:
         return len(self.waiting) != 0 or len(self.running) != 0 or len(
-            self.swapped) != 0 or not self.fetching_kv.empty()
+            self.swapped) != 0
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return self.block_manager.get_prefix_cache_hit_rate(device)
@@ -680,7 +599,7 @@ class Scheduler:
         return self.block_manager.reset_prefix_cache()
 
     def get_num_unfinished_seq_groups(self) -> int:
-        return len(self.waiting) + len(self.running) + len(self.swapped) + self.fetching_kv.qsize()
+        return len(self.waiting) + len(self.running) + len(self.swapped)
 
     def get_and_reset_finished_requests_ids(self) -> List[str]:
         """Flushes the list of request ids of previously finished seq_groups."""

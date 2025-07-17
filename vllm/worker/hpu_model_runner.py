@@ -13,7 +13,6 @@ import itertools
 import math
 import os
 import time
-import concurrent.futures
 from array import array
 from enum import Enum, IntEnum
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple,
@@ -23,7 +22,6 @@ import habana_frameworks.torch as htorch
 import habana_frameworks.torch.internal.bridge_config as bc
 import torch
 import torch.nn as nn
-import vllm.envs as envs
 import vllm_hpu_extension.environment as environment
 from vllm_hpu_extension.bucketing import HPUBucketingContext
 from vllm_hpu_extension.flags import enabled_flags
@@ -31,7 +29,6 @@ from vllm_hpu_extension.ops import LoraMask as LoraMask
 from vllm_hpu_extension.ops import batch2block, block2batch
 from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
                                          HabanaMemoryProfiler, format_bytes)
-from vllm_hpu_extension.utils import VLLMKVCache
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionType
@@ -41,7 +38,6 @@ from vllm.distributed import broadcast_tensor_dict, get_kv_transfer_group
 from vllm.distributed.parallel_state import (get_dp_group, get_tp_group,
                                              get_pp_group, get_world_group)
 from vllm.forward_context import set_forward_context
-
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
@@ -63,13 +59,7 @@ from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceData, SequenceGroupMetadata,
                            SequenceOutput)
 from vllm.utils import (bind_kv_cache, is_fake_hpu, is_pin_memory_available,
-                        make_tensor_with_pad, SharedDict)
-from vllm.distributed import (divide, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce,
-                              get_tensor_model_parallel_world_size,
-                              get_tensor_model_parallel_rank)
-
+                        make_tensor_with_pad)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
@@ -730,8 +720,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         self.pin_memory = is_pin_memory_available()
         self.kv_cache_dtype = self.cache_config.cache_dtype
-        self.cache_k = VLLMKVCache()
-        self.input_tokens_tensor_cpu = None
 
         if self.model_config.is_deepseek_mla and not self.model_config.use_mla:
              raise NotImplementedError(
@@ -797,10 +785,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         # For delayed sampling
         self.cached_step_inputs: List[
             ModelInputForHPUWithSamplingMetadata] = []
-        
-        self.pd_executor_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        self.use_async_pd = envs.VLLM_USE_ASYNC_PD
-        logger.info(f"will use async pd: {self.use_async_pd}")
 
     def _set_gc_threshold(self) -> None:
         """
@@ -1245,8 +1229,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                                    pad=0,
                                                    dtype=torch.long,
                                                    device='cpu')
-        if self.use_async_pd:
-            self.input_tokens_tensor_cpu = input_tokens_tensor.clone()
 
         input_positions = make_tensor_with_pad(input_positions,
                                                max_len=max_prompt_len,
@@ -2678,7 +2660,6 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         warmup_mode = kwargs.get('warmup_mode', False)
         previous_hidden_states = kwargs.get('previous_hidden_states')
-        kv_cache_shared_dict: Optional[SharedDict] = kwargs.get('kv_cache_shared_dict', None)
 
         self.has_patched_prev_output = False
         use_delayed_sampling = VLLM_DELAYED_SAMPLING and not warmup_mode
@@ -2855,90 +2836,21 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 # NOTE: The receive operation is blocking
                 bypass_model_exec = False
                 if self.need_recv_kv(model_input, kv_caches, warmup_mode):
-                    # we assume kv cache is recved and put into the dict!
-                    def tensor_hash(tensor: torch.Tensor) -> int:
-                        """Calculate the hash value of the tensor."""
-                        import hashlib
-                        tensor_bytes = tensor.clone().detach().cpu().numpy().tobytes()
-                        hash_object = hashlib.blake2b(tensor_bytes)
-                        hash_hex = hash_object.hexdigest()
-                        return int(hash_hex[:16], 16)
-
                     cur_time = time.time()
                     attn_metadata = self.model.forward_update_meta_only(
                         **execute_model_kwargs,
                         selected_token_indices=sampling_metadata.
                         selected_token_indices)
-                    
-                    def sync_recv_kv_caches(model, model_input, attn_metadata, kv_caches):
-                        hidden_states, bypass_model_exec, model_input = \
-                            get_kv_transfer_group().recv_kv_caches_and_hidden_states_hpu(
-                            model, model_input, attn_metadata,
-                            kv_caches)
-                        return hidden_states, bypass_model_exec
-                    
-                    def async_recv_kv_caches(model, model_input, attn_metadata, kv_caches):
-                    
-                        input_tokens_tensor_cpu = self.input_tokens_tensor_cpu
-                        block_indices_list = attn_metadata.block_indices.tolist() 
-                        torch.hpu.synchronize()
-                        seq_lens_tensor = model_input.attn_metadata.seq_lens_tensor
-                        seq_lens = seq_lens_tensor.tolist() #2D list
-                        hidden_states_list = []
-                        start_block_idx = 0
-                        k_v_head_size = 576
-                        htorch.core.mark_step()
-                        for idx, slen in enumerate(seq_lens):
-                            if slen == 1:
-                                hidden_states_list.append(hidden_states_list[0])
-                                # skip the seq with only one token
-                                continue
-                            num_blocks = (slen + 127) // 128
-                            end_block_idx = start_block_idx + num_blocks
-
-                            kv_cache_shape = (61, num_blocks * self.block_size, 1, k_v_head_size)
-                            if get_tensor_model_parallel_rank() == 0:
-                                current_tokens = input_tokens_tensor_cpu[idx][:slen]
-                                prefix = tensor_hash(current_tokens)
-                                assert kv_cache_shared_dict is not None
-                                kv_cache_for_cur_seq, hidden_states = kv_cache_shared_dict.get_item(prefix)
-
-                                if get_tensor_model_parallel_world_size() > 1:
-                                    kv_cache_for_cur_seq = tensor_model_parallel_all_reduce(kv_cache_for_cur_seq)
-                                    hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-                                kv_cache_shared_dict.remove_item(prefix)
-                            else:
-                                kv_cache_for_cur_seq = torch.zeros(kv_cache_shape, dtype=torch.bfloat16, device="hpu")
-                                hidden_states = torch.zeros((1, 7168), dtype=torch.bfloat16, device="hpu")
-                                kv_cache_for_cur_seq = tensor_model_parallel_all_reduce(kv_cache_for_cur_seq)
-                                hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-
-                            hidden_states_list.append(hidden_states)
-
-                            block_indices_tensor = torch.tensor(block_indices_list[start_block_idx:end_block_idx], device="hpu", dtype=torch.int32 )
-                            htorch.core.mark_step()
-                            # write to kv cache
-                            for i in range(61):
-                                kv_cache_current_layer = kv_caches[i]
-                                key_cache_current_layer, value_cache_current_layer = kv_cache_current_layer[0], kv_cache_current_layer[1]
-
-                                key = kv_cache_for_cur_seq[i].squeeze(-2).view(-1, self.block_size, k_v_head_size)
-                                self.cache_k(key, key_cache_current_layer, block_indices_tensor, None)
-
-                            start_block_idx = end_block_idx
-                            htorch.core.mark_step()
-                        hidden_states = torch.cat(hidden_states_list, dim=0)
-                        bypass_model_exec = True
-                        htorch.core.mark_step()
-                        return hidden_states, bypass_model_exec
-                    
-                    model = self.get_model()
-                    if self.use_async_pd:
-                        hidden_states, bypass_model_exec = \
-                            async_recv_kv_caches(model, model_input, attn_metadata, kv_caches)
-                    else:
-                        hidden_states, bypass_model_exec = \
-                            sync_recv_kv_caches(model, model_input, attn_metadata, kv_caches)
+                    hidden_states, bypass_model_exec, model_input = \
+                    get_kv_transfer_group().recv_kv_caches_and_hidden_states_hpu(
+                        # model is used to know which layer the current worker
+                        # is working on, so that we can receive KV for only those
+                        # layers.
+                        self.get_model(),
+                        model_input,
+                        attn_metadata,
+                        kv_caches=kv_caches
+                    )
                     now = time.time()
                     logger.info(f"KV transfer recv time: {now - cur_time}")
 
@@ -2963,80 +2875,17 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 # torch.hpu.synchronize()
                 # Sending KV cache in distributed KV cache transfer setting
                 # NOTE: the send operation is non-blocking
-                
+                cur_time = time.time()
                 if self.need_send_kv(model_input, kv_caches, warmup_mode):
-                    cur_time = time.time()
-                    def sync_send_kv_caches():
-                        get_kv_transfer_group().send_kv_caches_and_hidden_states_hpu(
-                            # model_executable is used to know which layer the current
-                            # worker is working on, so that we can send KV for only those
-                            # layers.
-                            self.get_model(),
-                            model_input,
-                            kv_caches,
-                            hidden_states,
-                        )
-
-                    def fetch_kv_to_host(model, model_input, kv_caches, hidden_states):
-                        input_tokens_tensor_cpu = model_input.input_tokens.to("cpu")# shape: [batch_size, seq_len_padding_to_128]
-                        torch.hpu.synchronize() # sync here may hurt performance.
-                        seq_lens = model_input.attn_metadata.seq_lens
-                        start_layer = model.model.start_layer
-                        end_layer = model.model.end_layer
-                        num_kv_heads = 1
-                        k_v_head_size = 576
-                        kv_caches_send_list = []
-                        hidden_states_list = []
-                        input_tokens_list = []
-                        htorch.core.mark_step()
-                        for idx, slen in enumerate(seq_lens):
-                            if slen == 1:
-                                continue
-                            current_tokens_cpu = input_tokens_tensor_cpu[idx][:slen]
-                            keys, values = [], []
-                            start = 0
-                            padded_total_size = (slen + self.block_size - 1) // self.block_size * self.block_size
-                            current_slot_mapping = model_input.attn_metadata.slot_mapping[idx][start:padded_total_size]
-                            # ==== graph should start here ======
-                            for layer_id in range(start_layer, end_layer):
-                                kv_cache = kv_caches[layer_id - start_layer]
-                                key_cache = kv_cache[0].reshape(-1, num_kv_heads, k_v_head_size)
-                                # value_cache = kv_cache[1].reshape(-1, num_kv_heads, v_head_size)
-
-                                keys.append(key_cache.index_select(0, current_slot_mapping).unsqueeze(0))
-                            keys = torch.cat(keys, dim=0)
-                            kv_cache_to_sent = keys.cpu()
-                            current_hidden_states = hidden_states[idx].unsqueeze(0).cpu()
-                            # ==== graph should end here ======
-                            htorch.core.mark_step()
-                            torch.hpu.synchronize()
-                            kv_caches_send_list.append(kv_cache_to_sent)
-                            hidden_states_list.append(current_hidden_states)
-                            input_tokens_list.append(current_tokens_cpu)
-                        
-                        return input_tokens_list, kv_caches_send_list, hidden_states_list
-                    
-                    def send_kv(input_tokens_list, kv_caches_send_list, hidden_states_list):
-                        cur_time = time.time()
-                        get_kv_transfer_group().send_kv_caches_and_hidden_states_cpu(
-                            input_tokens_list, kv_caches_send_list, hidden_states_list)
-                        now = time.time()
-                        logger.info(f"KV transfer send time: {now - cur_time}")
-                        
-                    def async_send_kv_caches():
-                        input_tokens_list, kv_caches_send_list, hidden_states_list = \
-                            fetch_kv_to_host(self.get_model(), model_input, kv_caches, hidden_states)
-                        # TODO: we can make each request as a standalone send task 
-                        self.pd_executor_pool.submit(send_kv,
-                                                     input_tokens_list,
-                                                     kv_caches_send_list,
-                                                     hidden_states_list)
-
-                    if self.use_async_pd:
-                        async_send_kv_caches()
-                    else:
-                        sync_send_kv_caches()
-                    
+                    get_kv_transfer_group().send_kv_caches_and_hidden_states_hpu(
+                        # model_executable is used to know which layer the current
+                        # worker is working on, so that we can send KV for only those
+                        # layers.
+                        self.get_model(),
+                        model_input,
+                        kv_caches,
+                        hidden_states,
+                    )
                     now = time.time()
                     logger.info(f"KV transfer send time: {now - cur_time}")
 
