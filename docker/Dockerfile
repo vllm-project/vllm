@@ -381,7 +381,7 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
     . /etc/environment
     export TORCH_CUDA_ARCH_LIST='7.0 7.5 8.0 8.9 9.0 10.0 12.0'
-    uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.30"
+    uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.31"
     # DEBUG
     python3 -m xformers.info
 BASH
