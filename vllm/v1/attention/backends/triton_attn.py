@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Optional
+from typing import Any, ClassVar, Optional
 
 import torch
 
@@ -14,6 +14,7 @@ from vllm.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode)
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.ops.triton_unified_attention import unified_attention
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
@@ -21,10 +22,6 @@ from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
     make_local_attention_virtual_batches)
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.block_table import BlockTable
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -75,12 +72,21 @@ class TritonAttentionMetadataBuilder(
         AttentionMetadataBuilder[TritonAttentionMetadata]):
     full_cudagraph_supported: ClassVar[bool] = True
 
-    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
-                 block_table: BlockTable):
-        self.runner = runner
+    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
+                 device: torch.device):
+        self.device = device
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
-        self.block_table = block_table
+
+        model_config = vllm_config.model_config
+        self.num_heads_q = model_config.get_num_attention_heads(
+            vllm_config.parallel_config)
+        self.num_heads_kv = model_config.get_num_kv_heads(
+            vllm_config.parallel_config)
+        self.headdim = model_config.get_head_size()
+
+        self.attention_chunk_size = getattr(vllm_config.scheduler_config,
+                                            'attention_chunk_size', None)
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -92,46 +98,36 @@ class TritonAttentionMetadataBuilder(
         attn_metadata.seq_lens.fill_(1)
         return attn_metadata
 
-    def build(
-        self, common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata
-    ) -> TritonAttentionMetadata:
-        num_reqs = common_attn_metadata.num_reqs
+    def build(self,
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata,
+              fast_build: bool = False) -> TritonAttentionMetadata:
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
 
-        max_seq_len = int(self.runner.seq_lens_np[:num_reqs].max())
+        max_seq_len = int(common_attn_metadata.seq_lens_cpu.max())
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
-        block_table = self.block_table
-        block_table_tensor = block_table.get_device_tensor()[:num_reqs]
-
-        block_table.slot_mapping[:num_actual_tokens].copy_(
-            block_table.slot_mapping_cpu[:num_actual_tokens],
-            non_blocking=True)
-        # Fill unused with -1. Needed for reshape_and_cache in full cuda graph
-        # mode.
-        block_table.slot_mapping[num_actual_tokens:].fill_(-1)
-
-        slot_mapping = block_table.slot_mapping[:num_actual_tokens]
+        block_table_tensor = common_attn_metadata.block_table_tensor
+        slot_mapping = common_attn_metadata.slot_mapping
 
         # for local attention
         local_attn_metadata = None
-        if self.runner.attention_chunk_size is not None:
+        if self.attention_chunk_size is not None:
             seqlens_q_local_np, virt_q_cu_seqlens_np, virt_k_seqlens_np, \
                 virt_block_table_tensor = make_local_attention_virtual_batches(
-                    self.runner.attention_chunk_size,
-                    self.runner.query_start_loc_np[:num_reqs + 1],
-                    self.runner.seq_lens_np[:num_reqs],
+                    self.attention_chunk_size,
+                    common_attn_metadata.query_start_loc_cpu.numpy(),
+                    common_attn_metadata.seq_lens_cpu.numpy(),
                     block_table_tensor,
                     self.block_size,
                 )
             local_query_start_loc = torch.from_numpy(virt_q_cu_seqlens_np).to(
-                self.runner.device, non_blocking=True)
+                self.device, non_blocking=True)
             local_seqused_k = torch.from_numpy(virt_k_seqlens_np).to(
-                self.runner.device, non_blocking=True)
-            local_max_query_len = seqlens_q_local_np.max()
-            local_max_seq_len = virt_k_seqlens_np.max()
+                self.device, non_blocking=True)
+            local_max_query_len = seqlens_q_local_np.max().item()
+            local_max_seq_len = virt_k_seqlens_np.max().item()
 
             local_attn_metadata = TritonAttentionMetadata \
                         .LocalAttentionMetadata(
@@ -148,14 +144,13 @@ class TritonAttentionMetadataBuilder(
         if use_cascade:
             cu_prefix_query_lens = torch.tensor([0, num_actual_tokens],
                                                 dtype=torch.int32,
-                                                device=self.runner.device)
+                                                device=self.device)
             prefix_kv_lens = torch.tensor([common_prefix_len],
                                           dtype=torch.int32,
-                                          device=self.runner.device)
-            suffix_kv_lens = (self.runner.seq_lens_np[:num_reqs] -
+                                          device=self.device)
+            suffix_kv_lens = (common_attn_metadata.seq_lens_cpu -
                               common_prefix_len)
-            suffix_kv_lens = torch.from_numpy(suffix_kv_lens).to(
-                self.runner.device)
+            suffix_kv_lens = suffix_kv_lens.to(self.device)
         else:
             cu_prefix_query_lens = None
             prefix_kv_lens = None
