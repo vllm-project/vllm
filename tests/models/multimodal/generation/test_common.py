@@ -191,9 +191,8 @@ VLM_TEST_SETTINGS = {
         },
         marks=[pytest.mark.core_model],
     ),
-    # FIXME(Isotr0py): failing due to `split_size` mismatched num_image_tokens,
-    # likely a bug in hf_processor implementation. Needs further investigation.
-    # Has col/row special token between patches
+    # FIXME(Isotr0py): Enable this test after
+    # https://github.com/huggingface/transformers/pull/39470 released
     # "idefics3-transformers": VLMTestInfo(
     #     models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
     #     test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -221,7 +220,7 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
-        image_size_factors=[(0.25, 0.5, 1.0)],
+        image_size_factors=[(0.25, 0.2, 0.15)],
         vllm_runner_kwargs={
             "model_impl": "transformers",
             "disable_mm_preprocessor_cache": True,
