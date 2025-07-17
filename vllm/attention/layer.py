@@ -23,6 +23,16 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op
 
+try:
+    from xformers import ops as xops
+
+    if current_platform.is_cuda() and current_platform.has_device_capability(100):
+        # Xformers FA is not compatible with B200
+        USE_XFORMERS_OPS = False
+    else:
+        USE_XFORMERS_OPS = True
+except ImportError:
+    USE_XFORMERS_OPS = False
 
 class Attention(nn.Module):
     """Attention layer.
@@ -314,12 +324,6 @@ class MultiHeadAttention(nn.Module):
                 _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.PALLAS_VLLM_V1
             } else _Backend.TORCH_SDPA
 
-        if self.attn_backend == _Backend.XFORMERS and current_platform.is_cuda(
-        ) and current_platform.has_device_capability(100):
-            # currently, xformers does not support blackwell architecture
-            # TODO: remove this once xformers supports blackwell
-            self.attn_backend = _Backend.TORCH_SDPA
-
     def forward(
         self,
         query: torch.Tensor,
@@ -340,26 +344,24 @@ class MultiHeadAttention(nn.Module):
             key = torch.repeat_interleave(key, num_repeat, dim=2)
             value = torch.repeat_interleave(value, num_repeat, dim=2)
 
-        if self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-
+        if self.attn_backend == _Backend.XFORMERS and USE_XFORMERS_OPS:
             out = xops.memory_efficient_attention_forward(query,
                                                           key,
                                                           value,
                                                           scale=self.scale)
-        elif self.attn_backend == _Backend.TORCH_SDPA:
+        elif self.attn_backend == _Backend.PALLAS_VLLM_V1:
+            query, key, value = (x.transpose(1, 2)
+                                 for x in (query, key, value))
+            from torch_xla.experimental.custom_kernel import flash_attention
+            out = flash_attention(query, key, value, sm_scale=self.scale)
+            out = out.transpose(1, 2)
+        else:
             query, key, value = (x.transpose(1, 2)
                                  for x in (query, key, value))
             out = F.scaled_dot_product_attention(query,
                                                  key,
                                                  value,
                                                  scale=self.scale)
-            out = out.transpose(1, 2)
-        elif self.attn_backend == _Backend.PALLAS_VLLM_V1:
-            query, key, value = (x.transpose(1, 2)
-                                 for x in (query, key, value))
-            from torch_xla.experimental.custom_kernel import flash_attention
-            out = flash_attention(query, key, value, sm_scale=self.scale)
             out = out.transpose(1, 2)
 
         return out.reshape(bsz, q_len, -1)
