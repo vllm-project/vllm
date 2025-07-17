@@ -97,14 +97,31 @@ def test_video_media_io_kwargs():
         _ = videoio.load_bytes(b"test")
 
 
-def test_opencv_video_io_colorspace():
-    """Test all functions that use OpenCV for video I/O return RGB format."""
+@pytest.mark.parametrize("is_color", [True, False])
+@pytest.mark.parametrize("fourcc, ext", [("mp4v", "mp4"), ("XVID", "avi")])
+def test_opencv_video_io_colorspace(is_color: bool, fourcc: str, ext: str):
+    """
+    Test all functions that use OpenCV for video I/O return RGB format.
+    Both RGB and grayscale videos are tested.
+    """
     image_path = get_vllm_public_assets(filename="stop_sign.jpg",
                                         s3_prefix="vision_model_images")
     image = Image.open(image_path)
     with tempfile.TemporaryDirectory() as tmpdir:
-        video_path = f"{tmpdir}/test_video.mp4"
-        create_video_from_image(image_path, video_path, num_frames=2)
+        if not is_color:
+            image_path = f"{tmpdir}/test_grayscale_image.png"
+            image = image.convert("L")
+            image.save(image_path)
+            # Convert to gray RGB for comparison
+            image = image.convert("RGB")
+        video_path = f"{tmpdir}/test_RGB_video.{ext}"
+        create_video_from_image(
+            image_path,
+            video_path,
+            num_frames=2,
+            is_color=is_color,
+            fourcc=fourcc,
+        )
 
         frames = video_to_ndarrays(video_path)
         for frame in frames:

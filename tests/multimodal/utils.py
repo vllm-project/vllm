@@ -40,14 +40,23 @@ def create_video_from_image(
     video_path: str,
     num_frames: int = 10,
     fps: float = 1.0,
+    is_color: bool = True,
+    fourcc: str = "mp4v",
 ):
     image = cv2.imread(image_path)
-    height, width, _ = image.shape
+    if not is_color:
+        # Convert to grayscale if is_color is False
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        height, width = image.shape
+    else:
+        height, width, _ = image.shape
+
     video_writer = cv2.VideoWriter(
         video_path,
-        cv2.VideoWriter_fourcc(*"mp4v"),
+        cv2.VideoWriter_fourcc(*fourcc),
         fps,
         (width, height),
+        isColor=is_color,
     )
 
     for _ in range(num_frames):
