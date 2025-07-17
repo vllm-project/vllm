@@ -28,17 +28,24 @@ def default_server_args():
     ]
 
 
-@pytest.fixture(scope="module",
-                params=[["--logits-processors", DUMMY_LOGITPROC_FQCN]])
-def server(default_server_args, request):
-    """Server cli arg list is parameterized by logitproc source
-    
-    TODO (andy): entrypoints unit test; currently CLI logitsprocs
-    unit test only covers the case where logitproc is specified by
-    FQCN
+@pytest.fixture(scope="function",
+                params=[[], ["--logits-processors", DUMMY_LOGITPROC_FQCN]])
+def server(default_server_args, request, monkeypatch):
+    """Server cli arg list is parameterized by logitproc source: either fully-
+    qualified class name (FQCN) specified by `--logits-processors`, or
+    entrypoint.
+
+    Entrypoint requires no cli argument, but for testing purposes an
+    environment variable must be set to mock a dummy logit processor entrypoint
     """
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
     if request.param:
+        # Append FQCN argument
         default_server_args = default_server_args + request.param
+    else:
+        # Enable mock logit processor entrypoint
+        monkeypatch.setenv("VLLM_MOCK_LP_ENTRYPOINT", "1")
+
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
         yield remote_server
 
