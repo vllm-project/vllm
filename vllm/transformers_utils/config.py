@@ -733,13 +733,6 @@ def get_hf_text_config(config: PretrainedConfig):
     """Get the "sub" config relevant to llm for multi modal models.
     No op for pure text models.
     """
-    # This block should be unnecessary after https://github.com/huggingface/transformers/pull/37517
-    if hasattr(config, "thinker_config"):
-        # TODO(suyang.fy): Refactor code.
-        #  For Qwen2.5-Omni, change hf_text_config to
-        #  thinker_config.text_config.
-        return config.thinker_config.text_config
-
     text_config = config.get_text_config()
 
     if text_config is not config:
