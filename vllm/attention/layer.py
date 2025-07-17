@@ -343,8 +343,8 @@ class MultiHeadAttention(nn.Module):
                 _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.PALLAS_VLLM_V1
             } else _Backend.TORCH_SDPA
 
-        if self.attn_backend == _Backend.XFORMERS and not check_xformers_availability(
-        ):
+        if (self.attn_backend == _Backend.XFORMERS
+                and not check_xformers_availability()):
             self.attn_backend = _Backend.TORCH_SDPA
 
     def forward(
