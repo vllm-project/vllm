@@ -1,0 +1,1 @@
+VLLM_USE_V1=1 vllm serve nm-testing/SpeculatorLlama3-1-8B-Eagle3-converted-0717 >output_speculators_llama.txt
