@@ -569,6 +569,8 @@ async def benchmark(
 
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
+    if max_concurrency is not None:
+        print("{:<40} {:<10}".format("Maximum request concurrency:", max_concurrency))
     print("{:<40} {:<10.2f}".format("Benchmark duration (s):", benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
     print("{:<40} {:<10}".format("Total generated tokens:", metrics.total_output))
