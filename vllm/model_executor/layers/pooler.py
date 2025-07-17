@@ -165,6 +165,10 @@ class PoolingMethod(nn.Module, ABC):
         raise NotImplementedError(f"Unsupported method: {pooling_type}")
 
     @abstractmethod
+    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+        raise NotImplementedError
+
+    @abstractmethod
     def forward_one(
         self,
         hidden_states: torch.Tensor,
@@ -202,6 +206,14 @@ class PoolingMethod(nn.Module, ABC):
 
 class CLSPool(PoolingMethod):
 
+    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+        # The equalities are split up to keep mypy happy
+        if (task == "encode" or task == "embed" or task == "classify"
+                or task == "score"):
+            return PoolingParams()
+
+        assert_never(task)
+
     def forward_one(
         self,
         hidden_states: torch.Tensor,
@@ -224,6 +236,14 @@ class CLSPool(PoolingMethod):
 
 class LastPool(PoolingMethod):
 
+    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+        # The equalities are split up to keep mypy happy
+        if (task == "encode" or task == "embed" or task == "classify"
+                or task == "score"):
+            return PoolingParams()
+
+        assert_never(task)
+
     def forward_one(
         self,
         hidden_states: torch.Tensor,
@@ -241,6 +261,16 @@ class LastPool(PoolingMethod):
 
 
 class AllPool(PoolingMethod):
+
+    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+        if task == "encode":
+            return PoolingParams()
+
+        # The equalities are split up to keep mypy happy
+        if task == "embed" or task == "classify" or task == "score":
+            return None
+
+        assert_never(task)
 
     def forward_one(
         self,
@@ -268,6 +298,14 @@ class AllPool(PoolingMethod):
 
 
 class MeanPool(PoolingMethod):
+
+    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+        # The equalities are split up to keep mypy happy
+        if (task == "encode" or task == "embed" or task == "classify"
+                or task == "score"):
+            return PoolingParams()
+
+        assert_never(task)
 
     def forward_one(
         self,
@@ -483,17 +521,7 @@ class SimplePooler(Pooler):
         self.head = head
 
     def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
-        if task == "encode":
-            return PoolingParams()
-
-        # The equalities are split up to keep mypy happy
-        if task == "embed" or task == "classify" or task == "score":
-            if isinstance(self.pooling, (LastPool, CLSPool, MeanPool)):
-                return PoolingParams()
-
-            return None
-
-        assert_never(task)
+        return self.pooling.get_pooling_params(task)
 
     def forward(
         self,
