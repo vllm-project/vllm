@@ -429,6 +429,9 @@ class ServingScores(OpenAIServing):
                 raw_request,
                 request.truncate_prompt_tokens,
             )
+            if isinstance(final_res_batch, ErrorResponse):
+                return final_res_batch
+
             return self.request_output_to_rerank_response(
                 final_res_batch,
                 request_id,
