@@ -24,9 +24,9 @@ from vllm.v1.sample.logits_processor import (BatchUpdate, BatchUpdateBuilder,
                                              LogitsProcessor,
                                              MinPLogitsProcessor,
                                              MinTokensLogitsProcessor,
-                                             MoveDirectionality)
+                                             MoveDirectionality,
+                                             build_logitsprocs)
 # yapf: enable
-from vllm.v1.sample.logits_processor.load import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 
 PIN_MEMORY_AVAILABLE = is_pin_memory_available()
