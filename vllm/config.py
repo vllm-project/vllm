@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from transformers.configuration_utils import PretrainedConfig
 
     import vllm.model_executor.layers.quantization as me_quant
+    import vllm.model_executor.model_loader as model_loader
     import vllm.model_executor.models as me_models
     from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -83,6 +84,8 @@ else:
     ConfigType = type
     HfOverrides = Union[dict[str, Any], Callable[[type], type]]
 
+    model_loader = LazyLoader("model_executor", globals(),
+                              "vllm.model_executor.model_loader")
     me_quant = LazyLoader("model_executor", globals(),
                           "vllm.model_executor.layers.quantization")
     me_models = LazyLoader("model_executor", globals(),
@@ -1807,9 +1810,7 @@ class LoadConfig:
 
     def __post_init__(self):
         self.load_format = self.load_format.lower()
-        from vllm.model_executor.model_loader import get_supported_load_formats
-
-        if self.load_format not in get_supported_load_formats():
+        if self.load_format not in model_loader.get_supported_load_formats():
             raise ValueError(f"{self.load_format} is not supported")
 
         if self.ignore_patterns is not None and len(self.ignore_patterns) > 0:

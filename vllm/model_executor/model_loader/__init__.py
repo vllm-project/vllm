@@ -38,7 +38,7 @@ LoadFormats = Literal[
     "sharded_state",
     "tensorizer",
 ]
-_LOAD_FORMAT_TO_MODEL_LOADER = {
+_LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "auto": DefaultModelLoader,
     "bitsandbytes": BitsAndBytesModelLoader,
     "dummy": DummyModelLoader,
