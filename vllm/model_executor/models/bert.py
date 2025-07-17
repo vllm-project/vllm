@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -18,12 +18,14 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.pooler import (ClassifierPooler, Pooler,
+                                               PoolingMethod, PoolingTask,
                                                PoolingType)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.pooling_params import PoolingParams
+from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsCrossEncoding, SupportsQuant, SupportsV0Only
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
@@ -80,18 +82,25 @@ class BertEmbedding(nn.Module):
         return embeddings
 
 
-class BertPooler(nn.Module):
+class BertPooler(Pooler):
 
     def __init__(self, config: BertConfig):
         super().__init__()
+
+        self.pooling = PoolingMethod.from_pooling_type(PoolingType.CLS)
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.activation = nn.Tanh()
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # We "pool" the model by simply taking the hidden state corresponding
-        # to the first token.
-        first_token_tensor = hidden_states[0, :]
-        pooled_output = self.dense(first_token_tensor)
+    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+        return self.pooling.get_pooling_params(task)
+
+    def forward(
+        self,
+        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
+        pooling_metadata: PoolingMetadata,
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+        pooled_output = self.pooling(hidden_states, pooling_metadata)
+        pooled_output = self.dense(pooled_output)
         pooled_output = self.activation(pooled_output)
         return pooled_output
 
@@ -315,6 +324,9 @@ class BertOutput(nn.Module):
 
 
 class BertModel(nn.Module, SupportsQuant):
+
+    is_pooling_model = True
+
     packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
 
     def __init__(self,
@@ -399,12 +411,15 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
         _pooler: An instance of Pooler used for pooling operations.
     """
 
+    is_pooling_model = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
         pooler_config = vllm_config.model_config.pooler_config
         self.model = self._build_model(vllm_config=vllm_config,
                                        prefix=maybe_prefix(prefix, "model"))
-        self._pooler = self._build_pooler(pooler_config)
+        self.pooler = self._build_pooler(pooler_config)
 
     def forward(
         self,
@@ -417,13 +432,6 @@ class BertEmbeddingModel(nn.Module, SupportsV0Only, SupportsQuant):
                           position_ids=positions,
                           inputs_embeds=inputs_embeds,
                           intermediate_tensors=intermediate_tensors)
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         weights_list = list(weights)
@@ -462,6 +470,8 @@ class BertForSequenceClassification(nn.Module, SupportsV0Only,
        _pooler: An instance of Pooler used for pooling operations.
    """
 
+    is_pooling_model = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -472,20 +482,16 @@ class BertForSequenceClassification(nn.Module, SupportsV0Only,
                               embedding_class=BertEmbedding,
                               add_pooling_layer=True)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-        self._pooler = ClassifierPooler(vllm_config.model_config,
-                                        self.classifier, self.bert.pooler)
+        self.pooler = ClassifierPooler(
+            vllm_config.model_config,
+            pooling=self.bert.pooler,
+            classifier=self.classifier,
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights)
         return loaded_params
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)
 
     def forward(
         self,

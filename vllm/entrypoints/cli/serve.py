@@ -67,37 +67,6 @@ class ServeSubcommand(CLISubcommand):
             help="Start the vLLM OpenAI Compatible API server.",
             description="Start the vLLM OpenAI Compatible API server.",
             usage="vllm serve [model_tag] [options]")
-        serve_parser.add_argument("model_tag",
-                                  type=str,
-                                  nargs='?',
-                                  help="The model tag to serve "
-                                  "(optional if specified in config)")
-        serve_parser.add_argument(
-            "--headless",
-            action='store_true',
-            default=False,
-            help="Run in headless mode. See multi-node data parallel "
-            "documentation for more details.")
-        serve_parser.add_argument(
-            '--data-parallel-start-rank',
-            '-dpr',
-            type=int,
-            default=0,
-            help="Starting data parallel rank for secondary nodes. "
-            "Requires --headless.")
-        serve_parser.add_argument('--api-server-count',
-                                  '-asc',
-                                  type=int,
-                                  default=1,
-                                  help='How many API server processes to run.')
-        serve_parser.add_argument(
-            "--config",
-            type=str,
-            default='',
-            required=False,
-            help="Read CLI options from a config file. "
-            "Must be a YAML with the following options: "
-            "https://docs.vllm.ai/en/latest/configuration/serve_args.html")
 
         serve_parser = make_arg_parser(serve_parser)
         show_filtered_argument_or_group_from_help(serve_parser, ["serve"])
