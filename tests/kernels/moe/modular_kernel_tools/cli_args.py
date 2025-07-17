@@ -85,7 +85,6 @@ def make_config_arg_parser(description: str):
                         help="num topk")
     parser.add_argument(
         "--fused-moe-chunk-size",
-        nargs="+",
         type=int,
         help="Fused moe chunk size used for the non-batched fused experts impl."
     )
