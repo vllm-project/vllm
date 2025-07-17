@@ -1,13 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import tempfile
+from pathlib import Path
+
 import numpy as np
 import numpy.typing as npt
 import pytest
+from PIL import Image
 
 from vllm import envs
+from vllm.assets.base import get_vllm_public_assets
+from vllm.assets.video import video_to_ndarrays, video_to_pil_images_list
 from vllm.multimodal.image import ImageMediaIO
 from vllm.multimodal.video import (VIDEO_LOADER_REGISTRY, VideoLoader,
                                    VideoMediaIO)
+
+from .utils import cosine_similarity, create_video_from_image, normalize_image
 
 NUM_FRAMES = 10
 FAKE_OUTPUT_1 = np.random.rand(NUM_FRAMES, 1280, 720, 3)
@@ -86,3 +95,34 @@ def test_video_media_io_kwargs():
     with pytest.raises(AssertionError, match="bad fps"):
         videoio = VideoMediaIO(imageio, **{"num_frames": 10, "fps": 2.0})
         _ = videoio.load_bytes(b"test")
+
+
+def test_opencv_video_io_colorspace():
+    """Test all functions that use OpenCV for video I/O return RGB format."""
+    image_path = get_vllm_public_assets(filename="stop_sign.jpg",
+                                        s3_prefix="vision_model_images")
+    image = Image.open(image_path)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        video_path = f"{tmpdir}/test_video.mp4"
+        create_video_from_image(image_path, video_path, num_frames=2)
+
+        frames = video_to_ndarrays(video_path)
+        for frame in frames:
+            sim = cosine_similarity(normalize_image(np.array(frame)),
+                                    normalize_image(np.array(image)))
+            assert np.sum(np.isnan(sim)) / sim.size < 0.001
+            assert np.nanmean(sim) > 0.99
+
+        pil_frames = video_to_pil_images_list(video_path)
+        for frame in pil_frames:
+            sim = cosine_similarity(normalize_image(np.array(frame)),
+                                    normalize_image(np.array(image)))
+            assert np.sum(np.isnan(sim)) / sim.size < 0.001
+            assert np.nanmean(sim) > 0.99
+
+        io_frames, _ = VideoMediaIO(ImageMediaIO()).load_file(Path(video_path))
+        for frame in io_frames:
+            sim = cosine_similarity(normalize_image(np.array(frame)),
+                                    normalize_image(np.array(image)))
+            assert np.sum(np.isnan(sim)) / sim.size < 0.001
+            assert np.nanmean(sim) > 0.99

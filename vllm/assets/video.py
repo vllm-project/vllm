@@ -59,6 +59,8 @@ def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
         if idx in frame_indices:  # only decompress needed
             ret, frame = cap.retrieve()
             if ret:
+                # OpenCV uses BGR format, we need to convert it to RGB
+                # for PIL and transformers compatibility
                 frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
     frames = np.stack(frames)
@@ -71,10 +73,7 @@ def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
 def video_to_pil_images_list(path: str,
                              num_frames: int = -1) -> list[Image.Image]:
     frames = video_to_ndarrays(path, num_frames)
-    return [
-        Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        for frame in frames
-    ]
+    return [Image.fromarray(frame) for frame in frames]
 
 
 def video_get_metadata(path: str) -> dict[str, Any]:
