@@ -13,7 +13,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.pooler import (BasePooler, ClassifierPooler,
+from vllm.model_executor.layers.pooler import (ClassifierPooler, Pooler,
                                                PoolingMethod, PoolingType)
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -253,7 +253,7 @@ class ModernBertModel(nn.Module):
         return norm_outputs
 
 
-class ModernBertPooler(BasePooler):
+class ModernBertPooler(Pooler):
 
     def __init__(self, config: ModernBertConfig):
         super().__init__()
