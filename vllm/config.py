@@ -588,6 +588,11 @@ class ModelConfig:
             self.truncation_side = "right"
 
         model_info, arch = self.registry.inspect_model_cls(self.architectures)
+        if (arch == "TransformersForMultimodalLM"
+                and self.hf_config == self.hf_text_config):
+            model_info, arch = self.registry.inspect_model_cls(
+                "TransformersForCausalLM")
+
         self._model_info = model_info
         self._architecture = arch
 
@@ -729,7 +734,7 @@ class ModelConfig:
             self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
-        if self.registry.is_multimodal_model(self.architectures):
+        if self.registry.is_multimodal_model(self.architecture):
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
                 media_io_kwargs=self.media_io_kwargs,
