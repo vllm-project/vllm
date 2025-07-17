@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A TPU worker class."""
 import os
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.distributed
@@ -25,8 +25,9 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.utils import bind_kv_cache, report_usage_stats
+from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.tpu_model_runner import TPUModelRunner
+from vllm.v1.worker.utils import bind_kv_cache
 
 logger = init_logger(__name__)
 
@@ -259,6 +260,9 @@ class TPUWorker:
 
     def load_model(self) -> None:
         self.model_runner.load_model()
+
+    def update_config(self, overrides: dict[str, Any]) -> None:
+        self.model_runner.update_config(overrides)
 
     def compile_or_warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:

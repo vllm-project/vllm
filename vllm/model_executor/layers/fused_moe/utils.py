@@ -15,8 +15,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
-from vllm.utils.deep_gemm import (is_blackwell_deep_gemm_used,
-                                  per_token_group_cast_to_fp8)
 
 
 @triton.jit
@@ -111,16 +109,15 @@ def _fp8_quantize(
     is provided, the output will be blocked.
     """
     if block_shape is None:
+        # TODO(luka): use QuantFP8 custom op
+        #  https://github.com/vllm-project/vllm/issues/20711
         A, A_scale = ops.scaled_fp8_quant(
             A, A_scale, use_per_token_if_dynamic=per_act_token)
     else:
         assert not per_act_token
         assert len(block_shape) == 2
         _, block_k = block_shape[0], block_shape[1]
-        if is_blackwell_deep_gemm_used():
-            A, A_scale = per_token_group_cast_to_fp8(A, block_k)
-        else:
-            A, A_scale = per_token_group_quant_fp8(A, block_k)
+        A, A_scale = per_token_group_quant_fp8(A, block_k)
         assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
 
     return A, A_scale

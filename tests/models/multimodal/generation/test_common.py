@@ -318,6 +318,7 @@ VLM_TEST_SETTINGS = {
         num_logprobs=10,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         auto_cls=AutoModelForImageTextToText,
+        marks=[large_gpu_mark(min_gb=32)],
     ),
     "glm4_1v-video": VLMTestInfo(
         models=["THUDM/GLM-4.1V-9B-Thinking"],
@@ -331,8 +332,7 @@ VLM_TEST_SETTINGS = {
             inputs=custom_inputs.video_with_metadata_glm4_1v(),
             limit_mm_per_prompt={"video": 1},
         )],
-        # This is needed to run on machine with 24GB VRAM
-        vllm_runner_kwargs={"gpu_memory_utilization": 0.95},
+        marks=[large_gpu_mark(min_gb=32)],
     ),
     "h2ovl": VLMTestInfo(
         models = [

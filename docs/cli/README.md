@@ -1,3 +1,7 @@
+---
+toc_depth: 4
+---
+
 # vLLM CLI Guide
 
 The vllm command-line tool is used to run and manage vLLM models. You can start by viewing the help message with:
@@ -37,7 +41,14 @@ Start the vLLM OpenAI Compatible API server.
 
     # To search by keyword
     vllm serve --help=max
+
+    # To view full help with pager (less/more)
+    vllm serve --help=page
     ```
+
+### Options
+
+--8<-- "docs/argparse/serve.md"
 
 ## chat
 
