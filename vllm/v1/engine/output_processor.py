@@ -93,6 +93,7 @@ class RequestState:
         arrival_time: float,
         queue: Optional[RequestOutputCollector],
         log_stats: bool,
+        preproc_ms: float,
     ):
         self.request_id = request_id
         self.parent_req = parent_req
@@ -107,6 +108,7 @@ class RequestState:
         self.max_tokens_param = max_tokens_param
         self.is_prefilling = True
         self.queue = queue
+        self.preproc_ms = preproc_ms
 
         self.stats = RequestStateStats(
             arrival_time=arrival_time) if log_stats else None
@@ -158,6 +160,7 @@ class RequestState:
             arrival_time=request.arrival_time,
             queue=queue,
             log_stats=log_stats,
+            preproc_ms=request.preproc_ms,
         )
 
     def make_request_output(
@@ -469,6 +472,7 @@ class OutputProcessor:
             finish_reason=finish_reason,
             num_prompt_tokens=len(req_state.prompt_token_ids),
             max_tokens_param=req_state.max_tokens_param,
+            preproc_ms=req_state.preproc_ms,
             req_stats=req_state.stats)
         self.lora_states.finish_request(req_state)
 

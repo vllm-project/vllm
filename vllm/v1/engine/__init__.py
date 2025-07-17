@@ -70,6 +70,9 @@ class EngineCoreRequest(
     current_wave: int = 0
     priority: int = 0
 
+    # Duration of input pre-processing in milliseconds
+    preproc_ms: float = 0.0
+
 
 class EngineCoreEventType(enum.IntEnum):
     """The type of engine core request event."""

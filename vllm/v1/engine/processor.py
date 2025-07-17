@@ -249,6 +249,7 @@ class Processor:
         if arrival_time is None:
             arrival_time = time.time()
 
+        preproc_start = time.monotonic_ns()
         # Process inputs, which includes:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
@@ -342,6 +343,8 @@ class Processor:
             else:
                 sorted_mm_inputs = orig_sorted_mm_inputs
 
+        preproc_ms = (time.monotonic_ns() - preproc_start) / 1e6
+
         return decoder_inputs.get("prompt"), EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=decoder_inputs["prompt_token_ids"],
@@ -356,6 +359,7 @@ class Processor:
             cache_salt=decoder_inputs.get("cache_salt"),
             priority=priority,
             data_parallel_rank=data_parallel_rank,
+            preproc_ms=preproc_ms,
         )
 
     def _validate_model_inputs(self,
