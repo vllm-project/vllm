@@ -684,14 +684,14 @@ async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
 
 
 @pytest.mark.asyncio
-async def test_completion_with_empty_prompt_embeds(client: openai.AsyncOpenAI) -> None:
+async def test_completion_with_empty_prompt_embeds(
+        client: openai.AsyncOpenAI) -> None:
     """Test completion with empty prompt embeds."""
-    print(f"base_url: {client.base_url}")
-    payload = {"prompt_embeds": []}
-    headers = {"Content-Type": "application/json"}
+    payload: dict[str, list] = {"prompt_embeds": []}
+    headers: dict[str, str] = {"Content-Type": "application/json"}
     # base_url = http://localhost:8000/v1/completions
-    response = requests.post(
-        f"{client.base_url}completions", headers=headers, json=payload
-    )
+    response = requests.post(f"{client.base_url}completions",
+                             headers=headers,
+                             json=payload)
     assert response.status_code == 200, (
         f"Expected status code 200, got {response.status_code}. ")
