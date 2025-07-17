@@ -416,7 +416,7 @@ class RankTensors:
         # We dequant and use that as hidden_states so the tests are stable.
         # quantizing and dequantizing yield slightly different results
         # depending on the hardware. Here we, quantize and dequantize
-        # first - so further quantize and dequantize will yeild the same
+        # first - so further quantize and dequantize will yield the same
         # values.
         if config.is_per_tensor_act_quant:
             a_q, a_scales = ops.scaled_fp8_quant(
