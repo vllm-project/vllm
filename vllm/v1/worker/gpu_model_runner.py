@@ -5,6 +5,7 @@ import gc
 import time
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Optional, Union
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -1891,7 +1892,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         Randomize input_ids if VLLM_RANDOMIZE_DP_DUMMY_INPUTS is set.
         This is to help balance expert-selection
          - during profile_run
-         - during DP rank dummy run 
+         - during DP rank dummy run
         """
         dp_size = self.vllm_config.parallel_config.data_parallel_size
         randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and dp_size > 1
@@ -1913,6 +1914,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             non_blocking=True)
             yield
             input_ids.fill_(0)
+
+    @contextmanager
+    def suppress_gc_collect(self):
+        """Temporarily disable ``gc.collect`` to speed up CUDA graph capture."""
+        with patch("gc.collect", lambda: None):
+            yield
 
     @torch.inference_mode()
     def _dummy_run(
@@ -2255,7 +2262,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
-        with graph_capture(device=self.device):
+        with self.suppress_gc_collect(), graph_capture(device=self.device):
             full_cg = self.full_cuda_graph
             # Only rank 0 should print progress bar during capture
             compilation_cases = reversed(self.cudagraph_batch_sizes)
