@@ -429,6 +429,44 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Nemontron_VL
+def run_nemotron_vl(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    assert modality == "image"
+    placeholder = "<image>"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [
+        [{"role": "user", "content": f"{placeholder}\n{question}"}]
+        for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    # Stop tokens for InternVL
+    # models variants may have different stop tokens
+    # please refer to the model card for the correct "stop words":
+    # https://huggingface.co/OpenGVLab/InternVL2-2B/blob/main/conversation.py
+    stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|end|>"]
+    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
+    stop_token_ids = [token_id for token_id in stop_token_ids if token_id is not None]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        stop_token_ids=stop_token_ids,
+    )
+
+
 # Keye-VL
 def run_keye_vl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "Kwai-Keye/Keye-VL-8B-Preview"
@@ -1186,6 +1224,7 @@ model_example_map = {
     "h2ovl_chat": run_h2ovl,
     "idefics3": run_idefics3,
     "internvl_chat": run_internvl,
+    "nemotron_vl": run_nemotron_vl,
     "keye_vl": run_keye_vl,
     "kimi_vl": run_kimi_vl,
     "llava": run_llava,

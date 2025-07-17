@@ -30,6 +30,7 @@ mamba_ssm # required for plamo2 test
 matplotlib # required for qwen-vl test
 mistral_common[opencv] >= 1.8.0 # required for voxtral test
 num2words # required for smolvlm test
+open_clip_torch==2.32.0 # Required for nemotron_vl test
 opencv-python-headless >= 4.11.0 # required for video test
 datamodel_code_generator # required for minicpm3 test
 lm-eval[api]==0.4.8 # required for model evaluation test

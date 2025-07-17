@@ -291,6 +291,7 @@ def _test_processing_correctness_one(
     "allenai/Molmo-7B-D-0924",
     "allenai/Molmo-7B-O-0924",
     "nvidia/NVLM-D-72B",
+    "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1",
     "AIDC-AI/Ovis1.6-Gemma2-9B",
     "AIDC-AI/Ovis1.6-Llama3.2-3B",
     "AIDC-AI/Ovis2-1B",
