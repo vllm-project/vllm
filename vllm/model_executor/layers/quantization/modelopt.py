@@ -13,6 +13,7 @@ from vllm._custom_ops import (cutlass_scaled_fp4_mm,
                               cutlass_scaled_mm_supports_fp4, scaled_fp4_quant)
 from vllm.distributed import get_ep_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
     FlashInferCutlassMoEPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -741,8 +742,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
         self.fused_experts = None  # type: ignore
 
-    def select_experts_impl(
-            self, moe_parallel_config) -> mk.FusedMoEPermuteExpertsUnpermute:
+    def maybe_swap_experts_impl(
+        self,
+        moe_parallel_config: FusedMoEParallelConfig,
+    ):
         if not self.allow_flashinfer_cutlass:
             return
 

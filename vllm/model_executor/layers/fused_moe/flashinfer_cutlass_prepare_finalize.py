@@ -69,18 +69,18 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-        a1_gscale: torch.Tensor,
-        use_dp: Optional[bool] = True,
-        local_tokens: int = -1,
+        extra_prepare_args: Optional[dict] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 
-        if apply_router_weight_on_input:
-            topk = topk_ids.size(1)
-            # TODO: this only works for topK=1, will need to update for topK>1
-            assert topk == 1, \
-                "apply_router_weight_on_input is only implemented for topk=1"
-            a1.mul_(topk_weights.to(a1.dtype))
+        assert not apply_router_weight_on_input
+        assert 'a1_gscale' in extra_prepare_args
+        assert 'use_dp' in extra_prepare_args
+        assert 'local_tokens' in extra_prepare_args
+
+        a1_gscale = extra_prepare_args['a1_gscale']
+        use_dp = extra_prepare_args['use_dp']
+        local_tokens = extra_prepare_args['local_tokens']
 
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
@@ -101,17 +101,19 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
-    def finalize(
-        self,
-        output: torch.Tensor,
-        fused_expert_output: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        apply_router_weight_on_input: bool,
-        weight_and_reduce_impl: mk.TopKWeightAndReduce,
-        use_dp: bool = False,
-        local_tokens: int = -1,
-    ) -> None:
+    def finalize(self,
+                 output: torch.Tensor,
+                 fused_expert_output: torch.Tensor,
+                 topk_weights: torch.Tensor,
+                 topk_ids: torch.Tensor,
+                 apply_router_weight_on_input: bool,
+                 weight_and_reduce_impl: mk.TopKWeightAndReduce,
+                 extra_finalize_args: Optional[dict] = None) -> None:
+        assert 'use_dp' in extra_finalize_args
+        assert 'local_tokens' in extra_finalize_args
+        use_dp = extra_finalize_args['use_dp']
+        local_tokens = extra_finalize_args['local_tokens']
+
         if use_dp:
             fused_expert_output = get_dp_group().reduce_scatterv(
                 fused_expert_output,

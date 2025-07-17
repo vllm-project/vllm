@@ -103,7 +103,7 @@ def _fp4_quantize(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
     is_sf_swizzled_layout: bool,
-) -> tuple[torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     return fp4_quantize(A,
                         A_scale,
                         is_sf_swizzled_layout=is_sf_swizzled_layout)

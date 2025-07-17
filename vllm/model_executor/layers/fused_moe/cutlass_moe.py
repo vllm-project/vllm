@@ -616,41 +616,36 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         return (workspace1, workspace2, output,
                 self.out_dtype if self.out_dtype is not None else a.dtype)
 
-    def apply(
-        self,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: str,
-        global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        w1_scale: torch.Tensor,
-        w2_scale: torch.Tensor,
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: torch.Tensor,
-        workspace13: Optional[torch.Tensor],
-        workspace2: Optional[torch.Tensor],
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-        # start of extra_expert_args
-        topk_weights: torch.Tensor,
-        g1_alphas: torch.Tensor,
-        g2_alphas: torch.Tensor,
-        a1_gscale: torch.Tensor,
-        a2_gscale: torch.Tensor,
-        m: int,
-        n: int,
-        k: int,
-        e: int,
-        device: torch.device,
-        apply_router_weight_on_input,
-    ):
-        assert expert_map is None, ("Expert Parallelism / expert_map "
-                                    "is currently not supported for "
-                                    "ModelOptNvFp4FusedMoE.")
+    def apply(self, output: torch.Tensor, hidden_states: torch.Tensor,
+              w1: torch.Tensor, w2: torch.Tensor, topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor, activation: str, global_num_experts: int,
+              expert_map: Optional[torch.Tensor], w1_scale: torch.Tensor,
+              w2_scale: torch.Tensor, w1_zp: Optional[torch.Tensor],
+              w2_zp: Optional[torch.Tensor], a1q_scale: Optional[torch.Tensor],
+              a2_scale: torch.Tensor, workspace13: Optional[torch.Tensor],
+              workspace2: Optional[torch.Tensor],
+              expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+              apply_router_weight_on_input: bool,
+              extra_expert_args: Optional[dict]):
+        assert 'g1_alphas' in extra_expert_args
+        assert 'g2_alphas' in extra_expert_args
+        assert 'a1_gscale' in extra_expert_args
+        assert 'a2_gscale' in extra_expert_args
+        assert 'm' in extra_expert_args
+        assert 'n' in extra_expert_args
+        assert 'k' in extra_expert_args
+        assert 'e' in extra_expert_args
+        assert 'device' in extra_expert_args
+
+        g1_alphas = extra_expert_args['g1_alphas']
+        g2_alphas = extra_expert_args['g2_alphas']
+        a1_gscale = extra_expert_args['a1_gscale']
+        a2_gscale = extra_expert_args['a2_gscale']
+        m = extra_expert_args['m']
+        n = extra_expert_args['n']
+        k = extra_expert_args['k']
+        e = extra_expert_args['e']
+        device = extra_expert_args['device']
 
         run_cutlass_moe_fp4(
             output=output,

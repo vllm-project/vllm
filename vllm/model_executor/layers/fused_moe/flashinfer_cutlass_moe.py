@@ -140,12 +140,19 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: Optional[torch.Tensor],
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: Optional[bool],
-        g1_alphas: torch.Tensor,
-        g2_alphas: torch.Tensor,
-        a1_gscale: torch.Tensor,
-        a2_gscale: torch.Tensor,
-        out_dtype: torch.dtype,
+        extra_expert_args: Optional[dict],
     ):
+        assert 'g1_alphas' in extra_expert_args
+        assert 'g2_alphas' in extra_expert_args
+        assert 'a1_gscale' in extra_expert_args
+        assert 'a2_gscale' in extra_expert_args
+        assert 'out_dtype' in extra_expert_args
+        g1_alphas: torch.Tensor = extra_expert_args['g1_alphas']
+        g2_alphas: torch.Tensor = extra_expert_args['g2_alphas']
+        a1_gscale: torch.Tensor = extra_expert_args['a1_gscale']
+        a2_gscale: torch.Tensor = extra_expert_args['a2_gscale']
+        out_dtype: torch.dtype = extra_expert_args['out_dtype']
+
         # Flashinfer CUTLASS kernel takes scalar global scales,
         # min because inv_scale.
         assert self.use_nvfp4_w4a4 is True, ("Only nvfp4 quantization is "
@@ -156,7 +163,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "w1_scale and w2_scale must not "
             "be None for FlashInferExperts")
 
-        assert apply_router_weight_on_input is False
+        assert not apply_router_weight_on_input
 
         quant_scales = [
             a1_gscale,

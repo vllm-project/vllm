@@ -79,9 +79,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     moe: FusedMoEConfig
 
-    def select_experts_impl(self, moe_parallel_config):
-        pass
-
     @abstractmethod
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -213,6 +210,14 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         raise NotImplementedError(
             f"{self.__class__.__name__} must select appropriate gemm "
             "implementation based on the prepare_finalize")
+
+    def maybe_swap_experts_impl(
+        self,
+        moe_parallel_config: FusedMoEParallelConfig,
+    ):
+        raise NotImplementedError(
+            f"{self.__class__.__name__} must select appropriate experts "
+            "implementation based on the moe_parallel_config")
 
     @abstractmethod
     def apply(
@@ -756,7 +761,7 @@ class FusedMoE(torch.nn.Module):
         quant_method = (UnquantizedFusedMoEMethod(moe) if quant_config is None
                         else quant_config.get_quant_method(self, prefix))
 
-        quant_method.select_experts_impl(self.moe_parallel_config)
+        quant_method.maybe_swap_experts_impl(self.moe_parallel_config)
 
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
