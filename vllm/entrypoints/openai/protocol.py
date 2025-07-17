@@ -859,10 +859,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     'are supported.'
                 )
 
+            # if tool_choice is "required" but the "tools" list is empty,
+            # override the data to behave like "none" to align with
+            # OpenAI’s behavior.
             if data["tool_choice"] == "required" and isinstance(
                     data["tools"], list) and len(data["tools"]) == 0:
-                raise ValueError('When using `tool_choice` as "required",'
-                                 ' `tools` must contain at least one tool')
+                data["tool_choice"] = "none"
+                del data["tools"]
+                return data
 
             # ensure that if "tool_choice" is specified as an object,
             # it matches a valid tool
