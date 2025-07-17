@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A GPU worker class."""
+import copy
 import gc
 import os
 from typing import TYPE_CHECKING, Any, Optional
@@ -326,7 +327,10 @@ class Worker(WorkerBase):
             assert isinstance(output, IntermediateTensors)
             get_pp_group().send_tensor_dict(output.tensors,
                                             all_gather_group=get_tp_group())
-            output = EMPTY_MODEL_RUNNER_OUTPUT
+            empty_output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+            empty_output.finished_sending = output.finished_sending
+            empty_output.finished_recving = output.finished_recving
+            output = empty_output
 
         assert isinstance(output, ModelRunnerOutput)
         # return output only from the driver worker
