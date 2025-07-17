@@ -102,6 +102,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
+        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
@@ -110,11 +111,13 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                                      or is_blackwell_deep_gemm_used()):
             assert self.deep_gemm_expert is not None
             return self.deep_gemm_expert.workspace_shapes(
-                a, aq, M, N, K, topk, global_num_experts, local_num_experts)
+                a, aq, M, N, K, topk, global_num_experts, local_num_experts,
+                expert_tokens_meta)
         else:
             return self.triton_expert.workspace_shapes(a, aq, M, N, K, topk,
                                                        global_num_experts,
-                                                       local_num_experts)
+                                                       local_num_experts,
+                                                       expert_tokens_meta)
 
     def apply(
         self,
@@ -122,6 +125,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
+        topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,
@@ -135,6 +139,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        apply_router_weight_on_input: bool,
     ):
         use_deep_gemm = (self.allow_deep_gemm
                          and (_valid_deep_gemm(hidden_states, w1, w2)
@@ -148,6 +153,7 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             hidden_states,
             w1,
             w2,
+            topk_weights,
             topk_ids,
             activation,
             global_num_experts,
@@ -161,4 +167,5 @@ class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             workspace13,
             workspace2,
             expert_tokens_meta,
+            apply_router_weight_on_input,
         )

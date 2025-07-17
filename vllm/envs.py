@@ -97,7 +97,6 @@ if TYPE_CHECKING:
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
-    VLLM_COMPILE_DEPYF: bool = False
     Q_SCALE_CONSTANT: int = 200
     K_SCALE_CONSTANT: int = 200
     V_SCALE_CONSTANT: int = 100
@@ -140,6 +139,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: Optional[int] = None
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 120
+    VLLM_USE_CUDNN_PREFILL: bool = False
+    VLLM_LOOPBACK_IP: str = ""
 
 
 def get_default_cache_root():
@@ -742,11 +743,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_COMPILE_CACHE":
     lambda: bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0"))),
 
-    # If set, vllm will decompile the torch compiled code and dump to
-    # transformed_code.py. This is useful for debugging.
-    "VLLM_COMPILE_DEPYF":
-    lambda: bool(int(os.getenv("VLLM_COMPILE_DEPYF", "0"))),
-
     # If set, vllm will run in development mode, which will enable
     # some additional endpoints for developing and debugging,
     # e.g. `/reset_prefix_cache`
@@ -967,9 +963,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NIXL_ABORT_REQUEST_TIMEOUT":
     lambda: int(os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "120")),
 
+    # Controls whether or not to use cudnn prefill
+    "VLLM_USE_CUDNN_PREFILL":
+    lambda: bool(int(os.getenv("VLLM_USE_CUDNN_PREFILL", "0"))),
+
     # If set to 1, use the TRTLLM Decode Attention backend in flashinfer.
     "VLLM_USE_TRTLLM_DECODE_ATTENTION":
     lambda: os.getenv("VLLM_USE_TRTLLM_DECODE_ATTENTION", None),
+
+    # Used to force set up loopback IP
+    "VLLM_LOOPBACK_IP":
+    lambda: os.getenv("VLLM_LOOPBACK_IP", ""),
 }
 
 # --8<-- [end:env-vars-definition]
