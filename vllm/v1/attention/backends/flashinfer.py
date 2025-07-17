@@ -636,7 +636,7 @@ class FlashInferImpl(AttentionImpl):
                 out=output[num_decode_tokens:],
             )
         if decode_wrapper := attn_metadata.decode_wrapper:
-            decode_query = query[:num_decode_tokens].contiguous()
+            decode_query = query[:num_decode_tokens]
             assert decode_query.shape[0] == num_decode_tokens
             if not FlashInferBackend.use_trtllm_decode_attention(
                     attn_metadata.num_decodes, attn_metadata.max_seq_len,
@@ -657,6 +657,8 @@ class FlashInferImpl(AttentionImpl):
             else:
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
                 if num_decode_tokens > 0:
+                    # decode_query may be non-contiguous
+                    decode_query = decode_query.contiguous()
                     block_tables_decode = attn_metadata.block_table_tensor[:
                                                                            num_decode_tokens]
                     seq_lens_decode = attn_metadata.seq_lens[:
