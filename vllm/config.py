@@ -2466,7 +2466,7 @@ class SchedulerConfig:
         return self.num_scheduler_steps > 1
 
 
-Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu", "hpu"]
+Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu"]
 
 
 @config

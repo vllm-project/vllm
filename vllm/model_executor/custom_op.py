@@ -73,11 +73,6 @@ class CustomOp(nn.Module):
         # NOTE(woosuk): This is a placeholder for future extensions.
         return self.forward_native(*args, **kwargs)
 
-    def forward_hpu(self, *args, **kwargs):
-        # By default, we assume that Gaudi ops are compatible with the
-        # PyTorch-native implementation.
-        return self.forward_native(*args, **kwargs)
-
     def forward_neuron(self, *args, **kwargs):
         # By default, we assume that Neuron ops are compatible with the
         # PyTorch-native implementation.
@@ -106,8 +101,6 @@ class CustomOp(nn.Module):
             return self.forward_hip
         elif current_platform.is_cpu():
             return self.forward_cpu
-        elif current_platform.is_hpu():
-            return self.forward_hpu
         elif current_platform.is_tpu():
             return self.forward_tpu
         elif current_platform.is_xpu():
