@@ -40,7 +40,7 @@ def check_xformers_availability():
     else:
         try:
             import importlib
-            
+
             importlib.util.find_spec("xformers.ops")
             USE_XFORMERS_OPS = True
         except ImportError:
