@@ -65,6 +65,76 @@ class CommonAttentionMetadata:
         self.slot_mapping[self.num_actual_tokens:].fill_(-1)
 
 
+def slice_query_start_locs(
+    query_start_loc: torch.Tensor,
+    req_slice: slice,
+) -> torch.Tensor:
+    return query_start_loc[req_slice.start: req_slice.stop + 1] -\
+        query_start_loc[req_slice.start]
+
+
+def make_metadata_with_slice(ubatch_slice, query_start_loc,
+                             query_start_loc_cpu, seq_lens, seq_lens_cpu,
+                             num_computed_tokens_cpu, num_reqs,
+                             num_actual_tokens, max_query_len,
+                             block_table_tensor,
+                             slot_mapping) -> CommonAttentionMetadata:
+
+    req_slice = ubatch_slice[0]
+    token_slice = ubatch_slice[1]
+
+    query_start_loc = slice_query_start_locs(query_start_loc, req_slice)
+
+    # TODO (Sage) Make sure that this is correct
+    query_start_loc_cpu = slice_query_start_locs(query_start_loc_cpu,
+                                                 req_slice)
+
+    seq_lens = seq_lens[req_slice]
+    seq_lens_cpu = seq_lens_cpu[req_slice]
+    num_computed_tokens_cpu = num_computed_tokens_cpu[req_slice]
+
+    num_requests = req_slice.stop - req_slice.start
+    num_actual_tokens = token_slice.stop - token_slice.start
+    max_query_len = 1
+
+    block_table_tensor = block_table_tensor[token_slice]
+    slot_mapping = slot_mapping[token_slice]
+
+    return CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=seq_lens,
+        seq_lens_cpu=seq_lens_cpu,
+        num_computed_tokens_cpu=num_computed_tokens_cpu,
+        num_reqs=num_requests,
+        num_actual_tokens=num_actual_tokens,
+        max_query_len=max_query_len,
+        block_table_tensor=block_table_tensor,
+        slot_mapping=slot_mapping,
+    )
+
+
+def split_attn_metadata(
+    token_slices,
+    common_attn_metadata,
+) -> list[CommonAttentionMetadata]:
+    results = []
+    for token_slice in token_slices:
+        results.append(
+            make_metadata_with_slice(
+                token_slice, common_attn_metadata.query_start_loc,
+                common_attn_metadata.query_start_loc_cpu,
+                common_attn_metadata.seq_lens,
+                common_attn_metadata.seq_lens_cpu,
+                common_attn_metadata.num_computed_tokens_cpu,
+                common_attn_metadata.num_reqs,
+                common_attn_metadata.num_actual_tokens,
+                common_attn_metadata.max_query_len,
+                common_attn_metadata.block_table_tensor,
+                common_attn_metadata.slot_mapping))
+    return results
+
+
 M = TypeVar("M")
 
 
