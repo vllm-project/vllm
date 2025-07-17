@@ -1448,13 +1448,14 @@ async def init_app_state(
     vllm_config: VllmConfig,
     state: State,
     args: Namespace,
+    engine_args: AsyncEngineArgs,
 ) -> None:
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
     else:
         served_model_names = [args.model]
 
-    if args.disable_log_requests:
+    if engine_args.disable_log_requests:
         request_logger = None
     else:
         request_logger = RequestLogger(max_log_len=args.max_log_len)
@@ -1704,12 +1705,16 @@ async def run_server_worker(listen_address,
     if log_config is not None:
         uvicorn_kwargs['log_config'] = log_config
 
-    async with build_async_engine_client(args, client_config) as engine_client:
+    engine_args = AsyncEngineArgs.from_cli_args(args)
+    async with build_async_engine_client_from_engine_args(
+            engine_args, args.disable_frontend_multiprocessing,
+            client_config) as engine_client:
         maybe_register_tokenizer_info_endpoint(args)
         app = build_app(args)
 
         vllm_config = await engine_client.get_vllm_config()
-        await init_app_state(engine_client, vllm_config, app.state, args)
+        await init_app_state(engine_client, vllm_config, app.state, args,
+                             engine_args)
 
         logger.info("Starting vLLM API server %d on %s", server_index,
                     listen_address)

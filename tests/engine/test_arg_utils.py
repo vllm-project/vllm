@@ -290,6 +290,22 @@ def test_prefix_cache_default():
     assert not engine_args.enable_prefix_caching
 
 
+def test_log_request_default_and_legacy_flag(caplog_vllm):
+    parser = AsyncEngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    args = parser.parse_args([])
+    caplog_vllm.clear()
+    engine_args = AsyncEngineArgs.from_cli_args(args=args)
+    assert engine_args.disable_log_requests
+    assert "--disable-log-requests" in caplog_vllm.text
+
+    caplog_vllm.clear()
+    args = parser.parse_args(["--enable-legacy-log-requests"])
+    engine_args = AsyncEngineArgs.from_cli_args(args=args)
+    assert not engine_args.disable_log_requests
+    assert caplog_vllm.text == ""
+
+
 # yapf: disable
 @pytest.mark.parametrize(("arg", "expected", "option"), [
     (None, None, "mm-processor-kwargs"),

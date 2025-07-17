@@ -881,6 +881,17 @@ class EngineArgs:
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
         engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
+        if isinstance(engine_args, AsyncEngineArgs):
+            if getattr(args, 'disable_log_requests', False):
+                engine_args.disable_log_requests = True
+            elif getattr(args, 'enable_legacy_log_requests', False):
+                engine_args.disable_log_requests = False
+            else:
+                engine_args.disable_log_requests = True
+                logger.warning(
+                    "'--disable-log-requests' is now enabled by default. "
+                    "Use --enable-legacy-log-requests to restore the previous "
+                    "request logging behavior.")
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
@@ -1701,7 +1712,8 @@ class EngineArgs:
 @dataclass
 class AsyncEngineArgs(EngineArgs):
     """Arguments for asynchronous vLLM engine."""
-    disable_log_requests: bool = False
+    disable_log_requests: bool = True
+    enable_legacy_log_requests: bool = False
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser,
@@ -1715,6 +1727,9 @@ class AsyncEngineArgs(EngineArgs):
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='Disable logging requests.')
+        parser.add_argument('--enable-legacy-log-requests',
+                            action='store_true',
+                            help='Enable legacy request logging behavior.')
         current_platform.pre_register_and_update(parser)
         return parser
 
