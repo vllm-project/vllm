@@ -284,7 +284,7 @@ class Qwen2Model(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-
+        self.aux_hidden_state_layers: tuple[int] = tuple()
         # TODO (@robertgshaw2): see if this can be moved out
         if (cache_config.sliding_window is not None
                 and hasattr(config, "max_window_layers")):
@@ -351,18 +351,30 @@ class Qwen2Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for layer in self.layers[self.start_layer:self.end_layer]:
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-            )
+
+        if len(self.aux_hidden_state_layers) > 0:
+            aux_hidden_states = []
+            for idx, layer in enumerate(
+                    self.layers[self.start_layer:self.end_layer]):
+                if idx in self.aux_hidden_state_layers:
+                    aux_hidden_states.append(hidden_states + residual)
+                hidden_states, residual = layer(positions, hidden_states, residual)
+        else:
+            for layer in self.layers[self.start_layer:self.end_layer]:
+                hidden_states, residual = layer(
+                    positions,
+                    hidden_states,
+                    residual,
+                )
+
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
                 "residual": residual
             })
         hidden_states, _ = self.norm(hidden_states, residual)
+        if len(aux_hidden_states) > 0:   
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str,
