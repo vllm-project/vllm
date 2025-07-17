@@ -603,7 +603,9 @@ class HpuModelAdapter(torch.nn.Module):
                 raise AssertionError(
                     f"input token length {seq_len} is not multiple "
                     f"of SLICE_SIZE {self.slice_size}. Please adjust "
-                    f"Prompt Buckets")
+                    f"VLLM_EXPONENTIAL_BUCKETING: False "
+                    f"VLLM_PROMPT_SEQ_BUCKET_MIN: 1024 "
+                    f"VLLM_PROMPT_SEQ_BUCKET_STEP: 1024 ")
 
         attn_metadata = attn_metadata._replace(use_window_sdpa=use_window_sdpa)
         return attn_metadata
@@ -3927,6 +3929,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     if self.model_is_mrope or self.is_mm_optimized:
                         if 'pixel_values' in execute_model_kwargs and \
                                 self.is_mm_optimized:
+                            if warmup_mode:
+                                bypass_model_exec = False
                             execute_model_kwargs[
                                     'graphed_multimodal_buckets'] = \
                                 list(self.graphed_multimodal_buckets)
@@ -3936,6 +3940,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                             self.model.compute_input_embeddings_for_mrope_mm_optimized(
                                 **execute_model_kwargs
                             )
+                        if warmup_mode and bypass_model_exec:
+                            return []
 
                     with self.profiler.record_event('internal',
                                                     model_event_name,

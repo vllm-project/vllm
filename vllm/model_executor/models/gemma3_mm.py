@@ -674,7 +674,6 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         kwargs["has_images"] = True
         seq_lens = []
         if is_hpu:
-            IMG_TOKENS = self.config.mm_tokens_per_image
             seq_len = input_ids.shape[1]
             bs = input_ids.shape[0]
             kwargs["seq_lens"] = [seq_len] * bs
@@ -725,29 +724,15 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
             if not is_hpu:
                 img_mask[:, :, :, img_pos] += 1
                 img_mask[:, :, img_pos, :] += 1
-                global_attn_mask = torch.where(img_mask == 2, 0,
-                                               global_attn_mask)
             else:
                 img_mask[img_pos.unsqueeze(1)] += 1
                 img_mask = img_mask.permute(0, 1, 3, 2)
                 img_mask[img_pos.unsqueeze(1)] += 1
                 img_mask = img_mask.permute(0, 1, 3, 2)
 
-                img_pos_cum = torch.cumsum(img_pos, 1)
-                img_causal = torch.arange(seq_len,
-                    device = input_ids.device).unsqueeze(0) - \
-                    img_pos_cum + (img_pos_cum//IMG_TOKENS + 1) * IMG_TOKENS + 1
-                img_causal = torch.cat(
-                    (img_causal[:, 0:1] - 1, img_causal[:, :-1]), dim=1)
-                img_causal = img_causal.clamp_(min=0, max=seq_len -
-                                               1).unsqueeze(1).unsqueeze(3)
-                ind = torch.arange(seq_len, device=input_ids.device).unsqueeze(
-                    0).unsqueeze(1).unsqueeze(2)
-                img_mask[ind < img_causal] += 1
-                global_attn_mask = torch.where(img_mask == 3, 0,
-                                               global_attn_mask)
-
+            global_attn_mask = torch.where(img_mask == 2, 0, global_attn_mask)
             global_attn_masks.append(global_attn_mask)
+
             if self.sliding_window is not None:
                 if is_hpu and kwargs['attn_metadata'].use_window_sdpa:
                     # In HPU, no need to create local attn_mask(save memory)
