@@ -9,6 +9,7 @@
 #include <torch/all.h>
 
 #include "../vectorization.cuh"
+#include "../vectorization_utils.cuh"
 #include "../../dispatch_utils.h"
 
 __device__ __forceinline__ float GroupReduceMax(float val, const int tid) {
@@ -67,25 +68,23 @@ __global__ void per_token_group_quant_8bit_kernel(
   T* smem = reinterpret_cast<T*>(smem_raw);
   T* smem_group = smem + local_group_id * group_size;
 
-  constexpr uint32_t vec_size = 16 / sizeof(T);
+  constexpr int vec_size = 16 / sizeof(T);
   using vec_t = vllm::vec_n_t<T, vec_size>;
 
-  const int32_t num_vec_elems = group_size / vec_size;
+  // copy global -> shared & compute absmax
+  auto scalar_op_cache = [&] __device__(T & dst, const T& src) {
+    float abs_v = fabsf(static_cast<float>(src));
+    local_absmax = fmaxf(local_absmax, abs_v);
+    dst = src;
+  };
 
-  for (int32_t i = lane_id; i < num_vec_elems; i += 16) {
-    vec_t input_vec =
-        *reinterpret_cast<const vec_t*>(group_input + i * vec_size);
-
-    // cache to shared memory
-    *reinterpret_cast<vec_t*>(smem_group + i * vec_size) = input_vec;
-
-#pragma unroll
-    for (uint32_t j = 0; j < vec_size; ++j) {
-      float val = static_cast<float>(input_vec.val[j]);
-      float abs_val = fabsf(val);
-      local_absmax = fmaxf(local_absmax, abs_val);
-    }
-  }
+  vllm::vectorize_with_alignment<vec_size>(
+      group_input,        // in
+      smem_group,         // out (shared)
+      group_size,         // elements per group
+      lane_id,            // thread id
+      threads_per_group,  // stride in group
+      scalar_op_cache);   // scalar handler
 
   local_absmax = GroupReduceMax(local_absmax, lane_id);
 
@@ -102,17 +101,19 @@ __global__ void per_token_group_quant_8bit_kernel(
 
   __syncthreads();
 
-  for (int32_t i = lane_id; i < num_vec_elems; i += 16) {
-    vec_t input_vec =
-        *reinterpret_cast<const vec_t*>(smem_group + i * vec_size);
+  // quantize shared -> global 8-bit
+  auto scalar_op_quant = [&] __device__(DST_DTYPE & dst, const T& src) {
+    float q = fminf(fmaxf(static_cast<float>(src) / y_s, min_8bit), max_8bit);
+    dst = DST_DTYPE(q);
+  };
 
-#pragma unroll
-    for (uint32_t j = 0; j < vec_size; ++j) {
-      float val = static_cast<float>(input_vec.val[j]);
-      float q_val = fminf(fmaxf(val / y_s, min_8bit), max_8bit);
-      group_output[i * vec_size + j] = DST_DTYPE(q_val);
-    }
-  }
+  vllm::vectorize_with_alignment<vec_size>(
+      smem_group,         // in (shared)
+      group_output,       // out (global quant tensor)
+      group_size,         // elements
+      lane_id,            // tid
+      threads_per_group,  // stride
+      scalar_op_quant);   // scalar handler
 }
 
 void per_token_group_quant_8bit(const torch::Tensor& input,
