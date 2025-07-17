@@ -139,7 +139,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace13: Optional[torch.Tensor],
         workspace2: Optional[torch.Tensor],
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-        apply_router_weight_on_input: Optional[bool],  # Not used
+        apply_router_weight_on_input: Optional[bool],
         g1_alphas: torch.Tensor,
         g2_alphas: torch.Tensor,
         a1_gscale: torch.Tensor,
@@ -155,6 +155,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert w1_scale is not None and w2_scale is not None, (
             "w1_scale and w2_scale must not "
             "be None for FlashInferExperts")
+
+        assert apply_router_weight_on_input is False
 
         quant_scales = [
             a1_gscale,

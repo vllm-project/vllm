@@ -725,9 +725,12 @@ class FusedMoEModularKernel(torch.nn.Module):
         - apply_router_weight_on_input (bool): When true, the topk weights are
           applied directly on the inputs. This is only applicable when topk is
           1.
-        - extra_expert_args (Optional[dict]): Extra keyword arguments to pass to fused_experts.apply.
-        - extra_prepare_args (Optional[dict]): Extra keyword arguments to pass to prepare.
-        - extra_finalize_args (Optional[dict]): Extra keyword arguments to pass to finalize.
+        - extra_expert_args (Optional[dict]): Extra keyword arguments to pass to
+          fused_experts.apply.
+        - extra_prepare_args (Optional[dict]): Extra keyword arguments to pass
+          to prepare.
+        - extra_finalize_args (Optional[dict]): Extra keyword arguments to pass 
+          to finalize.
 
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.

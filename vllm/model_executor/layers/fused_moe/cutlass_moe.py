@@ -538,9 +538,10 @@ def run_cutlass_moe_fp4(
 
     assert output.dtype == out_dtype
     if not apply_router_weight_on_input:
-        output.copy_((c3.view(m, num_topk, k) *
-                    topk_weights.view(m, num_topk, 1).to(out_dtype)).sum(dim=1),
-                    non_blocking=True)
+        output.copy_(
+            (c3.view(m, num_topk, k) *
+             topk_weights.view(m, num_topk, 1).to(out_dtype)).sum(dim=1),
+            non_blocking=True)
     else:
         output.copy_(c2.view(m, num_topk, k).sum(dim=1), non_blocking=True)
     return
@@ -652,26 +653,26 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
                                     "ModelOptNvFp4FusedMoE.")
 
         run_cutlass_moe_fp4(
-            output,
-            hidden_states,
-            a1_gscale,
-            w1,
-            w1_scale,
-            g1_alphas,
-            a2_gscale,
-            w2,
-            w2_scale,
-            g2_alphas,
-            topk_weights,
-            topk_ids,
-            workspace13,
-            workspace2,
-            m,
-            n,
-            k,
-            e,
-            device,
-            apply_router_weight_on_input,
+            output=output,
+            a=hidden_states,
+            a1_gscale=a1_gscale,
+            w1_fp4=w1,
+            w1_blockscale=w1_scale,
+            w1_alphas=g1_alphas,
+            a2_gscale=a2_gscale,
+            w2_fp4=w2,
+            w2_blockscale=w2_scale,
+            w2_alphas=g2_alphas,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            workspace13=workspace13,
+            workspace2=workspace2,
+            m=m,
+            n=n,
+            k=k,
+            e=e,
+            device=device,
+            apply_router_weight_on_input=apply_router_weight_on_input,
         )
 
 
@@ -719,9 +720,9 @@ def cutlass_moe_fp4(
         'device': device,
     }
 
-    # NVFP4 requires two levels of quantization, which involves computing some 
+    # NVFP4 requires two levels of quantization, which involves computing some
     # scaling factors dynamically. This makes it incompatible with the typical
-    # prepare -> MoE -> finalize pipeline. Move the quantization logic into the 
+    # prepare -> MoE -> finalize pipeline. Move the quantization logic into the
     # MoE body.
     extra_prepare_args = {
         'skip_quant': True,

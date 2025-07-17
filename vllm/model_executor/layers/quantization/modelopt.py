@@ -738,10 +738,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 raise ValueError("Current platform does not support NVFP4"
                                  " quantization. Please use Blackwell and"
                                  " above.")
-        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-            cutlass_moe_fp4)
 
-        self.fused_experts = cutlass_moe_fp4
+        self.fused_experts = None  # type: ignore
 
     def select_experts_impl(
             self, moe_parallel_config) -> mk.FusedMoEPermuteExpertsUnpermute:
@@ -1063,15 +1061,40 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map)
 
-        a1_gscale = torch.min(layer.w13_input_scale_quant)
-        a2_gscale = torch.min(layer.w2_input_scale_quant)
-        if self.allow_flashinfer_cutlass:
+        if self.fused_experts is None:
+            # If no modular kernel is provided, use cutlass_moe_fp4 for TP case
+            # only (no EP).
+            from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+                cutlass_moe_fp4)
+            out = cutlass_moe_fp4(
+                a=x,
+                w1_fp4=layer.w13_weight,
+                w2_fp4=layer.w2_weight,
+                w1_blockscale=layer.w13_blockscale_swizzled,
+                w2_blockscale=layer.w2_blockscale_swizzled,
+                g1_alphas=layer.g1_alphas,
+                g2_alphas=layer.g2_alphas,
+                a1_gscale=layer.w13_input_scale_quant,
+                a2_gscale=layer.w2_input_scale_quant,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                m=x.shape[0],
+                n=layer.w2_weight.shape[2] * 2,
+                k=x.shape[1],
+                e=layer.w13_weight.shape[0],
+                device=x.device,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input)
+        else:
             # TP or DP case
             from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
                 is_valid_flashinfer_cutlass_fused_moe)
             assert is_valid_flashinfer_cutlass_fused_moe(
                 x, layer.w13_weight, layer.w2_weight), (
                     "Flashinfer CUTLASS Fused MoE not applicable!")
+
+            a1_gscale = torch.min(layer.w13_input_scale_quant)
+            a2_gscale = torch.min(layer.w2_input_scale_quant)
             extra_expert_args = {
                 'g1_alphas': layer.g1_alphas,
                 'g2_alphas': layer.g2_alphas,
@@ -1103,29 +1126,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 expert_map=expert_map,
                 w1_scale=layer.w13_blockscale_swizzled,
                 w2_scale=layer.w2_blockscale_swizzled,
+                apply_router_weight_on_input=apply_router_weight_on_input,
                 extra_expert_args=extra_expert_args,
                 extra_prepare_args=extra_prepare_args,
                 extra_finalize_args=extra_finalize_args,
             )
-        else:
-            # cutlass_moe_fp4, TP case only(no EP)
-            out = self.fused_experts(
-                a=x,
-                w1_fp4=layer.w13_weight,
-                w2_fp4=layer.w2_weight,
-                w1_blockscale=layer.w13_blockscale_swizzled,
-                w2_blockscale=layer.w2_blockscale_swizzled,
-                g1_alphas=layer.g1_alphas,
-                g2_alphas=layer.g2_alphas,
-                a1_gscale=layer.w13_input_scale_quant,
-                a2_gscale=layer.w2_input_scale_quant,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                m=x.shape[0],
-                n=layer.w2_weight.shape[2] * 2,
-                k=x.shape[1],
-                e=layer.w13_weight.shape[0],
-                device=x.device,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input)
         return out
