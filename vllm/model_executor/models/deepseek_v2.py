@@ -871,7 +871,8 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
 
                 # kv_a_proj_with_mqa might not be fused into fused_qkv_a_proj if
                 # model doesn't have q_lora_rank
-                if ((weight_name == "kv_a_proj_with_mqa") and name not in params_dict):
+                if ((weight_name == "kv_a_proj_with_mqa")
+                        and name not in params_dict):
                     continue
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
