@@ -1798,6 +1798,76 @@ def test_priority_scheduling_heap_property():
     assert scheduled_priorities == expected_priorities
 
 
+@pytest.mark.parametrize(
+    "arrival_times_spaced, trigger_aging",
+    [
+        (0, False),  # No spacing, all requests arrive at time 0
+        (1000, True)  # Large spacing to trigger aging
+    ])
+def test_priority_scheduling_with_aging(arrival_times_spaced: int,
+                                        trigger_aging: bool):
+    """Test that the waiting queue maintains heap
+    property for priority scheduling with aging."""
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=1,  # Only one request can run at a time
+    )
+
+    # Add requests in random priority order
+    priorities = [5, 1, 0, 0, 5, 0, 0, 0]
+    # arrival times are spaced out to simulate aging
+    # (requests with higher priority will age faster)
+    # and should be scheduled first
+    arrival_times = [
+        float(i) * arrival_times_spaced for i in range(len(priorities))
+    ]
+    requests = create_requests_with_priority(num_requests=len(priorities),
+                                             priorities=priorities,
+                                             arrival_times=arrival_times,
+                                             num_tokens=10)
+
+    # Add all requests
+    for request in requests:
+        scheduler.add_request(request)
+
+    # Schedule one request at a time and verify priority order
+    scheduled_priorities = []
+
+    while scheduler.waiting:
+        output = scheduler.schedule()
+        if output.scheduled_new_reqs:
+            req = output.scheduled_new_reqs[0]
+            scheduled_priorities.append(requests[int(req.req_id)].priority)
+
+            # Simulate completion to make room for next request
+            model_output = ModelRunnerOutput(
+                req_ids=[req.req_id],
+                req_id_to_index={req.req_id: 0},
+                sampled_token_ids=[[100]],
+                spec_token_ids=None,
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            )
+            scheduler.update_from_output(output, model_output)
+
+            # Finish the request to make room for the next one
+            scheduler.finish_requests(req.req_id,
+                                      RequestStatus.FINISHED_STOPPED)
+    if trigger_aging:
+        # If aging is enabled, the requests with priority 5 should be
+        # scheduled first, followed by priority 1, and then the requests with
+        # priority 0 should be scheduled last.
+        # This is because the requests with priority 0 wait sorter than
+        # the requests with priority 5 and 1, due to aging.
+        # The expected order is:
+        expected_priorities = [5, 1, 0, 0, 5, 0, 0, 0]
+    else:
+        # If aging is not enabled, the requests with priority 0 should be
+        # scheduled last since they have the lowest priority.
+        expected_priorities = [0, 0, 0, 0, 0, 1, 5, 5]
+    assert scheduled_priorities == expected_priorities
+
+
 def test_schedule_skip_tokenizer_init():
     scheduler = create_scheduler(skip_tokenizer_init=True)
     requests = create_requests(num_requests=5)
