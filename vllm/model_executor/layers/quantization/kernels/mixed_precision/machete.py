@@ -126,6 +126,11 @@ class MacheteLinearKernel(MPLinearKernel):
         if c.has_g_idx:
             x_2d = self.act_perm(x_2d)
 
+        if c.zero_points:
+            assert w_zp is not None
+        else:
+            w_zp = None
+
         output = ops.machete_mm(a=x_2d,
                                 b_q=w_q,
                                 b_type=c.weight_type,
