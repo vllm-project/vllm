@@ -498,7 +498,7 @@ async def benchmark(
         "total_input_tokens": metrics.total_input,
         "total_output_tokens": metrics.total_output,
         "request_throughput": metrics.request_throughput,
-        "request_goodput:":
+        "request_goodput":
         metrics.request_goodput if goodput_config_dict else None,
         "output_throughput": metrics.output_throughput,
         "total_token_throughput": metrics.total_token_throughput,
@@ -630,6 +630,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=None,
         help="The label (prefix) of the benchmark results. If not specified, "
         "the endpoint type will be used as the label.",
+    )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="vllm",
+        choices=list(ASYNC_REQUEST_FUNCS.keys()),
     )
     parser.add_argument(
         "--base-url",

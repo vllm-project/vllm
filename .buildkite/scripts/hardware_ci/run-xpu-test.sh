@@ -11,8 +11,8 @@ container_name="xpu_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head
 docker build -t ${image_name} -f docker/Dockerfile.xpu .
 
 # Setup cleanup
-remove_docker_container() { 
-  docker rm -f "${container_name}" || true; 
+remove_docker_container() {
+  docker rm -f "${container_name}" || true;
   docker image rm -f "${image_name}" || true;
   docker system prune -f || true;
 }
@@ -26,6 +26,9 @@ docker run \
     --name "${container_name}" \
     "${image_name}" \
     sh -c '
-    VLLM_USE_V1=0 python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m
-    VLLM_USE_V1=0 python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m -tp 2
+    VLLM_USE_V1=1 python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager
+    VLLM_USE_V1=1 python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager -tp 2 --distributed-executor-backend ray
+    VLLM_USE_V1=1 python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager -tp 2 --distributed-executor-backend mp
+    cd tests
+    pytest -v -s v1/core
 '

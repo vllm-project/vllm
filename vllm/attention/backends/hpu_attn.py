@@ -115,7 +115,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
     ) -> None:
         super(AttentionImpl, self).__init__()
         if kv_sharing_target_layer_name is not None:
-            raise NotImplementedError("KV sharing is not supported in V0.")
+            raise NotImplementedError("KV sharing is not supported in V0 "
+                                      "HPU_ATTN backend.")
         if use_irope:
             logger.warning_once(
                 "Using irope in HPU is not supported yet, it will fall back "

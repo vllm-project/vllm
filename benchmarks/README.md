@@ -4,7 +4,7 @@ This README guides you through running benchmark tests with the extensive
 datasets supported on vLLM. It’s a living document, updated as new features and datasets
 become available.
 
-## Dataset Overview
+**Dataset Overview**
 
 <table style="width:100%; border-collapse: collapse;">
   <thead>
@@ -82,7 +82,10 @@ become available.
 **Note**: HuggingFace dataset's `dataset-name` should be set to `hf`
 
 ---
-## Example - Online Benchmark
+<details>
+<summary><b>🚀 Example - Online Benchmark</b></summary>
+
+<br/>
 
 First start serving your model
 
@@ -130,7 +133,8 @@ P99 ITL (ms):                            8.39
 ==================================================
 ```
 
-### Custom Dataset
+**Custom Dataset**
+
 If the dataset you want to benchmark is not supported yet in vLLM, even then you can benchmark on it using `CustomDataset`. Your data needs to be in `.jsonl` format and needs to have "prompt" field per entry, e.g., data.jsonl
 
 ```
@@ -162,7 +166,7 @@ python3 benchmarks/benchmark_serving.py --port 9001 --save-result --save-detaile
 
 You can skip applying chat template if your data already has it by using `--custom-skip-chat-template`.
 
-### VisionArena Benchmark for Vision Language Models
+**VisionArena Benchmark for Vision Language Models**
 
 ```bash
 # need a model with vision capability here
@@ -180,7 +184,7 @@ python3 vllm/benchmarks/benchmark_serving.py \
   --num-prompts 1000
 ```
 
-### InstructCoder Benchmark with Speculative Decoding
+**InstructCoder Benchmark with Speculative Decoding**
 
 ``` bash
 VLLM_USE_V1=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
@@ -197,7 +201,7 @@ python3 benchmarks/benchmark_serving.py \
     --num-prompts 2048
 ```
 
-### Other HuggingFaceDataset Examples
+**Other HuggingFaceDataset Examples**
 
 ```bash
 vllm serve Qwen/Qwen2-VL-7B-Instruct --disable-log-requests
@@ -251,7 +255,7 @@ python3 vllm/benchmarks/benchmark_serving.py \
     --num-prompts 80
 ```
 
-### Running With Sampling Parameters
+**Running With Sampling Parameters**
 
 When using OpenAI-compatible backends such as `vllm`, optional sampling
 parameters can be specified. Example client command:
@@ -269,7 +273,7 @@ python3 vllm/benchmarks/benchmark_serving.py \
   --num-prompts 10
 ```
 
-### Running With Ramp-Up Request Rate
+**Running With Ramp-Up Request Rate**
 
 The benchmark tool also supports ramping up the request rate over the
 duration of the benchmark run. This can be useful for stress testing the
@@ -284,8 +288,12 @@ The following arguments can be used to control the ramp-up:
 - `--ramp-up-start-rps`: The request rate at the beginning of the benchmark.
 - `--ramp-up-end-rps`: The request rate at the end of the benchmark.
 
----
-## Example - Offline Throughput Benchmark
+</details>
+
+<details>
+<summary><b>📈 Example - Offline Throughput Benchmark</b></summary>
+
+<br/>
 
 ```bash
 python3 vllm/benchmarks/benchmark_throughput.py \
@@ -303,7 +311,7 @@ Total num prompt tokens:  5014
 Total num output tokens:  1500
 ```
 
-### VisionArena Benchmark for Vision Language Models
+**VisionArena Benchmark for Vision Language Models**
 
 ``` bash
 python3 vllm/benchmarks/benchmark_throughput.py \
@@ -323,7 +331,7 @@ Total num prompt tokens:  14527
 Total num output tokens:  1280
 ```
 
-### InstructCoder Benchmark with Speculative Decoding
+**InstructCoder Benchmark with Speculative Decoding**
 
 ``` bash
 VLLM_WORKER_MULTIPROC_METHOD=spawn \
@@ -347,7 +355,7 @@ Total num prompt tokens:  261136
 Total num output tokens:  204800
 ```
 
-### Other HuggingFaceDataset Examples
+**Other HuggingFaceDataset Examples**
 
 **`lmms-lab/LLaVA-OneVision-Data`**
 
@@ -386,7 +394,7 @@ python3 benchmarks/benchmark_throughput.py \
   --num-prompts 10
 ```
 
-### Benchmark with LoRA Adapters
+**Benchmark with LoRA Adapters**
 
 ``` bash
 # download dataset
@@ -403,18 +411,22 @@ python3 vllm/benchmarks/benchmark_throughput.py \
   --lora-path yard1/llama-2-7b-sql-lora-test
   ```
 
----
-## Example - Structured Output Benchmark
+</details>
+
+<details>
+<summary><b>🛠️ Example - Structured Output Benchmark</b></summary>
+
+<br/>
 
 Benchmark the performance of structured output generation (JSON, grammar, regex).
 
-### Server Setup
+**Server Setup**
 
 ```bash
 vllm serve NousResearch/Hermes-3-Llama-3.1-8B --disable-log-requests
 ```
 
-### JSON Schema Benchmark
+**JSON Schema Benchmark**
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
@@ -426,7 +438,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
   --num-prompts 1000
 ```
 
-### Grammar-based Generation Benchmark
+**Grammar-based Generation Benchmark**
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
@@ -438,7 +450,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
   --num-prompts 1000
 ```
 
-### Regex-based Generation Benchmark
+**Regex-based Generation Benchmark**
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
@@ -449,7 +461,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
   --num-prompts 1000
 ```
 
-### Choice-based Generation Benchmark
+**Choice-based Generation Benchmark**
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
@@ -460,7 +472,7 @@ python3 benchmarks/benchmark_serving_structured_output.py \
   --num-prompts 1000
 ```
 
-### XGrammar Benchmark Dataset
+**XGrammar Benchmark Dataset**
 
 ```bash
 python3 benchmarks/benchmark_serving_structured_output.py \
@@ -471,12 +483,16 @@ python3 benchmarks/benchmark_serving_structured_output.py \
   --num-prompts 1000
 ```
 
----
-## Example - Long Document QA Throughput Benchmark
+</details>
+
+<details>
+<summary><b>📚 Example - Long Document QA Benchmark</b></summary>
+
+<br/>
 
 Benchmark the performance of long document question-answering with prefix caching.
 
-### Basic Long Document QA Test
+**Basic Long Document QA Test**
 
 ```bash
 python3 benchmarks/benchmark_long_document_qa_throughput.py \
@@ -488,7 +504,7 @@ python3 benchmarks/benchmark_long_document_qa_throughput.py \
   --repeat-count 5
 ```
 
-### Different Repeat Modes
+**Different Repeat Modes**
 
 ```bash
 # Random mode (default) - shuffle prompts randomly
@@ -519,12 +535,16 @@ python3 benchmarks/benchmark_long_document_qa_throughput.py \
   --repeat-mode interleave
 ```
 
----
-## Example - Prefix Caching Benchmark
+</details>
+
+<details>
+<summary><b>🗂️ Example - Prefix Caching Benchmark</b></summary>
+
+<br/>
 
 Benchmark the efficiency of automatic prefix caching.
 
-### Fixed Prompt with Prefix Caching
+**Fixed Prompt with Prefix Caching**
 
 ```bash
 python3 benchmarks/benchmark_prefix_caching.py \
@@ -535,7 +555,7 @@ python3 benchmarks/benchmark_prefix_caching.py \
   --input-length-range 128:256
 ```
 
-### ShareGPT Dataset with Prefix Caching
+**ShareGPT Dataset with Prefix Caching**
 
 ```bash
 # download dataset
@@ -550,12 +570,16 @@ python3 benchmarks/benchmark_prefix_caching.py \
   --input-length-range 128:256
 ```
 
----
-## Example - Request Prioritization Benchmark
+</details>
+
+<details>
+<summary><b>⚡ Example - Request Prioritization Benchmark</b></summary>
+
+<br/>
 
 Benchmark the performance of request prioritization in vLLM.
 
-### Basic Prioritization Test
+**Basic Prioritization Test**
 
 ```bash
 python3 benchmarks/benchmark_prioritization.py \
@@ -566,7 +590,7 @@ python3 benchmarks/benchmark_prioritization.py \
   --scheduling-policy priority
 ```
 
-### Multiple Sequences per Prompt
+**Multiple Sequences per Prompt**
 
 ```bash
 python3 benchmarks/benchmark_prioritization.py \
@@ -577,3 +601,5 @@ python3 benchmarks/benchmark_prioritization.py \
   --scheduling-policy priority \
   --n 2
 ```
+
+</details>

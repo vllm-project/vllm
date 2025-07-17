@@ -22,16 +22,6 @@ trap remove_docker_container EXIT
 # Remove the container that might not be cleaned up in the previous run.
 remove_docker_container
 
-# Build docker image.
-# TODO: build the image outside the script and share the image with other
-# tpu test if building time is too long.
-DOCKER_BUILDKIT=1 docker build \
-  --build-arg max_jobs=16 \
-  --build-arg USE_SCCACHE=1 \
-  --build-arg GIT_REPO_CHECK=0 \
-  --tag vllm/vllm-tpu-bm \
-  --progress plain -f docker/Dockerfile.tpu .
-
 LOG_ROOT=$(mktemp -d)
 # If mktemp fails, set -e will cause the script to exit.
 echo "Results will be stored in: $LOG_ROOT"
@@ -68,7 +58,7 @@ docker run \
 
 echo "run script..."
 echo
-docker exec "$CONTAINER_NAME" /bin/bash -c ".buildkite/scripts/hardware_ci/run_bm.sh"
+docker exec "$CONTAINER_NAME" /bin/bash -c ".buildkite/scripts/tpu/run_bm.sh"
 
 echo "copy result back..."
 VLLM_LOG="$LOG_ROOT/$TEST_NAME"_vllm_log.txt

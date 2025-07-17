@@ -63,6 +63,7 @@ class BitBLASConfig(QuantizationConfig):
             # (since we have only one group per output channel)
             desc_act = False
 
+        super().__init__()
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.desc_act = desc_act

@@ -689,10 +689,11 @@ setup(
     install_requires=get_requirements(),
     extras_require={
         "bench": ["pandas", "datasets"],
-        "tensorizer": ["tensorizer>=2.9.0"],
+        "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
         "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
-        "audio": ["librosa", "soundfile"],  # Required for audio processing
+        "audio": ["librosa", "soundfile",
+                  "mistral_common[audio]"],  # Required for audio processing
         "video": []  # Kept for backwards compatibility
     },
     cmdclass=cmdclass,

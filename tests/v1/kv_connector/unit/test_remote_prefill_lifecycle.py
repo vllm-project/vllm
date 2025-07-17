@@ -36,7 +36,7 @@ def test_basic_lifecycle():
     # Nothing running and empty scheduler output.
     assert len(scheduler.running) == 0
     assert len(scheduler_output.scheduled_new_reqs) == 0
-    assert len(scheduler_output.scheduled_cached_reqs) == 0
+    assert scheduler_output.scheduled_cached_reqs.num_reqs == 0
     assert len(scheduler_output.num_scheduled_tokens) == 0
     assert scheduler_output.total_num_scheduled_tokens == 0
 
@@ -158,7 +158,7 @@ def test_interleaved_lifecycle():
     assert len(scheduler.running) == 2
     assert len(scheduler.waiting) == 1
     assert len(scheduler_output.scheduled_new_reqs) == 1
-    assert len(scheduler_output.scheduled_cached_reqs) == 1
+    assert scheduler_output.scheduled_cached_reqs.num_reqs == 1
 
     model_runner_output = create_model_runner_output(
         [request_local_a, request_local_b])
@@ -169,7 +169,7 @@ def test_interleaved_lifecycle():
     assert len(scheduler.running) == 2
     assert len(scheduler.waiting) == 1
     assert len(scheduler_output.scheduled_new_reqs) == 0
-    assert len(scheduler_output.scheduled_cached_reqs) == 2
+    assert scheduler_output.scheduled_cached_reqs.num_reqs == 2
 
     model_runner_output = create_model_runner_output(
         reqs=[request_local_a, request_local_b])
@@ -177,14 +177,14 @@ def test_interleaved_lifecycle():
     assert len(scheduler.running) == 2
     assert len(scheduler.waiting) == 1
     assert len(scheduler_output.scheduled_new_reqs) == 0
-    assert len(scheduler_output.scheduled_cached_reqs) == 2
+    assert scheduler_output.scheduled_cached_reqs.num_reqs == 2
 
     # STEP 4: KVs arrive.
     scheduler_output = scheduler.schedule()
     assert len(scheduler.running) == 2
     assert len(scheduler.waiting) == 1
     assert len(scheduler_output.scheduled_new_reqs) == 0
-    assert len(scheduler_output.scheduled_cached_reqs) == 2
+    assert scheduler_output.scheduled_cached_reqs.num_reqs == 2
 
     model_runner_output = create_model_runner_output(
         [request_local_a, request_local_b],
@@ -196,7 +196,7 @@ def test_interleaved_lifecycle():
     assert len(scheduler.running) == 3
     assert len(scheduler.waiting) == 0
     assert len(scheduler_output.scheduled_new_reqs) == 1
-    assert len(scheduler_output.scheduled_cached_reqs) == 2
+    assert scheduler_output.scheduled_cached_reqs.num_reqs == 2
 
     model_runner_output = create_model_runner_output(
         [request_local_a, request_local_b, request_remote])

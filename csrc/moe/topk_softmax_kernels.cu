@@ -492,7 +492,7 @@ void topk_softmax(
     torch::Tensor& gating_output)               // [num_tokens, num_experts]
 {
     const int num_experts = gating_output.size(-1);
-    const int num_tokens = gating_output.numel() / num_experts;
+    const auto num_tokens = gating_output.numel() / num_experts;
     const int topk = topk_weights.size(-1);
 
     const bool is_pow_2 = (num_experts != 0) && ((num_experts & (num_experts - 1)) == 0);

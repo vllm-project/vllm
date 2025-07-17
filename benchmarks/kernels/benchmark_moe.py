@@ -623,7 +623,7 @@ def main(args: argparse.Namespace):
             4096,
         ]
     else:
-        batch_sizes = [args.batch_size]
+        batch_sizes = args.batch_size
 
     use_deep_gemm = bool(args.use_deep_gemm)
 
@@ -731,7 +731,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--use-deep-gemm", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--batch-size", type=int, required=False)
+    parser.add_argument("--batch-size", type=int, nargs="+", required=False)
     parser.add_argument("--tune", action="store_true")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--model-prefix", type=str, required=False)

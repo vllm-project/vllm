@@ -5,8 +5,12 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
-# Required to register custom ops.
+import torch_xla.core.xla_builder as xb
 import torch_xla.experimental.custom_kernel  # noqa: F401
+# Required to register custom ops.
+from torch.library import impl
+from torch_xla._internal.jax_workarounds import requires_jax
+from torch_xla.experimental.custom_kernel import XLA_LIB
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
@@ -48,13 +52,7 @@ class PallasAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         padded_head_size = cdiv(
             head_size, TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
-        num_blocks = num_blocks * head_size // padded_head_size
-        if padded_head_size != head_size:
-            logger.warning_once(
-                "head size is padded to %d, and num_blocks is adjusted to %d"
-                " accordingly", padded_head_size, num_blocks)
-        head_size = padded_head_size
-        return (num_blocks, block_size, num_kv_heads * 2, head_size)
+        return (num_blocks, block_size, num_kv_heads * 2, padded_head_size)
 
     @staticmethod
     def swap_blocks(
@@ -77,12 +75,23 @@ class PallasAttentionBackend(AttentionBackend):
         min_page_size = 1 << (min_page_size - 1).bit_length()
         return min_page_size
 
+    @staticmethod
+    def get_max_num_seqs(model_len: int, page_size: int) -> int:
+        num_page_per_req = cdiv(model_len, page_size)
+        return 1024 * 1024 // 2 // num_page_per_req // 4
+
     # TPU has limited SREGs (scalar registers), if page_size is too small, we
     # can spill SREGs easily which leads to bad performance. The strategy we
     # apply here is trying to split max-model-len to 16 pages which make the
     # spill less likely. Meanwhile we make sure the page size is in [16, 256].
     @staticmethod
     def get_page_size(vllm_config: VllmConfig) -> int:
+        # TODO: This is a temporary fix for vmem OOM.
+        # For long model length, we use 16 page-size to avoid too much
+        # VMEM spill. A more robust solution should be implemented to
+        # handle VREG spills.
+        if vllm_config.model_config.max_model_len > 8192:
+            return 16
         page_size = next_power_of_2(
             vllm_config.model_config.max_model_len) // 16
         if page_size <= 16:
@@ -108,6 +117,8 @@ class PallasMetadata:
     context_lens: torch.Tensor
     query_start_loc: torch.Tensor
     num_seqs: torch.Tensor
+    num_kv_update_slices: torch.Tensor
+    num_slices_per_kv_cache_update_block: int
 
 
 class PallasAttentionBackendImpl(AttentionImpl):
@@ -155,10 +166,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "PallasAttentionBackendImpl")
-
-        tpu_version = torch_xla.tpu.version()
-        if tpu_version < 4:
-            raise NotImplementedError("TPU version must be 4 or higher.")
 
     def forward(
         self,
@@ -213,7 +220,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
             # Write input keys and values to the KV cache.
             # Skip this if sharing KV cache with an earlier attention layer.
             slot_mapping = attn_metadata.slot_mapping
-            write_to_kv_cache(key, value, kv_cache, slot_mapping)
+            write_to_kv_cache(
+                key, value, kv_cache, slot_mapping,
+                attn_metadata.num_slices_per_kv_cache_update_block,
+                attn_metadata.num_kv_update_slices)
 
         output = torch.ops.xla.ragged_paged_attention(
             query,
@@ -245,6 +255,8 @@ def write_to_kv_cache(
     value: torch.Tensor,
     kv_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
+    num_slices_per_kv_cache_update_block: int,
+    num_kv_update_slices: torch.Tensor,
 ) -> None:
     """ Write the key and values to the KV cache.
 
@@ -252,9 +264,9 @@ def write_to_kv_cache(
         key: shape = [num_tokens, num_kv_heads * head_size]
         value: shape = [num_tokens, num_kv_heads *  head_size]
         kv_cache = [num_blocks, block_size, num_kv_heads * 2, head_size]
-
+        num_slices_per_kv_cache_update_block: int
     """
-    _, _, num_combined_kv_heads, head_size = kv_cache.shape
+    _, page_size, num_combined_kv_heads, head_size = kv_cache.shape
     head_size = cdiv(head_size,
                      TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
     kv = torch.cat([key, value], axis=-1).reshape(-1, num_combined_kv_heads,
@@ -263,4 +275,101 @@ def write_to_kv_cache(
     torch.ops.xla.dynamo_set_buffer_donor_(kv_cache, True)
 
     kv_cache = kv_cache.flatten(0, 1)
-    kv_cache.index_copy_(0, slot_mapping, kv)
+    new_kv_cache = torch.ops.xla.kv_cache_update_op(
+        kv, slot_mapping, kv_cache, num_kv_update_slices, page_size,
+        num_slices_per_kv_cache_update_block)
+    # NOTE: the in-place copy will be optimized away by XLA compiler.
+    kv_cache.copy_(new_kv_cache)
+
+
+@requires_jax
+def kv_cache_update_op_impl(kv: torch.Tensor, slot_mapping: torch.Tensor,
+                            kv_cache: torch.Tensor,
+                            num_kv_update_slices: torch.Tensor, page_size: int,
+                            num_slices_per_block: int):
+    from vllm.attention.ops.pallas_kv_cache_update import kv_cache_update
+    new_kv_cache = xb.call_jax(
+        kv_cache_update, (kv, slot_mapping, kv_cache, num_kv_update_slices), {
+            "page_size": page_size,
+            "num_slices_per_block": num_slices_per_block
+        })
+    return new_kv_cache
+
+
+XLA_LIB.define(
+    "kv_cache_update_op(Tensor kv, Tensor slot_mapping, Tensor kv_cache," \
+    "Tensor num_kv_update_slices, int page_size, int num_slices_per_block)" \
+    "-> Tensor", )
+
+
+@impl(XLA_LIB, "kv_cache_update_op", "XLA")
+def kv_cache_update_op_xla(kv: torch.Tensor, slot_mapping: torch.Tensor,
+                           kv_cache: torch.Tensor,
+                           num_kv_update_slices: torch.Tensor, page_size: int,
+                           num_slices_per_block: int) -> torch.Tensor:
+    new_kv_cache = kv_cache_update_op_impl(kv, slot_mapping, kv_cache,
+                                           num_kv_update_slices, page_size,
+                                           num_slices_per_block)
+    return new_kv_cache
+
+
+@impl(XLA_LIB, "kv_cache_update_op", "CompositeExplicitAutograd")
+def kv_cache_update_op_non_xla(kv: torch.Tensor, slot_mapping: torch.Tensor,
+                               kv_cache: torch.Tensor,
+                               num_kv_update_slices: torch.Tensor,
+                               page_size: int,
+                               num_slices_per_block: int) -> torch.Tensor:
+    return kv_cache
+
+
+# We can move this function to a common utils file if it's also useful for other
+# hardware.
+def dtype_bits(dtype: torch.dtype):
+    if dtype.is_floating_point:
+        try:
+            return torch.finfo(dtype).bits
+        except TypeError:
+            pass
+    elif dtype.is_complex:
+        if dtype is torch.complex32:
+            return 32
+        elif dtype is torch.complex64:
+            return 64
+        elif dtype is torch.complex128:
+            return 128
+    else:
+        try:
+            return torch.iinfo(dtype).bits
+        # torch.iinfo cannot support int4, int2, bits8...
+        except TypeError:
+            pass
+    str_dtype = str(dtype)
+    # support torch.int4, torch.int5, torch.uint5...
+    if str_dtype.startswith("torch.int") or str_dtype.startswith("torch.uint"):
+        return int(str_dtype[-1])
+    raise TypeError(f"Getting the bit width of {dtype} is not supported")
+
+
+def get_dtype_packing(dtype):
+    bits = dtype_bits(dtype)
+    if 32 % bits != 0:
+        raise ValueError(
+            f"The bit width must be divisible by 32, but got bits={bits}, "
+            "dtype={dtype}")
+    return 32 // bits
+
+
+def get_page_size_bytes(block_size: int, num_kv_heads: int, head_size: int,
+                        kv_cache_dtype: torch.dtype) -> int:
+    """Returns the size in bytes of one page of the KV cache."""
+    padded_head_size = cdiv(head_size,
+                            TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
+    num_combined_kv_heads = num_kv_heads * 2
+
+    # NOTE: for the implicit padding in XLA
+    packing = get_dtype_packing(kv_cache_dtype)
+    num_combined_kv_heads = cdiv(num_combined_kv_heads, packing) * packing
+
+    kv_cache_dtype_bits = dtype_bits(kv_cache_dtype)
+    return (block_size * num_combined_kv_heads * padded_head_size *
+            kv_cache_dtype_bits // 8)

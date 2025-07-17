@@ -26,6 +26,7 @@ class HpuPlatform(Platform):
     device_type: str = "hpu"
     dispatch_key: str = "HPU"
     ray_device_key: str = "HPU"
+    dist_backend: str = "hccl"
     device_control_env_var: str = "HABANA_VISIBLE_MODULES"
 
     @classmethod
@@ -43,6 +44,13 @@ class HpuPlatform(Platform):
     @classmethod
     def inference_mode(cls):
         return torch.no_grad()
+
+    @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.hpu.set_device(device)
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
