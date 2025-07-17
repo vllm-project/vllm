@@ -11,6 +11,7 @@ from vllm.attention.backends.abstract import (AttentionType,
 from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
                                          get_mla_metadata,
                                          is_flashmla_supported)
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonDecodeMetadata,
@@ -18,7 +19,6 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.block_table import BlockTable
 
 logger = init_logger(__name__)
 
@@ -56,12 +56,13 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
     full_cudagraph_supported: ClassVar[bool] = True  # Decode-only
 
-    def __init__(self, runner, kv_cache_spec: AttentionSpec,
-                 block_table: BlockTable):
-        super().__init__(runner, kv_cache_spec, block_table, FlashMLAMetadata)
+    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
+                 device: torch.device):
+        super().__init__(kv_cache_spec, vllm_config, device, FlashMLAMetadata)
 
-        self.num_q_heads = self.runner.model_config.get_num_attention_heads(
-            self.runner.parallel_config)
+        self.compilation_config = vllm_config.compilation_config
+        self.num_q_heads = vllm_config.model_config.get_num_attention_heads(
+            vllm_config.parallel_config)
 
         self.cg_buf_tile_scheduler_metadata = None
         self.cg_buf_num_splits = None
@@ -75,7 +76,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             1, # MQA for the decode path
         )
 
-        if self.runner.full_cuda_graph:
+        if self.compilation_config.full_cuda_graph:
             # First time around (CUDAGraph capture), allocate the static buffer
             if self.cg_buf_tile_scheduler_metadata is None:
                 self.cg_buf_tile_scheduler_metadata = tile_scheduler_metadata
