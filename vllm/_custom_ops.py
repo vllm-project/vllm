@@ -1843,6 +1843,26 @@ def cutlass_mla_decode(out: torch.Tensor, q_nope: torch.Tensor,
     return out
 
 
+def sm100_cutlass_mla_decode(out: torch.Tensor, q_nope: torch.Tensor,
+                             q_pe: torch.Tensor,
+                             kv_c_and_k_pe_cache: torch.Tensor,
+                             seq_lens: torch.Tensor, page_table: torch.Tensor,
+                             workspace: torch.Tensor, scale: float,
+                             num_kv_splits: int) -> torch.Tensor:
+    torch.ops._C.sm100_cutlass_mla_decode(out, q_nope, q_pe,
+                                          kv_c_and_k_pe_cache, seq_lens,
+                                          page_table, workspace, scale,
+                                          num_kv_splits)
+    return out
+
+
+def sm100_cutlass_mla_get_workspace_size(max_seq_len: int, num_batches: int,
+                                         sm_count: int,
+                                         num_kv_splits: int) -> int:
+    return torch.ops._C.sm100_cutlass_mla_get_workspace_size(
+        max_seq_len, num_batches, sm_count, num_kv_splits)
+
+
 if hasattr(torch.ops._C, "weight_packed_linear"):
 
     @register_fake("_C::weight_packed_linear")
