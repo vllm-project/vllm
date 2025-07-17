@@ -8,6 +8,14 @@ from transformers import PretrainedConfig
 
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 
+# Map speculators weight names to vLLM names
+SPECULATORS_WEIGHT_MAP = {
+    "fusion_fc.weight": "model.fc.weight",
+    "fusion_fc.bias": "model.fc.bias",
+    "embedding_layernorm.weight": "model.embedding_layernorm.weight",
+    "pre_lm_head_layernorm.weight": "model.hidden_states_layernorm.weight",
+}
+
 # Constants for speculators format
 SUPPORTED_SPECULATORS_TYPES = frozenset({"eagle", "eagle3"})
 DEFAULT_HIDDEN_SIZE = 4096
@@ -338,3 +346,16 @@ def extract_speculators_info(model_path: Union[str, os.PathLike]) -> Optional[di
     except Exception:
         # If any error occurs, treat as not speculators format
         return None
+
+
+def remap_speculators_weight_name(name: str) -> Optional[str]:
+    """Remap speculators format weight names to vLLM names.
+    
+    Returns None for weights that should be skipped.
+    """
+    if name in SPECULATORS_WEIGHT_MAP:
+        return SPECULATORS_WEIGHT_MAP[name]
+    elif name.startswith("transformer."):
+        # Replace "transformer." with "model.layers.0."
+        return "model.layers.0." + name[len("transformer."):]
+    return name

@@ -19,31 +19,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import (LlamaDecoderLayer,
                                               LlamaForCausalLM)
+from vllm.transformers_utils.configs.speculators_eagle import (
+    remap_speculators_weight_name)
 
 from .utils import AutoWeightsLoader, maybe_prefix
 
 logger = init_logger(__name__)
-
-# Map speculators weight names to vLLM names
-SPECULATORS_WEIGHT_MAP = {
-    "fusion_fc.weight": "model.fc.weight",
-    "fusion_fc.bias": "model.fc.bias",
-    "embedding_layernorm.weight": "model.embedding_layernorm.weight",
-    "pre_lm_head_layernorm.weight": "model.hidden_states_layernorm.weight",
-}
-
-
-def remap_speculators_weight_name(name: str) -> Optional[str]:
-    """Remap speculators format weight names to vLLM names.
-    
-    Returns None for weights that should be skipped.
-    """
-    if name in SPECULATORS_WEIGHT_MAP:
-        return SPECULATORS_WEIGHT_MAP[name]
-    elif name.startswith("transformer."):
-        # Replace "transformer." with "model.layers.0."
-        return "model.layers.0." + name[len("transformer."):]
-    return name
 
 
 class LlamaDecoderLayer(LlamaDecoderLayer):
