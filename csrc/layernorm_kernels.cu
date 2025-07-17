@@ -17,7 +17,7 @@ template <typename scalar_t>
 __global__ void rms_norm_kernel(
     scalar_t* __restrict__ out,          // [..., hidden_size]
     const scalar_t* __restrict__ input,  // [..., hidden_size]
-    const int input_stride,
+    const int64_t input_stride,
     const scalar_t* __restrict__ weight,  // [hidden_size]
     const float epsilon, const int num_tokens, const int hidden_size) {
   __shared__ float s_variance;
@@ -52,7 +52,7 @@ template <typename scalar_t, int width>
 __global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>
 fused_add_rms_norm_kernel(
     scalar_t* __restrict__ input,  // [..., hidden_size]
-    const int input_stride,
+    const int64_t input_stride,
     scalar_t* __restrict__ residual,      // [..., hidden_size]
     const scalar_t* __restrict__ weight,  // [hidden_size]
     const float epsilon, const int num_tokens, const int hidden_size) {
@@ -61,7 +61,7 @@ fused_add_rms_norm_kernel(
   static_assert(sizeof(_f16Vec<scalar_t, width>) == sizeof(scalar_t) * width);
 
   const int vec_hidden_size = hidden_size / width;
-  const int vec_input_stride = input_stride / width;
+  const int64_t vec_input_stride = input_stride / width;
   __shared__ float s_variance;
   float variance = 0.0f;
   /* These and the argument pointers are all declared `restrict` as they are
@@ -76,7 +76,7 @@ fused_add_rms_norm_kernel(
 
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
     int id = blockIdx.x * vec_hidden_size + idx;
-    int strided_id = blockIdx.x * vec_input_stride + idx;
+    int64_t strided_id = blockIdx.x * vec_input_stride + idx;
     _f16Vec<scalar_t, width> temp = input_v[strided_id];
     temp += residual_v[id];
     variance += temp.sum_squares();
@@ -94,7 +94,7 @@ fused_add_rms_norm_kernel(
 
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
     int id = blockIdx.x * vec_hidden_size + idx;
-    int strided_id = blockIdx.x * vec_input_stride + idx;
+    int64_t strided_id = blockIdx.x * vec_input_stride + idx;
     _f16Vec<scalar_t, width> temp = residual_v[id];
     temp *= s_variance;
     temp *= weight_v[idx];
@@ -109,7 +109,7 @@ template <typename scalar_t, int width>
 __global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
 fused_add_rms_norm_kernel(
     scalar_t* __restrict__ input,  // [..., hidden_size]
-    const int input_stride,
+    const int64_t input_stride,
     scalar_t* __restrict__ residual,      // [..., hidden_size]
     const scalar_t* __restrict__ weight,  // [hidden_size]
     const float epsilon, const int num_tokens, const int hidden_size) {
@@ -152,7 +152,7 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
 
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
-  int input_stride = input.stride(-2);
+  int64_t input_stride = input.stride(-2);
 
   dim3 grid(num_tokens);
   dim3 block(std::min(hidden_size, 1024));
@@ -182,7 +182,7 @@ void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
   TORCH_CHECK(residual.is_contiguous());
   TORCH_CHECK(weight.is_contiguous());
   int hidden_size = input.size(-1);
-  int input_stride = input.stride(-2);
+  int64_t input_stride = input.stride(-2);
   int num_tokens = input.numel() / hidden_size;
 
   dim3 grid(num_tokens);
