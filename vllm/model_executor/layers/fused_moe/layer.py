@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from abc import abstractmethod
 from collections.abc import Iterable
 from enum import Enum
@@ -37,6 +38,8 @@ from vllm.utils import direct_register_custom_op, has_deep_ep, has_pplx
 from vllm.utils.flashinfer import has_flashinfer
 
 if current_platform.is_cuda_alike():
+    from vllm._custom_ops import moe_fused_gate
+
     from .fused_batched_moe import BatchedTritonExperts
     from .fused_moe import TritonExperts, fused_experts
     if has_pplx():
@@ -66,6 +69,10 @@ else:
     fused_moe_pallas = None  # type: ignore
 
 logger = init_logger(__name__)
+
+
+def is_power_of_two(n):
+    return n > 0 and math.log2(n).is_integer()
 
 
 class FusedMoeWeightScaleSupported(Enum):
@@ -1232,6 +1239,8 @@ class FusedMoE(torch.nn.Module):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        num_fused_shared_experts: int = 0,
+        routed_scaling_factor: Optional[float] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the
@@ -1251,15 +1260,37 @@ class FusedMoE(torch.nn.Module):
         if use_grouped_topk:
             assert topk_group is not None
             assert num_expert_group is not None
-            topk_weights, topk_ids = grouped_topk(
-                hidden_states=hidden_states,
-                gating_output=router_logits,
-                topk=top_k,
-                renormalize=renormalize,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias)
+            if hidden_states.shape[0] == 0:
+                topk_ids = torch.full((0, top_k),
+                                      -1,
+                                      dtype=torch.int,
+                                      device=hidden_states.device)
+                topk_weights = torch.empty((0, top_k),
+                                           dtype=torch.float32,
+                                           device=hidden_states.device)
+            elif (envs.VLLM_USE_FUSED_MOE_ROUTER
+                  and e_score_correction_bias is not None
+                  and is_power_of_two(e_score_correction_bias.shape[0])):
+                # The fused kernel can only work with 128/256 experts
+                topk_weights, topk_ids = moe_fused_gate(
+                    input_tensor=router_logits,
+                    bias=e_score_correction_bias.data.to(router_logits.dtype),
+                    num_expert_group=num_expert_group,
+                    topk_group=topk_group,
+                    topk=top_k,
+                    num_fused_shared_experts=num_fused_shared_experts,
+                    routed_scaling_factor=routed_scaling_factor,
+                )
+            else:
+                topk_weights, topk_ids = grouped_topk(
+                    hidden_states=hidden_states,
+                    gating_output=router_logits,
+                    topk=top_k,
+                    renormalize=renormalize,
+                    num_expert_group=num_expert_group,
+                    topk_group=topk_group,
+                    scoring_func=scoring_func,
+                    e_score_correction_bias=e_score_correction_bias)
             if indices_type is not None:
                 topk_ids = topk_ids.to(dtype=indices_type)
         elif custom_routing_function is None:
