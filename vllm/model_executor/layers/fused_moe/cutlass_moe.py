@@ -562,7 +562,7 @@ def run_cutlass_moe_fp4(
              topk_weights.view(m, num_topk, 1).to(out_dtype)).sum(dim=1),
             non_blocking=True)
     else:
-        output.copy_(c2.view(m, num_topk, k).sum(dim=1), non_blocking=True)
+        output.copy_(c3.view(m, num_topk, k).sum(dim=1), non_blocking=True)
     return
 
 
