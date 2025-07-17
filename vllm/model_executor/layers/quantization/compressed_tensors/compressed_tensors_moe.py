@@ -859,6 +859,21 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                         requires_grad=False)
 
+        device = layer.w13_weight.device
+        # ab_strides1 and c_strides2 are the same
+        self.ab_strides1_c_strides2 = torch.full((layer.local_num_experts, ),
+                                                 layer.hidden_size,
+                                                 device=device,
+                                                 dtype=torch.int64)
+        self.ab_strides2 = torch.full((layer.local_num_experts, ),
+                                      layer.intermediate_size_per_partition,
+                                      device=device,
+                                      dtype=torch.int64)
+        self.c_strides1 = torch.full((layer.local_num_experts, ),
+                                     2 * layer.intermediate_size_per_partition,
+                                     device=device,
+                                     dtype=torch.int64)
+
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
@@ -881,6 +896,10 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             moe.in_dtype,
             self.input_quant.strategy == QuantizationStrategy.TOKEN,
             self.weight_quant.strategy == QuantizationStrategy.CHANNEL,
+            ab_strides1=self.ab_strides1_c_strides2,
+            ab_strides2=self.ab_strides2,
+            c_strides1=self.c_strides1,
+            c_strides2=self.ab_strides1_c_strides2,
             num_dispatchers=num_dispatchers,
             use_batched_format=use_batched_format,
         )
@@ -927,12 +946,11 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype)
 
-        a1_scale = layer.w13_input_scale
-        a2_scale = layer.w2_input_scale
-        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
-            a2_scale.numel() != 1 if a2_scale is not None else False)
+        per_act_token = (
+            self.input_quant.strategy == QuantizationStrategy.TOKEN)
 
         if self.fused_experts is None:
             # If no modular kernel is provided, use cutlass_moe_fp8
@@ -950,8 +968,12 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
                 expert_map=None if self.disable_expert_map else expert_map,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
-                a1_scale=a1_scale,
-                a2_scale=a2_scale,
+                ab_strides1=self.ab_strides1_c_strides2,
+                ab_strides2=self.ab_strides2,
+                c_strides1=self.c_strides1,
+                c_strides2=self.ab_strides1_c_strides2,
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale,
             )
         else:
             return self.fused_experts(
