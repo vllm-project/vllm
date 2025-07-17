@@ -448,8 +448,8 @@ class TransformersModel(nn.Module):
                 config, sliding_window=config.interleaved_sliding_window)
 
         # Set correct attn and init on "meta" to delay allocating GPU tensors
-        # TODO: @raushan, use the public `model.set_attn_implementation()` method
-        # after v4.54.0 is released
+        # TODO: @raushan, use the public `model.set_attn_implementation()`
+        # method after v4.54.0 is released
         self.text_config._attn_implementation = "vllm"
         with init_on_device_without_buffers("meta"), config_override:
             # FIXME(Isotr0py): We need to refactor this part in the future to
