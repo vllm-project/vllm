@@ -839,6 +839,62 @@ class VisionArenaDataset(HuggingFaceDataset):
 
 
 # -----------------------------------------------------------------------------
+# MuirBenchDataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class MuirBenchDataset(HuggingFaceDataset):
+    """
+    MUIRBENCH Dataset.
+    https://huggingface.co/datasets/MUIRBENCH/MUIRBENCH
+    """
+
+    DEFAULT_OUTPUT_LEN = 128
+    SUPPORTED_DATASET_PATHS = {
+        "MUIRBENCH/MUIRBENCH": lambda x: x["question"],
+    }
+    IS_MULTIMODAL = True
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        enable_multimodal_chat: bool = False,
+        **kwargs,
+    ) -> list:
+        output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
+        sampled_requests = []
+
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+            parser_fn = self.SUPPORTED_DATASET_PATHS.get(self.dataset_path)
+            if parser_fn is None:
+                raise ValueError(f"Unsupported dataset path: {self.dataset_path}")
+
+            prompt = parser_fn(item)
+            prompt_len = len(tokenizer(prompt).input_ids)
+
+            mm_content = [process_image(img) for img in item["image_list"]]
+
+            if enable_multimodal_chat:
+                prompt = self.apply_multimodal_chat_transformation(prompt, mm_content)
+
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=mm_content,
+                )
+            )
+
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
 # Instruct Coder Dataset Implementation
 # -----------------------------------------------------------------------------
 
