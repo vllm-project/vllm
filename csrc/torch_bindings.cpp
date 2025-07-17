@@ -588,7 +588,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int group_size, float eps, float fp8_min, float fp8_max, bool "
       "scale_ue8m0) -> ()");
   ops.impl("per_token_group_fp8_quant", torch::kCUDA,
-           &sgl_per_token_group_quant_fp8);
+           &per_token_group_quant_fp8);
 
   // Mamba selective scan kernel
   ops.def(

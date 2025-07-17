@@ -138,10 +138,10 @@ __global__ void per_token_group_quant_8bit_kernel(
   }
 }
 
-void sgl_per_token_group_quant_8bit(torch::Tensor input, torch::Tensor output_q,
-                                    torch::Tensor output_s, int64_t group_size,
-                                    double eps, double min_8bit,
-                                    double max_8bit, bool scale_ue8m0 = false) {
+void per_token_group_quant_8bit(torch::Tensor input, torch::Tensor output_q,
+                                torch::Tensor output_s, int64_t group_size,
+                                double eps, double min_8bit, double max_8bit,
+                                bool scale_ue8m0 = false) {
   TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(output_q.is_contiguous());
 
@@ -228,18 +228,10 @@ void sgl_per_token_group_quant_8bit(torch::Tensor input, torch::Tensor output_q,
 #undef LAUNCH_KERNEL
 }
 
-void sgl_per_token_group_quant_int8(torch::Tensor input, torch::Tensor output_q,
-                                    torch::Tensor output_s, int64_t group_size,
-                                    double eps, double int8_min,
-                                    double int8_max) {
-  sgl_per_token_group_quant_8bit(input, output_q, output_s, group_size, eps,
-                                 int8_min, int8_max);
-}
-
-void sgl_per_token_group_quant_fp8(torch::Tensor input, torch::Tensor output_q,
-                                   torch::Tensor output_s, int64_t group_size,
-                                   double eps, double fp8_min, double fp8_max,
-                                   bool scale_ue8m0) {
-  sgl_per_token_group_quant_8bit(input, output_q, output_s, group_size, eps,
-                                 fp8_min, fp8_max, scale_ue8m0);
+void per_token_group_quant_fp8(torch::Tensor input, torch::Tensor output_q,
+                               torch::Tensor output_s, int64_t group_size,
+                               double eps, double fp8_min, double fp8_max,
+                               bool scale_ue8m0) {
+  per_token_group_quant_8bit(input, output_q, output_s, group_size, eps,
+                             fp8_min, fp8_max, scale_ue8m0);
 }
