@@ -31,7 +31,7 @@ Each P/D instance periodically sends a heartbeat packet to the Proxy/Router (cur
 
 ## KV Cache Transfer Methods
 
-There are three methods for KVcache transfer: PUT, GET, and PUT_ASYNC. These methods can be specified using the `--kv-transfer-config` and `kv_connector_extra_config` parameters, specifically through the `send_type` field. Both PUT and PUT_ASYNC involve the P instance actively sending KVcache to the D instance. The difference is that PUT is a synchronous transfer method that blocks the main process, while PUT_ASYNC is an asynchronous transfer method. PUT_ASYNC uses a dedicated thread for sending KVcache, which means it does not block the main process. In contrast, the GET method involves the P instance saving the KVcache to the memory buffer after computing the prefill. The D instance then actively retrieves the computed KVcache from the P instance once it has allocated space for the KVcache.
+There are three methods for KVCache transfer: PUT, GET, and PUT_ASYNC. These methods can be specified using the `--kv-transfer-config` and `kv_connector_extra_config` parameters, specifically through the `send_type` field. Both PUT and PUT_ASYNC involve the P instance actively sending KVCache to the D instance. The difference is that PUT is a synchronous transfer method that blocks the main process, while PUT_ASYNC is an asynchronous transfer method. PUT_ASYNC uses a dedicated thread for sending KVCache, which means it does not block the main process. In contrast, the GET method involves the P instance saving the KVCache to the memory buffer after computing the prefill. The D instance then actively retrieves the computed KVCache from the P instance once it has allocated space for the KVCache.
 
 Experimental results have shown that the performance of these methods, from highest to lowest, is as follows: PUT_ASYNC → GET → PUT.
 
@@ -39,13 +39,13 @@ Experimental results have shown that the performance of these methods, from high
 
 As long as the address of the counterpart is known, point-to-point KV cache transfer (using NCCL) can be performed, without being constrained by rank and world size. To support dynamic scaling (expansion and contraction) of instances with PD disaggregation. This means that adding or removing P/D instances does not require a full system restart.
 
-Each P/D instance only needs to create a single `P2pNcclEngine` instance. This instance maintains a ZMQ Server, which runs a dedicated thread to listen on the `zmq_addr` address and receive control flow requests from other instances. These requests include requests to establish an NCCL connection and requests to send KVcache metadata (such as tensor shapes and data types). However, it does not actually transmit the KVcache data itself.
+Each P/D instance only needs to create a single `P2pNcclEngine` instance. This instance maintains a ZMQ Server, which runs a dedicated thread to listen on the `zmq_addr` address and receive control flow requests from other instances. These requests include requests to establish an NCCL connection and requests to send KVCache metadata (such as tensor shapes and data types). However, it does not actually transmit the KVCache data itself.
 
-When a P instance and a D instance transmit KVcache for the first time, they need to establish a ZMQ connection and an NCCL group. For subsequent KVcache transmissions, this ZMQ connection and NCCL group are reused. The NCCL group consists of only two ranks, meaning the world size is equal to 2. This design is intended to support dynamic scaling, which means that adding or removing P/D instances does not require a full system restart. As long as the address of the counterpart is known, point-to-point KVcache transmission can be performed, without being restricted by rank or world size.
+When a P instance and a D instance transmit KVCache for the first time, they need to establish a ZMQ connection and an NCCL group. For subsequent KVCache transmissions, this ZMQ connection and NCCL group are reused. The NCCL group consists of only two ranks, meaning the world size is equal to 2. This design is intended to support dynamic scaling, which means that adding or removing P/D instances does not require a full system restart. As long as the address of the counterpart is known, point-to-point KVCache transmission can be performed, without being restricted by rank or world size.
 
 ## NCCL Group Topology
 
-Currently, only symmetric TP (Tensor Parallelism) methods are supported for KVcache transmission. Asymmetric TP and PP (Pipeline Parallelism) methods will be supported in the future. Figure 2 illustrates the 1P2D setup, where each instance has a TP (Tensor Parallelism) degree of 2. There are a total of 7 NCCL groups: three vLLM instances each have one NCCL group with TP=2. Additionally, the 0th GPU card of the P instance establishes an NCCL group with the 0th GPU card of each D instance. Similarly, the 1st GPU card of the P instance establishes an NCCL group with the 1st GPU card of each D instance.
+Currently, only symmetric TP (Tensor Parallelism) methods are supported for KVCache transmission. Asymmetric TP and PP (Pipeline Parallelism) methods will be supported in the future. Figure 2 illustrates the 1P2D setup, where each instance has a TP (Tensor Parallelism) degree of 2. There are a total of 7 NCCL groups: three vLLM instances each have one NCCL group with TP=2. Additionally, the 0th GPU card of the P instance establishes an NCCL group with the 0th GPU card of each D instance. Similarly, the 1st GPU card of the P instance establishes an NCCL group with the 1st GPU card of each D instance.
 
 ![image2](https://github.com/user-attachments/assets/837e61d6-365e-4cbf-8640-6dd7ab295b36)
 
@@ -53,32 +53,18 @@ Each NCCL group occupies a certain amount of GPU memory buffer for communication
 
 ## GPU Memory Buffer and Tensor Memory Pool
 
-The trade-off in the size of the memory buffer is as follows: For P instances, the memory buffer is not required in PUT and PUT_ASYNC modes, but it is necessary in GET mode. For D instances, a memory buffer is needed in all three modes. The memory buffer for D instances should not be too large. Similarly, for P instances in GET mode, the memory buffer should also not be too large. The memory buffer of D instances is used to temporarily store KVcache sent by P instances. If it is too large, it will reduce the KVcache space available for normal inference by D instances, thereby decreasing the inference batch size and ultimately leading to a reduction in output throughput. The size of the memory buffer is configured by the parameter `kv_buffer_size`, measured in bytes, and is typically set to 5%～10% of the memory size.
+The trade-off in the size of the memory buffer is as follows: For P instances, the memory buffer is not required in PUT and PUT_ASYNC modes, but it is necessary in GET mode. For D instances, a memory buffer is needed in all three modes. The memory buffer for D instances should not be too large. Similarly, for P instances in GET mode, the memory buffer should also not be too large. The memory buffer of D instances is used to temporarily store KVCache sent by P instances. If it is too large, it will reduce the KVCache space available for normal inference by D instances, thereby decreasing the inference batch size and ultimately leading to a reduction in output throughput. The size of the memory buffer is configured by the parameter `kv_buffer_size`, measured in bytes, and is typically set to 5%～10% of the memory size.
 
-If the `--max-num-seqs` parameter for P instances is set to a large value, due to the large batch size, P instances will generate a large amount of KVcache simultaneously. This may exceed the capacity of the memory buffer of D instances, resulting in KVcache loss. Once KVcache is lost, D instances need to recompute Prefill, which is equivalent to performing Prefill twice. Consequently, the time-to-first-token (TTFT) will significantly increase, leading to degraded performance.
+If the `--max-num-seqs` parameter for P instances is set to a large value, due to the large batch size, P instances will generate a large amount of KVCache simultaneously. This may exceed the capacity of the memory buffer of D instances, resulting in KVCache loss. Once KVCache is lost, D instances need to recompute Prefill, which is equivalent to performing Prefill twice. Consequently, the time-to-first-token (TTFT) will significantly increase, leading to degraded performance.
 
-To address the above issues, I have designed and developed a local Tensor memory pool for storing KVcache, inspired by the buddy system used in Linux memory modules. Since the memory is sufficiently large, typically in the TB range on servers, there is no need to consider prefix caching or using block-based designs to reuse memory, thereby saving space. When the memory buffer is insufficient, KVcache can be directly stored in the Tensor memory pool, and D instances can subsequently retrieve KVcache from it. The read and write speed is that of PCIe, with PCIe 4.0 having a speed of approximately 21 GB/s, which is usually faster than the Prefill speed. Otherwise, solutions like Mooncake and lmcache would not be necessary. The Tensor memory pool acts as a flood diversion area, typically unused except during sudden traffic surges. In the worst-case scenario, my solution performs no worse than the normal situation with a Cache store.
+To address the above issues, I have designed and developed a local Tensor memory pool for storing KVCache, inspired by the buddy system used in Linux memory modules. Since the memory is sufficiently large, typically in the TB range on servers, there is no need to consider prefix caching or using block-based designs to reuse memory, thereby saving space. When the memory buffer is insufficient, KVCache can be directly stored in the Tensor memory pool, and D instances can subsequently retrieve KVCache from it. The read and write speed is that of PCIe, with PCIe 4.0 having a speed of approximately 21 GB/s, which is usually faster than the Prefill speed. Otherwise, solutions like Mooncake and lmcache would not be necessary. The Tensor memory pool acts as a flood diversion area, typically unused except during sudden traffic surges. In the worst-case scenario, my solution performs no worse than the normal situation with a Cache store.
 
 # Install vLLM
 
 ??? console "Commands"
 
     ```shell
-    # Enter the home directory or your working directory.
-    cd /home
-
-    # Download the installation package, and I will update the commit-id in time. You can directly copy the command.
-    wget https://vllm-wheels.s3.us-west-2.amazonaws.com/9112b443a042d8d815880b8780633882ad32b183/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
-
-    # Download the code repository.
-    git clone -b xpyd-v1 https://github.com/Abatom/vllm.git
-    cd vllm
-
-    # Set the installation package path.
-    export VLLM_PRECOMPILED_WHEEL_LOCATION=/home/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
-
-    # installation
-    pip install -e . -v
+    pip install "vllm>=0.9.2"
     ```
 
 # Run xPyD
@@ -90,7 +76,7 @@ To address the above issues, I have designed and developed a local Tensor memory
 - You may need to modify the `kv_buffer_size` and `port` in the following commands (if there is a conflict).
 - `PUT_ASYNC` offers the best performance and should be prioritized.
 - The `--port` must be consistent with the `http_port` in the `--kv-transfer-config`.
-- The `disagg_prefill_proxy_xpyd.py` script will use port 10001 (for receiving client requests) and port 30001 (for receiving service discovery from P and D instances).
+- The `disagg_proxy_p2p_nccl_xpyd.py` script will use port 10001 (for receiving client requests) and port 30001 (for receiving service discovery from P and D instances).
 - The node running the proxy must have `quart` installed.
 - Supports multiple nodes; you just need to modify the `proxy_ip` and `proxy_port` in `--kv-transfer-config`.
 - In the following examples, it is assumed that **the proxy's IP is 10.0.1.1**.
@@ -100,8 +86,8 @@ To address the above issues, I have designed and developed a local Tensor memory
 ### Proxy (e.g. 10.0.1.1)
 
 ```shell
-cd {your vllm directory}/examples/online_serving/disagg_xpyd/
-python3 disagg_prefill_proxy_xpyd.py &
+cd {your vllm directory}/examples/online_serving/disaggregated_serving_p2p_nccl_xpyd/
+python3 disagg_proxy_p2p_nccl_xpyd.py &
 ```
 
 ### Prefill1 (e.g. 10.0.1.2 or 10.0.1.1)
@@ -111,7 +97,7 @@ python3 disagg_prefill_proxy_xpyd.py &
     ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=0 vllm serve {your model directory} \
         --host 0.0.0.0 \
-        --port 20005 \
+        --port 20001 \
         --tensor-parallel-size 1 \
         --seed 1024 \
         --served-model-name base_model \
@@ -123,7 +109,7 @@ python3 disagg_prefill_proxy_xpyd.py &
         --gpu-memory-utilization 0.9 \
         --disable-log-request \
         --kv-transfer-config \
-        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"21001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20005","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
+        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"21001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20001"}}' > /var/vllm.log 2>&1 &
     ```
 
 ### Decode1 (e.g. 10.0.1.3 or 10.0.1.1)
@@ -133,7 +119,7 @@ python3 disagg_prefill_proxy_xpyd.py &
     ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=1 vllm serve {your model directory} \
         --host 0.0.0.0 \
-        --port 20009 \
+        --port 20002 \
         --tensor-parallel-size 1 \
         --seed 1024 \
         --served-model-name base_model \
@@ -145,7 +131,7 @@ python3 disagg_prefill_proxy_xpyd.py &
         --gpu-memory-utilization 0.7 \
         --disable-log-request \
         --kv-transfer-config \
-        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"22001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20009","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
+        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"22001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20002"}}' > /var/vllm.log 2>&1 &
     ```
 
 ### Decode2 (e.g. 10.0.1.4 or 10.0.1.1)
@@ -167,7 +153,7 @@ python3 disagg_prefill_proxy_xpyd.py &
         --gpu-memory-utilization 0.7 \
         --disable-log-request \
         --kv-transfer-config \
-        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"23001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20003","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
+        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"23001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20003"}}' > /var/vllm.log 2>&1 &
     ```
 
 ### Decode3 (e.g. 10.0.1.5 or 10.0.1.1)
@@ -177,7 +163,7 @@ python3 disagg_prefill_proxy_xpyd.py &
     ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=3 vllm serve {your model directory} \
         --host 0.0.0.0 \
-        --port 20008 \
+        --port 20004 \
         --tensor-parallel-size 1 \
         --seed 1024 \
         --served-model-name base_model \
@@ -189,7 +175,7 @@ python3 disagg_prefill_proxy_xpyd.py &
         --gpu-memory-utilization 0.7 \
         --disable-log-request \
         --kv-transfer-config \
-        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"24001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20008","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
+        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"24001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20004"}}' > /var/vllm.log 2>&1 &
     ```
 
 ## Run 3P1D
@@ -197,8 +183,8 @@ python3 disagg_prefill_proxy_xpyd.py &
 ### Proxy (e.g. 10.0.1.1)
 
 ```shell
-cd {your vllm directory}/examples/online_serving/disagg_xpyd/
-python3 disagg_prefill_proxy_xpyd.py &
+cd {your vllm directory}/examples/online_serving/disaggregated_serving_p2p_nccl_xpyd/
+python3 disagg_proxy_p2p_nccl_xpyd.py &
 ```
 
 ### Prefill1 (e.g. 10.0.1.2 or 10.0.1.1)
@@ -208,7 +194,7 @@ python3 disagg_prefill_proxy_xpyd.py &
     ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=0 vllm serve {your model directory} \
         --host 0.0.0.0 \
-        --port 20005 \
+        --port 20001 \
         --tensor-parallel-size 1 \
         --seed 1024 \
         --served-model-name base_model \
@@ -220,7 +206,7 @@ python3 disagg_prefill_proxy_xpyd.py &
         --gpu-memory-utilization 0.9 \
         --disable-log-request \
         --kv-transfer-config \
-        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"21001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20005","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
+        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"21001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20001"}}' > /var/vllm.log 2>&1 &
     ```
 
 ### Prefill2 (e.g. 10.0.1.3 or 10.0.1.1)
@@ -230,7 +216,7 @@ python3 disagg_prefill_proxy_xpyd.py &
     ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=1 vllm serve {your model directory} \
         --host 0.0.0.0 \
-        --port 20009 \
+        --port 20002 \
         --tensor-parallel-size 1 \
         --seed 1024 \
         --served-model-name base_model \
@@ -242,7 +228,7 @@ python3 disagg_prefill_proxy_xpyd.py &
         --gpu-memory-utilization 0.9 \
         --disable-log-request \
         --kv-transfer-config \
-        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"22001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20009","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
+        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"22001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20002"}}' > /var/vllm.log 2>&1 &
     ```
 
 ### Prefill3 (e.g. 10.0.1.4 or 10.0.1.1)
@@ -264,7 +250,7 @@ python3 disagg_prefill_proxy_xpyd.py &
         --gpu-memory-utilization 0.9 \
         --disable-log-request \
         --kv-transfer-config \
-        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"23001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20003","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
+        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_buffer_size":"1e1","kv_port":"23001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20003"}}' > /var/vllm.log 2>&1 &
     ```
 
 ### Decode1 (e.g. 10.0.1.5 or 10.0.1.1)
@@ -274,7 +260,7 @@ python3 disagg_prefill_proxy_xpyd.py &
     ```shell
     VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=3 vllm serve {your model directory} \
         --host 0.0.0.0 \
-        --port 20008 \
+        --port 20004 \
         --tensor-parallel-size 1 \
         --seed 1024 \
         --served-model-name base_model \
@@ -286,7 +272,7 @@ python3 disagg_prefill_proxy_xpyd.py &
         --gpu-memory-utilization 0.7 \
         --disable-log-request \
         --kv-transfer-config \
-        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"24001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20008","send_type":"PUT_ASYNC","nccl_num_channels":"16"}}' > /var/vllm.log 2>&1 &
+        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_buffer_size":"8e9","kv_port":"24001","kv_connector_extra_config":{"proxy_ip":"10.0.1.1","proxy_port":"30001","http_port":"20004"}}' > /var/vllm.log 2>&1 &
     ```
 
 # Single request
@@ -334,24 +320,6 @@ pgrep python | xargs kill -9 && pkill -f python
 
 # Test data
 
-## **Scenario 1**: 1K input & 1K output tokens, E2E P99 latency ~20s
-- **1P5D (6×A800) vs vLLM (1×A800)**:
-  - Throughput ↑7.2% (1085 → 6979/6)
-  - ITL (P99) ↓81.3% (120ms → 22.9ms)
-  - TTFT (P99) ↑26.8% (175ms → 222ms)
-  - TPOT: No change
+## **Scenario**: 1K input & 200 output tokens, E2E P99 latency ~2s
 
-- **1P6D (7×A800) vs vLLM (1×A800)**:
-  - Throughput ↑9.6% (1085 → 8329/7)
-  - ITL (P99) ↓81.0% (120ms → 22.7ms)
-  - TTFT (P99) ↑210% (175ms →543ms)
-  - TPOT: No change
-
-## **Scenario 2**: 1K input & 200 output tokens, E2E P99 latency ~4s
-- **1P1D (2×A800) vs vLLM (1×A800)**:
-  - Throughput ↑37.4% (537 → 1476/2)
-  - ITL (P99) ↓81.8% (127ms → 23.1ms)
-  - TTFT (P99) ↑41.8% (160ms → 227ms)
-  - TPOT: No change
-
-![testdata](https://github.com/user-attachments/assets/f791bfc7-9f3d-4e5c-9171-a42f9f4da627)
+![testdata](https://github.com/user-attachments/assets/cef0953b-4567-4bf9-b940-405b92a28eb1)
