@@ -11,7 +11,7 @@ from vllm.entrypoints.openai.tool_parsers import Glm4MoeModelToolParser
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 # Use a common model that is likely to be available
-MODEL = "/model/GLM-4.2-MoE-106B-A12B"
+MODEL = "THUDM/GLM-4-MoE"
 
 
 @pytest.fixture(scope="module")
