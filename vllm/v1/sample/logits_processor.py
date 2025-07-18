@@ -495,7 +495,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         return logits
 
 
-class MaxThinkTokensLogitsProcessor(LogitsProcessor):
+class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
     """Limits the number of tokens allowed inside a 'thinking' section."""
 
     def __init__(self, reasoning_config: ReasoningConfig, pin_memory: bool,
@@ -531,7 +531,7 @@ class MaxThinkTokensLogitsProcessor(LogitsProcessor):
                 return i
         return -1
 
-    def _init_state_entry(self, prompt_tok_ids: list[int], max_think_tokens: int) -> dict[str, Any]:
+    def _init_state_entry(self, prompt_tok_ids: list[int], thinking_token_budget: int) -> dict[str, Any]:
         """Initializes the tracking state for a given sequence index."""
         last_start = self._find_last_sequence_index(
             prompt_tok_ids, self.think_start_token_ids)
@@ -547,7 +547,7 @@ class MaxThinkTokensLogitsProcessor(LogitsProcessor):
             "end_count": 0,             # Number of end tokens forced so far
             "prompt_tok_ids": prompt_tok_ids,
             "output_tok_ids": [],
-            "max_think_tokens": max_think_tokens,
+            "thinking_token_budget": thinking_token_budget,
         }
 
     def _update_think_state(self, state: dict[str, Any]):
@@ -573,7 +573,7 @@ class MaxThinkTokensLogitsProcessor(LogitsProcessor):
                 state["in_end"] = False
                 state["end_count"] = 0
         else:
-            if state["in_think"] and state["think_count"] >= state["max_think_tokens"]:
+            if state["in_think"] and state["think_count"] >= state["thinking_token_budget"]:
                 state["in_think"] = False
                 state["in_end"] = True
                 state["end_count"] = 0
@@ -587,11 +587,11 @@ class MaxThinkTokensLogitsProcessor(LogitsProcessor):
     def update_state(self, batch_update: Optional[BatchUpdate]):
         if batch_update:
             for (index, params, prompt_tok_ids, output_tok_ids) in batch_update.added:
-                max_think_tokens = (params.max_think_tokens if isinstance(
+                thinking_token_budget = (params.thinking_token_budget if isinstance(
                     params, SamplingParams) else None)
-                if max_think_tokens is not None:
+                if thinking_token_budget is not None:
                     self._state[index] = self._init_state_entry(
-                        prompt_tok_ids, max_think_tokens)
+                        prompt_tok_ids, thinking_token_budget)
                     self._state[index]["output_tok_ids"] = output_tok_ids
 
             for index in batch_update.removed:
@@ -657,12 +657,12 @@ def init_builtin_logitsprocs(
     non_argmax_invariant = [min_tokens_logitproc, logit_bias_logitproc]
 
     if reasoning_config is not None:
-        max_think_tokens_logitproc = MaxThinkTokensLogitsProcessor(
+        thinking_token_budget_logitproc = ThinkingTokenBudgetLogitsProcessor(
             reasoning_config=reasoning_config,
             pin_memory=pin_memory_available,
             device=device,
         )
-        non_argmax_invariant.append(max_think_tokens_logitproc)
+        non_argmax_invariant.append(thinking_token_budget_logitproc)
 
     return LogitsProcessorManager(
         non_argmax_invariant=non_argmax_invariant,
