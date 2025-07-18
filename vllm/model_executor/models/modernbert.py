@@ -14,14 +14,15 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.pooler import (ClassifierPooler, Pooler,
-                                               PoolingMethod, PoolingTask,
+                                               PoolingMethod,
+                                               PoolingParamsUpdate,
                                                PoolingType)
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.pooling_params import PoolingParams
+from vllm.pooling_params import PoolingTask
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsCrossEncoding, SupportsV0Only
@@ -270,8 +271,11 @@ class ModernBertPooler(Pooler):
                                  eps=config.norm_eps,
                                  bias=config.norm_bias)
 
-    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
-        return self.pooling.get_pooling_params(task)
+    def get_pooling_updates(
+        self,
+        task: PoolingTask,
+    ) -> Optional[PoolingParamsUpdate]:
+        return self.pooling.get_pooling_updates(task)
 
     def forward(
         self,

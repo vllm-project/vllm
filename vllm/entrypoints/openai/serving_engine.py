@@ -305,6 +305,16 @@ class OpenAIServing:
                     " Please, select a smaller truncation size.")
         return None
 
+    def _create_pooling_params(
+        self,
+        ctx: ServeContext,
+    ) -> Union[PoolingParams, ErrorResponse]:
+        if not hasattr(ctx.request, "to_pooling_params"):
+            return self.create_error_response(
+                "Request type does not support pooling parameters")
+
+        return ctx.request.to_pooling_params()
+
     async def _prepare_generators(
         self,
         ctx: ServeContext,
@@ -318,11 +328,9 @@ class OpenAIServing:
             trace_headers = (None if ctx.raw_request is None else await
                              self._get_trace_headers(ctx.raw_request.headers))
 
-            if not hasattr(ctx.request, "to_pooling_params"):
-                return self.create_error_response(
-                    "Request type does not support pooling parameters")
-
-            pooling_params = ctx.request.to_pooling_params()
+            pooling_params = self._create_pooling_params(ctx)
+            if isinstance(pooling_params, ErrorResponse):
+                return pooling_params
 
             if ctx.engine_prompts is None:
                 return self.create_error_response(

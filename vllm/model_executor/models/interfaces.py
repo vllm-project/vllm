@@ -600,13 +600,6 @@ def supports_cross_encoding(
     return is_pooling_model(model) and _supports_cross_encoding(model)
 
 
-def has_step_pooler(model: Union[type[object], object]) -> bool:
-    """Check if the model uses step pooler."""
-    from vllm.model_executor.layers.pooler import StepPooler
-
-    return is_pooling_model(model) and isinstance(model.pooler, StepPooler)
-
-
 class SupportsQuant:
     """The interface required for all models that support quantization."""
 
