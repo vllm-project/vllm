@@ -551,7 +551,7 @@ class ModelConfig:
         # For pooling models, self.task is used to indicate the
         # user-selected task
         if self.task == "score":
-            if self.registry.is_cross_encoder_model(self.architectures):
+            if self._is_classify_task(self.architectures):
                 self.task = "classify"
             else:
                 self.task = "embed"
@@ -806,6 +806,12 @@ class ModelConfig:
                 f"one of {get_args(TokenizerMode)}.")
         self.tokenizer_mode = tokenizer_mode
 
+    def _is_classify_task(self, architectures: list[str]):
+        for arch in architectures:
+            if arch.endswith("ForSequenceClassification"):
+                return True
+        return self.registry.is_cross_encoder_model(architectures)
+
     def _get_preferred_pooling_task(
         self,
         architectures: list[str],
@@ -813,14 +819,11 @@ class ModelConfig:
         model_id = self.model
         if get_pooling_config(model_id, self.revision):
             return "embed"
-        if self.registry.is_cross_encoder_model(architectures):
-            return "classify"
         if self.registry.is_transcription_model(architectures):
             return "transcription"
 
         suffix_to_preferred_task: list[tuple[str, _ResolvedTask]] = [
             # Other models follow this pattern
-            ("ForSequenceClassification", "classify"),
             ("EmbeddingModel", "embed"),
             ("RewardModel", "reward"),
         ]
@@ -878,11 +881,14 @@ class ModelConfig:
         self,
         task_option: TaskOption,
     ) -> dict[RunnerType, list[_ResolvedTask]]:
-        return {
-            "generate": self._get_supported_generation_tasks(task_option),
-            "pooling": self._get_supported_pooling_tasks(task_option),
-            "draft": ["draft"]
-        }
+        if self._is_classify_task(self.architectures):
+            return {"generate": [], "pooling": ["classify"], "draft": []}
+        else:
+            return {
+                "generate": self._get_supported_generation_tasks(task_option),
+                "pooling": self._get_supported_pooling_tasks(task_option),
+                "draft": ["draft"]
+            }
 
     def _get_supported_runner_types(
         self,
@@ -925,12 +931,16 @@ class ModelConfig:
                     f"Available tasks for runner={task_runner!r}: "
                     f"{supported_tasks[task_runner]}")
 
+        if "classify" in supported_tasks.get("pooling", []):
+            # When multiple pooling tasks are present, default to
+            # pooling (eg cross-encoder) for non-standard architectures.
+            return "pooling"
+
         suffix_to_preferred_runner: list[tuple[str, RunnerType]] = [
             ("ForCausalLM", "generate"),
             ("ForConditionalGeneration", "generate"),
             ("ChatModel", "generate"),
             ("LMHeadModel", "generate"),
-            ("ForSequenceClassification", "pooling"),
             ("EmbeddingModel", "pooling"),
             ("RewardModel", "pooling"),
         ]
@@ -940,10 +950,6 @@ class ModelConfig:
             if arch.endswith(suffix) and pref_runner in supported_runner_types:
                 return pref_runner
 
-        if "classify" in supported_tasks.get("pooling", []):
-            # When multiple pooling tasks are present, default to
-            # pooling (eg cross-encoder) for non-standard architectures.
-            return "pooling"
         if "generate" in supported_runner_types:
             return "generate"
         if "pooling" in supported_runner_types:
@@ -963,7 +969,7 @@ class ModelConfig:
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
             "awq_marlin", "fbgemm_fp8", "compressed-tensors", "experts_int8",
-            "quark", "modelopt_fp4", "bitblas", "gptq_bitblas"
+            "quark", "modelopt_fp4", "bitblas", "gptq_bitblas", "inc"
         ]
         if self.quantization is not None:
             self.quantization = cast(me_quant.QuantizationMethods,
@@ -1527,7 +1533,7 @@ class ModelConfig:
 
     @property
     def is_matryoshka(self) -> bool:
-        return (hasattr(self.hf_config, "matryoshka_dimensions")
+        return (bool(getattr(self.hf_config, "matryoshka_dimensions", None))
                 or getattr(self.hf_config, "is_matryoshka", False))
 
     @property
@@ -1541,13 +1547,11 @@ class ModelConfig:
         return getattr(self.hf_config, "use_pad_token", True)
 
     def get_and_verify_max_len(self, max_model_len: int):
-        # For pooling models, the tokenizer's `model_max_length` is often a
-        # reliable source for the maximum sequence length. However, for
-        # generative models, this can be incorrect and unduly limit the
-        # context window (e.g., DeepSeek-R1). Therefore, we only consider
-        # tokenizer_config for pooling models.
+        # Consider max_model_len in tokenizer_config only when
+        # pooling models use absolute position_embedding.
         tokenizer_config = None
-        if self.runner_type == "pooling":
+        if (self.runner_type == "pooling" and getattr(
+                self.hf_config, "position_embedding_type", "") == "absolute"):
             tokenizer_config = try_get_tokenizer_config(
                 self.tokenizer,
                 trust_remote_code=self.trust_remote_code,
@@ -1565,7 +1569,7 @@ class ModelConfig:
 
 
 BlockSize = Literal[1, 8, 16, 32, 64, 128]
-CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
+CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"]
 PrefixCachingHashAlgo = Literal["builtin", "sha256", "sha256_cbor_64bit"]
 
 
@@ -1595,7 +1599,7 @@ class CacheConfig:
     cache_dtype: CacheDType = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
-    fp8 (=fp8_e4m3)."""
+    fp8 (=fp8_e4m3). Intel Gaudi (HPU) supports fp8 (using fp8_inc)."""
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
@@ -1693,7 +1697,7 @@ class CacheConfig:
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
                 "Meanwhile, it may cause accuracy drop without a proper "
-                "scaling factor")
+                "scaling factor.")
         else:
             raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype}")
 
@@ -1783,6 +1787,9 @@ class LoadConfig:
         default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
     corresponding to the chosen load_format."""
+    device: Optional[str] = None
+    """Device to which model weights will be loaded, default to
+    device_config.device"""
     ignore_patterns: Optional[Union[list[str], str]] = None
     """The list of patterns to ignore when loading the model. Default to
     "original/**/*" to avoid repeated loading of llama's checkpoints."""
@@ -1909,7 +1916,7 @@ class ParallelConfig:
     or equal to the number of GPUs available, "mp" will be used to
     keep processing on a single host. Otherwise, this will default
     to "ray" if Ray is installed and fail otherwise. Note that tpu
-    and hpu only support Ray for distributed inference."""
+    only support Ray for distributed inference."""
 
     worker_cls: str = "auto"
     """The full name of the worker class to use. If "auto", the worker class
@@ -2451,7 +2458,7 @@ class SchedulerConfig:
         return self.num_scheduler_steps > 1
 
 
-Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu", "hpu"]
+Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu"]
 
 
 @config
