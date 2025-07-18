@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+import platform
 from typing import Callable, Optional
 
 import torch
@@ -41,7 +42,7 @@ class CPUWorker(Worker):
     def init_device(self):
         # Setup OpenMP threads affinity.
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
-        if omp_cpuids == "auto":
+        if omp_cpuids == "auto" and platform.system() == "Linux":
             if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
                 # For POWERPC SMT-8/4/2
                 self.local_omp_cpuid = self._get_autobind_cpu_ids(
