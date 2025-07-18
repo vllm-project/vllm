@@ -11,36 +11,35 @@ This script creates a new model with fewer layers by:
 """
 
 import json
-import os
 import shutil
 from pathlib import Path
 from typing import Any, Dict
 
 import torch
 from safetensors.torch import save_file
-from transformers import AutoConfig, AutoTokenizer
+from transformers import (AutoConfig, AutoProcessor, AutoTokenizer,
+                          GenerationConfig)
 
 from vllm import LLM, SamplingParams
 
 # Sample prompts for testing
-prompts = [
+PROMPTS: list[str] = [
     "Hello, my name is",
     "The president of the United States is",
     "The capital of France is",
     "The future of AI is",
 ]
 
-# Create a sampling params object
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
-
 
 def test_maverick_serving(model: str):
     """Test Llama-4-Maverick model with vLLM LLM class using CLI equivalent
-    options with reduced layers
-
+    options with reduced layers.
     """
 
     try:
+        # Create a sampling params object
+        sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+
         llm = LLM(
             model=model,
             max_model_len=2048,  # Smaller context for testing
@@ -52,92 +51,7 @@ def test_maverick_serving(model: str):
             kv_cache_dtype="fp8",
         )
 
-        # Print model configuration
-        print("Model loaded successfully!")
-        print("\nModel Configuration:")
-        print("-" * 40)
-
-        model_config = llm.llm_engine.model_config
-        print(f"Model: {model_config.model}")
-        print(f"Architecture: {model_config.architectures}")
-        print(f"Max Model Length: {model_config.max_model_len}")
-        print(f"Dtype: {model_config.dtype}")
-        print(f"Quantization: {model_config.quantization}")
-        print(f"Trust Remote Code: {model_config.trust_remote_code}")
-        print(f"Sliding Window: {model_config.get_sliding_window()}")
-        print(f"Vocab Size: {model_config.get_vocab_size()}")
-        print(f"Hidden Size: {model_config.get_hidden_size()}")
-
-        # Print HuggingFace model cache path
-        try:
-            # Try to get the model path from HuggingFace cache
-            hf_cache_dir = os.environ.get(
-                "HF_HOME", os.path.expanduser("~/.cache/huggingface"))
-            print(f"HuggingFace Cache Directory: {hf_cache_dir}")
-
-            # Try to load the config to get more info about the model path
-            config = AutoConfig.from_pretrained(model_config.model,
-                                                trust_remote_code=True)
-            print(f"Model Config loaded from: {config.name_or_path}")
-
-            # Check if there's a specific model path in the load config
-            load_config = llm.llm_engine.vllm_config.load_config
-            if (hasattr(load_config, "download_dir")
-                    and load_config.download_dir):
-                print(f"Custom Download Directory: {load_config.download_dir}")
-
-        except Exception as e:
-            print(f"Could not determine exact model path: {e}")
-
-        # Try to find the actual cached model directory
-        try:
-            import glob
-
-            model_name_safe = model_config.model.replace("/", "--")
-            cache_pattern = os.path.join(hf_cache_dir, "hub",
-                                         f"models--{model_name_safe}*")
-            cached_dirs = glob.glob(cache_pattern)
-            if cached_dirs:
-                print(f"Cached Model Directory: {cached_dirs[0]}")
-                # Look for the actual model files
-                snapshot_dirs = glob.glob(
-                    os.path.join(cached_dirs[0], "snapshots", "*"))
-                if snapshot_dirs:
-                    print(f"Model Snapshot Directory: {snapshot_dirs[0]}")
-            else:
-                print("No cached model directory found in standard HF "
-                      "cache location")
-        except Exception as e:
-            print(f"Error finding cached model directory: {e}")
-
-        # Print cache configuration
-        cache_config = llm.llm_engine.cache_config
-        print("\nCache Configuration:")
-        print(f"Block Size: {cache_config.block_size}")
-        print(f"GPU Memory Utilization: {cache_config.gpu_memory_utilization}")
-        print(f"KV Cache Dtype: {cache_config.cache_dtype}")
-        print(f"Enable Prefix Caching: {cache_config.enable_prefix_caching}")
-
-        # Print parallel configuration
-        parallel_config = llm.llm_engine.vllm_config.parallel_config
-        print("\nParallel Configuration:")
-        print(f"Tensor Parallel Size: {parallel_config.tensor_parallel_size}")
-        print(
-            f"Pipeline Parallel Size: {parallel_config.pipeline_parallel_size}"
-        )
-        print(
-            f"Enable Expert Parallel: {parallel_config.enable_expert_parallel}"
-        )
-        print(f"Num Attention Heads: "
-              f"{model_config.get_num_attention_heads(parallel_config)}")
-        print(f"Num Key Value Heads: "
-              f"{model_config.get_num_kv_heads(parallel_config)}")
-        print(f"Num Layers: {model_config.get_num_layers(parallel_config)}")
-        print("-" * 40)
-        print("Generating text from sample prompts...")
-
-        # Generate texts from the prompts
-        outputs = llm.generate(prompts, sampling_params)
+        outputs = llm.generate(PROMPTS, sampling_params)
 
         # Print the outputs
         print("\nGenerated Outputs:\n" + "-" * 60)
@@ -188,7 +102,7 @@ def create_reduced_maverick_model(
             shutil.rmtree(output_path)
         else:
             print(
-                f"Output directory {output_dir} already exists. Use force_recreate=True to overwrite."
+                f"Output directory {output_dir} already exists. Use --force-recreate to overwrite."
             )
             return str(output_path)
 
@@ -220,14 +134,12 @@ def create_reduced_maverick_model(
         create_reduced_safetensors(original_config, reduced_config,
                                    output_path)
 
-        # Step 6: Create preprocessor config for multimodal model
+        ## Step 6: Create preprocessor config for multimodal model
         print("Creating preprocessor config...")
         create_preprocessor_config(original_config, output_path)
 
         # Step 7: Create generation config if it exists
         try:
-            from transformers import GenerationConfig
-
             gen_config = GenerationConfig.from_pretrained(original_model_name)
             gen_config.save_pretrained(output_path)
             print("Copied generation config")
@@ -300,99 +212,19 @@ def create_preprocessor_config(original_config: Any,
                                output_path: Path) -> None:
     """Create preprocessor_config.json for multimodal model."""
 
+    # Try to load the original preprocessor config first
     try:
-        # Try to load the original preprocessor config first
-        try:
-            from transformers import AutoProcessor
-
-            processor = AutoProcessor.from_pretrained(
-                original_config._name_or_path
-                or "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
-                trust_remote_code=True,
-            )
-            processor.save_pretrained(output_path)
-            print("Copied original preprocessor config")
-            return
-        except Exception as e:
-            print(f"Could not copy original preprocessor config: {e}")
-            print("Creating synthetic preprocessor config...")
-
-        # Create a synthetic preprocessor config based on typical Llama4 multimodal setup
-        vision_config = (original_config.vision_config if hasattr(
-            original_config, "vision_config") else {})
-
-        preprocessor_config = {
-            "auto_map": {
-                "AutoProcessor": "processing_llama4.Llama4Processor"
-            },
-            "chat_template":
-            "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% elif USE_DEFAULT_PROMPT == true and not '<<SYS>>' in messages[0]['content'] %}{% set loop_messages = messages %}{% set system_message = 'You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\\n\\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don\\'t know the answer to a question, please don\\'t share false information.' %}{% else %}{% set loop_messages = messages %}{% set system_message = false %}{% endif %}{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if loop.index0 == 0 and system_message != false %}{{ '<|begin_of_text|><|start_header_id|>system<|end_header_id|>\\n\\n' + system_message + '<|eot_id|>' }}{% endif %}{%- if message['role'] == 'user' or message['role'] == 'system' %}{{ '<|start_header_id|>' + message['role'] + '<|end_header_id|>\\n\\n'}}{% if message['content'] is not string %}{% for item in message['content'] %}{% if item['type'] == 'image' %}{{ '<|image|>' }}{% elif item['type'] == 'text' %}{{ item['text'] }}{% endif %}{% endfor %}{% else %}{{ message['content'] }}{% endif %}{{ '<|eot_id|>' }}{% elif message['role'] == 'assistant' %}{{ '<|start_header_id|>assistant<|end_header_id|>\\n\\n'  + message['content'] + '<|eot_id|>' }}{% endif %}{% if loop.last and message['role'] == 'user' %}{{ '<|start_header_id|>assistant<|end_header_id|>\\n\\n' }}{% endif %}{% endfor %}",
-            "image_processor": {
-                "auto_map": {
-                    "AutoImageProcessor":
-                    "image_processing_llama4_fast.Llama4ImageProcessor"
-                },
-                "do_convert_rgb": True,
-                "do_normalize": True,
-                "do_pad": True,
-                "do_rescale": True,
-                "do_resize": True,
-                "image_mean": [0.48145466, 0.4578275, 0.40821073],
-                "image_processor_type": "Llama4ImageProcessor",
-                "image_std": [0.26862954, 0.26130258, 0.27577711],
-                "max_image_size": getattr(vision_config, "image_size", 560),
-                "min_image_size": 224,
-                "processor_class": "Llama4ImageProcessor",
-                "resample": 3,
-                "rescale_factor": 0.00392156862745098,
-                "size": {
-                    "height": getattr(vision_config, "image_size", 560),
-                    "width": getattr(vision_config, "image_size", 560),
-                },
-            },
-            "processor_class": "Llama4Processor",
-            "tokenizer": {
-                "add_bos_token": True,
-                "add_eos_token": False,
-                "added_tokens_decoder": {},
-                "additional_special_tokens": [],
-                "bos_token": "<|begin_of_text|>",
-                "chat_template":
-                "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% elif USE_DEFAULT_PROMPT == true and not '<<SYS>>' in messages[0]['content'] %}{% set loop_messages = messages %}{% set system_message = 'You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\\n\\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don\\'t know the answer to a question, please don\\'t share false information.' %}{% else %}{% set loop_messages = messages %}{% set system_message = false %}{% endif %}{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if loop.index0 == 0 and system_message != false %}{{ '<|begin_of_text|><|start_header_id|>system<|end_header_id|>\\n\\n' + system_message + '<|eot_id|>' }}{% endif %}{%- if message['role'] == 'user' or message['role'] == 'system' %}{{ '<|start_header_id|>' + message['role'] + '<|end_header_id|>\\n\\n'}}{% if message['content'] is not string %}{% for item in message['content'] %}{% if item['type'] == 'image' %}{{ '<|image|>' }}{% elif item['type'] == 'text' %}{{ item['text'] }}{% endif %}{% endfor %}{% else %}{{ message['content'] }}{% endif %}{{ '<|eot_id|>' }}{% elif message['role'] == 'assistant' %}{{ '<|start_header_id|>assistant<|end_header_id|>\\n\\n'  + message['content'] + '<|eot_id|>' }}{% endif %}{% if loop.last and message['role'] == 'user' %}{{ '<|start_header_id|>assistant<|end_header_id|>\\n\\n' }}{% endif %}{% endfor %}",
-                "clean_up_tokenization_spaces": False,
-                "eos_token": "<|eot_id|>",
-                "legacy": True,
-                "model_max_length": 131072,
-                "pad_token": "<|eot_id|>",
-                "padding_side": "left",
-                "processor_class": "Llama4Processor",
-                "sp_model_kwargs": {},
-                "spaces_between_special_tokens": False,
-                "tokenizer_class": "LlamaTokenizer",
-                "unk_token": None,
-                "use_default_system_prompt": False,
-            },
-        }
-
-        # Save the preprocessor config
-        preprocessor_path = output_path / "preprocessor_config.json"
-        with open(preprocessor_path, "w") as f:
-            json.dump(preprocessor_config, f, indent=2)
-        print(f"Created preprocessor config at {preprocessor_path}")
-
+        processor = AutoProcessor.from_pretrained(
+            original_config._name_or_path
+            or "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+            trust_remote_code=True,
+        )
+        processor.save_pretrained(output_path)
+        print("Copied original preprocessor config")
+        return
     except Exception as e:
-        print(f"Error creating preprocessor config: {e}")
-        # Create a minimal fallback config
-        minimal_config = {
-            "processor_class": "Llama4Processor",
-            "auto_map": {
-                "AutoProcessor": "processing_llama4.Llama4Processor"
-            },
-        }
-        preprocessor_path = output_path / "preprocessor_config.json"
-        with open(preprocessor_path, "w") as f:
-            json.dump(minimal_config, f, indent=2)
-        print(f"Created minimal preprocessor config at {preprocessor_path}")
+        print(f"Could not copy original preprocessor config: {e}")
+        raise
 
 
 def create_reduced_safetensors(original_config: Any, reduced_config: Dict[str,
@@ -711,26 +543,20 @@ def test_reduced_model(model_path: str) -> None:
         )
 
         # Test generation
-        prompts = ["Hello, how are you?", "What is AI?"]
         sampling_params = SamplingParams(temperature=0.8,
                                          top_p=0.95,
                                          max_tokens=50)
 
         llm.start_profile()
-        outputs = llm.generate(prompts, sampling_params)
+        outputs = llm.generate(PROMPTS, sampling_params)
         llm.stop_profile()
 
         print("Test generation successful!")
         for output in outputs:
             print(f"Prompt: {output.prompt}")
-            print(f"Output: {output.outputs[0].text}")
-            print("-" * 40)
-        outputs = llm.generate(prompts, sampling_params)
-
-        print("Test generation successful!")
-        for output in outputs:
-            print(f"Prompt: {output.prompt}")
-            print(f"Output: {output.outputs[0].text}")
+            print(
+                f"Output (expected to be empty with random tensor): {output.outputs[0].text}"
+            )
             print("-" * 40)
 
     except Exception as e:
