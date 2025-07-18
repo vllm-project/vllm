@@ -68,6 +68,7 @@ class Attention(nn.Module):
         super().__init__()
         self.pre_attn = nn.Linear(mlp_size, hidden_size, bias=False)
         self.post_attn = nn.Linear(hidden_size, mlp_size, bias=False)
+        self.rms_norm_weight = nn.Parameter(torch.ones(hidden_size))
 
         # Initialize to same weights for testing
         nn.init.xavier_normal_(
@@ -79,11 +80,19 @@ class Attention(nn.Module):
             generator=torch.Generator().manual_seed(RANDOM_SEED),
             gain=0.001)
 
+    def rms_norm_ref(self, x: torch.Tensor) -> torch.Tensor:
+        x_f32 = x.float()
+        return (x_f32 * torch.rsqrt(
+            torch.mean(x_f32.square(), dim=-1, keepdim=True) + 1e-6) *
+                self.rms_norm_weight).to(x.dtype)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.pre_attn(x)
+        x = self.rms_norm_ref(x)
         attn_output = torch.empty_like(x)
         torch.ops.silly.attention(x, x, x, attn_output)
         x = attn_output
+        x = self.rms_norm_ref(x)
         x = self.post_attn(x)
         return x
 
@@ -283,9 +292,9 @@ def test_multi_graph_piecewise_compile_outputs_equal():
             num_graphs_seen=2,  # two graphs for the model
             num_piecewise_graphs_seen=6,
             # attn_one, attn_two each has 3 piecewise graphs
-            # (pre_attn, post_attn, silly_attention) each
+            # (pre attn, post attn, silly_attention) each
             num_piecewise_capturable_graphs_seen=4,
-            # attn_one, attn_two has pre_attn and post_attn each, total=4
+            # attn_one, attn_two has pre attn and post attn each, total=4
             num_backend_compilations=4,  # num_piecewise_capturable_graphs_seen
             num_cudagraph_captured=8,
             # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
@@ -333,5 +342,9 @@ def test_multi_graph_piecewise_compile_outputs_equal():
     ):
         outputs.append(run_model(vllm_config, model, inputs))
 
-    assert torch.equal(outputs[0], outputs[1])
+    # Generally don't expect outputs with and without inductor
+    # to be bitwise equivalent
+    assert torch.allclose(outputs[0], outputs[1])
+
+    # Expect bitwise equivalence using inductor w/ and w/o cudagraph
     assert torch.equal(outputs[0], outputs[2])
