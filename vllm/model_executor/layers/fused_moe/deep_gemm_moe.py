@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -152,6 +152,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
+        extra_expert_args: Optional[dict[str, Any]],
     ):
         assert self.block_shape is not None
         assert a1q_scale is not None
