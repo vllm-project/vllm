@@ -17,7 +17,7 @@ The following colab [calculator](https://colab.sandbox.google.com/drive/1M_f3xZm
 - TPU/GPU memory allocated for the KV cache
 - Maximum \# of requests you can approximately set (--max-num-seqs)
 
-This approach serves as a general rule of thumb. As latency becomes more important, you may want to reduce –max-num-seqs and/or increase the number of chips in increments of 128.
+This approach serves as a general rule of thumb. As latency becomes more important, you may want to reduce --max-num-seqs and/or increase the number of chips in increments of 128.
 
 ### **Optimize based on your data**
 
