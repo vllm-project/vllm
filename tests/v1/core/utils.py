@@ -4,6 +4,7 @@ from typing import Optional, Union
 
 import torch
 
+from vllm.attention import AttentionType
 from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
@@ -102,7 +103,7 @@ def create_scheduler(
         kv_cache_groups=[
             KVCacheGroupSpec(['layer'],
                              FullAttentionSpec(block_size, 1, 1, torch.float32,
-                                               False))
+                                               False, AttentionType.DECODER))
         ],
     )
     cache_config.num_gpu_blocks = num_blocks
@@ -141,6 +142,7 @@ def create_requests(
         request = Request(
             request_id=f"{i}",
             prompt_token_ids=prompt_token_ids,
+            token_type_ids=None,
             sampling_params=sampling_params,
             pooling_params=None,
             multi_modal_inputs=mm_inputs,
