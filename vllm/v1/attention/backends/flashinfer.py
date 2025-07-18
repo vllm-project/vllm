@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 import torch
-
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
@@ -297,12 +296,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.global_hyperparameters = infer_global_hyperparameters(
                 get_per_layer_parameters(self.vllm_config, FlashInferImpl))
 
-        # Ensure CPU tensors are not None
-        assert attn_metadata.qo_indptr_cpu is not None
-        assert attn_metadata.paged_kv_indptr_cpu is not None
-        assert attn_metadata.paged_kv_indices is not None
-        assert attn_metadata.paged_kv_last_page_len_cpu is not None
-
         if attn_metadata.use_cascade:
             attn_metadata.cascade_wrapper = self._get_cascade_wrapper()
             attn_metadata.cascade_wrapper.plan(
@@ -407,10 +400,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         qo_indptr = common_attn_metadata.query_start_loc
         max_seq_len = common_attn_metadata.seq_lens_cpu.max()
         seq_lens = common_attn_metadata.seq_lens
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         block_table_tensor = common_attn_metadata.block_table_tensor
 
-        # Build CPU versions directly from seq_lens_cpu
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         block_table_bounds_cpu = (seq_lens_cpu + page_size - 1) // page_size
 
         use_cascade = common_prefix_len > 0
@@ -448,14 +440,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 < block_table_bounds.unsqueeze(1))
         paged_kv_indices = block_table_tensor[:, :max_num_blocks][mask]
 
-        # paged_kv_indptr_cpu: cumulative sum of block_table_bounds_cpu
         paged_kv_indptr_cpu = torch.zeros(len(block_table_bounds_cpu) + 1,
                                           dtype=torch.int32,
                                           device='cpu')
         paged_kv_indptr_cpu[1:] = block_table_bounds_cpu.cumsum(
             dim=0, dtype=torch.int32)
 
-        # paged_kv_last_page_len_cpu: from seq_lens_cpu
         paged_kv_last_page_len_cpu = seq_lens_cpu % page_size
         paged_kv_last_page_len_cpu = torch.where(
             paged_kv_last_page_len_cpu == 0, page_size,
