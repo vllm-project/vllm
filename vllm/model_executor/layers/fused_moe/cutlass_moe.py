@@ -561,10 +561,10 @@ def cutlass_moe_fp4(a: torch.Tensor,
         out = c2.view(m, num_topk, k).sum(dim=1)
     return out.to(dtype=out_dtype)
 
-    
+
 def run_block_scaled_cutlass_moe_fp8(
     output: torch.Tensor,
-    hidden_states: torch.Tensor,   
+    hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
     topk_ids: torch.Tensor,
