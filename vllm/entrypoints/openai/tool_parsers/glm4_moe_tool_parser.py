@@ -22,6 +22,7 @@ logger = init_logger(__name__)
 
 @ToolParserManager.register_module("glm4_moe")
 class Glm4MoeModelToolParser(ToolParser):
+
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
         self.current_tool_name_sent = False
@@ -88,9 +89,9 @@ class Glm4MoeModelToolParser(ToolParser):
         return json.dumps(args_dict, ensure_ascii=False)
 
     def extract_tool_calls(
-            self,
-            model_output: str,
-            request: ChatCompletionRequest,
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
 
         # sanity check; avoid unnecessary processing
@@ -129,7 +130,8 @@ class Glm4MoeModelToolParser(ToolParser):
                     ))
 
             # Extract content before the first tool call
-            content = model_output[:model_output.find(self.tool_calls_start_token)]
+            content = model_output[:model_output.find(self.
+                                                      tool_calls_start_token)]
             return ExtractedToolCallInformation(
                 tools_called=bool(tool_calls),
                 tool_calls=tool_calls,
@@ -137,21 +139,20 @@ class Glm4MoeModelToolParser(ToolParser):
             )
 
         except Exception:
-            logger.exception(
-                "Error in extracting tool call from response.")
+            logger.exception("Error in extracting tool call from response.")
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=model_output)
 
     def extract_tool_calls_streaming(
-            self,
-            previous_text: str,
-            current_text: str,
-            delta_text: str,
-            previous_token_ids: Sequence[int],
-            current_token_ids: Sequence[int],
-            delta_token_ids: Sequence[int],
-            request: ChatCompletionRequest,
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
 
         logger.debug("delta_text: %s", delta_text)
@@ -194,7 +195,7 @@ class Glm4MoeModelToolParser(ToolParser):
                 full_text = current_text + delta_text
                 tool_call_portion = full_text.split(
                     self.tool_call_start_token)[-1].split(
-                    self.tool_call_end_token)[0].strip()
+                        self.tool_call_end_token)[0].strip()
                 delta_text = delta_text.split(
                     self.tool_call_end_token)[0].strip()
                 text_portion = delta_text.split(
@@ -237,18 +238,24 @@ class Glm4MoeModelToolParser(ToolParser):
 
                 # Handle any remaining arguments
                 if self.current_tool_id < len(self.prev_tool_call_arr):
-                    current_tool_call = self.prev_tool_call_arr[self.current_tool_id]
+                    current_tool_call = self.prev_tool_call_arr[
+                        self.current_tool_id]
                     if current_tool_call.get("arguments"):
                         remaining_args = current_tool_call["arguments"]
-                        if remaining_args not in self.streamed_args_for_tool[self.current_tool_id]:
-                            diff = remaining_args[len(self.streamed_args_for_tool[self.current_tool_id]):]
+                        if remaining_args not in self.streamed_args_for_tool[
+                                self.current_tool_id]:
+                            diff = remaining_args[len(
+                                self.streamed_args_for_tool[self.
+                                                            current_tool_id]):]
                             if diff:
-                                self.streamed_args_for_tool[self.current_tool_id] += diff
+                                self.streamed_args_for_tool[
+                                    self.current_tool_id] += diff
                                 return DeltaMessage(tool_calls=[
                                     DeltaToolCall(
                                         index=self.current_tool_id,
                                         function=DeltaFunctionCall(
-                                            arguments=diff).model_dump(exclude_none=True),
+                                            arguments=diff).model_dump(
+                                                exclude_none=True),
                                     )
                                 ])
                 return None
@@ -266,19 +273,24 @@ class Glm4MoeModelToolParser(ToolParser):
                     self.stream_tool_call_portion_regex.match(
                         tool_call_portion))
                 if current_tool_call_matches:
-                    function_name = current_tool_call_matches.group("function_name")
-                    function_args_xml = current_tool_call_matches.group("function_arguments") or ""
+                    function_name = current_tool_call_matches.group(
+                        "function_name")
+                    function_args_xml = current_tool_call_matches.group(
+                        "function_arguments") or ""
 
                     current_tool_call['id'] = f"call_{self.current_tool_id}"
                     current_tool_call["name"] = function_name.strip()
-                    current_tool_call["arguments"] = self._parse_arguments(function_args_xml)
+                    current_tool_call["arguments"] = self._parse_arguments(
+                        function_args_xml)
                 else:
                     current_tool_call_name_matches = (
                         self.stream_tool_call_name_regex.match(
                             tool_call_portion))
                     if current_tool_call_name_matches:
-                        function_name = current_tool_call_name_matches.group("function_name")
-                        current_tool_call['id'] = f"call_{self.current_tool_id}"
+                        function_name = current_tool_call_name_matches.group(
+                            "function_name")
+                        current_tool_call[
+                            'id'] = f"call_{self.current_tool_id}"
                         current_tool_call["name"] = function_name.strip()
                         current_tool_call["arguments"] = "{}"
                     else:
@@ -301,7 +313,7 @@ class Glm4MoeModelToolParser(ToolParser):
                             id=tool_id,
                             function=DeltaFunctionCall(
                                 name=function_name).model_dump(
-                                exclude_none=True),
+                                    exclude_none=True),
                         )
                     ])
                 else:
@@ -356,7 +368,7 @@ class Glm4MoeModelToolParser(ToolParser):
                         index=self.current_tool_id,
                         function=DeltaFunctionCall(
                             arguments=cur_arguments).model_dump(
-                            exclude_none=True),
+                                exclude_none=True),
                     )
                 ])
                 self.streamed_args_for_tool[
@@ -376,7 +388,7 @@ class Glm4MoeModelToolParser(ToolParser):
                             index=self.current_tool_id,
                             function=DeltaFunctionCall(
                                 arguments=delta_arguments).model_dump(
-                                exclude_none=True),
+                                    exclude_none=True),
                         )
                     ])
                     self.streamed_args_for_tool[
