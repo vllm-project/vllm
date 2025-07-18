@@ -130,6 +130,24 @@ def get_prompt_lens(
         pooling_metadata, hidden_states.device).prompt_lens
 
 
+def get_prompt_token_ids(
+        pooling_metadata: PoolingMetadata) -> list[torch.Tensor]:
+    if isinstance(pooling_metadata, V1PoolingMetadata):
+        assert pooling_metadata.prompt_token_ids is not None, (
+            "Please set `logits_processing_needs_token_ids=True` "
+            "in `get_pooling_params`")
+
+        return [
+            pooling_metadata.prompt_token_ids[i, :num]
+            for i, num in enumerate(pooling_metadata.prompt_lens)
+        ]
+
+    return [
+        torch.tensor(seq_data_i.prompt_token_ids)
+        for seq_data_i in pooling_metadata.seq_data.values()
+    ]
+
+
 def get_classification_activation_function(config: PretrainedConfig):
     return PoolerClassify()
 
@@ -574,27 +592,13 @@ class StepPooler(Pooler):
         self.step_tag_id = step_tag_id
         self.returned_token_ids = returned_token_ids
 
-    def get_prompt_token_ids(
-        self,
-        pooling_metadata: PoolingMetadata,
-    ) -> list[torch.Tensor]:
-        if isinstance(pooling_metadata, V1PoolingMetadata):
-            return [
-                pooling_metadata.prompt_token_ids[i, :num]
-                for i, num in enumerate(pooling_metadata.prompt_lens)
-            ]
-        return [
-            torch.tensor(seq_data_i.prompt_token_ids)
-            for seq_data_i in pooling_metadata.seq_data.values()
-        ]
-
     def extract_states(
         self,
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
         pooled_data_lst = self.pooling(hidden_states, pooling_metadata)
-        prompt_token_ids = self.get_prompt_token_ids(pooling_metadata)
+        prompt_token_ids = get_prompt_token_ids(pooling_metadata)
 
         pooled_data = list[torch.Tensor]()
         returned_token_ids = self.returned_token_ids
