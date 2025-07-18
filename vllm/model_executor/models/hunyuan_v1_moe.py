@@ -640,6 +640,17 @@ class HunYuanModel(nn.Module):
         v = v.reshape(-1, hidden_size)
         return torch.concat((q, k, v))
 
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        return FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.num_experts,
+        )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         cla_factor = _get_cla_factor(self.config)
         stacked_params_mapping = [
@@ -666,17 +677,9 @@ class HunYuanModel(nn.Module):
             ),
         ]
 
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
-        )
-
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
