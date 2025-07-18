@@ -195,7 +195,7 @@ if current_platform.is_rocm():
                            q.shape[1],
                            v_cache.shape[-2],
                            dtype=q.dtype,
-                           device="cuda")
+                           device=q.device)
 
     direct_register_custom_op("flash_attn_varlen_func",
                               flash_attn_varlen_func_impl, ["out"],
@@ -564,7 +564,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
                 cu_seq_lens = torch.zeros(seqused_k.shape[0] + 1,
                                           dtype=torch.int32,
-                                          device="cuda")
+                                          device=query.device)
 
                 torch.cumsum(seqused_k,
                              dim=0,
