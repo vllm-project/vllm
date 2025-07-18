@@ -3364,11 +3364,17 @@ class ReasoningConfig:
                  think_start_str: Optional[str] = None,
                  think_end_str: Optional[str] = None,
                  think_start_token_ids: Optional[int] = None,
-                 think_end_token_ids: Optional[int] = None):
+                 think_end_token_ids: Optional[int] = None,
+                 low_effort_token_budget: Optional[int] = 1024,
+                 medium_effort_token_budget: Optional[int] = 2048,
+                 high_effort_token_budget: Optional[int] = 8192):
         self.think_start_str = think_start_str
         self.think_end_str = think_end_str
         self.think_start_token_ids = think_start_token_ids
         self.think_end_token_ids = think_end_token_ids
+        self.low_effort_token_budget = low_effort_token_budget
+        self.medium_effort_token_budget = medium_effort_token_budget
+        self.high_effort_token_budget = high_effort_token_budget
 
 
 @config
