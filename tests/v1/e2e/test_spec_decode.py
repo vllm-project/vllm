@@ -130,19 +130,27 @@ def test_ngram_correctness(
       "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", 1), False, True),
     pytest.param(
         ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-          "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4), False, True,
+         "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
+        False,
+        True,
         marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
     pytest.param(
         ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-          "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4), True, True,
+         "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
+        True,
+        True,
         marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
     pytest.param(
         ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-          "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4), False, False,
+         "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
+        False,
+        False,
         marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
     pytest.param(
         ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-          "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4), True, False,
+         "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
+        True,
+        False,
         marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
 ],
                          ids=[

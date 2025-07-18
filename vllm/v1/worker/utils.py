@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 from vllm.config import ModelConfig, SchedulerConfig
+from vllm._custom_ops import copy_blocks_between_layers
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.registry import MultiModalRegistry

@@ -44,7 +44,8 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        GiB_bytes, LazyLoader, check_use_alibi, get_dtype_size,
+                        GiB_bytes, LazyLoader, async_tensor_h2d,
+                        check_use_alibi, get_dtype_size,
                         is_pin_memory_available, round_up, supports_dynamo)
 from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
 from vllm.v1.attention.backends.utils import (
@@ -1493,8 +1494,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Prepare the decoder inputs.
         (attn_metadata, attention_cuda_graphs, logits_indices,
          spec_decode_metadata, num_scheduled_tokens_np,
-         spec_decode_common_attn_metadata, decode_mask) = (
-             self._prepare_inputs(scheduler_output))
+         spec_decode_common_attn_metadata,
+         decode_mask) = (self._prepare_inputs(scheduler_output))
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
@@ -1895,16 +1896,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         last_hidden_index]
                     partial_prefill_mask.append(True)
                 next_token_ids.append(next_token_id)
-            next_token_ids = torch.tensor(next_token_ids,
-                                          dtype=torch.int32,
-                                          device=self.device)
+            next_token_ids = async_tensor_h2d(next_token_ids,
+                                              dtype=torch.int32,
+                                              target_device=self.device,
+                                              pin_memory=True)
             prefill_first_hiddens = torch.cat(prefill_first_hiddens, dim=0)
-            full_prefill_mask = torch.tensor(full_prefill_mask,
-                                             dtype=torch.bool,
-                                             device=self.device)
-            partial_prefill_mask = torch.tensor(partial_prefill_mask,
-                                                dtype=torch.bool,
-                                                device=self.device)
+            full_prefill_mask = async_tensor_h2d(full_prefill_mask,
+                                                 dtype=torch.bool,
+                                                 target_device=self.device,
+                                                 pin_memory=True)
+            partial_prefill_mask = async_tensor_h2d(partial_prefill_mask,
+                                                    dtype=torch.bool,
+                                                    target_device=self.device,
+                                                    pin_memory=True)
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
