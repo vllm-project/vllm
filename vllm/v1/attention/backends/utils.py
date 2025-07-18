@@ -66,6 +66,7 @@ class CommonAttentionMetadata:
         self.slot_mapping[self.num_actual_tokens:].fill_(-1)
 
 
+# The first slice is for requests. The second is for tokens.
 UbatchSlice: TypeAlias = tuple[slice, slice]
 UBatchSlices: TypeAlias = list[UbatchSlice]
 
@@ -86,6 +87,10 @@ def slice_query_start_locs(
 def _make_metadata_with_slice(
         ubatch_slice: UbatchSlice,
         attn_metadata: CommonAttentionMetadata) -> CommonAttentionMetadata:
+    """
+    This function creates a new CommonAttentionMetadata that covers the 
+    requests included in ubatch_slice
+    """
 
     req_slice = ubatch_slice[0]
     token_slice = ubatch_slice[1]
@@ -127,6 +132,12 @@ def split_attn_metadata(
     ubatch_slices: UBatchSlices,
     common_attn_metadata: CommonAttentionMetadata,
 ) -> list[CommonAttentionMetadata]:
+    """
+    Creates a new CommonAttentionMetadata instance that covers the 
+    requests for each UbatchSlice in ubatch_slices.
+
+    Note: This function does not modify common_attn_metadata
+    """
     results = []
     for ubatch_slice in ubatch_slices:
         results.append(
