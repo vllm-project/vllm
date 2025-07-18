@@ -60,7 +60,7 @@ endfunction()
 
 
 function(check_sysctl TARGET OUT)
-    execute_process(COMMAND sysctl -n ${TARGET}
+    execute_process(COMMAND sysctl -n "${TARGET}"
                     RESULT_VARIABLE SYSCTL_RET
                     OUTPUT_VARIABLE SYSCTL_INFO
                     ERROR_QUIET
@@ -87,7 +87,6 @@ is_avx512_disabled(AVX512_DISABLED)
 
 if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
     message(STATUS "Apple Silicon Detected")
-    set(APPLE_SILICON_FOUND TRUE)
     set(ENABLE_NUMA OFF)
     check_sysctl(hw.optional.neon ASIMD_FOUND)
     check_sysctl(hw.optional.arm.FEAT_BF16 ARM_BF16_FOUND)
@@ -101,7 +100,6 @@ else()
     find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
     find_isa(${CPUINFO} "S390" S390_FOUND)
 endif()
-
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     list(APPEND CXX_COMPILE_FLAGS
