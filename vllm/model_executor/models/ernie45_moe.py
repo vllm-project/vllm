@@ -51,7 +51,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -525,7 +525,7 @@ class Ernie4_5_MoeModel(nn.Module):
         return loaded_params
 
 
-class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP):
+class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

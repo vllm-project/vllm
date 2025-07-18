@@ -53,7 +53,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -453,7 +453,7 @@ class BailingMoeModel(nn.Module):
         return loaded_params
 
 
-class BailingMoeForCausalLM(nn.Module, SupportsPP):
+class BailingMoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
 
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],

@@ -56,6 +56,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
+from .interfaces import SupportsLoRA
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_layers)
 
@@ -814,7 +815,7 @@ class HunYuanModel(nn.Module):
         return loaded_params
 
 
-class HunYuanMoEV1ForCausalLM(nn.Module):
+class HunYuanMoEV1ForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -832,16 +833,12 @@ class HunYuanMoEV1ForCausalLM(nn.Module):
 
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
         self.config = config
         self.quant_config = quant_config
-        self.lora_config = lora_config
 
         self.model = HunYuanModel(vllm_config=vllm_config, prefix="model")
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
-            if lora_config:
-                self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
             self.lm_head = ParallelLMHead(
                 self.unpadded_vocab_size,
                 config.hidden_size,
