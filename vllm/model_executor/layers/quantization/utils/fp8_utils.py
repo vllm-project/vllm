@@ -366,6 +366,7 @@ def per_token_group_quant_fp8(
     dtype: Optional[torch.dtype] = None,
     column_major_scales: bool = False,
     out_q: Optional[torch.Tensor] = None,
+    use_ue8m0: bool = is_blackwell_deep_gemm_used(),
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Function to perform per-token-group quantization on an input tensor `x`.
     It converts the tensor values into signed float8 values and returns the
@@ -411,8 +412,7 @@ def per_token_group_quant_fp8(
     # prefer CUDA kernel if available
     if current_platform.is_cuda():
         torch.ops._C.per_token_group_fp8_quant(x, x_q, x_s, group_size, eps,
-                                               fp8_min, fp8_max,
-                                               is_blackwell_deep_gemm_used())
+                                               fp8_min, fp8_max, use_ue8m0)
         return x_q, x_s
 
     # TRITON FALLBACK
@@ -434,7 +434,7 @@ def per_token_group_quant_fp8(
             eps,
             fp8_min=fp8_min,
             fp8_max=fp8_max,
-            use_ue8m0=is_blackwell_deep_gemm_used(),
+            use_ue8m0=use_ue8m0,
             BLOCK=BLOCK,
             num_warps=num_warps,
             num_stages=num_stages,
@@ -450,7 +450,7 @@ def per_token_group_quant_fp8(
             eps,
             fp8_min=fp8_min,
             fp8_max=fp8_max,
-            use_ue8m0=is_blackwell_deep_gemm_used(),
+            use_ue8m0=use_ue8m0,
             BLOCK=BLOCK,
             num_warps=num_warps,
             num_stages=num_stages,
