@@ -2162,7 +2162,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         model = cast(VllmModelForPooling, self.model)
         dummy_task = self.get_supported_pooling_tasks()[0]
-        dummy_pooling_params = PoolingParams()
+        dummy_pooling_params = PoolingParams(task=dummy_task)
 
         to_update = model.pooler.get_pooling_updates(dummy_task)
         assert to_update is not None
