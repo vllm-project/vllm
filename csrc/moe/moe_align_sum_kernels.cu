@@ -23,6 +23,11 @@ __global__ void moe_align_block_size_kernel(
     size_t numel, int32_t* __restrict__ cumsum, int32_t max_num_tokens_padded) {
   extern __shared__ int32_t shared_counts[];
 
+  // Initialize sorted_token_ids with numel
+  for (size_t it = threadIdx.x; it < max_num_tokens_padded; it += blockDim.x) {
+    sorted_token_ids[it] = numel;
+  }
+
   const int warp_id = threadIdx.x / WARP_SIZE;
   const int my_expert_start = warp_id * experts_per_warp;
 
@@ -30,15 +35,6 @@ __global__ void moe_align_block_size_kernel(
     if (my_expert_start + i < padded_num_experts) {
       shared_counts[warp_id * experts_per_warp + i] = 0;
     }
-  }
-
-  // Initialize sorted_token_ids with numel
-  const size_t sorted_per_thread = CEILDIV(max_num_tokens_padded, blockDim.x);
-  const size_t sorted_start_idx = threadIdx.x * sorted_per_thread;
-  for (int i = sorted_start_idx;
-       i < max_num_tokens_padded && i < sorted_start_idx + sorted_per_thread;
-       ++i) {
-    sorted_token_ids[i] = numel;
   }
 
   __syncthreads();
@@ -132,6 +128,11 @@ __global__ void moe_align_block_size_small_batch_expert_kernel(
     int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ expert_ids,
     int32_t* __restrict__ total_tokens_post_pad, int32_t num_experts,
     int32_t block_size, size_t numel, int32_t max_num_tokens_padded) {
+  // Initialize sorted_token_ids with numel
+  for (size_t it = threadIdx.x; it < max_num_tokens_padded; it += blockDim.x) {
+    sorted_token_ids[it] = numel;
+  }
+
   const size_t tid = threadIdx.x;
   const size_t stride = blockDim.x;
 
@@ -145,15 +146,6 @@ __global__ void moe_align_block_size_small_batch_expert_kernel(
 
   for (size_t i = tid; i < numel; i += stride) {
     ++tokens_cnts[(threadIdx.x + 1) * num_experts + topk_ids[i]];
-  }
-
-  // Initialize sorted_token_ids with numel
-  const size_t sorted_per_thread = CEILDIV(max_num_tokens_padded, blockDim.x);
-  const size_t sorted_start_idx = threadIdx.x * sorted_per_thread;
-  for (int i = sorted_start_idx;
-       i < max_num_tokens_padded && i < sorted_start_idx + sorted_per_thread;
-       ++i) {
-    sorted_token_ids[i] = numel;
   }
 
   __syncthreads();

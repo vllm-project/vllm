@@ -111,6 +111,8 @@ def moe_align_block_size_triton(
                          dtype=torch.int32,
                          device=topk_ids.device)
     tokens_per_thread = cdiv(numel, num_experts)
+    sorted_token_ids.fill_(numel)
+    expert_ids.zero_()
 
     moe_align_block_size_stage1[grid](
         topk_ids,

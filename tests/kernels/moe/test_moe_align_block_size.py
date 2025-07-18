@@ -48,8 +48,7 @@ def test_moe_align_block_size_compare_implementations(block_size, num_tokens,
                                            device=topk_ids.device)
 
     sorted_ids_triton = torch.empty_like(sorted_ids_cuda)
-    sorted_ids_triton.fill_(topk_ids.numel())
-    expert_ids_triton = torch.zeros_like(expert_ids_cuda)
+    expert_ids_triton = torch.empty_like(expert_ids_cuda)
     num_tokens_post_pad_triton = torch.empty_like(num_tokens_post_pad_cuda)
 
     ops.moe_align_block_size(
