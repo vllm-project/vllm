@@ -9,7 +9,7 @@ Help() {
     # Display Help
     echo "Start vllm server for a huggingface model on Gaudi."
     echo
-    echo "Syntax: bash  start_vllm.sh <-w> [-u:p:l:b:c:s] [-h]"
+    echo "Syntax: bash  start_vllm.sh <-w> [-u:p:l:b:c:sq] [-h]"
     echo "options:"
     echo "w  Weights of the model, could be model id in huggingface or local path"
     echo "u  URL of the server, str, default=0.0.0.0"
@@ -18,6 +18,7 @@ Help() {
     echo "b  max_num_seqs for vllm, int, default=128"
     echo "c  Cache HPU recipe to the specified path, str, default=None"
     echo "s  Skip warmup or not, bool, default=false"
+    echo "q  Enable INC fp8 quantization, go to README.md for details."
     echo "h  Help info"
     echo
 }
@@ -33,20 +34,7 @@ max_model_len=16384
 # Change to fp8_inc if want to use fp8 kv cache
 KV_CACHE_DTYPE=auto
 
-# INC FP8 quantization
-export INC_MEASUREMENT_DUMP_PATH_PREFIX=
-export QUANT_CONFIG=
-if [ -n "$QUANT_CONFIG" ]; then
-    export VLLM_REQUANT_FP8_INC=1
-    export VLLM_ENABLE_RUNTIME_DEQUANT=1
-    export VLLM_HPU_MARK_SCALES_AS_CONST=false
-    export VLLM_MOE_N_SLICE=1
-else
-    export VLLM_MOE_N_SLICE=8
-fi
-
-
-while getopts hw:u:p:l:b:c:s flag; do
+while getopts hw:u:p:l:b:c:sq flag; do
     case $flag in
     h) # display Help
         Help
@@ -66,6 +54,8 @@ while getopts hw:u:p:l:b:c:s flag; do
         warmup_cache_path=$OPTARG ;;
     s) # skip_warmup
         skip_warmup=true ;;
+    q) # enable inc fp8 quantization
+        inc_fp8_quant=true ;;
     \?) # Invalid option
         echo "Error: Invalid option"
         Help
@@ -73,6 +63,18 @@ while getopts hw:u:p:l:b:c:s flag; do
         ;;
     esac
 done
+
+# INC FP8 quantization
+if [ "$inc_fp8_quant" = "true" ]; then
+    export INC_MEASUREMENT_DUMP_PATH_PREFIX=$(realpath "$BASH_DIR/../..")
+    export QUANT_CONFIG=$(realpath "$BASH_DIR/../quant_configs/inc_quant_per_channel_bf16kv.json")
+    export VLLM_REQUANT_FP8_INC=1
+    export VLLM_ENABLE_RUNTIME_DEQUANT=1
+    export VLLM_HPU_MARK_SCALES_AS_CONST=false
+    export VLLM_MOE_N_SLICE=1
+else
+    export VLLM_MOE_N_SLICE=8
+fi
 
 
 if [ "$warmup_cache_path" != "" ]; then

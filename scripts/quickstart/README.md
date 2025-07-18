@@ -153,7 +153,7 @@ The command output is like below.
 ```bash
 Start vllm server for a huggingface model on Gaudi.
 
-Syntax: bash start_vllm.sh <-w> [-u:p:l:b:c:s] [-h]
+Syntax: bash start_vllm.sh <-w> [-u:p:l:b:c:sq] [-h]
 options:
 w  Weights of the model, could be model id in huggingface or local path
 u  URL of the server, str, default=0.0.0.0
@@ -162,6 +162,7 @@ l  max_model_len for vllm, int, default=16384, maximal value for single node: 32
 b  max_num_seqs for vllm, int, default=128
 c  Cache HPU recipe to the specified path, str, default=None
 s  Skip warmup or not, bool, default=false
+q  Enable inc fp8 quantization
 h  Help info
 ```
 
