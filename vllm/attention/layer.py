@@ -25,32 +25,6 @@ from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op
 
 logger = init_logger(__name__)
-USE_XFORMERS_OPS = None
-
-
-def check_xformers_availability():
-    global USE_XFORMERS_OPS
-    if USE_XFORMERS_OPS is not None:
-        return USE_XFORMERS_OPS
-
-    if current_platform.is_cuda() and current_platform.has_device_capability(
-            100):
-        # Xformers FA is not compatible with B200
-        USE_XFORMERS_OPS = False
-    else:
-        try:
-            from importlib.util import find_spec
-
-            find_spec("xformers.ops")
-            USE_XFORMERS_OPS = True
-        except ImportError:
-            USE_XFORMERS_OPS = False
-
-    # the warning only needs to be shown once
-    if not USE_XFORMERS_OPS:
-        logger.warning("Xformers is not available, falling back.")
-
-    return USE_XFORMERS_OPS
 
 
 class Attention(nn.Module):
@@ -343,9 +317,31 @@ class MultiHeadAttention(nn.Module):
                 _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.PALLAS_VLLM_V1
             } else _Backend.TORCH_SDPA
 
-        if (self.attn_backend == _Backend.XFORMERS
-                and not check_xformers_availability()):
-            self.attn_backend = _Backend.TORCH_SDPA
+        # Check xformers availability and fallback to torch_sdpa if needed
+        if self.attn_backend == _Backend.XFORMERS:
+            xformers_available = True
+
+            # Check if xformers FA is not compatible as >= SM100 is broken
+            if (current_platform.is_cuda()
+                    and current_platform.has_device_capability(100)):
+                logger.warning_once(
+                    "XFormers MultiHeadAttention is not compatible with "
+                    ">= NVIDIA Blackwell GPUs, falling back to torch SDPA "
+                    "backend.")
+                xformers_available = False
+            else:
+                # Try to import xformers
+                try:
+                    from importlib.util import find_spec
+                    find_spec("xformers.ops")
+                except ImportError:
+                    logger.warning_once(
+                        "XFormers MultiHeadAttention is not available, "
+                        "falling back to torch SDPA backend.")
+                    xformers_available = False
+
+            if not xformers_available:
+                self.attn_backend = _Backend.TORCH_SDPA
 
     def forward(
         self,
