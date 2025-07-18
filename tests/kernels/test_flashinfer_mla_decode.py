@@ -60,7 +60,7 @@ def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int,
     qk_nope_head_dim = 128
     qk_rope_head_dim = 64
     qk_head_dim = kv_lora_rank + qk_rope_head_dim
-    scale = 1.0
+    scale = (qk_nope_head_dim + qk_rope_head_dim) ** -0.5
 
     MAX_SEQ_LEN = 1024
 
@@ -96,8 +96,7 @@ def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int,
     q = torch.randn(bs, num_heads, qk_head_dim)
 
     out_ref = q.new_zeros(bs, num_heads, kv_lora_rank)
-    ref_scale = scale / ((qk_nope_head_dim + qk_rope_head_dim) ** 0.5)
-    ref_mla(out_ref, q, kv_cache, ref_scale, block_tables, seq_lens_tensor)
+    ref_mla(out_ref, q, kv_cache, scale, block_tables, seq_lens_tensor)
 
     workspace_buffer = torch.empty(
         FLASHINFER_WORKSPACE_BUFFER_SIZE,
@@ -105,6 +104,10 @@ def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int,
         device=q.device,
     )
     kv_cache_duplicate = torch.stack([kv_cache, kv_cache], dim=1)
+    # Flashinfer MLA expects the query to be of shape
+    # (bs, acc_q_len, num_heads, qk_head_dim),
+    # where acc_q_len is # MTP draft tokens + 1.
+    q = q.unsqueeze(1)
 
     out_ans = trtllm_batch_decode_with_kv_cache_mla(
         query=q,
@@ -117,7 +120,7 @@ def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int,
         seq_lens=seq_lens_tensor,
         block_size=block_size,
         max_seq_len=max_seq_len,
-        sm_scale=scale,
+        bmm1_scale=scale,
     )
-
+    out_ans = out_ans.squeeze(1)
     torch.testing.assert_close(out_ans, out_ref, atol=1e-2, rtol=1e-2)

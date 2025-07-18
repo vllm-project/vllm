@@ -87,7 +87,9 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         B = q_nope.shape[0]
 
         q = torch.cat([q_nope, q_pe], dim=-1)
+        q = q.unsqueeze(1)
         o = torch.zeros(B,
+                        1,  # acc_q_len = # MTP draft tokens + 1
                         self.num_heads,
                         self.kv_lora_rank,
                         dtype=q.dtype,
@@ -101,9 +103,10 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             dtype=torch.uint8,
             device=q.device,
         )
+        kv_cache_duplicate = torch.stack([kv_c_and_k_pe_cache, kv_c_and_k_pe_cache], dim=1)
         trtllm_batch_decode_with_kv_cache_mla(
             query=q,
-            kv_cache=kv_c_and_k_pe_cache,
+            kv_cache=kv_cache_duplicate,
             workspace_buffer=workspace_buffer,
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
@@ -112,8 +115,9 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             seq_lens=attn_metadata.decode.seq_lens,
             block_size=page_size,
             max_seq_len=max_seq_len,
-            sm_scale=self.scale,
             out=o,
+            bmm1_scale=self.scale,
         )
+        o = o.squeeze(1)
 
         return self._v_up_proj(o)
