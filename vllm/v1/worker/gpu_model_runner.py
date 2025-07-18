@@ -1774,6 +1774,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.model.set_aux_hidden_state_layers(
                     self.model.get_eagle3_aux_hidden_state_layers())
             time_after_load = time.perf_counter()
+
+        #if self.parallel_config.rank == 0:
+        #    print (f"model : {self.model}")
+
         self.model_memory_usage = m.consumed_memory
         logger.info("Model loading took %.4f GiB and %.6f seconds",
                     self.model_memory_usage / GiB_bytes,

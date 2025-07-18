@@ -33,7 +33,7 @@ from transformers import LlamaConfig
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size, get_tp_group
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -373,6 +373,11 @@ class LlamaModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors, tuple[torch.Tensor,
                                                         list[torch.Tensor]]]:
+
+        if get_tp_group().rank == 0:
+            torch.cuda.synchronize()
+            print (f"in embeds {inputs_embeds} | {input_ids}")
+
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -401,6 +406,11 @@ class LlamaModel(nn.Module):
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
+
+        if get_tp_group().rank == 0:
+            torch.cuda.synchronize()
+            print (f"out hidden {hidden_states}")
+
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -590,8 +600,23 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
+
+        debug_print = False #(hidden_states.size(0) == 1) and (get_tp_group().rank == 0)
+
+        #if debug_print:
+        #    torch.cuda.synchronize()
+        #    torch.set_printoptions(profile="full")
+        #    print (f"logits in : {hidden_states.size()} {hidden_states}")
+        #    torch.set_printoptions(profile="default")
+    
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
+        #if debug_print:
+        #    torch.cuda.synchronize()
+        #    torch.set_printoptions(profile="full")
+        #    print (f"logits out : {logits.size()} {logits}")
+        #    torch.set_printoptions(profile="default")
+
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

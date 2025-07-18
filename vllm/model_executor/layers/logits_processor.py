@@ -11,6 +11,7 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.distributed import (tensor_model_parallel_all_gather,
                               tensor_model_parallel_gather)
+from vllm.distributed import get_tp_group
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -61,6 +62,9 @@ class LogitsProcessor(nn.Module):
         embedding_bias: Optional[torch.Tensor] = None,
         prune_hidden_states: bool = True,
     ) -> Optional[torch.Tensor]:
+
+        debug = get_tp_group().rank == 0
+
         if self.logits_as_input:
             logits = hidden_states
         else:
@@ -72,17 +76,26 @@ class LogitsProcessor(nn.Module):
             logits = self._get_logits(hidden_states, lm_head, embedding_bias)
         if logits is not None:
             if self.soft_cap is not None:
+                if debug:
+                    print (f"applying soft_cap ...")
                 logits = logits / self.soft_cap
                 logits = torch.tanh(logits)
                 logits = logits * self.soft_cap
 
             if self.scale != 1.0:
+                if debug: 
+                    print (f"applying scale ...")
                 logits *= self.scale
 
             # Apply logits processors (if any).
             if sampling_metadata is not None and \
                 sampling_metadata.seq_groups is not None:
+                if debug:
+                    print (f"applying logits processor ...")
                 logits = _apply_logits_processors(logits, sampling_metadata)
+
+        if debug:
+            print (f"logits processor out : {logits.shape} {logits}")
 
         return logits
 
@@ -111,12 +124,45 @@ class LogitsProcessor(nn.Module):
                                             hidden_states,
                                             bias=embedding_bias)
 
+        tp_size = get_tp_group().world_size
+        vocab_size_per_tp_group = self.org_vocab_size // tp_size
+        tp_logits_size = logits.size(1) 
+        tp_padding = tp_logits_size - vocab_size_per_tp_group
+
+        if get_tp_group().rank == 0:
+            torch.cuda.synchronize()
+            print (f"_get_logits : after lm_head : {logits.shape} {torch.min(logits)} {torch.max(logits)} {torch.mean(logits)} -- {logits}")
+
         # Gather logits for TP
         logits = self._gather_logits(logits)
 
+        if get_tp_group().rank == 0:
+            torch.cuda.synchronize()
+            print (f"_get_logits : after gather_logits : {logits.shape} {torch.min(logits)} {torch.max(logits)} {torch.mean(logits)} -- {logits}")
+            print (f"_get_logits : after gather_logits [:,:-128]: {logits.shape} {torch.min(logits)} {torch.max(logits)} {torch.mean(logits)} -- {logits[:, :-128]}")
+
         # Remove paddings in vocab (if any).
         if logits is not None:
-            logits = logits[..., :self.org_vocab_size]
+            #logits = logits[..., :self.org_vocab_size]
+            logits = logits.view((-1, tp_logits_size))
+
+            if get_tp_group().rank == 0:
+                print (f"logits 2d view {logits.size()}")
+
+            logits = logits[:, :-tp_padding].contiguous()
+
+            if get_tp_group().rank == 0:
+                print (f"logits 2d view pruned  {logits.size()}")
+
+            logits = logits.view((-1, self.org_vocab_size))
+
+            if get_tp_group().rank == 0:
+                print (f"logits back to 1d  {logits.size()}")
+
+
+        if get_tp_group().rank == 0:
+            torch.cuda.synchronize()
+            print (f"_get_logits : out logits : {logits.shape} {torch.min(logits)} {torch.max(logits)} {torch.mean(logits)} -- {logits}")
         return logits
 
     def extra_repr(self) -> str:
