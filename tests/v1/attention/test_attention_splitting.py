@@ -107,15 +107,7 @@ def test_make_metadata_with_slice_decode_batch(small_decode_metadata):
     # Split first request only
     ubatch_slice = (slice(0, 1), slice(0, 1))  # First request, first token
 
-    result = _make_metadata_with_slice(
-        ubatch_slice, small_decode_metadata.query_start_loc,
-        small_decode_metadata.query_start_loc_cpu,
-        small_decode_metadata.seq_lens, small_decode_metadata.seq_lens_cpu,
-        small_decode_metadata.num_computed_tokens_cpu,
-        small_decode_metadata.num_actual_tokens,
-        small_decode_metadata.max_query_len,
-        small_decode_metadata.block_table_tensor,
-        small_decode_metadata.slot_mapping)
+    result = _make_metadata_with_slice(ubatch_slice, small_decode_metadata)
 
     # Check sliced results
     assert result.num_reqs == 1  # slice(0, 0) gives 0 requests
@@ -130,15 +122,7 @@ def test_make_metadata_with_slice_mixed_batch(mixed_small_metadata):
     # Split middle requests
     ubatch_slice = (slice(1, 3), slice(1, 7))  # Requests 1-2, tokens 1-7
 
-    result = _make_metadata_with_slice(
-        ubatch_slice, mixed_small_metadata.query_start_loc,
-        mixed_small_metadata.query_start_loc_cpu,
-        mixed_small_metadata.seq_lens, mixed_small_metadata.seq_lens_cpu,
-        mixed_small_metadata.num_computed_tokens_cpu,
-        mixed_small_metadata.num_actual_tokens,
-        mixed_small_metadata.max_query_len,
-        mixed_small_metadata.block_table_tensor,
-        mixed_small_metadata.slot_mapping)
+    result = _make_metadata_with_slice(ubatch_slice, mixed_small_metadata)
 
     # Check sliced results
     assert result.num_reqs == 2  # slice(1, 3) gives 2 requests
