@@ -203,8 +203,6 @@ if flashinfer_comm is not None:
                 # as flashinfer does not support rms_norm
                 # and allreduce_out together
                 residual_out = allreduce_in
-            if scale_factor is not None:
-                scale_factor = scale_factor.item()
             # For the sizes that are smaller than the max size,
             # we only use flashinfer one shot allreduce
             flashinfer_comm.trtllm_allreduce_fusion(
@@ -242,7 +240,7 @@ if flashinfer_comm is not None:
                                       rms_eps)
             if scale_factor is not None:
                 if scale_out is not None:
-                    torch.ops._C.scaled_fp4_quant(scale_out, norm_out,
+                    torch.ops._C.scaled_fp4_quant(quant_out, norm_out,
                                                   scale_out, scale_factor)
                 else:
                     torch.ops._C.static_scaled_fp8_quant(
@@ -579,7 +577,7 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
                 pattern_code=flashinfer_comm.AllReduceFusionPattern.
-                kARResidualRMSNormFP4Quant,
+                kARResidualRMSNormFP8Quant,  # we don't use norm_out afterwards
                 scale_factor=scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
@@ -665,7 +663,7 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
                 pattern_code=flashinfer_comm.AllReduceFusionPattern.
-                kARResidualRMSNormFP4Quant,
+                kARResidualRMSNormFP4Quant,  # we don't use norm_out afterwards
                 scale_factor=input_global_scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
@@ -710,8 +708,7 @@ class AllReduceFusionPass(VllmInductorPass):
             flashinfer_comm.trtllm_create_ipc_workspace_for_all_reduce_fusion(
                 tp_rank=rank,
                 tp_size=self.tp_size,
-                max_token_num=config.compilation_config.pass_config.
-                fi_allreduce_fusion_max_token_num,
+                max_token_num=16384,
                 hidden_dim=self.hidden_dim,
                 group=self.group,
                 use_fp32_lamport=use_fp32_lamport,
@@ -723,8 +720,7 @@ class AllReduceFusionPass(VllmInductorPass):
             rank=rank,
             world_size=self.tp_size,
             use_fp32_lamport=use_fp32_lamport,
-            max_token_num=config.compilation_config.pass_config.
-            fi_allreduce_fusion_max_token_num,
+            max_token_num=config.model_config.max_model_len,
         )
 
         for epsilon in [1e-5, 1e-6]:
