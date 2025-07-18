@@ -245,7 +245,7 @@ class LLMEngine:
         else:
             self.tokenizer = self._init_tokenizer()
             self.detokenizer = Detokenizer(self.tokenizer)
-            tokenizer_group = self.get_tokenizer_group()            
+            tokenizer_group = self.get_tokenizer_group()
 
         # Ensure that the function doesn't contain a reference to self,
         # to avoid engine GC issues
