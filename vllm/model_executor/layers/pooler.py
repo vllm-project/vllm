@@ -15,11 +15,9 @@ from vllm.model_executor.pooling_metadata import (  # noqa: E501
     PoolingMetadata as V0PoolingMetadata)
 from vllm.model_executor.pooling_metadata import PoolingTensors
 from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils import resolve_obj_by_qualname
 from vllm.v1.pool.metadata import PoolingMetadata as V1PoolingMetadata
-
-HAS_TRITON = triton is not None
 
 PoolingMetadata = Union[V0PoolingMetadata, V1PoolingMetadata]
 
