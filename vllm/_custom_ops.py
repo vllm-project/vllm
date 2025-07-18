@@ -1632,6 +1632,28 @@ def copy_blocks_mla(kv_caches: list[torch.Tensor],
     torch.ops._C_cache_ops.copy_blocks_mla(kv_caches, block_mapping)
 
 
+def copy_blocks_between_layers(src_key_caches: list[torch.Tensor],
+                               src_value_caches: list[torch.Tensor],
+                               dst_key_caches: list[torch.Tensor],
+                               dst_value_caches: list[torch.Tensor],
+                               block_mapping: torch.Tensor) -> None:
+    """Copy blocks between different key-value caches across model layers.
+    
+    Args:
+        src_key_caches: List of source key cache tensors.
+        src_value_caches: List of source value cache tensors.
+        dst_key_caches: List of destination key cache tensors.
+        dst_value_caches: List of destination value cache tensors.
+        block_mapping: Tensor of shape (num_blocks, 2) containing pairs of
+            (src_block_idx, dst_block_idx) to copy.
+    """
+    torch.ops._C_cache_ops.copy_blocks_between_layers(src_key_caches,
+                                                      src_value_caches,
+                                                      dst_key_caches,
+                                                      dst_value_caches,
+                                                      block_mapping)
+
+
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
                 block_mapping: torch.Tensor) -> None:
     torch.ops._C_cache_ops.swap_blocks(src, dst, block_mapping)

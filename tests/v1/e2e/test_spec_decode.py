@@ -128,8 +128,10 @@ def test_ngram_correctness(
 @pytest.mark.parametrize(
     "model_setup, mm_enabled, prefill_shift",
     [
-        # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611
-        # (("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1), False, True),
+        # TODO: Re-enable this once tests/models/test_initialization.py is
+        # fixed, see PR #22333 #22611
+        # (("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1),
+        #  False, True),
         (
             ("eagle", "meta-llama/Llama-3.1-8B-Instruct",
              "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1),
@@ -172,7 +174,8 @@ def test_ngram_correctness(
         ),
     ],
     ids=[
-        # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611
+        # TODO: Re-enable this once tests/models/test_initialization.py is
+        # fixed, see PR #22333 #22611
         # "qwen3_eagle3",
         "llama3_eagle",
         "llama3_eagle3",

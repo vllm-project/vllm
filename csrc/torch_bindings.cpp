@@ -650,6 +650,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "copy_blocks_mla(Tensor(a!)[] kv_caches, Tensor block_mapping) -> ()");
   cache_ops.impl("copy_blocks_mla", torch::kCUDA, &copy_blocks_mla);
 
+  // Copy blocks between different caches
+  cache_ops.def(
+      "copy_blocks_between_layers(Tensor(a!)[] src_key_caches, Tensor(b!)[] "
+      "src_value_caches, "
+      "Tensor(c!)[] dst_key_caches, Tensor(d!)[] dst_value_caches, "
+      "Tensor block_mapping) -> ()");
+  cache_ops.impl("copy_blocks_between_layers", torch::kCUDA,
+                 &copy_blocks_between_layers);
+
   // Reshape the key and value tensors and cache them.
   cache_ops.def(
       "reshape_and_cache(Tensor key, Tensor value,"

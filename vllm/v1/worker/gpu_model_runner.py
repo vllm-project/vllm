@@ -51,9 +51,9 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        GiB_bytes, LazyLoader, cdiv, check_use_alibi,
-                        get_dtype_size, is_pin_memory_available, round_up,
-                        supports_dynamo)
+                        GiB_bytes, LazyLoader, async_tensor_h2d, cdiv,
+                        check_use_alibi, get_dtype_size,
+                        is_pin_memory_available, round_up, supports_dynamo)
 from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
@@ -691,7 +691,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         :return: tuple[
             attn_metadata: layer-to-attention_metadata mapping,
             logits_indices, spec_decode_metadata, num_scheduled_tokens,
-            spec_decode_common_attn_metadata, max_num_scheduled_tokens, decode_mask
+            spec_decode_common_attn_metadata, max_num_scheduled_tokens,
+            decode_mask
         ]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -1878,15 +1879,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     target_hidden_states = hidden_states[token_indices]
             draft_mm_embeds = mm_embeds if mm_embeds else None
-<<<<<<< HEAD
-            if (self.is_multimodal_model
-                    and self.speculative_config.eagle_shift_prefill_token()):
-=======
             if self.kv_sharing_prefill:
                 draft_mm_embeds = None
-            elif (self.is_multimodal_model
+            elif (self.supports_mm_inputs
                   and self.speculative_config.eagle_shift_prefill_token()):
->>>>>>> 34926dbff (add kv copy logic and offline tests)
                 draft_mm_embeds = self._gather_mm_embeddings(
                     scheduler_output, shift_computed_tokens=1)
 
@@ -1906,11 +1902,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # works very well for init the first prefill hidden state.
                 if req_state.prefill_hidden_states is None:
                     req_state.prefill_hidden_states = target_hidden_states[
-<<<<<<< HEAD
-                        cu_num_tokens[i]]
-=======
                         query_start_loc_cpu[i + 1] - 1]
->>>>>>> 34926dbff (add kv copy logic and offline tests)
                 prefill_first_hiddens.append(req_state.prefill_hidden_states)
                 num_prompt_tokens = req_state.num_prompt_tokens
                 num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
@@ -1937,16 +1929,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         last_hidden_index]
                     partial_prefill_mask.append(True)
                 next_token_ids.append(next_token_id)
-            next_token_ids = torch.tensor(next_token_ids,
-                                          dtype=torch.int32,
-                                          device=self.device)
+            next_token_ids = async_tensor_h2d(next_token_ids,
+                                              dtype=torch.int32,
+                                              target_device=self.device,
+                                              pin_memory=True)
             prefill_first_hiddens = torch.cat(prefill_first_hiddens, dim=0)
-            full_prefill_mask = torch.tensor(full_prefill_mask,
-                                             dtype=torch.bool,
-                                             device=self.device)
-            partial_prefill_mask = torch.tensor(partial_prefill_mask,
-                                                dtype=torch.bool,
-                                                device=self.device)
+            full_prefill_mask = async_tensor_h2d(full_prefill_mask,
+                                                 dtype=torch.bool,
+                                                 target_device=self.device,
+                                                 pin_memory=True)
+            partial_prefill_mask = async_tensor_h2d(partial_prefill_mask,
+                                                    dtype=torch.bool,
+                                                    target_device=self.device,
+                                                    pin_memory=True)
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,

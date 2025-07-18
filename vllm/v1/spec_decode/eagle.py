@@ -17,9 +17,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
-from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.rocm_aiter_fa import (
     AiterFlashAttentionMetadata)
@@ -147,8 +147,7 @@ class EagleProposer:
         block_table: torch.Tensor,
         batch_size: int,
         num_tokens: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int,
-               torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
         """
         Prepare adjusted tensors for different request types
         (partial prefill, full prefill, full decode).
@@ -168,7 +167,7 @@ class EagleProposer:
             
         Returns:
             tuple: (target_positions, target_hidden_states, target_slot_mapping,
-                    cu_num_tokens, current_pos, partial_prefill_mask)
+                    cu_num_tokens, current_pos)
 
         Algorithm design:
         - Suppose target tokens are [1,2,3,...N], next token is N+1
@@ -396,7 +395,6 @@ class EagleProposer:
             target_slot_mapping,
             cu_num_tokens,
             current_pos,
-            partial_prefill_mask,
         )
 
     def propose(
@@ -449,7 +447,6 @@ class EagleProposer:
                 target_slot_mapping,
                 query_start_loc,
                 num_tokens,
-                partial_prefill_mask,
             ) = self._prepare_adjusted_tensors(
                 target_token_ids,
                 target_positions,
@@ -498,10 +495,9 @@ class EagleProposer:
                 max_num_blocks_per_req = block_table.shape[1]
                 segment_indices = torch.arange(len(target_positions),
                                                device=target_positions.device)
-                segment_indices = (
-                    segment_indices.unsqueeze(0)
-                    >= common_attn_metadata.query_start_loc[:-1].unsqueeze(1)).sum(
-                    dim=0) - 1
+                segment_indices = (segment_indices.unsqueeze(0)
+                                   >= common_attn_metadata.query_start_loc[:-1]
+                                   .unsqueeze(1)).sum(dim=0) - 1
                 # Calculate the block table indices
                 block_table_indices = (
                     target_positions // self.block_size +
@@ -509,8 +505,7 @@ class EagleProposer:
                 block_numbers = block_table.flatten()[block_table_indices]
                 block_offsets = target_positions % self.block_size
                 common_attn_metadata.slot_mapping = (
-                    block_numbers * self.block_size + block_offsets
-                )
+                    block_numbers * self.block_size + block_offsets)
 
             # Use the original last token indices
         last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
