@@ -5,7 +5,7 @@ Create a reduced-layer version of the Maverick model for testing purposes.
 
 This script creates a new model with fewer layers by:
 1. Loading the original Maverick model configuration
-2. Creating a reduced configuration (4 text layers, 2 vision layers)
+2. Creating a reduced configuration
 3. Generating compatible safetensors files with appropriate weights
 4. Creating the necessary index files for vLLM compatibility
 """
@@ -15,6 +15,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import pytest
 import torch
 from safetensors.torch import save_file
 from transformers import (AutoConfig, AutoProcessor, AutoTokenizer,
@@ -31,23 +32,22 @@ PROMPTS: list[str] = [
 ]
 
 
-def test_maverick_serving(model: str):
+def run_maverick_serving(model: str):
     """Test Llama-4-Maverick model with vLLM LLM class using CLI equivalent
     options with reduced layers.
     """
 
     try:
-        # Create a sampling params object
         sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
         llm = LLM(
             model=model,
-            max_model_len=2048,  # Smaller context for testing
-            enforce_eager=True,  # for faster testing
-            tensor_parallel_size=8,  # Use single GPU for reduced model
+            max_model_len=2048,
+            enforce_eager=True,
+            tensor_parallel_size=8,
             enable_expert_parallel=True,
             trust_remote_code=True,
-            gpu_memory_utilization=0.4,  # Conservative memory usage
+            gpu_memory_utilization=0.4,
             kv_cache_dtype="fp8",
         )
 
@@ -82,9 +82,9 @@ def create_reduced_maverick_model(
     Args:
         original_model_name: Name of the original Maverick model
         output_dir: Directory to save the reduced model
-        text_layers: Number of text transformer layers (reduced from 48)
-        num_experts: Number of experts per layer (reduced from 128)
-        vision_layers: Number of vision transformer layers (reduced from 32)
+        text_layers: Number of text transformer layers
+        num_experts: Number of experts per layer
+        vision_layers: Number of vision transformer layers
         force_recreate: Whether to recreate if output_dir already exists
 
     Returns:
@@ -509,7 +509,7 @@ def save_weights_to_safetensors(weights: dict[str, torch.Tensor],
           f"{index_data['metadata']['total_size'] / (1024**3):.2f} GB")
 
 
-def test_reduced_model(model_path: str, should_profile: bool = False) -> None:
+def run_reduced_model(model_path: str, should_profile: bool = False) -> None:
     """Test the created reduced model with vLLM."""
 
     print(f"\nTesting reduced model at {model_path}...")
@@ -517,7 +517,6 @@ def test_reduced_model(model_path: str, should_profile: bool = False) -> None:
     try:
         from vllm import LLM, SamplingParams
 
-        # Create LLM instance
         llm = LLM(
             model=model_path,
             trust_remote_code=True,
@@ -528,7 +527,6 @@ def test_reduced_model(model_path: str, should_profile: bool = False) -> None:
             gpu_memory_utilization=0.3,  # Conservative memory usage
         )
 
-        # Test generation
         sampling_params = SamplingParams(temperature=0.8,
                                          top_p=0.95,
                                          max_tokens=50)
@@ -551,6 +549,33 @@ def test_reduced_model(model_path: str, should_profile: bool = False) -> None:
         print(
             "This is expected if the model architecture doesn't match exactly."
         )
+
+
+@pytest.mark.parametrize(
+    "original_model_name,text_layers,num_experts,vision_layers,",
+    [("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", 4, 4, 2)])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_dummy_maverick(
+    original_model_name: str,
+    text_layers: int,
+    num_experts: int,
+    vision_layers: int,
+    output_dir: str = "/tmp/reduced_maverick",
+    force_recreate: bool = True,
+    profile: bool = False,
+) -> None:
+    model_path = create_reduced_maverick_model(
+        original_model_name=original_model_name,
+        output_dir=output_dir,
+        text_layers=text_layers,
+        num_experts=num_experts,
+        vision_layers=vision_layers,
+        force_recreate=force_recreate,
+    )
+
+    print(f"\nReduced model created successfully at: {model_path}")
+
+    run_reduced_model(model_path, profile)
 
 
 def main():
@@ -605,31 +630,17 @@ def main():
 
     args = parser.parse_args()
 
-    try:
-        # Create the reduced model
-        model_path = create_reduced_maverick_model(
-            original_model_name=args.original_model,
-            output_dir=args.output_dir,
-            text_layers=args.text_layers,
-            num_experts=args.num_experts,
-            vision_layers=args.vision_layers,
-            force_recreate=args.force_recreate,
-        )
+    if args.test:
+        test_dummy_maverick(original_model_name=args.original_model,
+                            output_dir=args.output_dir,
+                            text_layers=args.text_layers,
+                            num_experts=args.num_experts,
+                            vision_layers=args.vision_layers,
+                            force_recreate=args.force_recreate,
+                            profile=args.profile)
 
-        print(f"\nReduced model created successfully at: {model_path}")
-
-        # Test if requested
-        if args.test:
-            test_reduced_model(model_path, args.profile)
-
-        if args.test_original:
-            test_maverick_serving(args.original_model)
-
-    except Exception as e:
-        print(f"Error: {e}")
-        return 1
-
-    return 0
+    if args.test_original:
+        run_maverick_serving(args.original_model)
 
 
 if __name__ == "__main__":
