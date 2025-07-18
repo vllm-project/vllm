@@ -562,6 +562,15 @@ class ModelConfig:
 
             self.task = "embed"
 
+        # The registry assumes that it can always inspect the vLLM model class
+        # for a given architecture. This assumption breaks down for the
+        # Transformers backend, which may use a different class depending on
+        # the model type. To work around this, we add the correct Transformers
+        # backend class to the architectures list. We must do this here because
+        # we need access to the `hf_config` to determine the backend class.
+        self.hf_config.architectures.append(
+            self._get_transformers_backend_cls())
+
         model_info, arch = self.registry.inspect_model_cls(self.architectures)
         self._model_info = model_info
         self._architecture = arch
@@ -673,6 +682,16 @@ class ModelConfig:
             raise ValueError(
                 "max_model_len must be an integer after __post_init__.")
         return self
+
+    def _get_transformers_backend_cls(self) -> str:
+        """Determine which Transformers backend class will be used if
+        `model_impl` is set to `transformers` or `auto`."""
+        if self.hf_config != self.hf_text_config:
+            # If 'hf_text_config' is the same as 'hf_config'. If not, it is
+            # probably a composite config, i.e. multimodal
+            return "TransformersForMultimodalLM"
+        else:
+            return "TransformersForCausalLM"
 
     @property
     def registry(self):
