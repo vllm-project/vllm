@@ -24,6 +24,7 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
 from vllm.outputs import (EmbeddingOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput)
+from vllm.pooling_params import PoolingParams
 
 logger = init_logger(__name__)
 
@@ -181,6 +182,8 @@ class OpenAIServingEmbedding(EmbeddingMixin):
             chat_template_content_format=self.chat_template_content_format,
         )
 
+        print("handle request")
+
         return await super().handle(ctx)  # type: ignore
 
     @override
@@ -193,11 +196,20 @@ class OpenAIServingEmbedding(EmbeddingMixin):
 
         ctx.truncate_prompt_tokens = ctx.request.truncate_prompt_tokens
 
-        pooling_params = ctx.request.to_pooling_params()
+        return None
+
+    @override
+    def _create_pooling_params(
+        self,
+        ctx: ServeContext[EmbeddingRequest],
+    ) -> Union[PoolingParams, ErrorResponse]:
+        pooling_params = super()._create_pooling_params(ctx)
+        if isinstance(pooling_params, ErrorResponse):
+            return pooling_params
 
         try:
             pooling_params.verify("embed", self.model_config)
         except ValueError as e:
             return self.create_error_response(str(e))
 
-        return None
+        return pooling_params

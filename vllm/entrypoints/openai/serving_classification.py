@@ -22,6 +22,7 @@ from vllm.entrypoints.openai.serving_engine import (ClassificationServeContext,
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
 from vllm.outputs import ClassificationOutput, PoolingRequestOutput
+from vllm.pooling_params import PoolingParams
 
 logger = init_logger(__name__)
 
@@ -172,11 +173,20 @@ class ServingClassification(ClassificationMixin):
 
         ctx.truncate_prompt_tokens = ctx.request.truncate_prompt_tokens
 
-        pooling_params = ctx.request.to_pooling_params()
+        return None
+
+    @override
+    def _create_pooling_params(
+        self,
+        ctx: ClassificationServeContext,
+    ) -> Union[PoolingParams, ErrorResponse]:
+        pooling_params = super()._create_pooling_params(ctx)
+        if isinstance(pooling_params, ErrorResponse):
+            return pooling_params
 
         try:
             pooling_params.verify("classify", self.model_config)
         except ValueError as e:
             return self.create_error_response(str(e))
 
-        return None
+        return pooling_params
