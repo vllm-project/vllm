@@ -65,10 +65,10 @@ def test_full_tensor_slice(sample_query_start_loc):
 
 def test_slice_bounds_edge_cases(sample_query_start_loc):
     # Test slice that goes exactly to the last element
-    req_slice = slice(4, 4)  # Last index
+    req_slice = slice(4, 5)  # Last index
     result = slice_query_start_locs(sample_query_start_loc, req_slice)
 
-    expected = torch.tensor([0])  # [50] - 50
+    expected = torch.tensor([0, 15])
     assert torch.equal(result, expected)
 
 
