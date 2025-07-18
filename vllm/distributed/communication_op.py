@@ -5,7 +5,9 @@ from typing import Any, Optional, Union
 
 import torch
 import torch.distributed
-
+from contextlib import nullcontext
+from vllm.distributed.device_communicators.pynccl_allocator import (
+    get_nccl_mem_pool)
 from .parallel_state import get_tp_group
 
 
@@ -39,3 +41,16 @@ def broadcast_tensor_dict(tensor_dict: Optional[dict[Any, Union[torch.Tensor,
     if not torch.distributed.is_initialized():
         return tensor_dict
     return get_tp_group().broadcast_tensor_dict(tensor_dict, src)
+
+def tensor_model_parallel_mempool_ctx():
+    # TODO(asamani): check arg for enabling this feature
+    return torch.cuda.use_mem_pool(get_nccl_mem_pool())
+
+
+def tensor_model_parallel_register_window(tensor: torch.Tensor):
+    return get_tp_group().pynccl_comm.register_comm_window(tensor)
+
+
+def tensor_model_parallel_deregister_window(window):
+    get_tp_group().pynccl_comm.deregister_comm_window(window)
+

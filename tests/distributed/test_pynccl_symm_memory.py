@@ -1,110 +1,103 @@
-import torch
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import multiprocessing
 import os
-import torch.distributed as dist
 
+import numpy as np
+import pytest
+import torch
 import torch.distributed
+
+from vllm.distributed.communication_op import (  # noqa
+    tensor_model_parallel_all_reduce,
+)
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-
-from torch.cuda.memory import CUDAPluggableAllocator
-from torch.distributed.distributed_c10d import _get_default_group
-from torch.utils import cpp_extension
-
-local_rank = int(os.environ['LOCAL_RANK'])
-world_size = int(os.environ['WORLD_SIZE'])
-torch.cuda.set_device(local_rank)
-print(f'local_rank: {local_rank}')
-
-device = torch.device(f"cuda:{local_rank}")
-dist.init_process_group(backend="nccl", device_id=device)
-
-ranks = [i for i in range(world_size)]
-cpu_group = torch.distributed.new_group(ranks, backend="gloo")
-
-
-
-
-pynccl_comm = PyNcclCommunicator(
-    group=cpu_group,
-    device=device,
-)
-pynccl_comm.disabled = False
-
-# create allocator
-nccl_allocator_source = """
-#include <nccl.h>
-extern "C" {
-
-void* nccl_alloc_plug(size_t size, int device, void* stream) {
-  void* ptr;
-  ncclResult_t err = ncclMemAlloc(&ptr, size);
-  return ptr;
-
-}
-
-void nccl_free_plug(void* ptr, size_t size, int device, void* stream) {
-  ncclResult_t err = ncclMemFree(ptr);
-}
-
-}
-"""
-nccl_allocator_libname = "nccl_allocator"
-nccl_allocator = torch.utils.cpp_extension.load_inline(
-    name=nccl_allocator_libname,
-    cpp_sources=nccl_allocator_source,
-    with_cuda=True,
-    extra_ldflags=["-lnccl"],
-    verbose=True,
-    is_python_module=False,
-    build_directory="./",
+from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
+from vllm.distributed.device_communicators.pynccl_allocator import (
+    get_nccl_mem_pool,
 )
 
-allocator = CUDAPluggableAllocator(
-    f"./{nccl_allocator_libname}.so", "nccl_alloc_plug", "nccl_free_plug"
-).allocator()
-pool = torch.cuda.MemPool(allocator)
-
-default_pg = _get_default_group()
-backend = default_pg._get_backend(device)
-backend.register_mem_pool(pool)
-
-size = 1024*1024
-input = torch.full([size], local_rank, dtype=torch.float16, device=device)
-
-with torch.cuda.use_mem_pool(pool):
-    # tensor gets allocated with ncclMemAlloc passed in the pool
-    symm_input = torch.full([size], local_rank, dtype=torch.float16, device=device)
+from vllm.distributed.parallel_state import (
+    ensure_model_parallel_initialized,
+    get_world_group,
+    graph_capture,
+    init_distributed_environment,
+)
+from vllm.utils import update_environment_variables
 
 
-pynccl_comm.register_comm_window(symm_input)
+def distributed_run(fn, world_size):
+    number_of_processes = world_size
+    processes: list[multiprocessing.Process] = []
+    for i in range(number_of_processes):
+        env: dict[str, str] = {}
+        env["RANK"] = str(i)
+        env["LOCAL_RANK"] = str(i)
+        env["WORLD_SIZE"] = str(number_of_processes)
+        env["LOCAL_WORLD_SIZE"] = str(number_of_processes)
+        env["MASTER_ADDR"] = "localhost"
+        env["MASTER_PORT"] = "12345"
+        p = multiprocessing.Process(target=fn, args=(env,))
+        processes.append(p)
+        p.start()
 
-start = torch.cuda.Event(enable_timing=True)
-end = torch.cuda.Event(enable_timing=True)
+    for p in processes:
+        p.join()
 
-stream = torch.cuda.default_stream()
-# Warmup
-torch.distributed.barrier()
-pynccl_comm.all_reduce(input, stream=stream)
+    for p in processes:
+        assert p.exitcode == 0
 
-start.record()
-for _ in range(100):
-    pynccl_comm.all_reduce(input, stream=stream)
-end.record()
-torch.cuda.synchronize()
 
-if local_rank == 0:
-    print(f'default={start.elapsed_time(end)/100:.3f}')
+def worker_fn_wrapper(fn):
+    # `multiprocessing.Process` cannot accept environment variables directly
+    # so we need to pass the environment variables as arguments
+    # and update the environment variables in the function
+    def wrapped_fn(env):
+        update_environment_variables(env)
+        local_rank = os.environ["LOCAL_RANK"]
+        device = torch.device(f"cuda:{local_rank}")
+        torch.cuda.set_device(device)
+        init_distributed_environment()
+        fn()
 
-# Warmup
-torch.distributed.barrier()
-pynccl_comm.all_reduce(symm_input, stream=stream)
+    return wrapped_fn
 
-start.record()
-for _ in range(100):
-    pynccl_comm.all_reduce(symm_input, stream=stream)
-end.record()
-torch.cuda.synchronize()
 
-if local_rank == 0:
-    print(f'symm_memory={start.elapsed_time(end)/100:.3f}')
+@worker_fn_wrapper
+def multiple_allreduce_worker_fn():
+    device = torch.device(f"cuda:{torch.distributed.get_rank()}")
+    groups = [
+        torch.distributed.new_group(ranks=[0, 1], backend="gloo"),
+        torch.distributed.new_group(ranks=[2, 3], backend="gloo"),
+    ]
+    group = groups[0] if torch.distributed.get_rank() in [0, 1] else groups[1]
+    pynccl_comm = PyNcclCommunicator(group=group, device=device)
+    with torch.cuda.use_mem_pool(get_nccl_mem_pool()):
+        symm_tensor = torch.ones(
+            16, 1024, 1024, dtype=torch.float32, device=device
+        )
+    win = pynccl_comm.register_comm_window(symm_tensor)
+    stream = torch.cuda.default_stream()
+    # two groups can communicate independently
+    if torch.distributed.get_rank() in [0, 1]:
+        tensor = pynccl_comm.all_reduce(symm_tensor, stream=stream)
+        tensor = pynccl_comm.all_reduce(symm_tensor, stream=stream)
+        torch.cuda.synchronize()
+        assert torch.all(tensor == 4).cpu().item()
+    else:
+        tensor = pynccl_comm.all_reduce(symm_tensor, stream=stream)
+        torch.cuda.synchronize()
+        assert torch.all(tensor == 2).cpu().item()
+    pynccl_comm.deregister_comm_window(win)
+    
 
-dist.destroy_process_group()
+
+@pytest.mark.skipif(
+    torch.cuda.device_count() < 4,
+    reason="Need at least 4 GPUs to run the test.",
+)
+def test_pynccl_multiple_allreduce():
+    # this tests pynccl for multiple tp groups, in a standalone way
+    # i.e. call `pynccl_comm.all_reduce` directly
+    distributed_run(multiple_allreduce_worker_fn, 4)

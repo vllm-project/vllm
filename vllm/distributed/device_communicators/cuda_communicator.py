@@ -9,7 +9,8 @@ from torch.distributed import ProcessGroup
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-
+from vllm.distributed.device_communicators.pynccl_allocator import (
+    get_nccl_mem_pool)
 from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
@@ -47,6 +48,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         self.pynccl_comm: Optional[PyNcclCommunicator] = None
         if use_pynccl and self.world_size > 1:
+            get_nccl_mem_pool()
             self.pynccl_comm = PyNcclCommunicator(
                 group=self.cpu_group,
                 device=self.device,
