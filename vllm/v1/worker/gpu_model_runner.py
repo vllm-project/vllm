@@ -1329,11 +1329,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             input_ids = self.input_ids[:num_scheduled_tokens]
-            if mm_embeds:
-                inputs_embeds = self.model.get_input_embeddings(
-                    input_ids, mm_embeds)
-            else:
-                inputs_embeds = self.model.get_input_embeddings(input_ids)
+            inputs_embeds = self.model.get_input_embeddings(
+                input_ids=input_ids,
+                multimodal_embeddings=mm_embeds or None,
+            )
             # TODO(woosuk): Avoid the copy. Optimize.
             self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
