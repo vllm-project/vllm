@@ -590,14 +590,18 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     total_tokens=attn_metadata.total_tokens,
                 )
 
+            _, num_heads, head_size = query.shape
             nbytes_per_qo_elem = torch.finfo(query.dtype).bits // 8
+            num_seqs = seqused_k.shape[0]
+            max_num_partitions = (max_seqlen_k + _PARTITION_SIZE_ROCM -
+                                  1) // _PARTITION_SIZE_ROCM
+
             workspace_buffer = torch.empty(
-                (block_table.shape[0] * query.shape[1] * _PARTITION_SIZE_ROCM *
-                 query.shape[2]) * nbytes_per_qo_elem + 2 *
-                (block_table.shape[0] * query.shape[1] * _PARTITION_SIZE_ROCM)
-                * 4,
+                (num_seqs * num_heads * max_num_partitions * head_size) *
+                nbytes_per_qo_elem + 2 *
+                (num_seqs * num_heads * max_num_partitions) * 4,
                 dtype=torch.uint8,
-                device=query.device,
+                device=output.device,
             )
 
             torch.ops.aiter.paged_attention_v1(
