@@ -37,8 +37,6 @@ class CPUWorker(Worker):
                          is_driver_worker=is_driver_worker)
 
         self.parallel_config.disable_custom_all_reduce = True
-        self.manually_bind_threads_suggestion = (
-            "To get better performance, please try to manually bind threads.")
 
     def init_device(self):
         # Setup OpenMP threads affinity.
