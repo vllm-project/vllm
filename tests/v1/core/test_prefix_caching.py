@@ -155,13 +155,14 @@ def test_prefill(hash_algo):
         assert block.ref_cnt == 2
 
     # At this point, we should have 5 free blocks left.
-    assert manager.block_pool.free_block_queue.num_free_blocks == 5
+    free_block_queue = manager.block_pool.free_block_queue
+    assert free_block_queue.num_free_blocks == 5
 
     manager.free(req0)
     manager.free(req1)
 
     # All blocks should be available.
-    assert manager.block_pool.free_block_queue.num_free_blocks == 10
+    assert free_block_queue.num_free_blocks == 10
     # The order should be
     # [unallocated (6, 7, 8, 9, 10)]
     # [unique_req0 (4)]
@@ -188,14 +189,10 @@ def test_prefill(hash_algo):
 
     # Although we only have 6 free blocks, we have 8 blocks in
     # the free block queue due to lazy removal.
-    assert manager.block_pool.free_block_queue.num_free_blocks == 6
-    assert all([
-        b.ref_cnt == 0
-        for b in manager.block_pool.free_block_queue.get_all_free_blocks()
-    ])
-    assert len([
-        b for b in manager.block_pool.free_block_queue.get_all_free_blocks()
-    ]) == 6
+    assert free_block_queue.num_free_blocks == 6
+    assert all(
+        [b.ref_cnt == 0 for b in free_block_queue.get_all_free_blocks()])
+    assert len([b for b in free_block_queue.get_all_free_blocks()]) == 6
 
     manager.free(req2)
 
@@ -209,9 +206,12 @@ def test_prefill(hash_algo):
                                     computed_blocks)
     # This block ID order also checks the eviction order.
     assert blocks.get_block_ids() == ([7, 8, 9, 10, 4, 5, 6, 3, 2, 1], )
-    assert manager.block_pool.free_block_queue.num_free_blocks == 0
-    assert manager.block_pool.free_block_queue.free_list_head is None
-    assert manager.block_pool.free_block_queue.free_list_tail is None
+
+    assert free_block_queue.num_free_blocks == 0
+    assert (free_block_queue.fake_free_list_head.next_free_block
+            is free_block_queue.fake_free_list_tail)
+    assert (free_block_queue.fake_free_list_tail.prev_free_block
+            is free_block_queue.fake_free_list_head)
 
 
 def test_prefill_hybrid_model():
