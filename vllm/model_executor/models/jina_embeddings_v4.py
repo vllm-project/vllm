@@ -12,16 +12,16 @@ from typing_extensions import assert_never
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import (HAS_TRITON, Pooler, PoolingTask,
-                                               PoolingType,
-                                               extract_vision_tokens_kernel)
+                                               PoolingType, build_output,
+                                               extract_vision_tokens_kernel,
+                                               get_prompt_lens)
 # yapf: disable
 from vllm.model_executor.pooling_metadata import (
     PoolingMetadata as V0PoolingMetadata)
-from vllm.model_executor.pooling_metadata import PoolingTensors
 # yapf: enable
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.pooling_params import PoolingParams
-from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
+from vllm.sequence import PoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata as V1PoolingMetadata
 
 from .interfaces import SupportsCrossEncoding, SupportsMultiModal
@@ -84,7 +84,7 @@ class JinaVLPooler(Pooler):
         # Validate inputs
         if hidden_states is None or hidden_states.numel() == 0:
             logger.warning("Empty hidden states received")
-            return PoolerOutput(outputs=[])
+            return build_output(torch.empty((0, 0)))
 
         # Extract token IDs safely from metadata
         token_ids_list, seq_ids = self._extract_token_ids_safe(
@@ -95,12 +95,8 @@ class JinaVLPooler(Pooler):
             # Fallback to base pooler
             return self._base_pooler(hidden_states, pooling_metadata)
 
-        # Get prompt lengths based on metadata type
-        if isinstance(pooling_metadata, V1PoolingMetadata):
-            prompt_lens = pooling_metadata.prompt_lens
-        else:
-            prompt_lens = PoolingTensors.from_pooling_metadata(
-                pooling_metadata, hidden_states.device).prompt_lens
+        # Get prompt lengths using utility function
+        prompt_lens = get_prompt_lens(hidden_states, pooling_metadata)
 
         # Validate lengths match
         assert len(token_ids_list) == len(prompt_lens), (
@@ -115,10 +111,8 @@ class JinaVLPooler(Pooler):
             pooled_data = self._apply_vision_pooling_pytorch(
                 hidden_states, token_ids_list, prompt_lens)
 
-        # Build output
-        pooled_outputs = [
-            PoolingSequenceGroupOutput(data) for data in pooled_data
-        ]
+        # Stack pooled data into tensor for build_output
+        pooled_tensor = torch.stack(pooled_data)
 
         # Record metrics
         if self.observability_config:
@@ -130,7 +124,7 @@ class JinaVLPooler(Pooler):
                 avg_time = self._pooling_time_ms / self._pooling_count
                 logger.debug("Average pooling time: %.2fms", avg_time)
 
-        return PoolerOutput(outputs=pooled_outputs)
+        return build_output(pooled_tensor)
 
     def _extract_token_ids_safe(
             self, pooling_metadata: PoolingMetadata
