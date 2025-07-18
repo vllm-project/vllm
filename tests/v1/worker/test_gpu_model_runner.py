@@ -461,6 +461,11 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
         model_runner_2.get_model().state_dict())
 
 
+def test_reload_weights_before_load_model(model_runner):
+    with pytest.raises(AssertionError):
+        model_runner.reload_weights()
+
+
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
     torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
