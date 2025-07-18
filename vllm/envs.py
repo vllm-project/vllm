@@ -507,7 +507,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_IMAGE_FETCH_TIMEOUT", "5")),
 
     # Timeout for torch distributed calls
-    "VLLM_DISTRIBUTED_INIT_TIMEOUT_SECONDS": 
+    "VLLM_DISTRIBUTED_INIT_TIMEOUT_SECONDS":
     lambda: maybe_convert_int(os.getenv("VLLM_IMAGE_FETCH_TIMEOUT", None)),
 
     # Timeout for fetching videos when serving multimodal models

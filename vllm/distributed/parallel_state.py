@@ -222,13 +222,15 @@ class GroupCoordinator:
 
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
-                ranks, backend=torch_distributed_backend,
+                ranks,
+                backend=torch_distributed_backend,
                 timeout=envs.VLLM_DISTRIBUTED_INIT_TIMEOUT_SECONDS)
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
-            cpu_group = torch.distributed.new_group(ranks, 
-                                                    backend="gloo",
-                                                    timeout=envs.VLLM_DISTRIBUTED_INIT_TIMEOUT_SECONDS)
+            cpu_group = torch.distributed.new_group(
+                ranks,
+                backend="gloo",
+                timeout=envs.VLLM_DISTRIBUTED_INIT_TIMEOUT_SECONDS)
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
