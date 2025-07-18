@@ -419,13 +419,7 @@ class EagleProposer:
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
-        last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
-
-        if self.method == "eagle3":
-            assert isinstance(self.model, Eagle3LlamaForCausalLM)
-            target_hidden_states = self.model.combine_hidden_states(
-                target_hidden_states)
-            assert target_hidden_states.shape[-1] == self.hidden_size
+        block_table = common_attn_metadata.block_table_tensor
 
         prefill_shift_tokens = True
         has_prefill = decode_mask is not None and (
@@ -453,15 +447,15 @@ class EagleProposer:
                 target_positions,
                 target_hidden_states,
                 target_slot_mapping,
-                cu_num_tokens,
+                query_start_loc,
                 num_tokens,
                 partial_prefill_mask,
             ) = self._prepare_adjusted_tensors(
                 target_token_ids,
                 target_positions,
                 target_hidden_states,
-                target_slot_mapping,
-                cu_num_tokens,
+                common_attn_metadata.slot_mapping,
+                common_attn_metadata.query_start_loc,
                 decode_mask,
                 full_prefill_mask,
                 partial_prefill_mask,
@@ -470,7 +464,28 @@ class EagleProposer:
                 batch_size,
                 num_tokens,
             )
-            batch_size = cu_num_tokens.shape[0] - 1
+            if (partial_prefill_mask.all()
+                    and self.draft_prefill_kv_sharing_from_base):
+                # All requests are partial prefill and
+                # KV cache sharing is enabled
+                # Skip the rest of the function
+                # and return dummy draft tokens
+                return torch.zeros(
+                    (batch_size, self.num_speculative_tokens),
+                    dtype=target_token_ids.dtype,
+                    device=target_token_ids.device,
+                )
+
+            query_start_loc_cpu = query_start_loc.to("cpu", non_blocking=True)
+            max_num_tokens = (query_start_loc_cpu[1:] -
+                              query_start_loc_cpu[:-1]).max().item()
+
+            common_attn_metadata.query_start_loc = query_start_loc
+            common_attn_metadata.slot_mapping = target_slot_mapping
+            common_attn_metadata.query_start_loc_cpu = query_start_loc_cpu
+            common_attn_metadata.num_actual_tokens = num_tokens
+            common_attn_metadata.max_query_len = max_num_tokens
+            batch_size = query_start_loc_cpu.shape[0] - 1
         else:
             # Original behavior: shift all tokens by one
             self.input_ids[:num_tokens - 1] = target_token_ids[1:]
@@ -483,20 +498,33 @@ class EagleProposer:
                 max_num_blocks_per_req = block_table.shape[1]
                 segment_indices = torch.arange(len(target_positions),
                                                device=target_positions.device)
-                segment_indices = (segment_indices.unsqueeze(0)
-                                   >= cu_num_tokens[:-1].unsqueeze(1)).sum(
-                                       dim=0) - 1
+                segment_indices = (
+                    segment_indices.unsqueeze(0)
+                    >= common_attn_metadata.query_start_loc[:-1].unsqueeze(1)).sum(
+                    dim=0) - 1
                 # Calculate the block table indices
                 block_table_indices = (
                     target_positions // self.block_size +
                     segment_indices * max_num_blocks_per_req)
                 block_numbers = block_table.flatten()[block_table_indices]
                 block_offsets = target_positions % self.block_size
-                target_slot_mapping = (block_numbers * self.block_size +
-                                       block_offsets)
+                common_attn_metadata.slot_mapping = (
+                    block_numbers * self.block_size + block_offsets
+                )
 
             # Use the original last token indices
-        last_token_indices = cu_num_tokens[1:] - 1
+        last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
+        if not prefill_shift_tokens:
+            seq_lens = (target_positions[last_token_indices] + 1).int()
+            seq_lens_cpu = seq_lens.to("cpu", non_blocking=True)
+            common_attn_metadata.seq_lens = seq_lens
+            common_attn_metadata.seq_lens_cpu = seq_lens_cpu
+
+        if self.method == "eagle3":
+            assert isinstance(self.model, Eagle3LlamaForCausalLM)
+            target_hidden_states = self.model.combine_hidden_states(
+                target_hidden_states)
+            assert target_hidden_states.shape[-1] == self.hidden_size
 
         if not prefill_shift_tokens and has_prefill:
             # Replace the last token with the next token under non-shifting,
