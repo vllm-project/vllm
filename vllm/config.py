@@ -376,11 +376,6 @@ class ModelConfig:
     disable_mm_preprocessor_cache: bool = False
     """If `True`, disable caching of the multi-modal preprocessor/mapper (not
     recommended)."""
-    override_neuron_config: dict[str, Any] = field(default_factory=dict)
-    """Initialize non-default neuron config or override default neuron config
-    that are specific to Neuron devices, this argument will be used to
-    configure the neuron config that can not be gathered from the vllm
-    arguments. e.g. `{"cast_logits_dtype": "bfloat16"}`."""
     pooler_config: Optional["PoolerConfig"] = field(init=False)
     """Pooler config which controls the behaviour of output pooling in pooling
     models."""
@@ -649,10 +644,6 @@ class ModelConfig:
         self.is_hybrid = self._init_is_hybrid()
         self.has_noops = self._init_has_noops()
         self.has_inner_state = self._init_has_inner_state()
-
-        if (not current_platform.is_neuron() and self.override_neuron_config):
-            raise ValueError(
-                "`override_neuron_config` is only supported on Neuron.")
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -1493,13 +1484,7 @@ class ModelConfig:
         """
         For Mllama, VLLM overrides HF's is_encoder_decoder flag and sets it to
         True to enable cross-attention
-        Neuron needs all multimodal data to be in the decoder and does not
-        need to explicitly enable cross-attention
         """
-        if (current_platform.is_neuron()
-                and self.hf_config.model_type == "mllama"):
-            return False
-
         return is_encoder_decoder(self.hf_config)
 
     @property
@@ -2075,10 +2060,7 @@ class ParallelConfig:
             from vllm.executor import ray_utils
             backend: DistributedExecutorBackend = "mp"
             ray_found = ray_utils.ray_is_available()
-            if current_platform.is_neuron():
-                # neuron uses single process to control multiple devices
-                backend = "uni"
-            elif current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
+            if current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
                 backend = "uni"
             elif (current_platform.is_cuda()
                   and cuda_device_count_stateless() < self.world_size):
@@ -2452,7 +2434,7 @@ class SchedulerConfig:
         return self.num_scheduler_steps > 1
 
 
-Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu"]
+Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 
 
 @config
@@ -2508,9 +2490,7 @@ class DeviceConfig:
                 self.device_type = self.device.type
 
         # Some device types require processing inputs on CPU
-        if self.device_type in ["neuron"]:
-            self.device = torch.device("cpu")
-        elif self.device_type in ["tpu"]:
+        if self.device_type in ["tpu"]:
             self.device = None
         else:
             # Set device with device type
@@ -4845,7 +4825,6 @@ class VllmConfig:
             f"skip_tokenizer_init={self.model_config.skip_tokenizer_init},"
             f" tokenizer_mode={self.model_config.tokenizer_mode}, "
             f"revision={self.model_config.revision}, "
-            f"override_neuron_config={self.model_config.override_neuron_config},"
             f" tokenizer_revision={self.model_config.tokenizer_revision}, "
             f"trust_remote_code={self.model_config.trust_remote_code}, "
             f"dtype={self.model_config.dtype}, "
