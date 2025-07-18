@@ -258,9 +258,7 @@ def run_model(vllm_config, model: nn.Module, inputs: torch.Tensor):
         return output.cpu()
 
 
-def test_multi_graph_piecewise_compile():
-    assert VLLM_USE_V1
-
+def test_multi_graph_piecewise_compile_outputs_equal():
     outputs = []
 
     # piecewise compile
@@ -313,4 +311,27 @@ def test_multi_graph_piecewise_compile():
     ):
         outputs.append(run_model(vllm_config, model, inputs))
 
-    assert torch.allclose(outputs[0], outputs[1])
+    # piecewise compile without CUDA graph
+    vllm_config = VllmConfig(compilation_config=CompilationConfig(
+        level=CompilationLevel.PIECEWISE,
+        use_cudagraph=False,
+        splitting_ops=["silly.attention"],
+    ))
+
+    with set_current_vllm_config(vllm_config):
+        model = SimpleModelWithTwoGraphs(mlp_size=MLP_SIZE,
+                                         hidden_size=HIDDEN_SIZE,
+                                         vllm_config=vllm_config,
+                                         prefix='').eval().cuda()
+
+    with compilation_counter.expect(
+            num_graphs_seen=2,
+            num_piecewise_graphs_seen=6,
+            num_piecewise_capturable_graphs_seen=4,
+            num_backend_compilations=4,
+            num_cudagraph_captured=0,  # no cudagraph captured
+    ):
+        outputs.append(run_model(vllm_config, model, inputs))
+
+    assert torch.equal(outputs[0], outputs[1])
+    assert torch.equal(outputs[0], outputs[2])
