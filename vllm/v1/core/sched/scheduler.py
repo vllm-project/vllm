@@ -253,8 +253,12 @@ class Scheduler(SchedulerInterface):
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     if self.policy == SchedulingPolicy.PRIORITY:
+                        if req_index == len(scheduled_running_reqs):
+                            no_schedule_running_req = self.running[req_index:]
+                        else:
+                            no_schedule_running_req = [req for req in self.running if req not in scheduled_running_reqs]
                         preempted_req = max(
-                            self.running,
+                            no_schedule_running_req,
                             key=lambda r: (r.priority, r.arrival_time),
                         )
                         self.running.remove(preempted_req)
