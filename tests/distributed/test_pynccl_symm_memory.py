@@ -7,7 +7,7 @@ from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
 from torch.cuda.memory import CUDAPluggableAllocator
 from torch.distributed.distributed_c10d import _get_default_group
-
+from torch.utils import cpp_extension
 
 local_rank = int(os.environ['LOCAL_RANK'])
 world_size = int(os.environ['WORLD_SIZE'])
@@ -65,6 +65,7 @@ pool = torch.cuda.MemPool(allocator)
 
 default_pg = _get_default_group()
 backend = default_pg._get_backend(device)
+backend.register_mem_pool(pool)
 
 size = 1024*1024
 input = torch.full([size], local_rank, dtype=torch.float16, device=device)

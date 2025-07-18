@@ -109,6 +109,7 @@ class PyNcclCommunicator:
 
     def all_reduce(self,
                    in_tensor: torch.Tensor,
+                   out_tensor: torch.Tensor = None,
                    op: ReduceOp = ReduceOp.SUM,
                    stream=None) -> torch.Tensor:
         if self.disabled:
@@ -119,18 +120,19 @@ class PyNcclCommunicator:
         assert in_tensor.device == self.device, (
             f"this nccl communicator is created to work on {self.device}, "
             f"but the input tensor is on {in_tensor.device}")
-
-        out_tensor = torch.empty_like(in_tensor)
-
+        if out_tensor is None:
+            output = torch.empty_like(in_tensor)
+        else:
+            output = out_tensor
         if stream is None:
             stream = current_stream()
         self.nccl.ncclAllReduce(buffer_type(in_tensor.data_ptr()),
-                                buffer_type(out_tensor.data_ptr()),
+                                buffer_type(output.data_ptr()),
                                 in_tensor.numel(),
                                 ncclDataTypeEnum.from_torch(in_tensor.dtype),
                                 ncclRedOpTypeEnum.from_torch(op), self.comm,
                                 cudaStream_t(stream.cuda_stream))
-        return out_tensor
+        return output
 
     def all_gather(self,
                    output_tensor: torch.Tensor,
