@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 """
 Create a reduced-layer version of the Maverick model for testing purposes.
 
@@ -12,19 +11,14 @@ This script creates a new model with fewer layers by:
 """
 
 import json
-
 import os
 import shutil
-import sys
-import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
 import torch
 from safetensors.torch import save_file
-
 from transformers import AutoConfig, AutoTokenizer
-from transformers.models.llama4 import Llama4Config, Llama4TextConfig
 
 from vllm import LLM, SamplingParams
 
@@ -78,19 +72,18 @@ def test_maverick_serving(model: str):
         try:
             # Try to get the model path from HuggingFace cache
             hf_cache_dir = os.environ.get(
-                "HF_HOME", os.path.expanduser("~/.cache/huggingface")
-            )
+                "HF_HOME", os.path.expanduser("~/.cache/huggingface"))
             print(f"HuggingFace Cache Directory: {hf_cache_dir}")
 
             # Try to load the config to get more info about the model path
-            config = AutoConfig.from_pretrained(
-                model_config.model, trust_remote_code=True
-            )
+            config = AutoConfig.from_pretrained(model_config.model,
+                                                trust_remote_code=True)
             print(f"Model Config loaded from: {config.name_or_path}")
 
             # Check if there's a specific model path in the load config
             load_config = llm.llm_engine.vllm_config.load_config
-            if hasattr(load_config, "download_dir") and load_config.download_dir:
+            if (hasattr(load_config, "download_dir")
+                    and load_config.download_dir):
                 print(f"Custom Download Directory: {load_config.download_dir}")
 
         except Exception as e:
@@ -101,22 +94,19 @@ def test_maverick_serving(model: str):
             import glob
 
             model_name_safe = model_config.model.replace("/", "--")
-            cache_pattern = os.path.join(
-                hf_cache_dir, "hub", f"models--{model_name_safe}*"
-            )
+            cache_pattern = os.path.join(hf_cache_dir, "hub",
+                                         f"models--{model_name_safe}*")
             cached_dirs = glob.glob(cache_pattern)
             if cached_dirs:
                 print(f"Cached Model Directory: {cached_dirs[0]}")
                 # Look for the actual model files
                 snapshot_dirs = glob.glob(
-                    os.path.join(cached_dirs[0], "snapshots", "*")
-                )
+                    os.path.join(cached_dirs[0], "snapshots", "*"))
                 if snapshot_dirs:
                     print(f"Model Snapshot Directory: {snapshot_dirs[0]}")
             else:
-                print(
-                    "No cached model directory found in standard HF " "cache location"
-                )
+                print("No cached model directory found in standard HF "
+                      "cache location")
         except Exception as e:
             print(f"Error finding cached model directory: {e}")
 
@@ -132,15 +122,16 @@ def test_maverick_serving(model: str):
         parallel_config = llm.llm_engine.vllm_config.parallel_config
         print("\nParallel Configuration:")
         print(f"Tensor Parallel Size: {parallel_config.tensor_parallel_size}")
-        print(f"Pipeline Parallel Size: {parallel_config.pipeline_parallel_size}")
-        print(f"Enable Expert Parallel: {parallel_config.enable_expert_parallel}")
         print(
-            f"Num Attention Heads: "
-            f"{model_config.get_num_attention_heads(parallel_config)}"
+            f"Pipeline Parallel Size: {parallel_config.pipeline_parallel_size}"
         )
         print(
-            f"Num Key Value Heads: " f"{model_config.get_num_kv_heads(parallel_config)}"
+            f"Enable Expert Parallel: {parallel_config.enable_expert_parallel}"
         )
+        print(f"Num Attention Heads: "
+              f"{model_config.get_num_attention_heads(parallel_config)}")
+        print(f"Num Key Value Heads: "
+              f"{model_config.get_num_kv_heads(parallel_config)}")
         print(f"Num Layers: {model_config.get_num_layers(parallel_config)}")
         print("-" * 40)
         print("Generating text from sample prompts...")
@@ -163,7 +154,8 @@ def test_maverick_serving(model: str):
 
 
 def create_reduced_maverick_model(
-    original_model_name: str = "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+    original_model_name:
+    str = "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
     output_dir: str = "/tmp/reduced_maverick",
     text_layers: int = 4,
     num_experts: int = 4,
@@ -205,15 +197,13 @@ def create_reduced_maverick_model(
     try:
         # Step 1: Load original configuration
         print("Loading original model configuration...")
-        original_config = AutoConfig.from_pretrained(
-            original_model_name, trust_remote_code=True
-        )
+        original_config = AutoConfig.from_pretrained(original_model_name,
+                                                     trust_remote_code=True)
 
         # Step 2: Create reduced configuration
         print("Creating reduced configuration...")
-        reduced_config = create_reduced_config(
-            original_config, text_layers, num_experts, vision_layers
-        )
+        reduced_config = create_reduced_config(original_config, text_layers,
+                                               num_experts, vision_layers)
 
         # Step 3: Save the reduced configuration
         config_path = output_path / "config.json"
@@ -227,7 +217,8 @@ def create_reduced_maverick_model(
 
         # Step 5: Create reduced safetensors files
         print("Creating reduced safetensors files...")
-        create_reduced_safetensors(original_config, reduced_config, output_path)
+        create_reduced_safetensors(original_config, reduced_config,
+                                   output_path)
 
         # Step 6: Create preprocessor config for multimodal model
         print("Creating preprocessor config...")
@@ -254,34 +245,41 @@ def create_reduced_maverick_model(
         raise
 
 
-def create_reduced_config(
-    original_config: Any, text_layers: int, num_expert: int, vision_layers: int
-) -> Dict[str, Any]:
+def create_reduced_config(original_config: Any, text_layers: int,
+                          num_expert: int,
+                          vision_layers: int) -> Dict[str, Any]:
     """Create a reduced configuration based on the original."""
 
     # Convert config to dictionary
     config_dict = original_config.to_dict()
 
     # Reduce text layers
-    if  "text_config" in config_dict:
+    if "text_config" in config_dict:
         original_text_layers = config_dict["text_config"]["num_hidden_layers"]
         config_dict["text_config"]["num_hidden_layers"] = text_layers
-        print(f"Reduced text layers from {original_text_layers} to {text_layers}")
+        print(
+            f"Reduced text layers from {original_text_layers} to {text_layers}"
+        )
         original_num_expert = config_dict["text_config"]["num_local_experts"]
         config_dict["text_config"]["num_local_experts"] = num_expert
-        print(f"Reduced num experts from {original_num_expert} to {num_expert}")
+        print(
+            f"Reduced num experts from {original_num_expert} to {num_expert}")
         original_hidden_size = config_dict["text_config"]["hidden_size"]
         config_dict["text_config"]["hidden_size"] = 5120
         print(f"Reduced hidden size from {original_hidden_size} to 5120")
 
     # Reduce vision layers
-    if  "vision_config" in config_dict:
-        original_vision_layers = config_dict["vision_config"]["num_hidden_layers"]
+    if "vision_config" in config_dict:
+        original_vision_layers = config_dict["vision_config"][
+            "num_hidden_layers"]
         config_dict["vision_config"]["num_hidden_layers"] = vision_layers
-        print(f"Reduced vision layers from {original_vision_layers} to {vision_layers}")
+        print(
+            f"Reduced vision layers from {original_vision_layers} to {vision_layers}"
+        )
 
     # Update model name to indicate it's a reduced version
-    config_dict["_name_or_path"] = f"reduced_maverick_{text_layers}t_{vision_layers}v"
+    config_dict["_name_or_path"] = (
+        f"reduced_maverick_{text_layers}t_{vision_layers}v")
 
     return config_dict
 
@@ -290,16 +288,16 @@ def copy_tokenizer_files(original_model_name: str, output_path: Path) -> None:
     """Copy tokenizer files from the original model."""
 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(
-            original_model_name, trust_remote_code=True
-        )
+        tokenizer = AutoTokenizer.from_pretrained(original_model_name,
+                                                  trust_remote_code=True)
         tokenizer.save_pretrained(output_path)
         print("Tokenizer files copied successfully")
     except Exception as e:
         print(f"Warning: Could not copy tokenizer files: {e}")
 
 
-def create_preprocessor_config(original_config: Any, output_path: Path) -> None:
+def create_preprocessor_config(original_config: Any,
+                               output_path: Path) -> None:
     """Create preprocessor_config.json for multimodal model."""
 
     try:
@@ -320,18 +318,19 @@ def create_preprocessor_config(original_config: Any, output_path: Path) -> None:
             print("Creating synthetic preprocessor config...")
 
         # Create a synthetic preprocessor config based on typical Llama4 multimodal setup
-        vision_config = (
-            original_config.vision_config
-            if hasattr(original_config, "vision_config")
-            else {}
-        )
+        vision_config = (original_config.vision_config if hasattr(
+            original_config, "vision_config") else {})
 
         preprocessor_config = {
-            "auto_map": {"AutoProcessor": "processing_llama4.Llama4Processor"},
-            "chat_template": "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% elif USE_DEFAULT_PROMPT == true and not '<<SYS>>' in messages[0]['content'] %}{% set loop_messages = messages %}{% set system_message = 'You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\\n\\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don\\'t know the answer to a question, please don\\'t share false information.' %}{% else %}{% set loop_messages = messages %}{% set system_message = false %}{% endif %}{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if loop.index0 == 0 and system_message != false %}{{ '<|begin_of_text|><|start_header_id|>system<|end_header_id|>\\n\\n' + system_message + '<|eot_id|>' }}{% endif %}{%- if message['role'] == 'user' or message['role'] == 'system' %}{{ '<|start_header_id|>' + message['role'] + '<|end_header_id|>\\n\\n'}}{% if message['content'] is not string %}{% for item in message['content'] %}{% if item['type'] == 'image' %}{{ '<|image|>' }}{% elif item['type'] == 'text' %}{{ item['text'] }}{% endif %}{% endfor %}{% else %}{{ message['content'] }}{% endif %}{{ '<|eot_id|>' }}{% elif message['role'] == 'assistant' %}{{ '<|start_header_id|>assistant<|end_header_id|>\\n\\n'  + message['content'] + '<|eot_id|>' }}{% endif %}{% if loop.last and message['role'] == 'user' %}{{ '<|start_header_id|>assistant<|end_header_id|>\\n\\n' }}{% endif %}{% endfor %}",
+            "auto_map": {
+                "AutoProcessor": "processing_llama4.Llama4Processor"
+            },
+            "chat_template":
+            "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% elif USE_DEFAULT_PROMPT == true and not '<<SYS>>' in messages[0]['content'] %}{% set loop_messages = messages %}{% set system_message = 'You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\\n\\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don\\'t know the answer to a question, please don\\'t share false information.' %}{% else %}{% set loop_messages = messages %}{% set system_message = false %}{% endif %}{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if loop.index0 == 0 and system_message != false %}{{ '<|begin_of_text|><|start_header_id|>system<|end_header_id|>\\n\\n' + system_message + '<|eot_id|>' }}{% endif %}{%- if message['role'] == 'user' or message['role'] == 'system' %}{{ '<|start_header_id|>' + message['role'] + '<|end_header_id|>\\n\\n'}}{% if message['content'] is not string %}{% for item in message['content'] %}{% if item['type'] == 'image' %}{{ '<|image|>' }}{% elif item['type'] == 'text' %}{{ item['text'] }}{% endif %}{% endfor %}{% else %}{{ message['content'] }}{% endif %}{{ '<|eot_id|>' }}{% elif message['role'] == 'assistant' %}{{ '<|start_header_id|>assistant<|end_header_id|>\\n\\n'  + message['content'] + '<|eot_id|>' }}{% endif %}{% if loop.last and message['role'] == 'user' %}{{ '<|start_header_id|>assistant<|end_header_id|>\\n\\n' }}{% endif %}{% endfor %}",
             "image_processor": {
                 "auto_map": {
-                    "AutoImageProcessor": "image_processing_llama4_fast.Llama4ImageProcessor"
+                    "AutoImageProcessor":
+                    "image_processing_llama4_fast.Llama4ImageProcessor"
                 },
                 "do_convert_rgb": True,
                 "do_normalize": True,
@@ -358,7 +357,8 @@ def create_preprocessor_config(original_config: Any, output_path: Path) -> None:
                 "added_tokens_decoder": {},
                 "additional_special_tokens": [],
                 "bos_token": "<|begin_of_text|>",
-                "chat_template": "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% elif USE_DEFAULT_PROMPT == true and not '<<SYS>>' in messages[0]['content'] %}{% set loop_messages = messages %}{% set system_message = 'You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\\n\\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don\\'t know the answer to a question, please don\\'t share false information.' %}{% else %}{% set loop_messages = messages %}{% set system_message = false %}{% endif %}{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if loop.index0 == 0 and system_message != false %}{{ '<|begin_of_text|><|start_header_id|>system<|end_header_id|>\\n\\n' + system_message + '<|eot_id|>' }}{% endif %}{%- if message['role'] == 'user' or message['role'] == 'system' %}{{ '<|start_header_id|>' + message['role'] + '<|end_header_id|>\\n\\n'}}{% if message['content'] is not string %}{% for item in message['content'] %}{% if item['type'] == 'image' %}{{ '<|image|>' }}{% elif item['type'] == 'text' %}{{ item['text'] }}{% endif %}{% endfor %}{% else %}{{ message['content'] }}{% endif %}{{ '<|eot_id|>' }}{% elif message['role'] == 'assistant' %}{{ '<|start_header_id|>assistant<|end_header_id|>\\n\\n'  + message['content'] + '<|eot_id|>' }}{% endif %}{% if loop.last and message['role'] == 'user' %}{{ '<|start_header_id|>assistant<|end_header_id|>\\n\\n' }}{% endif %}{% endfor %}",
+                "chat_template":
+                "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% elif USE_DEFAULT_PROMPT == true and not '<<SYS>>' in messages[0]['content'] %}{% set loop_messages = messages %}{% set system_message = 'You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\\n\\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don\\'t know the answer to a question, please don\\'t share false information.' %}{% else %}{% set loop_messages = messages %}{% set system_message = false %}{% endif %}{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if loop.index0 == 0 and system_message != false %}{{ '<|begin_of_text|><|start_header_id|>system<|end_header_id|>\\n\\n' + system_message + '<|eot_id|>' }}{% endif %}{%- if message['role'] == 'user' or message['role'] == 'system' %}{{ '<|start_header_id|>' + message['role'] + '<|end_header_id|>\\n\\n'}}{% if message['content'] is not string %}{% for item in message['content'] %}{% if item['type'] == 'image' %}{{ '<|image|>' }}{% elif item['type'] == 'text' %}{{ item['text'] }}{% endif %}{% endfor %}{% else %}{{ message['content'] }}{% endif %}{{ '<|eot_id|>' }}{% elif message['role'] == 'assistant' %}{{ '<|start_header_id|>assistant<|end_header_id|>\\n\\n'  + message['content'] + '<|eot_id|>' }}{% endif %}{% if loop.last and message['role'] == 'user' %}{{ '<|start_header_id|>assistant<|end_header_id|>\\n\\n' }}{% endif %}{% endfor %}",
                 "clean_up_tokenization_spaces": False,
                 "eos_token": "<|eot_id|>",
                 "legacy": True,
@@ -385,7 +385,9 @@ def create_preprocessor_config(original_config: Any, output_path: Path) -> None:
         # Create a minimal fallback config
         minimal_config = {
             "processor_class": "Llama4Processor",
-            "auto_map": {"AutoProcessor": "processing_llama4.Llama4Processor"},
+            "auto_map": {
+                "AutoProcessor": "processing_llama4.Llama4Processor"
+            },
         }
         preprocessor_path = output_path / "preprocessor_config.json"
         with open(preprocessor_path, "w") as f:
@@ -393,9 +395,9 @@ def create_preprocessor_config(original_config: Any, output_path: Path) -> None:
         print(f"Created minimal preprocessor config at {preprocessor_path}")
 
 
-def create_reduced_safetensors(
-    original_config: Any, reduced_config: Dict[str, Any], output_path: Path
-) -> None:
+def create_reduced_safetensors(original_config: Any, reduced_config: Dict[str,
+                                                                          Any],
+                               output_path: Path) -> None:
     """Create safetensors files with weights for the reduced model."""
 
     print("Generating synthetic weights for reduced model...")
@@ -424,7 +426,8 @@ def create_reduced_safetensors(
     save_weights_to_safetensors(weights, output_path)
 
 
-def create_text_model_weights(text_config: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+def create_text_model_weights(
+        text_config: Dict[str, Any]) -> Dict[str, torch.Tensor]:
     """Create synthetic weights for the text model with MoE structure."""
 
     weights = {}
@@ -435,19 +438,20 @@ def create_text_model_weights(text_config: Dict[str, Any]) -> Dict[str, torch.Te
     intermediate_size_mlp = text_config["intermediate_size_mlp"]
     num_layers = text_config["num_hidden_layers"]
     num_attention_heads = text_config["num_attention_heads"]
-    num_key_value_heads = text_config.get("num_key_value_heads", num_attention_heads)
+    num_key_value_heads = text_config.get("num_key_value_heads",
+                                          num_attention_heads)
 
     # MoE specific parameters
     num_experts = text_config.get("num_local_experts")
-    assert num_experts is not None, "num_local_experts must be specified for MoE"
+    assert (num_experts
+            is not None), "num_local_experts must be specified for MoE"
     num_experts_per_tok = text_config.get("num_experts_per_tok")
 
     head_dim = hidden_size // num_attention_heads
 
     # Embedding layers
     weights["language_model.model.embed_tokens.weight"] = torch.randn(
-        vocab_size, hidden_size, dtype=torch.float16
-    )
+        vocab_size, hidden_size, dtype=torch.float16)
 
     # Transformer layers
     for layer_idx in range(num_layers):
@@ -456,95 +460,96 @@ def create_text_model_weights(text_config: Dict[str, Any]) -> Dict[str, torch.Te
 
         # Self-attention weights (separate q, k, v projections)
         weights[f"{layer_prefix}.self_attn.q_proj.weight"] = torch.randn(
-            num_attention_heads * head_dim, hidden_size, dtype=torch.bfloat16
-        )
+            num_attention_heads * head_dim, hidden_size, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.self_attn.k_proj.weight"] = torch.randn(
-            num_key_value_heads * head_dim, hidden_size, dtype=torch.bfloat16
-        )
+            num_key_value_heads * head_dim, hidden_size, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.self_attn.v_proj.weight"] = torch.randn(
-            num_key_value_heads * head_dim, hidden_size, dtype=torch.bfloat16
-        )
+            num_key_value_heads * head_dim, hidden_size, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.self_attn.o_proj.weight"] = torch.randn(
-            hidden_size, num_attention_heads * head_dim, dtype=torch.bfloat16
-        )
+            hidden_size, num_attention_heads * head_dim, dtype=torch.bfloat16)
         print("Self-attention weights created.")
 
         # Feed-forward weights - MoE pattern based on interleave_moe_layer_step
         # For interleave_moe_layer_step=2: layers 1,3,5,... are MoE, layers 0,2,4,... are dense
         interleave_step = text_config.get("interleave_moe_layer_step", 1)
-        is_moe_layer = interleave_step > 0 and (layer_idx + 1) % interleave_step == 0
+        is_moe_layer = (interleave_step > 0
+                        and (layer_idx + 1) % interleave_step == 0)
 
         if is_moe_layer:
             # MoE layer structure
             # 1. Router weights
-            weights[f"{layer_prefix}.feed_forward.router.weight"] = torch.randn(
-                num_experts, hidden_size, dtype=torch.float16
-            )
+            weights[
+                f"{layer_prefix}.feed_forward.router.weight"] = torch.randn(
+                    num_experts, hidden_size, dtype=torch.float16)
 
             # 2. Individual expert weights (not fused)
             for expert_idx in range(num_experts):
-                expert_prefix = f"{layer_prefix}.feed_forward.experts.{expert_idx}"
+                expert_prefix = (
+                    f"{layer_prefix}.feed_forward.experts.{expert_idx}")
 
                 weights[f"{expert_prefix}.gate_proj.weight"] = torch.randn(
-                    intermediate_size, hidden_size, dtype=torch.float8_e4m3fn
-                )
+                    intermediate_size, hidden_size, dtype=torch.bfloat16)
                 weights[f"{expert_prefix}.up_proj.weight"] = torch.randn(
-                    intermediate_size, hidden_size, dtype=torch.float8_e4m3fn
-                )
+                    intermediate_size, hidden_size, dtype=torch.bfloat16)
                 weights[f"{expert_prefix}.down_proj.weight"] = torch.randn(
-                    hidden_size, intermediate_size, dtype=torch.float8_e4m3fn
-                )
+                    hidden_size, intermediate_size, dtype=torch.bfloat16)
 
                 # Expert weight scales (FP8 quantization)
-                weights[f"{expert_prefix}.gate_proj.weight_scale"] = torch.ones(intermediate_size, dtype=torch.bfloat16)
-                weights[f"{expert_prefix}.up_proj.weight_scale"] = torch.ones(intermediate_size, dtype=torch.bfloat16)
-                weights[f"{expert_prefix}.down_proj.weight_scale"] = torch.ones(hidden_size, dtype=torch.bfloat16)
+                weights[
+                    f"{expert_prefix}.gate_proj.weight_scale"] = torch.ones(
+                        intermediate_size, dtype=torch.bfloat16)
+                weights[f"{expert_prefix}.up_proj.weight_scale"] = torch.ones(
+                    intermediate_size, dtype=torch.bfloat16)
+                weights[
+                    f"{expert_prefix}.down_proj.weight_scale"] = torch.ones(
+                        hidden_size, dtype=torch.bfloat16)
 
             # 3. Shared expert weights
-            weights[f"{layer_prefix}.feed_forward.shared_expert.gate_proj.weight"] = torch.randn(
-                intermediate_size, hidden_size, dtype=torch.bfloat16
-            )
-            weights[f"{layer_prefix}.feed_forward.shared_expert.up_proj.weight"] = torch.randn(
-                intermediate_size, hidden_size, dtype=torch.bfloat16
-            )
-            weights[f"{layer_prefix}.feed_forward.shared_expert.down_proj.weight"] = torch.randn(
-                hidden_size, intermediate_size, dtype=torch.bfloat16
-            )
+            weights[
+                f"{layer_prefix}.feed_forward.shared_expert.gate_proj.weight"] = torch.randn(
+                    intermediate_size, hidden_size, dtype=torch.bfloat16)
+            weights[
+                f"{layer_prefix}.feed_forward.shared_expert.up_proj.weight"] = torch.randn(
+                    intermediate_size, hidden_size, dtype=torch.bfloat16)
+            weights[
+                f"{layer_prefix}.feed_forward.shared_expert.down_proj.weight"] = torch.randn(
+                    hidden_size, intermediate_size, dtype=torch.bfloat16)
             print(f"MoE feed-forward weights created for layer {layer_idx}.")
         else:
             # Dense layer structure
-            weights[f"{layer_prefix}.feed_forward.gate_proj.weight"] = torch.randn(
-                intermediate_size_mlp, hidden_size, dtype=torch.bfloat16
-            )
-            weights[f"{layer_prefix}.feed_forward.up_proj.weight"] = torch.randn(
-                intermediate_size_mlp, hidden_size, dtype=torch.bfloat16
-            )
-            weights[f"{layer_prefix}.feed_forward.down_proj.weight"] = torch.randn(
-                hidden_size, intermediate_size, dtype=torch.bfloat16
-            )
+            weights[f"{layer_prefix}.feed_forward.gate_proj.weight"] = (
+                torch.randn(intermediate_size_mlp,
+                            hidden_size,
+                            dtype=torch.bfloat16))
+            weights[f"{layer_prefix}.feed_forward.up_proj.weight"] = (
+                torch.randn(intermediate_size_mlp,
+                            hidden_size,
+                            dtype=torch.bfloat16))
+            weights[f"{layer_prefix}.feed_forward.down_proj.weight"] = (
+                torch.randn(hidden_size,
+                            intermediate_size,
+                            dtype=torch.bfloat16))
             print(f"Dense feed-forward weights created for layer {layer_idx}.")
 
         # Layer norms
         weights[f"{layer_prefix}.input_layernorm.weight"] = torch.ones(
-            hidden_size, dtype=torch.bfloat16
-        )
-        weights[f"{layer_prefix}.post_attention_layernorm.weight"] = torch.ones(
-            hidden_size, dtype=torch.bfloat16
-        )
+            hidden_size, dtype=torch.bfloat16)
+        weights[
+            f"{layer_prefix}.post_attention_layernorm.weight"] = torch.ones(
+                hidden_size, dtype=torch.bfloat16)
         print("Layer norms created.")
 
     # Final layer norm and output projection
-    weights["language_model.model.norm.weight"] = torch.ones(hidden_size, dtype=torch.bfloat16)
+    weights["language_model.model.norm.weight"] = torch.ones(
+        hidden_size, dtype=torch.bfloat16)
     weights["language_model.lm_head.weight"] = torch.randn(
-        vocab_size, hidden_size, dtype=torch.bfloat16
-    )
+        vocab_size, hidden_size, dtype=torch.bfloat16)
 
     return weights
 
 
 def create_vision_model_weights(
-    vision_config: Dict[str, Any]
-) -> Dict[str, torch.Tensor]:
+        vision_config: Dict[str, Any]) -> Dict[str, torch.Tensor]:
     """Create synthetic weights for the vision model."""
 
     weights = {}
@@ -557,7 +562,7 @@ def create_vision_model_weights(
     patch_size = vision_config.get("patch_size", 16)
     num_channels = vision_config.get("num_channels", 3)
 
-    num_patches = (image_size // patch_size) ** 2
+    num_patches = (image_size // patch_size)**2
 
     # Vision transformer layers
     for layer_idx in range(num_layers):
@@ -565,64 +570,49 @@ def create_vision_model_weights(
 
         # Self-attention (with biases as shown in the example)
         weights[f"{layer_prefix}.self_attn.q_proj.weight"] = torch.randn(
-            hidden_size, hidden_size, dtype=torch.bfloat16
-        )
+            hidden_size, hidden_size, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.self_attn.q_proj.bias"] = torch.zeros(
-            hidden_size, dtype=torch.bfloat16
-        )
+            hidden_size, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.self_attn.k_proj.weight"] = torch.randn(
-            hidden_size, hidden_size, dtype=torch.bfloat16
-        )
+            hidden_size, hidden_size, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.self_attn.k_proj.bias"] = torch.zeros(
-            hidden_size, dtype=torch.bfloat16
-        )
+            hidden_size, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.self_attn.v_proj.weight"] = torch.randn(
-            hidden_size, hidden_size, dtype=torch.bfloat16
-        )
+            hidden_size, hidden_size, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.self_attn.v_proj.bias"] = torch.zeros(
-            hidden_size, dtype=torch.bfloat16
-        )
+            hidden_size, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.self_attn.o_proj.weight"] = torch.randn(
-            hidden_size, hidden_size, dtype=torch.bfloat16
-        )
+            hidden_size, hidden_size, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.self_attn.o_proj.bias"] = torch.zeros(
-            hidden_size, dtype=torch.bfloat16
-        )
+            hidden_size, dtype=torch.bfloat16)
 
         # Feed-forward (with biases as shown in the example)
         weights[f"{layer_prefix}.mlp.fc1.weight"] = torch.randn(
-            intermediate_size, hidden_size, dtype=torch.bfloat16
-        )
+            intermediate_size, hidden_size, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.mlp.fc1.bias"] = torch.zeros(
-            intermediate_size, dtype=torch.bfloat16
-        )
+            intermediate_size, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.mlp.fc2.weight"] = torch.randn(
-            hidden_size, intermediate_size, dtype=torch.bfloat16
-        )
+            hidden_size, intermediate_size, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.mlp.fc2.bias"] = torch.zeros(
-            hidden_size, dtype=torch.bfloat16
-        )
+            hidden_size, dtype=torch.bfloat16)
 
         # Layer norms (input_layernorm and post_attention_layernorm as shown in example)
         weights[f"{layer_prefix}.input_layernorm.weight"] = torch.ones(
-            hidden_size, dtype=torch.bfloat16
-        )
+            hidden_size, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.input_layernorm.bias"] = torch.zeros(
-            hidden_size, dtype=torch.bfloat16
-        )
-        weights[f"{layer_prefix}.post_attention_layernorm.weight"] = torch.ones(
-            hidden_size, dtype=torch.bfloat16
-        )
+            hidden_size, dtype=torch.bfloat16)
+        weights[
+            f"{layer_prefix}.post_attention_layernorm.weight"] = torch.ones(
+                hidden_size, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.post_attention_layernorm.bias"] = torch.zeros(
-            hidden_size, dtype=torch.bfloat16
-        )
+            hidden_size, dtype=torch.bfloat16)
 
     return weights
 
 
 def create_shared_weights(
-    text_config: Dict[str, Any], vision_config: Dict[str, Any]
-) -> Dict[str, torch.Tensor]:
+        text_config: Dict[str, Any],
+        vision_config: Dict[str, Any]) -> Dict[str, torch.Tensor]:
     """Create weights for shared components (vision-language connector, etc.)."""
 
     weights = {}
@@ -632,26 +622,13 @@ def create_shared_weights(
 
     # Vision-language connector (projects vision features to text space)
     weights["multi_modal_projector.linear_1.weight"] = torch.randn(
-        text_hidden_size, projector_input_dim, dtype=torch.bfloat16
-    )
-    #weights["multi_modal_projector.linear_1.bias"] = torch.zeros(
-    #    text_hidden_size, dtype=torch.float16
-    #)
-
-    ## Additional connector layers if needed
-    #weights["multi_modal_projector.linear_2.weight"] = torch.randn(
-    #    text_hidden_size, text_hidden_size, dtype=torch.float16
-    #)
-    #weights["multi_modal_projector.linear_2.bias"] = torch.zeros(
-    #    text_hidden_size, dtype=torch.float16
-    #)
+        text_hidden_size, projector_input_dim, dtype=torch.bfloat16)
 
     return weights
 
 
-def save_weights_to_safetensors(
-    weights: Dict[str, torch.Tensor], output_path: Path
-) -> None:
+def save_weights_to_safetensors(weights: Dict[str, torch.Tensor],
+                                output_path: Path) -> None:
     """Save weights to safetensors files and create index."""
 
     # Determine how to shard the weights
@@ -697,9 +674,9 @@ def save_weights_to_safetensors(
     # Create index file
     index_data = {
         "metadata": {
-            "total_size": sum(
-                tensor.numel() * tensor.element_size() for tensor in weights.values()
-            )
+            "total_size":
+            sum(tensor.numel() * tensor.element_size()
+                for tensor in weights.values())
         },
         "weight_map": weight_map,
     }
@@ -727,7 +704,7 @@ def test_reduced_model(model_path: str) -> None:
             model=model_path,
             trust_remote_code=True,
             tensor_parallel_size=2,
-            enable_expert_parallelism=True,
+            enable_expert_parallel=True,
             enforce_eager=True,  # Disable CUDA graphs for testing
             max_model_len=512,  # Small context for testing
             gpu_memory_utilization=0.3,  # Conservative memory usage
@@ -735,8 +712,19 @@ def test_reduced_model(model_path: str) -> None:
 
         # Test generation
         prompts = ["Hello, how are you?", "What is AI?"]
-        sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=50)
+        sampling_params = SamplingParams(temperature=0.8,
+                                         top_p=0.95,
+                                         max_tokens=50)
 
+        llm.start_profile()
+        outputs = llm.generate(prompts, sampling_params)
+        llm.stop_profile()
+
+        print("Test generation successful!")
+        for output in outputs:
+            print(f"Prompt: {output.prompt}")
+            print(f"Output: {output.outputs[0].text}")
+            print("-" * 40)
         outputs = llm.generate(prompts, sampling_params)
 
         print("Test generation successful!")
@@ -747,7 +735,9 @@ def test_reduced_model(model_path: str) -> None:
 
     except Exception as e:
         print(f"Test failed: {e}")
-        print("This is expected if the model architecture doesn't match exactly.")
+        print(
+            "This is expected if the model architecture doesn't match exactly."
+        )
 
 
 def main():
@@ -756,17 +746,22 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Create a reduced-layer Maverick model"
-    )
+        description="Create a reduced-layer Maverick model")
     parser.add_argument(
         "--output-dir",
         default="/tmp/reduced_maverick",
         help="Output directory for the reduced model",
     )
     parser.add_argument(
-        "--text-layers", type=int, default=4, help="Number of text transformer layers"
+        "--text-layers",
+        type=int,
+        default=4,
+        help="Number of text transformer layers",
     )
-    parser.add_argument("--num-experts", type=int, default=4, help="Number of experts")
+    parser.add_argument("--num-experts",
+                        type=int,
+                        default=4,
+                        help="Number of experts")
     parser.add_argument(
         "--vision-layers",
         type=int,
@@ -778,9 +773,9 @@ def main():
         action="store_true",
         help="Force recreation if output directory exists",
     )
-    parser.add_argument(
-        "--test", action="store_true", help="Test the created model with vLLM"
-    )
+    parser.add_argument("--test",
+                        action="store_true",
+                        help="Test the created model with vLLM")
     parser.add_argument(
         "--test-original",
         action="store_true",
