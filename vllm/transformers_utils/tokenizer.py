@@ -16,6 +16,8 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.transformers_utils.config import (
+    get_sentence_transformer_tokenizer_config)
 from vllm.transformers_utils.tokenizers import MistralTokenizer
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import make_async
@@ -255,6 +257,18 @@ def get_tokenizer(
                 raise RuntimeError(err_msg) from e
             else:
                 raise e
+
+        # The special_tokens in tokenizer should also be
+        # controlled by do_lower_case in encoder_config
+        encoder_config = get_sentence_transformer_tokenizer_config(
+            tokenizer_name, revision)
+        if isinstance(encoder_config, dict) and encoder_config.get(
+                "do_lower_case", False):
+            special_tokens_map = {
+                k: v.lower()
+                for k, v in tokenizer.special_tokens_map.items()
+            }
+            tokenizer.add_special_tokens(special_tokens_map)
 
         # NOTE: We can remove this after https://github.com/THUDM/ChatGLM3/issues/1324
         if type(tokenizer).__name__ in ("ChatGLMTokenizer",
