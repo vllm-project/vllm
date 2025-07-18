@@ -413,7 +413,7 @@ class MergedReplicatedLinear(ReplicatedLinear):
                          return_bias=return_bias)
 
     def weight_loader(self,
-                      param: Parameter | BasevLLMParameter,
+                      param: Union[Parameter, BasevLLMParameter],
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[int] = None):
         assert loaded_shard_id is not None
