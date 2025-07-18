@@ -87,9 +87,9 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         B = q_nope.shape[0]
 
         q = torch.cat([q_nope, q_pe], dim=-1)
+        # trtllm API extras extra dimension for MTP
         q = q.unsqueeze(1)
         o = torch.zeros(B,
-                        1,  # acc_q_len = # MTP draft tokens + 1
                         self.num_heads,
                         self.kv_lora_rank,
                         dtype=q.dtype,
@@ -118,6 +118,5 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             out=o,
             bmm1_scale=self.scale,
         )
-        o = o.squeeze(1)
 
         return self._v_up_proj(o)
