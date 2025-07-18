@@ -707,7 +707,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # Fill unused with -1. Needed for reshape_and_cache in full cuda
             # graph mode.
-            slot_mapping[total_num_scheduled_tokens:].fill_(-1)
+            blk_table.slot_mapping[total_num_scheduled_tokens:].fill_(-1)
 
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=self.query_start_loc[:num_reqs + 1],
