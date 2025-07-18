@@ -13,7 +13,6 @@ from .utils import convert_mapping
 if TYPE_CHECKING:
     # avoid circuit import
     from vllm.lora.layers import LoRAMapping
-    from vllm.lora.models import LongContextLoRAContext
 
 
 @final
@@ -33,33 +32,15 @@ class PunicaWrapperHPU(PunicaWrapperBase):
         max_loras: int,
         vocab_size: int,
         extra_vocab_size: int,
-        long_lora_context: Optional["LongContextLoRAContext"] = None,
     ):
         (
             base_indices,
             sampler_indices,
             sampler_indices_padded,
             embeddings_indices,
-            long_lora_offsets_tensor,
             indices_len,
         ) = convert_mapping(mapping, lora_index_to_id, max_loras, vocab_size,
-                            extra_vocab_size, self.device, None)
-        # Updating each element in `long_lora_offsets` with `lora_offset` slows
-        # down perf in HPU due to a series of `strided_insert` ops during lazy
-        # graph accumulation. Hence HPU appends `lora_offset` to a list and
-        # converts it to a tensor only after it is ready.
-        if long_lora_context:
-            index_mapping_indices: list[int] = list(
-                mapping.index_mapping).copy()
-            long_lora_offsets: list[int] = []
-            for i in range(len(index_mapping_indices)):
-                lora_offset: int = long_lora_context.offsets_by_lora_id.get(
-                    index_mapping_indices[i], 0)
-                long_lora_offsets.append(lora_offset)
-            long_lora_offsets_tensor = torch.tensor(long_lora_offsets,
-                                                    device=self.device,
-                                                    dtype=torch.long)
-            indices_len[-1] = long_lora_offsets_tensor.shape[-1]
+                            extra_vocab_size, self.device)
 
         self._token_lora_indices[:base_indices.shape[0]].copy_(base_indices)
         self._sampler_indices[:sampler_indices.shape[0]].copy_(sampler_indices)
@@ -68,11 +49,7 @@ class PunicaWrapperHPU(PunicaWrapperBase):
         self._embeddings_indices[:embeddings_indices.
                                  shape[0], :embeddings_indices.shape[1]].copy_(
                                      embeddings_indices)
-        if long_lora_offsets_tensor is not None:
-            self._long_lora_indices[:long_lora_offsets_tensor.shape[0]].copy_(
-                long_lora_offsets_tensor)
-        else:
-            self._long_lora_indices.zero_()
+
         self.indices_len[:] = indices_len
 
     def add_lora_embedding(self,
