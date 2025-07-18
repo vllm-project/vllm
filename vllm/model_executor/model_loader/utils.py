@@ -22,7 +22,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.adapters import (as_embedding_model,
-                                                 as_reward_model)
+                                                 as_reward_model,
+                                                 as_seq_cls_model)
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.utils import is_pin_memory_available
 
@@ -238,9 +239,29 @@ def get_model_architecture(
     vllm_supported_archs = ModelRegistry.get_supported_archs()
     vllm_not_supported = not any(arch in vllm_supported_archs
                                  for arch in architectures)
+
+    if vllm_not_supported:
+        # try automatic conversion in adapters.py
+        for arch in architectures:
+            if not arch.endswith("ForSequenceClassification"):
+                continue
+
+            assert model_config.task == "classify"
+            causal_lm_arch = arch.replace("ForSequenceClassification",
+                                          "ForCausalLM")
+            causal_lm_arch_vllm_supported = (causal_lm_arch
+                                             in vllm_supported_archs)
+            if not causal_lm_arch_vllm_supported:
+                continue
+
+            architectures = [causal_lm_arch]
+            vllm_not_supported = False
+            break
+
     if (model_config.model_impl == ModelImpl.TRANSFORMERS or
             model_config.model_impl != ModelImpl.VLLM and vllm_not_supported):
         architectures = resolve_transformers_arch(model_config, architectures)
+        logger.debug_once("Resolve transformers arch %s", str(architectures))
     elif (model_config.quantization is not None
           and model_config.quantization not in mixtral_supported
           and "MixtralForCausalLM" in architectures):
@@ -248,12 +269,13 @@ def get_model_architecture(
 
     model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
     if model_config.task == "embed":
+        logger.debug_once("Automatic conversion using `as_embedding_model`.")
         model_cls = as_embedding_model(model_cls)
     elif model_config.task == "classify":
-        # Cannot automatically run as_seq_cls_model,
-        # otherwise it will cause a circular reference on is_cross_encoder_model
-        pass
+        logger.debug_once("Automatic conversion using `as_seq_cls_model`.")
+        model_cls = as_seq_cls_model(model_cls)
     elif model_config.task == "reward":
+        logger.debug_once("Automatic conversion using `as_reward_model`.")
         model_cls = as_reward_model(model_cls)
 
     return model_cls, arch
