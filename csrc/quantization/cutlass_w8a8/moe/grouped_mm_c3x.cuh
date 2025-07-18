@@ -31,13 +31,6 @@ using LayoutD_Transpose =
 using LayoutC = LayoutD;
 using LayoutC_Transpose = LayoutD_Transpose;
 
-using LayoutA_Transpose =
-    typename cutlass::layout::LayoutTranspose<LayoutA>::type;
-using LayoutB_Transpose =
-    typename cutlass::layout::LayoutTranspose<LayoutB>::type;
-using LayoutC_Transpose =
-    typename cutlass::layout::LayoutTranspose<LayoutC>::type;
-
 template <typename ElementAB_, typename ElementC_, typename ArchTag_,
           template <typename, typename, typename> typename Epilogue_,
           typename TileShape, typename ClusterShape, typename KernelSchedule,
