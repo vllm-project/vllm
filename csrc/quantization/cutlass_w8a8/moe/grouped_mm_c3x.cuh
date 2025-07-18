@@ -22,23 +22,29 @@ using ArchTag = cutlass::arch::Sm90;
 using OperatorClass = cutlass::arch::OpClassTensorOp;
 
 using LayoutA = cutlass::layout::RowMajor;
+using LayoutA_Transpose =
+    typename cutlass::layout::LayoutTranspose<LayoutA>::type;
 using LayoutB = cutlass::layout::ColumnMajor;
-using LayoutC = cutlass::layout::RowMajor;
+using LayoutB_Transpose =
+    typename cutlass::layout::LayoutTranspose<LayoutB>::type;
+using LayoutD = cutlass::layout::RowMajor;
+using LayoutD_Transpose =
+    typename cutlass::layout::LayoutTranspose<LayoutD>::type;
+using LayoutC = LayoutD;
+using LayoutC_Transpose = LayoutD_Transpose;
 
 template <typename ElementAB_, typename ElementC_,
           template <typename, typename, typename> typename Epilogue_,
           typename TileShape, typename ClusterShape, typename KernelSchedule,
-          typename EpilogueSchedule>
+          typename EpilogueSchedule, bool swap_ab_ = false>
 struct cutlass_3x_group_gemm {
+  static constexpr bool swap_ab = swap_ab_;
   using ElementAB = ElementAB_;
   using ElementC = void;
   using ElementD = ElementC_;
   using ElementAccumulator = float;
 
   using Epilogue = Epilogue_<ElementAccumulator, ElementD, TileShape>;
-
-  using StrideC =
-      cute::remove_pointer_t<cute::Stride<int64_t, cute::Int<1>, cute::Int<0>>>;
 
   static constexpr int AlignmentAB =
       128 / cutlass::sizeof_bits<ElementAB>::value;
@@ -50,19 +56,26 @@ struct cutlass_3x_group_gemm {
       typename cutlass::epilogue::collective::CollectiveBuilder<
           ArchTag, OperatorClass, TileShape, ClusterShape,
           cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator,
-          ElementAccumulator, ElementC, LayoutC*, AlignmentC, ElementD,
-          LayoutC*, AlignmentC, EpilogueSchedule, EVTCompute>::CollectiveOp;
+          ElementAccumulator, ElementC,
+          conditional_t<swap_ab, LayoutC_Transpose*, LayoutC*>, AlignmentC,
+          ElementD, conditional_t<swap_ab, LayoutD_Transpose*, LayoutD*>,
+          AlignmentC, EpilogueSchedule, EVTCompute>::CollectiveOp;
 
   static constexpr size_t CEStorageSize =
       sizeof(typename CollectiveEpilogue::SharedStorage);
   using Stages = typename cutlass::gemm::collective::StageCountAutoCarveout<
       static_cast<int>(CEStorageSize)>;
 
-  using CollectiveMainloop =
+  using CollectiveMainloop = conditional_t<
+      swap_ab,
+      typename cutlass::gemm::collective::CollectiveBuilder<
+          ArchTag, OperatorClass, ElementAB, LayoutB_Transpose*, AlignmentAB,
+          ElementAB, LayoutA_Transpose*, AlignmentAB, ElementAccumulator,
+          TileShape, ClusterShape, Stages, KernelSchedule>::CollectiveOp,
       typename cutlass::gemm::collective::CollectiveBuilder<
           ArchTag, OperatorClass, ElementAB, LayoutA*, AlignmentAB, ElementAB,
           LayoutB*, AlignmentAB, ElementAccumulator, TileShape, ClusterShape,
-          Stages, KernelSchedule>::CollectiveOp;
+          Stages, KernelSchedule>::CollectiveOp>;
 
   using KernelType = enable_sm90_only<cutlass::gemm::kernel::GemmUniversal<
       ProblemShape, CollectiveMainloop, CollectiveEpilogue>>;
@@ -78,12 +91,12 @@ void cutlass_group_gemm_caller(
     torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
     torch::Tensor const& b_strides, torch::Tensor const& c_strides,
     bool per_act_token, bool per_out_ch) {
+  static constexpr bool swap_ab = Gemm::swap_ab;
+
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
 
   int num_experts = static_cast<int>(expert_offsets.size(0));
-  int k_size = a_tensors.size(1);
-  int n_size = out_tensors.size(1);
 
   auto stream = at::cuda::getCurrentCUDAStream(a_tensors.device().index());
 
@@ -110,19 +123,35 @@ void cutlass_group_gemm_caller(
           problem_sizes.data_ptr());
   ProblemShape prob_shape{num_experts, problem_sizes_as_shapes, nullptr};
 
-  typename GemmKernel::MainloopArguments mainloop_args{
-      static_cast<const ElementAB**>(a_ptrs.data_ptr()),
-      static_cast<StrideA*>(a_strides.data_ptr()),
-      static_cast<const ElementAB**>(b_ptrs.data_ptr()),
-      static_cast<StrideB*>(b_strides.data_ptr())};
+  typename GemmKernel::MainloopArguments mainloop_args;
+  if constexpr (swap_ab) {
+    mainloop_args = typename GemmKernel::MainloopArguments{
+        static_cast<const ElementAB**>(b_ptrs.data_ptr()),
+        static_cast<StrideB*>(b_strides.data_ptr()),
+        static_cast<const ElementAB**>(a_ptrs.data_ptr()),
+        static_cast<StrideA*>(a_strides.data_ptr())};
+  } else {
+    mainloop_args = typename GemmKernel::MainloopArguments{
+        static_cast<const ElementAB**>(a_ptrs.data_ptr()),
+        static_cast<StrideA*>(a_strides.data_ptr()),
+        static_cast<const ElementAB**>(b_ptrs.data_ptr()),
+        static_cast<StrideB*>(b_strides.data_ptr())};
+  }
 
   // Currently, we are only able to do broadcast on either all or none a_scales
   // and on either all or none b_scales
   typename GemmKernel::EpilogueArguments epilogue_args{
       Gemm::Epilogue::prepare_args(
-          static_cast<const ElementAccumulator**>(a_scales_ptrs.data_ptr()),
-          static_cast<const ElementAccumulator**>(b_scales_ptrs.data_ptr()),
-          per_act_token, per_out_ch),
+          swap_ab ? static_cast<const ElementAccumulator**>(
+                        b_scales_ptrs.data_ptr())
+                  : static_cast<const ElementAccumulator**>(
+                        a_scales_ptrs.data_ptr()),
+          swap_ab ? static_cast<const ElementAccumulator**>(
+                        a_scales_ptrs.data_ptr())
+                  : static_cast<const ElementAccumulator**>(
+                        b_scales_ptrs.data_ptr()),
+          swap_ab ? per_out_ch : per_act_token,
+          swap_ab ? per_act_token : per_out_ch),
       nullptr, static_cast<StrideC*>(c_strides.data_ptr()),
       static_cast<ElementD**>(out_ptrs.data_ptr()),
       static_cast<StrideC*>(c_strides.data_ptr())};
