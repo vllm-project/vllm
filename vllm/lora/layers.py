@@ -4,7 +4,7 @@
 # pylint: disable=unused-argument
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, Union, cast
+from typing import TYPE_CHECKING, Optional, Union, cast, List
 
 import torch
 import torch.nn as nn
@@ -26,6 +26,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.fused_moe import FusedMoE
 # yapf: enable
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import (
@@ -217,9 +218,8 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self.reset_lora(index)
         self.lora_a_stacked[index, :lora_a.shape[0], :lora_a.shape[1]].copy_(
             lora_a, non_blocking=True)
-        self.lora_b_stacked[index,
-                            0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
-                                lora_b.T, non_blocking=True)
+        self.lora_b_stacked[index, 0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
+            lora_b.T, non_blocking=True)
         if embeddings_tensor is not None:
             self.embeddings_tensors[
                 index,
@@ -360,7 +360,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                     dtype=lora_config.lora_dtype,
                     device=self.device,
                 ) for _ in range(self.n_slices))
-        self.output_slices = (self.lora_b_stacked[0].shape[2], )
+        self.output_slices = (self.lora_b_stacked[0].shape[2],)
 
     def reset_lora(self, index: int):
         for s_index in range(self.n_slices):
@@ -461,7 +461,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
 
     def __init__(self, base_layer: ReplicatedLinear) -> None:
-        super().__init__(base_layer, )
+        super().__init__(base_layer,)
         # To ensure interface compatibility, set to 1 always.
         self.tp_size = 1
         self.output_size = self.base_layer.output_size
@@ -604,8 +604,8 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         model_config: Optional[PretrainedConfig],
     ) -> bool:
         return type(source_layer) is ColumnParallelLinear or (
-            type(source_layer) is MergedColumnParallelLinear
-            and len(packed_modules_list) == 1)
+            type(source_layer) is MergedColumnParallelLinear and
+            len(packed_modules_list) == 1)
 
 
 class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
@@ -630,7 +630,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         self.output_slices = tuple(
             divide(output_size, self.tp_size) for output_size in output_sizes)
         self.n_slices = len(self.output_slices)
-        self.output_ids = (self.tp_rank, ) * self.n_slices
+        self.output_ids = (self.tp_rank,) * self.n_slices
 
     def create_lora_weights(
         self,
@@ -677,13 +677,13 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 ) for output_size in self.output_slices)
 
     def slice_lora_a(
-        self, lora_a: list[Union[torch.Tensor, None]]
-    ) -> list[Union[torch.Tensor, None]]:
+        self, lora_a: list[Union[torch.Tensor,
+                                 None]]) -> list[Union[torch.Tensor, None]]:
         return lora_a
 
     def slice_lora_b(
-        self, lora_b: list[Union[torch.Tensor, None]]
-    ) -> list[Union[torch.Tensor, None]]:
+        self, lora_b: list[Union[torch.Tensor,
+                                 None]]) -> list[Union[torch.Tensor, None]]:
         for i, (shard_id, shard_size) in enumerate(
                 zip(self.output_ids, self.output_slices)):
             if (lora_b_i := lora_b[i]) is not None:
@@ -746,8 +746,8 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         packed_modules_list: list,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        return (type(source_layer) is MergedColumnParallelLinear
-                and len(packed_modules_list) == 2)
+        return (type(source_layer) is MergedColumnParallelLinear and
+                len(packed_modules_list) == 2)
 
 
 class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
@@ -811,8 +811,8 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
 
     @classmethod
     @_not_fully_sharded_can_replace
-    def can_replace_layer(cls, source_layer: nn.Module,
-                          lora_config: LoRAConfig, packed_modules_list: list,
+    def can_replace_layer(cls, source_layer: nn.Module, lora_config: LoRAConfig,
+                          packed_modules_list: list,
                           model_config: Optional[PretrainedConfig]) -> bool:
         return type(source_layer) is QKVParallelLinear and len(
             packed_modules_list) == 1
@@ -875,8 +875,8 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         packed_modules_list: list,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        return (type(source_layer) is QKVParallelLinear
-                and len(packed_modules_list) == 3)
+        return (type(source_layer) is QKVParallelLinear and
+                len(packed_modules_list) == 3)
 
 
 #TODO: Implement this
@@ -1087,12 +1087,10 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         bias: Optional[torch.Tensor] = None,
     ):
         self.reset_lora(index)
-        self.lora_a_stacked[index,
-                            0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
-                                lora_a.T, non_blocking=True)
-        self.lora_b_stacked[index,
-                            0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
-                                lora_b.T, non_blocking=True)
+        self.lora_a_stacked[index, 0, :lora_a.shape[1], :lora_a.shape[0]].copy_(
+            lora_a.T, non_blocking=True)
+        self.lora_b_stacked[index, 0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
+            lora_b.T, non_blocking=True)
         if embeddings_tensor is not None:
             self.embeddings_tensors[
                 index,
@@ -1170,8 +1168,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
 
         lora_output: Optional[
             torch.Tensor] = self.punica_wrapper.add_lora_logits(
-                logits, hidden_states, self.lora_a_stacked,
-                self.lora_b_stacked, 1.0)
+                logits, hidden_states, self.lora_a_stacked, self.lora_b_stacked,
+                1.0)
 
         if not current_platform.can_update_inplace():
             logits = lora_output
@@ -1276,8 +1274,221 @@ class LinearScalingRotaryEmbeddingWithLoRA(BaseLayerWithLoRA):
         model_config: Optional[PretrainedConfig],
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
-        return (type(source_layer) is LinearScalingRotaryEmbedding
-                or type(source_layer) is RotaryEmbedding)
+        return (type(source_layer) is LinearScalingRotaryEmbedding or
+                type(source_layer) is RotaryEmbedding)
 
     def extra_repr(self) -> str:
         return self.base_layer.extra_repr()
+
+
+class FusedMoEWithLoRA(BaseLayerWithLoRA):
+
+    def __init__(self, base_layer: FusedMoE) -> None:
+        super().__init__()
+        self.base_layer = base_layer
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.device = base_layer.w2_weight.device
+
+    def load_weights(self, index: int, module_name, lora_model):
+
+        for expert_id in range(0, self.base_layer.global_num_experts):
+            if "%s.%s.gate_proj" % (module_name,
+                                    expert_id) not in lora_model.loras:
+                continue
+
+            gate_proj = lora_model.loras.get("%s.%s.gate_proj" %
+                                             (module_name, expert_id))
+            up_proj = lora_model.loras.get("%s.%s.up_proj" %
+                                           (module_name, expert_id))
+            down_proj = lora_model.loras.get("%s.%s.down_proj" %
+                                             (module_name, expert_id))
+
+            self.w1_lora_a_stacked[index, expert_id, :gate_proj.lora_a.
+                                   shape[1], :gate_proj.lora_a.shape[0]].copy_(
+                                       gate_proj.lora_a.T, non_blocking=True)
+
+            if self.tp_size > 1:
+                lora_b = gate_proj.lora_b.T[self.tp_rank *
+                                            self.w1_lora_b_stacked.shape[2]:
+                                            (self.tp_rank + 1) *
+                                            self.w1_lora_b_stacked.shape[2]]
+                self.w1_lora_b_stacked[
+                    index, expert_id, :gate_proj.lora_b.shape[1], :gate_proj.
+                    lora_b.shape[0]].copy_(lora_b, non_blocking=True)
+            else:
+                self.w1_lora_b_stacked[
+                    index, expert_id, :gate_proj.lora_b.shape[1], :gate_proj.
+                    lora_b.shape[0]].copy_(gate_proj.lora_b.T,
+                                           non_blocking=True)
+
+            self.w3_lora_a_stacked[index, expert_id, :up_proj.lora_a.
+                                   shape[1], :up_proj.lora_a.shape[0]].copy_(
+                                       up_proj.lora_a.T, non_blocking=True)
+            if self.tp_size > 1:
+                lora_b = up_proj.lora_b.T[self.tp_rank *
+                                          self.w3_lora_b_stacked.shape[2]:
+                                          (self.tp_rank + 1) *
+                                          self.w3_lora_b_stacked.shape[2]]
+                self.w3_lora_b_stacked[
+                    index, expert_id, :up_proj.lora_b.shape[1], :up_proj.lora_b.
+                    shape[0]].copy_(lora_b, non_blocking=True)
+            else:
+                self.w3_lora_b_stacked[
+                    index, expert_id, :up_proj.lora_b.shape[1], :up_proj.lora_b.
+                    shape[0]].copy_(up_proj.lora_b.T, non_blocking=True)
+            if self.tp_size > 1:
+                lora_a = down_proj.lora_a.T[:, self.tp_rank *
+                                            self.w2_lora_a_stacked.shape[3]:
+                                            (self.tp_rank + 1) *
+                                            self.w2_lora_a_stacked.shape[3]]
+                self.w2_lora_a_stacked[
+                    index, expert_id, :down_proj.lora_a.shape[1], :down_proj.
+                    lora_a.shape[0]].copy_(lora_a, non_blocking=True)
+            else:
+                self.w2_lora_a_stacked[
+                    index, expert_id, :down_proj.lora_a.shape[1], :down_proj.
+                    lora_a.shape[0]].copy_(down_proj.lora_a.T,
+                                           non_blocking=True)
+            self.w2_lora_b_stacked[index, expert_id, :down_proj.lora_b.
+                                   shape[1], :down_proj.lora_b.shape[0]].copy_(
+                                       down_proj.lora_b.T, non_blocking=True)
+
+    def create_lora_weights(
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None,
+    ) -> None:
+        """Initializes lora matrices."""
+        self.lora_a_stacked = torch.zeros(
+            (
+                max_loras,
+                self.base_layer.global_num_experts,
+                lora_config.max_lora_rank,
+                self.base_layer.hidden_size,
+            ),
+            dtype=lora_config.lora_dtype,
+            device=self.device,
+        )
+        self.lora_b_stacked = torch.zeros(
+            (
+                max_loras,
+                self.base_layer.global_num_experts,
+                lora_config.max_lora_rank,
+                self.base_layer.hidden_size,
+            ),
+            dtype=lora_config.lora_dtype,
+            device=self.device,
+        )
+
+        self.w1_lora_a_stacked = torch.zeros(
+            (
+                max_loras,
+                self.base_layer.global_num_experts,
+                lora_config.max_lora_rank,
+                self.base_layer.hidden_size,
+            ),
+            dtype=lora_config.lora_dtype,
+            device=self.device,
+        )
+        self.w1_lora_b_stacked = torch.zeros(
+            (
+                max_loras,
+                self.base_layer.global_num_experts,
+                self.base_layer.intermediate_size_per_partition,
+                lora_config.max_lora_rank,
+            ),
+            dtype=lora_config.lora_dtype,
+            device=self.device,
+        )
+
+        self.w2_lora_a_stacked = torch.zeros(
+            (
+                max_loras,
+                self.base_layer.global_num_experts,
+                lora_config.max_lora_rank,
+                self.base_layer.intermediate_size_per_partition,
+            ),
+            dtype=lora_config.lora_dtype,
+            device=self.device,
+        )
+        self.w2_lora_b_stacked = torch.zeros(
+            (
+                max_loras,
+                self.base_layer.global_num_experts,
+                self.base_layer.hidden_size,
+                lora_config.max_lora_rank,
+            ),
+            dtype=lora_config.lora_dtype,
+            device=self.device,
+        )
+
+        self.w3_lora_a_stacked = torch.zeros(
+            (
+                max_loras,
+                self.base_layer.global_num_experts,
+                lora_config.max_lora_rank,
+                self.base_layer.hidden_size,
+            ),
+            dtype=lora_config.lora_dtype,
+            device=self.device,
+        )
+        self.w3_lora_b_stacked = torch.zeros(
+            (
+                max_loras,
+                self.base_layer.global_num_experts,
+                self.base_layer.intermediate_size_per_partition,
+                lora_config.max_lora_rank,
+            ),
+            dtype=lora_config.lora_dtype,
+            device=self.device,
+        )
+
+        setattr(self.base_layer, "w1_lora_a_stacked", self.w1_lora_a_stacked)
+        setattr(self.base_layer, "w1_lora_b_stacked", self.w1_lora_b_stacked)
+        setattr(self.base_layer, "w2_lora_a_stacked", self.w2_lora_a_stacked)
+        setattr(self.base_layer, "w2_lora_b_stacked", self.w2_lora_b_stacked)
+        setattr(self.base_layer, "w3_lora_a_stacked", self.w3_lora_a_stacked)
+        setattr(self.base_layer, "w3_lora_b_stacked", self.w3_lora_b_stacked)
+
+    def reset_lora(self, index: int):
+        """Resets the lora weights at index back to 0."""
+        self.w1_lora_a_stacked[index] = 0
+        self.w1_lora_b_stacked[index] = 0
+        self.w3_lora_a_stacked[index] = 0
+        self.w3_lora_b_stacked[index] = 0
+        self.w2_lora_a_stacked[index] = 0
+        self.w2_lora_b_stacked[index] = 0
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
+        embeddings_tensor: Optional[torch.Tensor],
+        bias: Optional[torch.Tensor] = None,
+    ):
+        """Overwrites lora tensors at index."""
+        pass
+
+    def set_mapping(
+        self,
+        punica_wrapper,
+    ):
+        self.punica_wrapper: PunicaWrapperBase = punica_wrapper
+        setattr(self.base_layer, "punica_wrapper", self.punica_wrapper)
+
+    @classmethod
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: List,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
+        """Returns True if the layer can be replaced by this LoRA layer."""
+        return type(source_layer) is FusedMoE
+
+    def forward(self, *args, **kwargs):
+        return self.base_layer.forward(*args, **kwargs)

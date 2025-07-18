@@ -54,7 +54,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import MixtureOfExperts, SupportsPP
+from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -170,8 +170,7 @@ class DeepseekV2MoE(nn.Module):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=self.experts.must_reduce_shared_expert_outputs(
-                ),
+                reduce_results=self.experts.must_reduce_shared_expert_outputs(),
                 prefix=f"{prefix}.shared_experts",
             )
 
@@ -333,8 +332,8 @@ class DeepseekV2Attention(nn.Module):
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
                                dim=-1)
         latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
-        kv_a, _ = latent_cache.split(
-            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim],
+                                     dim=-1)
         latent_cache = latent_cache.unsqueeze(1)
         kv_a = self.kv_a_layernorm(kv_a.contiguous())
         kv = self.kv_b_proj(kv_a)[0]
@@ -350,9 +349,10 @@ class DeepseekV2Attention(nn.Module):
         k[..., :self.qk_nope_head_dim] = k_nope
         k[..., self.qk_nope_head_dim:] = k_pe
         # padding value to qk_head_dim for alignment
-        v = torch.nn.functional.pad(
-            v, [0, self.qk_head_dim - self.v_head_dim],
-            value=0).view(-1, self.num_local_heads * self.qk_head_dim)
+        v = torch.nn.functional.pad(v, [0, self.qk_head_dim - self.v_head_dim],
+                                    value=0).view(
+                                        -1,
+                                        self.num_local_heads * self.qk_head_dim)
         attn_output = self.attn(q, k, v)
         attn_output = attn_output.view(
             -1, self.num_local_heads,
@@ -564,9 +564,9 @@ class DeepseekV2DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
 
-        if (config.n_routed_experts is not None
-                and layer_idx >= config.first_k_dense_replace
-                and layer_idx % config.moe_layer_freq == 0):
+        if (config.n_routed_experts is not None and
+                layer_idx >= config.first_k_dense_replace and
+                layer_idx % config.moe_layer_freq == 0):
             self.mlp = DeepseekV2MoE(
                 config=config,
                 quant_config=quant_config,
@@ -712,7 +712,14 @@ class DeepseekV2Model(nn.Module):
         return hidden_states
 
 
-class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
+class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
+                            SupportsLoRA):
+    packed_modules_mapping = {
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ]
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -804,13 +811,13 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
             device: torch.device) -> IntermediateTensors:
         return IntermediateTensors({
             "hidden_states":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
+                torch.zeros((batch_size, self.config.hidden_size),
+                            dtype=dtype,
+                            device=device),
             "residual":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
+                torch.zeros((batch_size, self.config.hidden_size),
+                            dtype=dtype,
+                            device=device),
         })
 
     def load_weights(self, weights: Iterable[tuple[str,

@@ -29,7 +29,9 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
                               QKVParallelLinearWithLoRA,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
-                              VocabParallelEmbeddingWithLoRA)
+                              VocabParallelEmbeddingWithLoRA,
+                              FusedMoEWithLoRA)
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
 
 # yapf: enable
@@ -57,6 +59,7 @@ _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     MergedQKVParallelLinearWithShardedLoRA,
     RowParallelLinearWithShardedLoRA,
     LinearScalingRotaryEmbeddingWithLoRA,
+    FusedMoEWithLoRA,
 }
 
 
@@ -102,8 +105,8 @@ def replace_submodule(model: nn.Module, module_name: str,
 
 
 def parse_fine_tuned_lora_name(
-    name: str,
-    weights_mapper: Optional["WeightsMapper"] = None
+        name: str,
+        weights_mapper: Optional["WeightsMapper"] = None
 ) -> tuple[str, bool, bool]:
     """Parse the name of lora weights.
 
@@ -136,8 +139,8 @@ def parse_fine_tuned_lora_name(
     start_index = 2 if name.startswith("base_model.model.") else 0
 
     parts = name.split(".")
-    if parts[-1] == "weight" and (parts[-2] == "lora_A"
-                                  or parts[-2] == "lora_B"):
+    if parts[-1] == "weight" and (parts[-2] == "lora_A" or
+                                  parts[-2] == "lora_B"):
         new_name = ".".join(parts[start_index:-2])
         return new_name, parts[-2] == "lora_A", False
 
@@ -191,8 +194,12 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
     supported_lora_modules: set[str] = set()
     # step1: traverse the model to get all the linear subfixes.
     for name, module in model.named_modules():
-        if isinstance(module, (LinearBase, )):
+        if isinstance(module, (LinearBase,)):
             supported_lora_modules.add(name.split(".")[-1])
+                
+        if isinstance(module, (FusedMoE, )):
+            supported_lora_modules.add(name.split(".")[-1])
+
     # step 2: get the embedding modules if the model's mbedding_modules
     # is not empty.
     if model.embedding_modules:

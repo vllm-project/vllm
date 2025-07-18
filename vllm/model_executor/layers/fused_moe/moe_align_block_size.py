@@ -83,8 +83,7 @@ def moe_align_block_size_stage4(
     start_idx = pid * tokens_per_thread
     off_t = pid * num_experts
 
-    for i in range(start_idx, tl.minimum(start_idx + tokens_per_thread,
-                                         numel)):
+    for i in range(start_idx, tl.minimum(start_idx + tokens_per_thread, numel)):
         expert_id = tl.load(topk_ids_ptr + i)
         token_cnt = tl.load(tokens_cnts_ptr + off_t + expert_id)
         rank_post_pad = token_cnt + tl.load(cumsum_ptr + expert_id)
@@ -103,11 +102,11 @@ def moe_align_block_size_triton(
     num_tokens_post_pad: torch.Tensor,
 ) -> None:
     numel = topk_ids.numel()
-    grid = (num_experts, )
+    grid = (num_experts,)
     tokens_cnts = torch.zeros((num_experts + 1, num_experts),
                               dtype=torch.int32,
                               device=topk_ids.device)
-    cumsum = torch.zeros((num_experts + 1, ),
+    cumsum = torch.zeros((num_experts + 1,),
                          dtype=torch.int32,
                          device=topk_ids.device)
     tokens_per_thread = cdiv(numel, num_experts)
@@ -123,7 +122,7 @@ def moe_align_block_size_triton(
         tokens_cnts,
         num_experts,
     )
-    moe_align_block_size_stage3[(1, )](
+    moe_align_block_size_stage3[(1,)](
         num_tokens_post_pad,
         tokens_cnts,
         cumsum,
@@ -202,14 +201,14 @@ def moe_align_block_size(
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     if pad_sorted_ids:
         max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
-    sorted_ids = torch.empty((max_num_tokens_padded, ),
+    sorted_ids = torch.empty((max_num_tokens_padded,),
                              dtype=torch.int32,
                              device=topk_ids.device)
     sorted_ids.fill_(topk_ids.numel())
     max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
     # Expert ids must be zeroed out to prevent index out of bounds error while
     # mapping global expert ids to local expert ids in expert parallelism.
-    expert_ids = torch.zeros((max_num_m_blocks, ),
+    expert_ids = torch.zeros((max_num_m_blocks,),
                              dtype=torch.int32,
                              device=topk_ids.device)
     num_tokens_post_pad = torch.empty((1),
@@ -218,6 +217,49 @@ def moe_align_block_size(
 
     ops.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
                              expert_ids, num_tokens_post_pad)
+    if expert_map is not None:
+        expert_ids = expert_map[expert_ids]
+
+    return sorted_ids, expert_ids, num_tokens_post_pad
+
+
+def moe_lora_align_block_size(
+    topk_ids: torch.Tensor,
+    token_lora_mapping: torch.Tensor,
+    block_size: int,
+    num_experts: int,
+    max_loras: int,
+    expert_map: Optional[torch.Tensor] = None,
+    pad_sorted_ids: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+    max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+    if pad_sorted_ids:
+        max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
+    sorted_ids = torch.full((max_loras * max_num_tokens_padded,),
+                            topk_ids.numel(),
+                            dtype=torch.int32,
+                            device=topk_ids.device)
+    max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
+    # Expert ids must be zeroed out to prevent index out of bounds error while
+    # mapping global expert ids to local expert ids in expert parallelism.
+    expert_ids = torch.full((max_loras * max_num_m_blocks,),
+                            num_experts,
+                            dtype=torch.int32,
+                            device=topk_ids.device)
+    num_tokens_post_pad = torch.empty((max_loras),
+                                      dtype=torch.int32,
+                                      device=topk_ids.device)
+    ops.moe_lora_align_block_size(
+        topk_ids,
+        token_lora_mapping,
+        num_experts,
+        block_size,
+        max_loras,
+        sorted_ids,
+        expert_ids,
+        num_tokens_post_pad,
+    )
     if expert_map is not None:
         expert_ids = expert_map[expert_ids]
 
