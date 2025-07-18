@@ -424,20 +424,20 @@ void topkGatingSoftmaxLauncherHelper(const float* input, const bool* finished, f
         input, finished, output, num_rows, indices, source_row, k, start_expert, end_expert);
 }
 
-#define LAUNCH_SOFTMAX(NUM_EXPERTS, WARPS_PER_TB)                       \
-    switch (warpSize) {                                                \
-        case 32:                                                        \
-            topkGatingSoftmaxLauncherHelper<NUM_EXPERTS, WARPS_PER_TB, 32>( \
-                gating_output, nullptr, topk_weights, topk_indices,     \
+#define LAUNCH_SOFTMAX(NUM_EXPERTS, WARPS_PER_TB)                                \
+    switch (warpSize) {                                                          \
+        case 32:                                                                 \
+            topkGatingSoftmaxLauncherHelper<NUM_EXPERTS, WARPS_PER_TB, 32>(      \
+                gating_output, nullptr, topk_weights, topk_indices,              \
                 token_expert_indices, num_tokens, topk, 0, num_experts, stream); \
-            break;                                                      \
-        case 64:                                                        \
-            topkGatingSoftmaxLauncherHelper<NUM_EXPERTS, WARPS_PER_TB, 64>( \
-                gating_output, nullptr, topk_weights, topk_indices,     \
+            break;                                                               \
+        case 64:                                                                 \
+            topkGatingSoftmaxLauncherHelper<NUM_EXPERTS, WARPS_PER_TB, 64>(      \
+                gating_output, nullptr, topk_weights, topk_indices,              \
                 token_expert_indices, num_tokens, topk, 0, num_experts, stream); \
-            break;                                                      \
-        default:                                                       \
-            TORCH_CHECK(false, "Unsupported warp size: ", warpSize);   \
+            break;                                                               \
+        default:                                                                 \
+            TORCH_CHECK(false, "Unsupported warp size: ", warpSize);             \
     }
 
 template <typename IndType>
