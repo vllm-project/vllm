@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import huggingface_hub
 import regex as re
@@ -30,10 +30,14 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
                               RowParallelLinearWithLoRA,
                               VocabParallelEmbeddingWithLoRA)
 from vllm.model_executor.layers.linear import LinearBase
+
 # yapf: enable
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.models.utils import WeightsMapper
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.logits_processor import LogitsProcessor
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        ParallelLMHead)
+    from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
 
@@ -73,8 +77,8 @@ def from_layer(layer: nn.Module,
 
 
 def from_layer_logits_processor(
-    layer: LogitsProcessor,
-    lm_head: ParallelLMHead,
+    layer: "LogitsProcessor",
+    lm_head: "ParallelLMHead",
     max_loras: int,
     lora_config: LoRAConfig,
     model_config: Optional[PretrainedConfig] = None,
@@ -96,8 +100,8 @@ def replace_submodule(model: nn.Module, module_name: str,
 
 
 def parse_fine_tuned_lora_name(
-        name: str,
-        weights_mapper: Optional[WeightsMapper] = None
+    name: str,
+    weights_mapper: Optional["WeightsMapper"] = None
 ) -> tuple[str, bool, bool]:
     """Parse the name of lora weights.
 
