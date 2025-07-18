@@ -181,6 +181,12 @@ class EngineCore:
 
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
+        if pooling_params := request.pooling_params:
+            supported_pooling_tasks = (
+                self.model_executor.supported_pooling_tasks)
+            if pooling_params.task not in supported_pooling_tasks:
+                raise ValueError(f"Unsupported task: {pooling_params.task!r} "
+                                 f"Supported tasks: {supported_pooling_tasks}")
 
         if request.mm_hashes is not None:
             # Here, if hash exists for a multimodal input, then it will be
