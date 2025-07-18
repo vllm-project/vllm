@@ -157,17 +157,15 @@ class Glm4MoeModelToolParser(ToolParser):
 
         logger.debug("delta_text: %s", delta_text)
         logger.debug("delta_token_ids: %s", delta_token_ids)
-
-        # check to see if we should be streaming a tool call
-        if self.tool_call_start_token_id not in current_token_ids:
+        # check to see if we should be streaming a tool call - is there a
+        if self.tool_calls_start_token_id not in current_token_ids:
             logger.debug("No tool call tokens found!")
             return DeltaMessage(content=delta_text)
-
-        # Remove tool call tokens from delta text for processing
-        delta_text = delta_text.replace(self.tool_call_start_token,
-                                        "").replace(self.tool_call_end_token,
+        delta_text = delta_text.replace(self.tool_calls_start_token,
+                                        "").replace(self.tool_calls_end_token,
                                                     "")
         try:
+
             # figure out where we are in the parsing by counting tool call
             # start & end tags
             prev_tool_start_count = previous_token_ids.count(
@@ -178,7 +176,6 @@ class Glm4MoeModelToolParser(ToolParser):
                 self.tool_call_start_token_id)
             cur_tool_end_count = current_token_ids.count(
                 self.tool_call_end_token_id)
-
             tool_call_portion = None
             text_portion = None
 
@@ -189,17 +186,16 @@ class Glm4MoeModelToolParser(ToolParser):
                 logger.debug("Generating text content! skipping tool parsing.")
                 return DeltaMessage(content=delta_text)
 
-            # Handle tool call end
             if self.tool_call_end_token in delta_text:
                 logger.debug("tool_call_end_token in delta_text")
                 full_text = current_text + delta_text
                 tool_call_portion = full_text.split(
                     self.tool_call_start_token)[-1].split(
-                        self.tool_call_end_token)[0].strip()
+                        self.tool_call_end_token)[0].rstrip()
                 delta_text = delta_text.split(
-                    self.tool_call_end_token)[0].strip()
+                    self.tool_call_end_token)[0].rstrip()
                 text_portion = delta_text.split(
-                    self.tool_call_end_token)[-1].strip()
+                    self.tool_call_end_token)[-1].lstrip()
 
             # case -- we're starting a new tool call
             if (cur_tool_start_count > cur_tool_end_count
@@ -209,6 +205,7 @@ class Glm4MoeModelToolParser(ToolParser):
                         self.tool_call_start_token)[-1]
                 else:
                     tool_call_portion = None
+                    delta = None
 
                 text_portion = None
 
@@ -235,30 +232,28 @@ class Glm4MoeModelToolParser(ToolParser):
                     logger.debug(
                         "attempting to close tool call, but no tool call")
                     return None
-
-                # Handle any remaining arguments
-                if self.current_tool_id < len(self.prev_tool_call_arr):
-                    current_tool_call = self.prev_tool_call_arr[
-                        self.current_tool_id]
-                    if current_tool_call.get("arguments"):
-                        remaining_args = current_tool_call["arguments"]
-                        if remaining_args not in self.streamed_args_for_tool[
-                                self.current_tool_id]:
-                            diff = remaining_args[len(
-                                self.streamed_args_for_tool[self.
-                                                            current_tool_id]):]
-                            if diff:
-                                self.streamed_args_for_tool[
-                                    self.current_tool_id] += diff
-                                return DeltaMessage(tool_calls=[
-                                    DeltaToolCall(
-                                        index=self.current_tool_id,
-                                        function=DeltaFunctionCall(
-                                            arguments=diff).model_dump(
-                                                exclude_none=True),
-                                    )
-                                ])
-                return None
+                diff = self.prev_tool_call_arr[self.current_tool_id].get(
+                    "arguments")
+                if diff:
+                    diff = (diff.encode("utf-8").decode("unicode_escape")
+                            if diff is str else diff)
+                    if '"}' not in delta_text:
+                        return None
+                    end_loc = delta_text.rindex('"}')
+                    diff = delta_text[:end_loc] + '"}'
+                    logger.debug(
+                        "Finishing tool and found diff that had not "
+                        "been streamed yet: %s",
+                        diff,
+                    )
+                    self.streamed_args_for_tool[self.current_tool_id] += diff
+                    return DeltaMessage(tool_calls=[
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            function=DeltaFunctionCall(
+                                arguments=diff).model_dump(exclude_none=True),
+                        )
+                    ])
 
             # case -- otherwise we're just generating text
             else:
@@ -273,28 +268,23 @@ class Glm4MoeModelToolParser(ToolParser):
                     self.stream_tool_call_portion_regex.match(
                         tool_call_portion))
                 if current_tool_call_matches:
-                    function_name = current_tool_call_matches.group(
-                        "function_name")
-                    function_args_xml = current_tool_call_matches.group(
-                        "function_arguments") or ""
-
-                    current_tool_call['id'] = f"call_{self.current_tool_id}"
-                    current_tool_call["name"] = function_name.strip()
-                    current_tool_call["arguments"] = self._parse_arguments(
-                        function_args_xml)
+                    tool_id, tool_args = (current_tool_call_matches.groups())
+                    tool_name = tool_id.split('.')[1].split(':')[0]
+                    current_tool_call['id'] = tool_id
+                    current_tool_call["name"] = tool_name
+                    current_tool_call["arguments"] = tool_args
                 else:
                     current_tool_call_name_matches = (
                         self.stream_tool_call_name_regex.match(
                             tool_call_portion))
                     if current_tool_call_name_matches:
-                        function_name = current_tool_call_name_matches.group(
-                            "function_name")
-                        current_tool_call[
-                            'id'] = f"call_{self.current_tool_id}"
-                        current_tool_call["name"] = function_name.strip()
-                        current_tool_call["arguments"] = "{}"
+                        tool_id_str, = current_tool_call_name_matches.groups()
+                        tool_name = tool_id_str.split('.')[1].split(':')[0]
+                        current_tool_call['id'] = tool_id_str
+                        current_tool_call["name"] = tool_name
+                        current_tool_call["arguments"] = ""
                     else:
-                        logger.debug("Not enough tokens to parse tool call")
+                        logger.debug("Not enough token")
                         return None
 
             # case - we haven't sent the tool name yet. If it's available, send
@@ -354,15 +344,17 @@ class Glm4MoeModelToolParser(ToolParser):
                 logger.debug("Skipping text %s - no arguments", delta_text)
                 delta = None
 
-            # case -- prev arguments are defined, but none are now.
+            # case -- prev arguments are defined, but non are now.
             #   probably impossible, but not a fatal error - just keep going
             elif not cur_arguments and prev_arguments:
                 logger.error("should be impossible to have arguments reset "
                              "mid-call. skipping streaming anything.")
                 delta = None
 
-            # case -- we now have the first info about arguments available
+            # case -- we now have the first info about arguments available from
+            #   autocompleting the JSON
             elif cur_arguments and not prev_arguments:
+
                 delta = DeltaMessage(tool_calls=[
                     DeltaToolCall(
                         index=self.current_tool_id,
@@ -381,7 +373,7 @@ class Glm4MoeModelToolParser(ToolParser):
                         and len(cur_arguments) > len(prev_arguments)
                         and cur_arguments.startswith(prev_arguments)):
                     delta_arguments = cur_arguments[len(prev_arguments):]
-                    logger.debug("got diff %s", delta_arguments)
+                    logger.debug("got diff %s", delta_text)
 
                     delta = DeltaMessage(tool_calls=[
                         DeltaToolCall(
