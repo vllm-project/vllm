@@ -3,11 +3,13 @@
 from typing import Callable, Optional
 
 import torch
+import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
 from torch.nn.parameter import Parameter
 from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 from triton_kernels.numerics import InFlexData
 from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
-from triton_kernels.tensor_details.layout import (HopperMXScaleLayout,
+from triton_kernels.tensor_details.layout import (BlackwellMXScaleLayout,
+                                                  HopperMXScaleLayout,
                                                   HopperMXValueLayout,
                                                   StridedLayout)
 
@@ -32,6 +34,10 @@ def swizzle_mxfp4(quant_tensor, scale):
             scale_layout = HopperMXScaleLayout
         if torch.cuda.get_device_capability()[0] == 10:
             scale_layout = BlackwellMXScaleLayout
+            constraints = {
+                "is_persistent": True,
+            }
+            opt_flags.update_opt_flags_constraints(constraints)
     quant_tensor = quant_tensor.transpose(-2, -1)
     scale = scale.transpose(-2, -1)
     quant_tensor = convert_layout(wrap_torch_tensor(quant_tensor, dtype=FP4),
