@@ -222,10 +222,13 @@ class GroupCoordinator:
 
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
-                ranks, backend=torch_distributed_backend)
+                ranks, backend=torch_distributed_backend,
+                timeout=envs.VLLM_DISTRIBUTED_INIT_TIMEOUT_SECONDS)
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
-            cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+            cpu_group = torch.distributed.new_group(ranks, 
+                                                    backend="gloo",
+                                                    timeout=envs.VLLM_DISTRIBUTED_INIT_TIMEOUT_SECONDS)
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
@@ -965,7 +968,8 @@ def init_distributed_environment(
             backend=backend,
             init_method=distributed_init_method,
             world_size=world_size,
-            rank=rank)
+            rank=rank,
+            timeout=envs.VLLM_DISTRIBUTED_INIT_TIMEOUT_SECONDS)
     # set the local rank
     # local_rank is not available in torch ProcessGroup,
     # see https://github.com/pytorch/pytorch/issues/122816
