@@ -997,7 +997,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     and scoring_func == 'sigmoid'
                     and custom_routing_function is None)
             assert activation == "silu"
-
             return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
                 routing_logits=router_logits.to(torch.float32),
                 routing_bias=e_score_correction_bias,
@@ -1010,7 +1009,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 top_k=top_k,
                 num_expert_group=num_expert_group,
                 topk_group=topk_group,
-                intermediate_size_per_partition=layer.intermediate_size_per_partition,
+                intermediate_size=layer.intermediate_size_per_partition,
                 expert_offset=layer.ep_rank * layer.local_num_experts,
                 local_num_experts=layer.local_num_experts,
                 block_shape=self.quant_config.weight_block_size,
