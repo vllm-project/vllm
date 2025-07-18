@@ -204,9 +204,16 @@ void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
   auto inp_ptr = reinterpret_cast<std::uintptr_t>(input.data_ptr());
   auto res_ptr = reinterpret_cast<std::uintptr_t>(residual.data_ptr());
   auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight.data_ptr());
-  bool ptrs_are_aligned =
-      inp_ptr % 16 == 0 && res_ptr % 16 == 0 && wt_ptr % 16 == 0;
-  if (ptrs_are_aligned && hidden_size % 8 == 0 && input_stride % 8 == 0) {
+  constexpr int vector_width = 8;
+  constexpr int req_alignment_bytes =
+      vector_width * 2;  // vector_width * sizeof(bfloat16 or float16) (float32
+                         // falls back to non-vectorized version anyway)
+  bool ptrs_are_aligned = inp_ptr % req_alignment_bytes == 0 &&
+                          res_ptr % req_alignment_bytes == 0 &&
+                          wt_ptr % req_alignment_bytes == 0;
+  bool offsets_are_multiple_of_vector_width =
+      hidden_size % vector_width == 0 && input_stride % vector_width == 0;
+  if (ptrs_are_aligned && offsets_are_multiple_of_vector_width) {
     LAUNCH_FUSED_ADD_RMS_NORM(8);
   } else {
     LAUNCH_FUSED_ADD_RMS_NORM(0);
