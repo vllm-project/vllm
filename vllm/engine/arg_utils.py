@@ -1417,28 +1417,12 @@ class EngineArgs:
             return False
 
         # V1 supports N-gram, Medusa, and Eagle speculative decoding.
-        is_ngram_enabled = False
-        is_eagle_enabled = False
-        is_medusa_enabled = False
-        if self.speculative_config is not None:
-            # This is supported but experimental (handled below).
-            speculative_method = self.speculative_config.get("method")
-            if speculative_method:
-                if speculative_method in ("ngram", "[ngram]"):
-                    is_ngram_enabled = True
-                elif speculative_method == "medusa":
-                    is_medusa_enabled = True
-                elif speculative_method in ("eagle", "eagle3", "deepseek_mtp"):
-                    is_eagle_enabled = True
-            else:
-                speculative_model = self.speculative_config.get("model")
-                if speculative_model in ("ngram", "[ngram]"):
-                    is_ngram_enabled = True
-            if not (is_ngram_enabled or is_eagle_enabled or is_medusa_enabled):
-                # Other speculative decoding methods are not supported yet.
-                _raise_or_fallback(feature_name="Speculative Decoding",
-                                   recommend_to_remove=False)
-                return False
+        if (self.speculative_config is not None
+                and self.speculative_config.get("method") == "draft_model"):
+            raise NotImplementedError(
+                "Speculative decoding with draft model is not supported yet. "
+                "Please consider using other speculative decoding methods "
+                "such as ngram, medusa, eagle, or deepseek_mtp.")
 
         # No XFormers so far.
         V1_BACKENDS = [
