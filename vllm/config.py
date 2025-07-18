@@ -4357,6 +4357,7 @@ class CompilationConfig:
             self.splitting_ops = [] if self.full_cuda_graph else [
                 "vllm.unified_attention",
                 "vllm.unified_attention_with_output",
+                "vllm.mamba_mixer2",
             ]
 
 
