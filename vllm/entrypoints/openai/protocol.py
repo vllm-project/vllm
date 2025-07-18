@@ -488,6 +488,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     prompt_logprobs: Optional[int] = None
     allowed_token_ids: Optional[list[int]] = None
     bad_words: list[str] = Field(default_factory=list)
+    reasoning_effort: Optional[str] = None
     thinking_token_budget: Optional[int] = None
     # --8<-- [end:chat-completion-sampling-params]
 
@@ -796,6 +797,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             structured_outputs=self.structured_outputs,
             logit_bias=self.logit_bias,
             bad_words= self.bad_words,
+            reasoning_effort=self.reasoning_effort,
             thinking_token_budget=self.thinking_token_budget,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,

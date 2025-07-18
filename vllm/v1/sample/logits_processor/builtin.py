@@ -246,8 +246,17 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
           device (torch.device): Device to use for tensor operations.
         """
         super().__init__()
-        self.think_start_token_ids = reasoning_config.think_start_token_ids
-        self.think_end_token_ids = reasoning_config.think_end_token_ids
+        self.reasoning_effort_to_token_budget = {
+            "low": 1024,
+            "medium": 2048,
+            "high": 8192,
+        }
+        self.think_start_token_ids = getattr(reasoning_config, "think_start_token_ids", [])
+        self.think_end_token_ids = getattr(reasoning_config, "think_end_token_ids", [])
+        self.reasoning_effort_to_token_budget['low'] = getattr(reasoning_config, "low_effort_token_budget", self.reasoning_effort_to_token_budget['low'])
+        self.reasoning_effort_to_token_budget['medium'] = getattr(reasoning_config, "medium_effort_token_budget", self.reasoning_effort_to_token_budget['medium'])
+        self.reasoning_effort_to_token_budget['high'] = getattr(reasoning_config, "high_effort_token_budget", self.reasoning_effort_to_token_budget['high'])
+
         self.pin_memory = pin_memory
         self.device = device
         self._state: dict[int, dict[str, Any]] = {}
@@ -268,6 +277,24 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             if target_list[i:i + len(token_ids)] == token_ids:
                 return i
         return -1
+
+    def _resolve_thinking_token_budget(self, reasoning_effort: Optional[str], thinking_token_budget: Optional[int]) -> int:
+        """
+        Determines the final thinking token budget.
+        Priority:
+          1. If explicit thinking token budget is given, use it.
+          2. Otherwise, use reasoning_effort mapping.
+        """
+        if thinking_token_budget is not None:
+            return thinking_token_budget
+
+        if reasoning_effort is not None:
+            budget = self.reasoning_effort_to_token_budget.get(reasoning_effort)
+            if budget is not None:
+                raise ValueError(f"Unknown reasoning_effort: {reasoning_effort}")
+            return budget
+
+        return None
 
     def _init_state_entry(self, prompt_tok_ids: list[int], thinking_token_budget: int) -> dict[str, Any]:
         """Initializes the tracking state for a given sequence index."""
@@ -325,11 +352,15 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
     def update_state(self, batch_update: Optional[BatchUpdate]):
         if batch_update:
             for (index, params, prompt_tok_ids, output_tok_ids) in batch_update.added:
+                reasoning_effort = (params.reasoning_effort if isinstance(
+                    params, SamplingParams) else None)
                 thinking_token_budget = (params.thinking_token_budget if isinstance(
                     params, SamplingParams) else None)
-                if thinking_token_budget is not None:
+                resolved_thinking_token_budget = self._resolve_thinking_token_budget(
+                    reasoning_effort, thinking_token_budget)
+                if thinking_token_budget is not None or reasoning_effort is not None:
                     self._state[index] = self._init_state_entry(
-                        prompt_tok_ids, thinking_token_budget)
+                        prompt_tok_ids, resolved_thinking_token_budget)
                     self._state[index]["output_tok_ids"] = output_tok_ids
 
             for index in batch_update.removed:
