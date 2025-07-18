@@ -101,8 +101,10 @@ class Pooler(nn.Module, ABC):
 
         return SimplePooler.from_config(resolved_config)
 
-    def get_pooling_params(self,
-                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
+    def get_pooling_updates(
+        self,
+        task: PoolingTask,
+    ) -> Optional[PoolingParamsUpdate]:
         """
         Construct the pooling parameters to use for a task,
         or `None` if the task is not supported.
@@ -135,7 +137,7 @@ def get_prompt_token_ids(
     if isinstance(pooling_metadata, V1PoolingMetadata):
         assert pooling_metadata.prompt_token_ids is not None, (
             "Please set `logits_processing_needs_token_ids=True` "
-            "in `get_pooling_params`")
+            "in `get_pooling_updates`")
 
         return [
             pooling_metadata.prompt_token_ids[i, :num]
@@ -192,8 +194,10 @@ class PoolingMethod(nn.Module, ABC):
         raise NotImplementedError(f"Unsupported method: {pooling_type}")
 
     @abstractmethod
-    def get_pooling_params(self,
-                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
+    def get_pooling_updates(
+        self,
+        task: PoolingTask,
+    ) -> Optional[PoolingParamsUpdate]:
         raise NotImplementedError
 
     @abstractmethod
@@ -234,8 +238,10 @@ class PoolingMethod(nn.Module, ABC):
 
 class CLSPool(PoolingMethod):
 
-    def get_pooling_params(self,
-                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
+    def get_pooling_updates(
+        self,
+        task: PoolingTask,
+    ) -> Optional[PoolingParamsUpdate]:
         # The equalities are split up to keep mypy happy
         if (task == "encode" or task == "embed" or task == "classify"
                 or task == "score"):
@@ -265,8 +271,10 @@ class CLSPool(PoolingMethod):
 
 class LastPool(PoolingMethod):
 
-    def get_pooling_params(self,
-                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
+    def get_pooling_updates(
+        self,
+        task: PoolingTask,
+    ) -> Optional[PoolingParamsUpdate]:
         # The equalities are split up to keep mypy happy
         if (task == "encode" or task == "embed" or task == "classify"
                 or task == "score"):
@@ -292,8 +300,10 @@ class LastPool(PoolingMethod):
 
 class AllPool(PoolingMethod):
 
-    def get_pooling_params(self,
-                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
+    def get_pooling_updates(
+        self,
+        task: PoolingTask,
+    ) -> Optional[PoolingParamsUpdate]:
         if task == "encode":
             return PoolingParamsUpdate()
 
@@ -330,8 +340,10 @@ class AllPool(PoolingMethod):
 
 class MeanPool(PoolingMethod):
 
-    def get_pooling_params(self,
-                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
+    def get_pooling_updates(
+        self,
+        task: PoolingTask,
+    ) -> Optional[PoolingParamsUpdate]:
         # The equalities are split up to keep mypy happy
         if (task == "encode" or task == "embed" or task == "classify"
                 or task == "score"):
@@ -552,9 +564,11 @@ class SimplePooler(Pooler):
         self.pooling = pooling
         self.head = head
 
-    def get_pooling_params(self,
-                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
-        return self.pooling.get_pooling_params(task)
+    def get_pooling_updates(
+        self,
+        task: PoolingTask,
+    ) -> Optional[PoolingParamsUpdate]:
+        return self.pooling.get_pooling_updates(task)
 
     def forward(
         self,
@@ -614,8 +628,10 @@ class StepPooler(Pooler):
 
         return pooled_data
 
-    def get_pooling_params(self,
-                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
+    def get_pooling_updates(
+        self,
+        task: PoolingTask,
+    ) -> Optional[PoolingParamsUpdate]:
         if task == "encode":
             return PoolingParamsUpdate(logits_processing_needs_token_ids=True)
 
@@ -678,8 +694,10 @@ class ClassifierPooler(nn.Module):
 
         raise ValueError(f"Unsupported task: {task!r}")
 
-    def get_pooling_params(self,
-                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
+    def get_pooling_updates(
+        self,
+        task: PoolingTask,
+    ) -> Optional[PoolingParamsUpdate]:
         # The equalities are split up to keep mypy happy
         if task == "encode" or task == "classify" or task == "score":
             return PoolingParamsUpdate()

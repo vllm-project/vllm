@@ -38,7 +38,7 @@ from vllm.model_executor.models.interfaces_base import (VllmModelForPooling,
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
-from vllm.pooling_params import PoolingTask
+from vllm.pooling_params import PoolingParams, PoolingTask
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
@@ -414,9 +414,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 assert pooling_params.task is not None, (
                     "You did not set `task` in the API")
 
-                to_update = (cast(VllmModelForPooling,
-                                  self.model).pooler.get_pooling_params(
-                                      pooling_params.task))
+                model = cast(VllmModelForPooling, self.model)
+                to_update = (model.pooler.get_pooling_updates(
+                    pooling_params.task))
                 assert to_update is not None, (
                     f"{pooling_params.task=} is not supported by the model")
 
@@ -1104,7 +1104,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         return [
             task for task in get_args(PoolingTask)
-            if model.pooler.get_pooling_params(task)
+            if model.pooler.get_pooling_updates(task)
         ]
 
     def apply_grammar_bitmask(
@@ -2154,7 +2154,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         model = cast(VllmModelForPooling, self.model)
         dummy_task = self.get_supported_pooling_tasks()[0]
-        dummy_pooling_params = model.pooler.get_pooling_params(dummy_task)
+        dummy_pooling_params = PoolingParams()
+
+        to_update = model.pooler.get_pooling_updates(dummy_task)
+        assert to_update is not None
+        to_update.apply(dummy_pooling_params)
+
         dummy_metadata = PoolingMetadata(
             prompt_lens=torch.tensor([h.shape[0] for h in hidden_states_list],
                                      device=self.device),
@@ -2164,8 +2169,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             pooling_params=[dummy_pooling_params] * num_reqs)
 
         try:
-            pooler_output = self.model.pooler(hidden_states=hidden_states_list,
-                                              pooling_metadata=dummy_metadata)
+            pooler_output = model.pooler(hidden_states=hidden_states_list,
+                                         pooling_metadata=dummy_metadata)
         except RuntimeError as e:
             if 'out of memory' in str(e):
                 raise RuntimeError(

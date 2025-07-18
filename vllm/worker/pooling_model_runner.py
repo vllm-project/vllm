@@ -203,7 +203,7 @@ class PoolingModelRunner(
                 "You did not set `task` in the API")
 
             to_update = (cast(VllmModelForPooling,
-                              self.model).pooler.get_pooling_params(
+                              self.model).pooler.get_pooling_updates(
                                   pooling_params.task))
             assert to_update is not None, (
                 f"{pooling_params.task=} is not supported by the model")

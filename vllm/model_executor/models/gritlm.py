@@ -135,8 +135,10 @@ class GritLMMeanPool(nn.Module):
 
         return instruction_len
 
-    def get_pooling_params(self,
-                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
+    def get_pooling_updates(
+        self,
+        task: PoolingTask,
+    ) -> Optional[PoolingParamsUpdate]:
         # The equalities are split up to keep mypy happy
         if task == "encode" or task == "embed":
             return PoolingParamsUpdate(logits_processing_needs_token_ids=True)
@@ -205,9 +207,11 @@ class GritLMPooler(Pooler):
         self.pooling = GritLMMeanPool(model_config)
         self.head = PoolerHead(PoolerNormalize())
 
-    def get_pooling_params(self,
-                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
-        return self.pooling.get_pooling_params(task)
+    def get_pooling_updates(
+        self,
+        task: PoolingTask,
+    ) -> Optional[PoolingParamsUpdate]:
+        return self.pooling.get_pooling_updates(task)
 
     def forward(
         self,

@@ -492,7 +492,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         return [
             task for task in get_args(PoolingTask)
-            if model.pooler.get_pooling_params(task)
+            if model.pooler.get_pooling_updates(task)
         ]
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:

@@ -232,7 +232,7 @@ class ModelRunnerBase(ABC, Generic[T]):
 
         return [
             task for task in get_args(PoolingTask)
-            if model.pooler.get_pooling_params(task)
+            if model.pooler.get_pooling_updates(task)
         ]
 
     def execute_model(
