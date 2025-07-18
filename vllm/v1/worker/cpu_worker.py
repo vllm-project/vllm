@@ -146,7 +146,7 @@ class CPUWorker(Worker):
             x for x in logical_cpu_list if x.numa_node == selected_numa_node
         ]
 
-        # Select at most cpu_num_per_core CPUs from each physical core
+        # Select CPUs from each physical core via cpu_selector
         core_to_cpus: dict[int, list[LogicalCPUInfo]] = {}
         for cpu_info in logical_cpu_list:
             if cpu_info.physical_core not in core_to_cpus:
