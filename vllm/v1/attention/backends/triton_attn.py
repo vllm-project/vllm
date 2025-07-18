@@ -72,9 +72,6 @@ class TritonAttentionMetadataBuilder(
             vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
 
-        self.attention_chunk_size = getattr(vllm_config.scheduler_config,
-                                            'attention_chunk_size', None)
-
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> TritonAttentionMetadata:
