@@ -279,7 +279,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=torch-builder,source=/torchwheels/,target=/torchwheels/,ro \
     --mount=type=bind,from=arrow-builder,source=/arrowwheels/,target=/arrowwheels/,ro \
     --mount=type=bind,from=cv-builder,source=/opencvwheels/,target=/opencvwheels/,ro \
-    --mount=type=bind,from=numa-builder,source=/numactl/,target=/numactl/,ro \
+    --mount=type=bind,from=numa-builder,source=/numactl/,target=/numactl/,rw \
     --mount=type=bind,from=numba-builder,source=/numbawheels/,target=/numbawheels/,ro \
     --mount=type=bind,src=.,dst=/src/,rw \
     source /opt/rh/gcc-toolset-13/enable && \
@@ -338,7 +338,7 @@ COPY --from=numba-builder /tmp/control /dev/null
 
 # install gcc-11, python, openblas, numactl, lapack
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,from=numa-builder,source=/numactl/,target=/numactl/,ro \
+    --mount=type=bind,from=numa-builder,source=/numactl/,target=/numactl/,rw \
     --mount=type=bind,from=lapack-builder,source=/lapack/,target=/lapack/,rw \
     --mount=type=bind,from=openblas-builder,source=/OpenBLAS-$OPENBLAS_VERSION/,target=/openblas/,rw \
     rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
