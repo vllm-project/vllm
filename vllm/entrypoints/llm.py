@@ -1,7 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
+
+# calculate time spend on imports, disable linter
+# module-import-not-at-top-of-file
+# ruff: noqa: E402
+start_init = time.perf_counter()
+
 import itertools
+import multiprocessing
+import os
 import warnings
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -56,7 +65,13 @@ from vllm.utils import Counter, Device, deprecate_kwargs, is_list_of
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
 
+elapsed = time.perf_counter() - start_init
+
 logger = init_logger(__name__)
+
+current_proc = multiprocessing.current_process()
+logger.debug("Imports in llm took: '%.4f' secs for process: '%s' pid: '%d'",
+             elapsed, current_proc.name, os.getpid())
 
 _R = TypeVar("_R", default=Any)
 
@@ -1395,17 +1410,17 @@ class LLM:
         of your inputs into a single list and pass it to this method.
 
         Supports both text and multi-modal data (images, etc.) when used with
-        appropriate multi-modal models. For multi-modal inputs, ensure the 
+        appropriate multi-modal models. For multi-modal inputs, ensure the
         prompt structure matches the model's expected input format.
 
         Args:
-            data_1: Can be a single prompt, a list of prompts or 
-                `ScoreMultiModalParam`, which can contain either text or 
-                multi-modal data. When a list, it must have the same length as 
+            data_1: Can be a single prompt, a list of prompts or
+                `ScoreMultiModalParam`, which can contain either text or
+                multi-modal data. When a list, it must have the same length as
                 the `data_2` list.
-            data_2: The data to pair with the query to form the input to 
+            data_2: The data to pair with the query to form the input to
                 the LLM. Can be text or multi-modal data. See [PromptType]
-                [vllm.inputs.PromptType] for more details about the format of 
+                [vllm.inputs.PromptType] for more details about the format of
                 each prompt.
             use_tqdm: If `True`, shows a tqdm progress bar.
                 If a callable (e.g., `functools.partial(tqdm, leave=False)`),
