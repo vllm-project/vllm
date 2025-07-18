@@ -13,7 +13,7 @@ This script creates a new model with fewer layers by:
 import json
 import shutil
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import torch
 from safetensors.torch import save_file
@@ -92,8 +92,8 @@ def create_reduced_maverick_model(
     """
 
     print(
-        f"Creating reduced Maverick model with {text_layers} text layers and {vision_layers} vision layers..."
-    )
+        f"Creating reduced Maverick model with {text_layers} text layers and "
+        f"{vision_layers} vision layers...")
 
     # Create output directory
     output_path = Path(output_dir)
@@ -101,9 +101,8 @@ def create_reduced_maverick_model(
         if force_recreate:
             shutil.rmtree(output_path)
         else:
-            print(
-                f"Output directory {output_dir} already exists. Use --force-recreate to overwrite."
-            )
+            print(f"Output directory {output_dir} already exists. "
+                  "Use --force-recreate to overwrite.")
             return str(output_path)
 
     output_path.mkdir(parents=True, exist_ok=True)
@@ -159,7 +158,7 @@ def create_reduced_maverick_model(
 
 def create_reduced_config(original_config: Any, text_layers: int,
                           num_expert: int,
-                          vision_layers: int) -> Dict[str, Any]:
+                          vision_layers: int) -> dict[str, Any]:
     """Create a reduced configuration based on the original."""
 
     # Convert config to dictionary
@@ -185,9 +184,8 @@ def create_reduced_config(original_config: Any, text_layers: int,
         original_vision_layers = config_dict["vision_config"][
             "num_hidden_layers"]
         config_dict["vision_config"]["num_hidden_layers"] = vision_layers
-        print(
-            f"Reduced vision layers from {original_vision_layers} to {vision_layers}"
-        )
+        print(f"Reduced vision layers from {original_vision_layers} "
+              f"to {vision_layers}")
 
     # Update model name to indicate it's a reduced version
     config_dict["_name_or_path"] = (
@@ -227,7 +225,7 @@ def create_preprocessor_config(original_config: Any,
         raise
 
 
-def create_reduced_safetensors(original_config: Any, reduced_config: Dict[str,
+def create_reduced_safetensors(original_config: Any, reduced_config: dict[str,
                                                                           Any],
                                output_path: Path) -> None:
     """Create safetensors files with weights for the reduced model."""
@@ -259,7 +257,7 @@ def create_reduced_safetensors(original_config: Any, reduced_config: Dict[str,
 
 
 def create_text_model_weights(
-        text_config: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+        text_config: dict[str, Any]) -> dict[str, torch.Tensor]:
     """Create synthetic weights for the text model with MoE structure."""
 
     weights = {}
@@ -277,7 +275,6 @@ def create_text_model_weights(
     num_experts = text_config.get("num_local_experts")
     assert (num_experts
             is not None), "num_local_experts must be specified for MoE"
-    num_experts_per_tok = text_config.get("num_experts_per_tok")
 
     head_dim = hidden_size // num_attention_heads
 
@@ -302,7 +299,8 @@ def create_text_model_weights(
         print("Self-attention weights created.")
 
         # Feed-forward weights - MoE pattern based on interleave_moe_layer_step
-        # For interleave_moe_layer_step=2: layers 1,3,5,... are MoE, layers 0,2,4,... are dense
+        # For interleave_moe_layer_step=2: layers 1,3,5,... are MoE, layers
+        # 0,2,4,... are dense
         interleave_step = text_config.get("interleave_moe_layer_step", 1)
         is_moe_layer = (interleave_step > 0
                         and (layer_idx + 1) % interleave_step == 0)
@@ -337,15 +335,13 @@ def create_text_model_weights(
                         hidden_size, dtype=torch.bfloat16)
 
             # 3. Shared expert weights
-            weights[
-                f"{layer_prefix}.feed_forward.shared_expert.gate_proj.weight"] = torch.randn(
-                    intermediate_size, hidden_size, dtype=torch.bfloat16)
-            weights[
-                f"{layer_prefix}.feed_forward.shared_expert.up_proj.weight"] = torch.randn(
-                    intermediate_size, hidden_size, dtype=torch.bfloat16)
-            weights[
-                f"{layer_prefix}.feed_forward.shared_expert.down_proj.weight"] = torch.randn(
-                    hidden_size, intermediate_size, dtype=torch.bfloat16)
+            shared_expert_prefix = f"{layer_prefix}.feed_forward.shared_expert"
+            weights[f"{shared_expert_prefix}.gate_proj.weight"] = torch.randn(
+                intermediate_size, hidden_size, dtype=torch.bfloat16)
+            weights[f"{shared_expert_prefix}.up_proj.weight"] = torch.randn(
+                intermediate_size, hidden_size, dtype=torch.bfloat16)
+            weights[f"{shared_expert_prefix}.down_proj.weight"] = torch.randn(
+                hidden_size, intermediate_size, dtype=torch.bfloat16)
             print(f"MoE feed-forward weights created for layer {layer_idx}.")
         else:
             # Dense layer structure
@@ -381,7 +377,7 @@ def create_text_model_weights(
 
 
 def create_vision_model_weights(
-        vision_config: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+        vision_config: dict[str, Any]) -> dict[str, torch.Tensor]:
     """Create synthetic weights for the vision model."""
 
     weights = {}
@@ -389,18 +385,11 @@ def create_vision_model_weights(
     hidden_size = vision_config["hidden_size"]
     intermediate_size = vision_config["intermediate_size"]
     num_layers = vision_config["num_hidden_layers"]
-    num_attention_heads = vision_config["num_attention_heads"]
-    image_size = vision_config.get("image_size", 224)
-    patch_size = vision_config.get("patch_size", 16)
-    num_channels = vision_config.get("num_channels", 3)
-
-    num_patches = (image_size // patch_size)**2
 
     # Vision transformer layers
     for layer_idx in range(num_layers):
         layer_prefix = f"vision_model.model.layers.{layer_idx}"
 
-        # Self-attention (with biases as shown in the example)
         weights[f"{layer_prefix}.self_attn.q_proj.weight"] = torch.randn(
             hidden_size, hidden_size, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.self_attn.q_proj.bias"] = torch.zeros(
@@ -418,7 +407,6 @@ def create_vision_model_weights(
         weights[f"{layer_prefix}.self_attn.o_proj.bias"] = torch.zeros(
             hidden_size, dtype=torch.bfloat16)
 
-        # Feed-forward (with biases as shown in the example)
         weights[f"{layer_prefix}.mlp.fc1.weight"] = torch.randn(
             intermediate_size, hidden_size, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.mlp.fc1.bias"] = torch.zeros(
@@ -428,7 +416,6 @@ def create_vision_model_weights(
         weights[f"{layer_prefix}.mlp.fc2.bias"] = torch.zeros(
             hidden_size, dtype=torch.bfloat16)
 
-        # Layer norms (input_layernorm and post_attention_layernorm as shown in example)
         weights[f"{layer_prefix}.input_layernorm.weight"] = torch.ones(
             hidden_size, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.input_layernorm.bias"] = torch.zeros(
@@ -443,9 +430,9 @@ def create_vision_model_weights(
 
 
 def create_shared_weights(
-        text_config: Dict[str, Any],
-        vision_config: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-    """Create weights for shared components (vision-language connector, etc.)."""
+        text_config: dict[str, Any],
+        vision_config: dict[str, Any]) -> dict[str, torch.Tensor]:
+    """Create weights for shared components (vision-language connector)"""
 
     weights = {}
 
@@ -459,7 +446,7 @@ def create_shared_weights(
     return weights
 
 
-def save_weights_to_safetensors(weights: Dict[str, torch.Tensor],
+def save_weights_to_safetensors(weights: dict[str, torch.Tensor],
                                 output_path: Path) -> None:
     """Save weights to safetensors files and create index."""
 
@@ -492,14 +479,14 @@ def save_weights_to_safetensors(weights: Dict[str, torch.Tensor],
         # Single file
         filename = "model.safetensors"
         save_file(shards[0], output_path / filename)
-        weight_map = {name: filename for name in shards[0].keys()}
+        weight_map = {name: filename for name in shards[0]}
         print(f"Saved weights to single file: {filename}")
     else:
         # Multiple shards
         for i, shard in enumerate(shards):
             filename = f"model-{i+1:05d}-of-{len(shards):05d}.safetensors"
             save_file(shard, output_path / filename)
-            for name in shard.keys():
+            for name in shard:
                 weight_map[name] = filename
             print(f"Saved shard {i+1}/{len(shards)}: {filename}")
 
@@ -518,9 +505,8 @@ def save_weights_to_safetensors(weights: Dict[str, torch.Tensor],
         json.dump(index_data, f, indent=2)
 
     print(f"Created index file: {index_path}")
-    print(
-        f"Total model size: {index_data['metadata']['total_size'] / (1024**3):.2f} GB"
-    )
+    print(f"Total model size: "
+          f"{index_data['metadata']['total_size'] / (1024**3):.2f} GB")
 
 
 def test_reduced_model(model_path: str) -> None:
@@ -554,9 +540,8 @@ def test_reduced_model(model_path: str) -> None:
         print("Test generation successful!")
         for output in outputs:
             print(f"Prompt: {output.prompt}")
-            print(
-                f"Output (expected to be empty with random tensor): {output.outputs[0].text}"
-            )
+            print(f"Output (expected to be empty with random tensor): "
+                  f"{output.outputs[0].text}")
             print("-" * 40)
 
     except Exception as e:
