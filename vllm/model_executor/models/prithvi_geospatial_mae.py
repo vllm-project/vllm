@@ -77,9 +77,10 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
-            pixel_values=MultiModalFieldConfig.batched("image"),
-            location_coords=MultiModalFieldConfig.batched("image"),
-        )
+            pixel_values=MultiModalFieldConfig.shared(batch_size=1,
+                                                      modality="image"),
+            location_coords=MultiModalFieldConfig.shared(batch_size=1,
+                                                         modality="image"))
 
     def _get_prompt_updates(
         self,

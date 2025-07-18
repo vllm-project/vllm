@@ -102,14 +102,14 @@ class AsyncLLM(EngineClient):
             custom_stat_loggers=stat_loggers,
         )
 
-        if not self.model_config.skip_tokenizer_init:
+        if self.model_config.skip_tokenizer_init:
+            self.tokenizer = None
+        else:
             # Tokenizer (+ ensure liveness if running in another process).
             self.tokenizer = init_tokenizer_from_configs(
                 model_config=vllm_config.model_config,
                 scheduler_config=vllm_config.scheduler_config,
                 lora_config=vllm_config.lora_config)
-        else:
-            self.tokenizer = None
 
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(
