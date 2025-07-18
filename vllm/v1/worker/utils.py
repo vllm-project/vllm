@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
+from vllm._custom_ops import copy_blocks_between_layers
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
@@ -197,42 +198,36 @@ def copy_kv_cache_for_layers(
     # Get the corresponding slot mappings for the positions
     slots = slot_mapping[positions]
 
-    # Copy KV cache values from source layers to target layers
+    # Prepare source and destination key/value caches
+    src_key_caches = []
+    src_value_caches = []
+    dst_key_caches = []
+    dst_value_caches = []
+
+    # Collect all valid source-target layer pairs
     for target_layer, source_layer in kv_sharing_layers_mapping.items():
         if target_layer not in kv_caches or source_layer not in kv_caches:
             continue
 
-        target_kv_cache = kv_caches[target_layer]
-        source_kv_cache = kv_caches[source_layer]
+        src_key_caches.append(kv_caches[source_layer][0])
+        src_value_caches.append(kv_caches[source_layer][1])
+        dst_key_caches.append(kv_caches[target_layer][0])
+        dst_value_caches.append(kv_caches[target_layer][1])
 
-        block_size = source_kv_cache.shape[2]
+    if not src_key_caches:  # No valid pairs to copy
+        return
 
-        kv_dim = 2
-        # Process in smaller batches to reduce memory overhead
-        batch_size = 8192
-        num_positions = positions.size(0)
+    # Prepare block mapping tensor
+    block_size = src_key_caches[0].shape[1]
+    block_indices = torch.unique_consecutive(slots // block_size)
 
-        for start_idx in range(0, num_positions, batch_size):
-            end_idx = min(start_idx + batch_size, num_positions)
+    # Create block mapping tensor with shape (num_positions, 2)
+    # Each row contains [source_block_idx, destination_block_idx]
+    block_mapping = torch.stack([block_indices, block_indices], dim=1)
 
-            # Get batch of slots
-            batch_slots = slots[start_idx:end_idx]
-            batch_block_indices = batch_slots // block_size
-            batch_block_offsets = batch_slots % block_size
+    # Use the optimized CUDA kernel to copy blocks between caches
+    copy_blocks_between_layers(src_key_caches, src_value_caches,
+                               dst_key_caches, dst_value_caches, block_mapping)
 
-            # Create batch-sized indexing tensors
-            batch_block_indices_expanded = batch_block_indices.view(
-                1, -1, 1, 1, 1)
-            batch_block_offsets_expanded = batch_block_offsets.view(
-                1, 1, -1, 1, 1)
-
-            # Copy values for this batch
-            for kv_idx in range(kv_dim):
-                target_kv_cache[
-                    kv_idx,
-                    batch_block_indices_expanded.squeeze(),
-                    batch_block_offsets_expanded.squeeze(), :, :] = (
-                        source_kv_cache[
-                            kv_idx,
-                            batch_block_indices_expanded.squeeze(),
-                            batch_block_offsets_expanded.squeeze(), :, :])
+    current_stream = torch.cuda.current_stream()
+    current_stream.synchronize()
