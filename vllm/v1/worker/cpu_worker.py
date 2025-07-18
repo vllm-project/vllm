@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import json
 import os
-import platform
-import subprocess
-from dataclasses import dataclass
 from typing import Optional
 
 import torch
@@ -15,6 +11,7 @@ from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms.cpu import CpuPlatform, LogicalCPUInfo
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
@@ -127,51 +124,12 @@ class CPUWorker(Worker):
             cpu_num_per_core: max number of CPUs to be used per physical core. 
         """
 
-        @dataclass
-        class LogicalCPUInfo:
-            id: int = -1
-            physical_core: int = -1
-            numa_node: int = -1
-
-            @staticmethod
-            def json_decoder(obj_dict: dict):
-                id = obj_dict.get("cpu")
-                physical_core = obj_dict.get("core")
-                numa_node = obj_dict.get("node")
-
-                if not (id is None or physical_core is None
-                        or numa_node is None):
-                    return LogicalCPUInfo(id=int(id),
-                                          physical_core=int(physical_core),
-                                          numa_node=int(numa_node))
-                else:
-                    return obj_dict
-
-        assert platform.system() == "Linux"
-
-        # Init LogicalCPUInfo from lscpu
-        lscpu_output = subprocess.check_output("lscpu -J -e=CPU,CORE,NODE",
-                                               shell=True,
-                                               text=True)
-        logical_cpu_list: list[LogicalCPUInfo] = json.loads(
-            lscpu_output, object_hook=LogicalCPUInfo.json_decoder)['cpus']
-
-        # Filter allowed CPUs
-        allowed_cpu_id_list = os.sched_getaffinity(0)
-        logical_cpu_list = [
-            x for x in logical_cpu_list if x.id in allowed_cpu_id_list
-        ]
-
-        # Get allowed NUMA nodes
-        allowed_numa_nodes = set()
-        for x in logical_cpu_list:
-            allowed_numa_nodes.add(x.numa_node)  # type: ignore
-        allowed_numa_nodes = sorted(allowed_numa_nodes)  # type: ignore
+        allowed_numa_nodes, logical_cpu_list = \
+            CpuPlatform.get_allowed_cpu_memory_node_list()
         assert len(allowed_numa_nodes) >= self.parallel_config.world_size, (
             f"No enough allowed NUMA nodes to bind threads of "
             f"{self.parallel_config.world_size} CPUWorkers. "
             f"Allowed NUMA nodes are {allowed_numa_nodes}. "
-            f"Allowed CPU ids are {allowed_cpu_id_list}. "
             "Please try to bind threads manually.")
 
         # Get CPUs on NUMA node `allowed_numa_nodes[local_rank]``

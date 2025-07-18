@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import os
 import platform
+import subprocess
 import sys
+from dataclasses import dataclass
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Optional
 
@@ -29,6 +32,26 @@ def get_max_threads(pid=0):
         return os.cpu_count()
     else:
         raise NotImplementedError("Unsupported OS")
+
+
+@dataclass
+class LogicalCPUInfo:
+    id: int = -1
+    physical_core: int = -1
+    numa_node: int = -1
+
+    @staticmethod
+    def json_decoder(obj_dict: dict):
+        id = obj_dict.get("cpu")
+        physical_core = obj_dict.get("core")
+        numa_node = obj_dict.get("node")
+
+        if not (id is None or physical_core is None or numa_node is None):
+            return LogicalCPUInfo(id=int(id),
+                                  physical_core=int(physical_core),
+                                  numa_node=int(numa_node))
+        else:
+            return obj_dict
 
 
 class CpuPlatform(Platform):
@@ -239,6 +262,32 @@ class CpuPlatform(Platform):
             vllm_config.scheduler_config.max_num_batched_tokens = max(
                 vllm_config.scheduler_config.max_model_len,
                 DEFAULT_MAX_NUM_BATCHED_TOKENS)
+
+    @classmethod
+    def get_allowed_cpu_memory_node_list(
+            cls) -> tuple[list[int], list[LogicalCPUInfo]]:
+        assert platform.system() == "Linux"
+
+        # Init LogicalCPUInfo from lscpu
+        lscpu_output = subprocess.check_output("lscpu -J -e=CPU,CORE,NODE",
+                                               shell=True,
+                                               text=True)
+        logical_cpu_list: list[LogicalCPUInfo] = json.loads(
+            lscpu_output, object_hook=LogicalCPUInfo.json_decoder)['cpus']
+
+        # Filter allowed CPUs
+        allowed_cpu_id_list = os.sched_getaffinity(0)
+        logical_cpu_list = [
+            x for x in logical_cpu_list if x.id in allowed_cpu_id_list
+        ]
+
+        # Get allowed NUMA nodes
+        allowed_numa_nodes = set()
+        for x in logical_cpu_list:
+            allowed_numa_nodes.add(x.numa_node)  # type: ignore
+        allowed_numa_nodes = sorted(allowed_numa_nodes)  # type: ignore
+
+        return allowed_numa_nodes, logical_cpu_list
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
