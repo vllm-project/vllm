@@ -19,8 +19,11 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
-                                              CommonAttentionMetadata)
+                                              CommonAttentionMetadata,
+                                              reorder_batch_to_split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.worker.gpu_input_batch import InputBatch
 
 logger = init_logger(__name__)
 
@@ -74,6 +77,12 @@ class TritonAttentionMetadataBuilder(
 
         self.attention_chunk_size = getattr(vllm_config.scheduler_config,
                                             'attention_chunk_size', None)
+
+    def reorder_batch(self, input_batch: InputBatch,
+                      scheduler_output: SchedulerOutput) -> bool:
+        return reorder_batch_to_split_decodes_and_prefills(input_batch,
+                                                           scheduler_output,
+                                                           decode_threshold=1)
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
