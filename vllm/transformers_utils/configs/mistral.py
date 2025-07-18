@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, WhisperConfig
 
 from vllm.logger import init_logger
 
@@ -24,9 +24,21 @@ def adapt_config_dict(config_dict: dict[str, Any],
 
     if bool(config_dict.get("yarn")):
         config_dict = _remap_mistral_yarn_args(config_dict)
-    if bool((config_dict.get("multimodal") or {}).get("vision_encoder_args")
-            or config_dict.get("vision_encoder")):
+
+    is_vision = ((config_dict.get("multimodal")
+                  or {}).get("vision_encoder_args")
+                 or config_dict.get("vision_encoder"))
+    is_audio = bool(
+        ((config_dict.get("multimodal") or {}).get("whisper_model_args")
+         or {}).get("encoder_args"))
+
+    assert not (is_vision and is_audio), \
+        "Vision and audio are mutually exclusive"
+
+    if is_vision:
         config_dict = _remap_mistral_vision_args(config_dict)
+    if is_audio:
+        config_dict = _remap_mistral_audio_args(config_dict)
 
     config = PretrainedConfig.from_dict(config_dict)
 
@@ -117,4 +129,36 @@ def _remap_mistral_quantization_args(config: dict) -> dict:
 
     config["quantization_config"] = quantization_config
 
+    return config
+
+
+def _remap_mistral_audio_args(config: dict) -> dict:
+    whisper_args = config["multimodal"].pop("whisper_model_args")
+    encoder_args = whisper_args["encoder_args"]
+    downsample_args = whisper_args["downsample_args"]
+
+    quant_config = config.get("quantization_config")
+    config = {
+        "model_type":
+        "whixtral",
+        "architectures": ["VoxtralForConditionalGeneration"],
+        "text_config":
+        PretrainedConfig.from_dict(config),
+        "audio_config":
+        WhisperConfig(
+            num_mel_bins=encoder_args["audio_encoding_args"]["num_mel_bins"],
+            window_size=encoder_args["audio_encoding_args"]["window_size"],
+            sampling_rate=encoder_args["audio_encoding_args"]["sampling_rate"],
+            hop_length=encoder_args["audio_encoding_args"]["hop_length"],
+            downsample_factor=downsample_args["downsample_factor"],
+            d_model=encoder_args["dim"],
+            encoder_layers=encoder_args["n_layers"],
+            encoder_ffn_dim=encoder_args["hidden_dim"],
+            encoder_attention_heads=encoder_args["n_heads"],
+            vocab_size=encoder_args["vocab_size"],
+            max_source_positions=encoder_args["max_source_positions"],
+        )
+    }
+    if quant_config:
+        config["quantization_config"] = quant_config
     return config

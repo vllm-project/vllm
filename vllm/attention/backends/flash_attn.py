@@ -622,7 +622,8 @@ class FlashAttentionImpl(AttentionImpl):
         use_irope: bool = False,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
-            raise NotImplementedError("KV sharing is not supported in V0.")
+            raise NotImplementedError("KV sharing is not supported in V0 "
+                                      "FLASH_ATTN backend.")
         if blocksparse_params is not None:
             raise ValueError(
                 "FlashAttention does not support block-sparse attention.")

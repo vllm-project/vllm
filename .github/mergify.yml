@@ -86,8 +86,6 @@ pull_request_rules:
     - and:
       - files~=^vllm/model_executor/models/
       - files=vllm/model_executor/models/registry.py
-      - files=tests/models/registry.py
-      - files=docs/models/supported_models.md
   actions:
     label:
       add:

@@ -56,6 +56,13 @@ class TpuPlatform(Platform):
         return "vllm.v1.attention.backends.pallas.PallasAttentionBackend"
 
     @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.tpu.set_device(device)
+
+    @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         chip_type, _ = device.get_local_chips()
         return f"TPU {chip_type.name}"
@@ -109,11 +116,13 @@ class TpuPlatform(Platform):
         assert vllm_config.speculative_config is None, \
             "TPU does not support speculative decoding"
 
-        if vllm_config.model_config.dtype in (torch.float16, torch.float32):
+        model_config = vllm_config.model_config
+        if model_config is not None and model_config.dtype in (torch.float16,
+                                                               torch.float32):
             logger.warning(
                 "The TPU backend currently does not support %s. "
-                "Using bfloat16 instead.", vllm_config.model_config.dtype)
-            vllm_config.model_config.dtype = torch.bfloat16
+                "Using bfloat16 instead.", model_config.dtype)
+            model_config.dtype = torch.bfloat16
 
         from vllm.v1.attention.backends.pallas import PallasAttentionBackend
         cache_config.block_size = PallasAttentionBackend.get_page_size(
@@ -139,7 +148,7 @@ class TpuPlatform(Platform):
             "Forcing --disable_chunked_mm_input.")
             scheduler_config.disable_chunked_mm_input = True
 
-        if vllm_config.model_config and vllm_config.model_config.use_mla:
+        if model_config and model_config.use_mla:
             logger.info(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled.")

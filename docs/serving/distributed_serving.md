@@ -1,7 +1,4 @@
----
-title: Distributed Inference and Serving
----
-[](){ #distributed-serving }
+# Distributed Inference and Serving
 
 ## How to decide the distributed inference strategy?
 
@@ -17,6 +14,10 @@ After adding enough GPUs and nodes to hold the model, you can run vLLM first, wh
 
 !!! note
     There is one edge case: if the model fits in a single node with multiple GPUs, but the number of GPUs cannot divide the model size evenly, you can use pipeline parallelism, which splits the model along layers and supports uneven splits. In this case, the tensor parallel size should be 1 and the pipeline parallel size should be the number of GPUs.
+
+### Distributed serving of MoE (Mixture of Experts) models
+
+It is often advantageous to exploit the inherent parallelism of experts by using a separate parallelism strategy for the expert layers. vLLM supports large-scale deployment combining Data Parallel attention with Expert or Tensor Parallel MoE layers. See the page on [Data Parallel Deployment](data_parallel_deployment.md) for more information.
 
 ## Running vLLM on a single node
 
