@@ -501,7 +501,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         use_irope: bool = False,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
-            raise NotImplementedError("KV sharing is not supported in V0.")
+            raise NotImplementedError("KV sharing is not supported in V0 "
+                                      "ROCM_FLASH backend.")
         if use_irope:
             logger.warning_once(
                 "Using irope in ROCm Flash Attention is not supported yet, it "

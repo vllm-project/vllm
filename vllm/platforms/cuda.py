@@ -99,7 +99,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        if enforce_eager:
+        if enforce_eager and not envs.VLLM_USE_V1:
             logger.warning(
                 "To see benefits of async output processing, enable CUDA "
                 "graph. Since, enforce-eager is enabled, async output "
@@ -165,6 +165,13 @@ class CudaPlatformBase(Platform):
                 cache_config.block_size = 64
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLA backend.")
+
+            use_cutlass_mla = (envs.VLLM_ATTENTION_BACKEND is not None \
+                and envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA_VLLM_V1")
+            if use_cutlass_mla and cache_config.block_size != 128:
+                cache_config.block_size = 128
+                logger.info("Forcing kv cache block size to 128 for "
+                            "CUTLASS_MLA_VLLM_V1 backend.")
 
         compilation_config = vllm_config.compilation_config
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
@@ -259,43 +266,56 @@ class CudaPlatformBase(Platform):
                 logger.info_once("Using Flash Attention backend on V1 engine.")
                 return FLASH_ATTN_V1
 
-            from vllm.attention.selector import supports_head_size
+            from vllm.attention.selector import is_attn_backend_supported
 
             # Default backends for V1 engine
-            # FP32 is only supported by FlexAttention
-            if dtype not in (torch.float16, torch.bfloat16):
-                logger.info_once(
-                    "Using FlexAttention backend for %s on V1 engine.",
-                    dtype,
-                )
-                return FLEX_ATTENTION_V1
-
             # Prefer FlashInfer for Blackwell GPUs if installed
-            if cls.is_device_capability(100) and \
-                supports_head_size(FLASHINFER_V1, head_size):
-                try:
-                    import flashinfer  # noqa: F401
-
+            if cls.is_device_capability(100):
+                if is_default_backend_supported := is_attn_backend_supported(
+                        FLASHINFER_V1, head_size, dtype):
                     from vllm.v1.attention.backends.utils import (
                         set_kv_cache_layout)
+
                     logger.info_once(
                         "Using FlashInfer backend with HND KV cache layout on "
                         "V1 engine by default for Blackwell (SM 10.0) GPUs.")
                     set_kv_cache_layout("HND")
+
                     return FLASHINFER_V1
-                except ImportError:
-                    logger.info_once(
+
+                if not is_default_backend_supported.can_import:
+                    logger.warning_once(
                         "FlashInfer failed to import for V1 engine on "
                         "Blackwell (SM 10.0) GPUs; it is recommended to "
                         "install FlashInfer for better performance.")
-                    pass
-            # FlashAttention is the default for SM 8.0+ GPUs
-            if cls.has_device_capability(80) and \
-                supports_head_size(FLASH_ATTN_V1, head_size):
-                logger.info_once("Using Flash Attention backend on V1 engine.")
-                return FLASH_ATTN_V1
 
-            logger.info_once("Using FlexAttention backend on V1 engine.")
+            # FlashAttention is the default for SM 8.0+ GPUs
+            if cls.has_device_capability(80):
+                if is_default_backend_supported := is_attn_backend_supported(
+                        FLASH_ATTN_V1, head_size, dtype,
+                        allow_import_error=False):
+                    logger.info_once("Using Flash Attention backend on "
+                                     "V1 engine.")
+                    return FLASH_ATTN_V1
+
+            # FlexAttention is the default for older GPUs
+            else:
+                logger.info_once("Using FlexAttention backend on V1 engine.")
+                return FLEX_ATTENTION_V1
+
+            assert not is_default_backend_supported
+
+            use_flex_attention_reason = {}
+            if not is_default_backend_supported.head_size:
+                use_flex_attention_reason["head_size"] = head_size
+            if not is_default_backend_supported.dtype:
+                use_flex_attention_reason["dtype"] = dtype
+
+            logger.info_once(
+                "Using FlexAttention backend for %s on V1 engine.",
+                ", ".join(f"{k}={v}"
+                          for k, v in use_flex_attention_reason.items()),
+            )
             return FLEX_ATTENTION_V1
 
         # Backends for V0 engine
@@ -316,6 +336,10 @@ class CudaPlatformBase(Platform):
             logger.info("Using DualChunkFlashAttention backend.")
             return ("vllm.attention.backends.dual_chunk_flash_attn."
                     "DualChunkFlashAttentionBackend")
+        elif selected_backend == _Backend.DIFFERENTIAL_FLASH_ATTN:
+            logger.info("Using DifferentialFlashAttention backend.")
+            return ("vllm.attention.backends.differential_flash_attn."
+                    "DifferentialFlashAttentionBackend")
         elif selected_backend == _Backend.FLASH_ATTN:
             pass
         elif selected_backend:

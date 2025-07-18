@@ -139,7 +139,13 @@ class EngineCore:
 
         # Profiles the peak memory usage of the model to determine how much
         # memory can be allocated for kv cache.
-        available_gpu_memory = self.model_executor.determine_available_memory()
+        has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
+        if has_kv_cache:
+            available_gpu_memory = \
+                self.model_executor.determine_available_memory()
+        else:
+            # Attention free models don't need memory for kv cache
+            available_gpu_memory = [0] * len(kv_cache_specs)
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
         # Get the kv cache tensor size
@@ -175,6 +181,12 @@ class EngineCore:
 
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
+        if pooling_params := request.pooling_params:
+            supported_pooling_tasks = (
+                self.model_executor.supported_pooling_tasks)
+            if pooling_params.task not in supported_pooling_tasks:
+                raise ValueError(f"Unsupported task: {pooling_params.task!r} "
+                                 f"Supported tasks: {supported_pooling_tasks}")
 
         if request.mm_hashes is not None:
             # Here, if hash exists for a multimodal input, then it will be

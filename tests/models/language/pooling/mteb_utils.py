@@ -268,7 +268,8 @@ def mteb_test_rerank_models(hf_runner,
                             model_info: RerankModelInfo,
                             vllm_extra_kwargs=None,
                             hf_model_callback=None,
-                            vllm_mteb_encoder=VllmMtebEncoder):
+                            vllm_mteb_encoder=VllmMtebEncoder,
+                            atol=MTEB_RERANK_TOL):
     if not model_info.enable_test:
         # A model family has many models with the same architecture,
         # and we don't need to test each one.
@@ -301,4 +302,4 @@ def mteb_test_rerank_models(hf_runner,
     print("SentenceTransformers:", st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
 
-    assert st_main_score == pytest.approx(vllm_main_score, abs=MTEB_RERANK_TOL)
+    assert st_main_score == pytest.approx(vllm_main_score, abs=atol)

@@ -12,7 +12,7 @@ import sys
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Set
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from typing import Callable, Optional, TypeVar, Union
 
@@ -41,6 +41,7 @@ _TEXT_GENERATION_MODELS = {
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),
     # baichuan-13b, lower case 'c' in the class name
     "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),
+    "BailingMoeForCausalLM": ("bailing_moe", "BailingMoeForCausalLM"),
     "BambaForCausalLM": ("bamba", "BambaForCausalLM"),
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
@@ -110,6 +111,7 @@ _TEXT_GENERATION_MODELS = {
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "Phi3SmallForCausalLM": ("phi3_small", "Phi3SmallForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
+    "Phi4FlashForCausalLM": ("phi4flash", "Phi4FlashForCausalLM"),
     "Plamo2ForCausalLM": ("plamo2", "Plamo2ForCausalLM"),
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
@@ -179,10 +181,7 @@ _CROSS_ENCODER_MODELS = {
     "ModernBertForSequenceClassification": ("modernbert",
                                             "ModernBertForSequenceClassification"),
     # [Auto-converted (see adapters.py)]
-    "GemmaForSequenceClassification": ("gemma", "GemmaForSequenceClassification"), # noqa: E501
-    "Qwen2ForSequenceClassification": ("qwen2", "Qwen2ForSequenceClassification"), # noqa: E501
-    "Qwen3ForSequenceClassification": ("qwen3", "Qwen3ForSequenceClassification"), # noqa: E501
-    "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"), # noqa: E501
+    "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"), # noqa: E501,
 }
 
 _MULTIMODAL_MODELS = {
@@ -203,6 +202,7 @@ _MULTIMODAL_MODELS = {
     "SmolVLMForConditionalGeneration": ("smolvlm","SmolVLMForConditionalGeneration"),  # noqa: E501
     "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
+    "Llama_Nemotron_Nano_VL": ("nemotron_vl", "LlamaNemotronVLChatModel"),
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "LlavaNextVideoForConditionalGeneration": ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),  # noqa: E501
@@ -228,6 +228,7 @@ _MULTIMODAL_MODELS = {
     "Phi4MMForCausalLM": ("phi4mm", "Phi4MMForCausalLM"),
     "TarsierForConditionalGeneration": ("tarsier", "TarsierForConditionalGeneration"),  # noqa: E501
     "Tarsier2ForConditionalGeneration": ("qwen2_vl", "Tarsier2ForConditionalGeneration"),  # noqa: E501
+    "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
     # [Encoder-decoder]
     "Florence2ForConditionalGeneration": ("florence2", "Florence2ForConditionalGeneration"),  # noqa: E501
     "MllamaForConditionalGeneration": ("mllama", "MllamaForConditionalGeneration"),  # noqa: E501
@@ -240,6 +241,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "MiMoMTPModel": ("mimo_mtp", "MiMoMTP"),
     "EAGLEModel": ("eagle", "EAGLE"),
     "EagleLlamaForCausalLM": ("llama_eagle", "EagleLlamaForCausalLM"),
+    "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
@@ -283,6 +285,7 @@ class _ModelInfo:
     is_hybrid: bool
     has_noops: bool
     supports_transcription: bool
+    supports_transcription_only: bool
     supports_v0_only: bool
 
     @staticmethod
@@ -298,6 +301,8 @@ class _ModelInfo:
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
             supports_transcription=supports_transcription(model),
+            supports_transcription_only=(supports_transcription(model) and
+                                         model.supports_transcription_only),
             supports_v0_only=supports_v0_only(model),
             has_noops=has_noops(model),
         )
@@ -453,10 +458,26 @@ class _ModelRegistry:
         return _try_load_model_cls(model_arch, self.models[model_arch])
 
     def _try_inspect_model_cls(self, model_arch: str) -> Optional[_ModelInfo]:
-        if model_arch not in self.models:
-            return None
+        if model_arch in self.models:
+            return _try_inspect_model_cls(model_arch, self.models[model_arch])
 
-        return _try_inspect_model_cls(model_arch, self.models[model_arch])
+        if model_arch.endswith("ForSequenceClassification"):
+            causal_lm_arch = model_arch.replace("ForSequenceClassification",
+                                                "ForCausalLM")
+            if causal_lm_arch not in self.models:
+                return None
+
+            info = _try_inspect_model_cls(causal_lm_arch,
+                                          self.models[causal_lm_arch])
+
+            info = _ModelInfo(**dict(
+                asdict(info), **{
+                    "architecture": model_arch,
+                    "supports_cross_encoding": True
+                }))
+            return info
+
+        return None
 
     def _normalize_archs(
         self,
@@ -470,6 +491,15 @@ class _ModelRegistry:
         # filter out support architectures
         normalized_arch = list(
             filter(lambda model: model in self.models, architectures))
+
+        # try automatic conversion in adapters.py
+        for arch in architectures:
+            if not arch.endswith("ForSequenceClassification"):
+                continue
+            causal_lm_arch = arch.replace("ForSequenceClassification",
+                                          "ForCausalLM")
+            if causal_lm_arch in self.models:
+                normalized_arch.append(arch)
 
         # make sure Transformers backend is put at the last as a fallback
         if len(normalized_arch) != len(architectures):
@@ -571,6 +601,13 @@ class _ModelRegistry:
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.supports_transcription
+
+    def is_transcription_only_model(
+        self,
+        architectures: Union[str, list[str]],
+    ) -> bool:
+        model_cls, _ = self.inspect_model_cls(architectures)
+        return model_cls.supports_transcription_only
 
     def is_v1_compatible(
         self,

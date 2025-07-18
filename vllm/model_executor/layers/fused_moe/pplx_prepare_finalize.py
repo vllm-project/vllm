@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Any, Optional
 
 import pplx_kernels as pplx
 import torch
@@ -89,16 +89,12 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         return self.num_dispatchers_
 
     def prepare(
-        self,
-        a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        apply_router_weight_on_input: bool,
+        self, a1: torch.Tensor, a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor], topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor, num_experts: int,
+        expert_map: Optional[torch.Tensor], apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        extra_prepare_args: Optional[dict[str, Any]]
     ) -> tuple[torch.Tensor, Optional[torch.Tensor],
                Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
                Optional[torch.Tensor]]:
@@ -111,7 +107,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # topk_indices_dtype() int32
         #
         if expert_map is not None:
-            logger.warn_once(
+            logger.warning_once(
                 "The PPLX backend does not support expert mapping. "
                 "The provided `expert_map` will be ignored.")
         expert_map = None  #noqa: F841
@@ -204,7 +200,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             out_expert_x_scale=expert_x_scale,
             dp_x=a1q,
             dp_x_scale=a1q_scale,
-            indices=topk_ids,
+            indices=topk_ids.view(dtype=torch.uint32),
             bound_m=bound_m,
         )
 
@@ -217,15 +213,11 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         return expert_x, expert_x_scale, expert_tokens_meta, None, None
 
-    def finalize(
-        self,
-        output: torch.Tensor,
-        fused_expert_output: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        apply_router_weight_on_input: bool,
-        weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> None:
+    def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
+                 topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+                 apply_router_weight_on_input: bool,
+                 weight_and_reduce_impl: mk.TopKWeightAndReduce,
+                 extra_finalize_args: Optional[dict[str, Any]]) -> None:
         assert isinstance(
             weight_and_reduce_impl, TopKWeightAndReduceDelegate
         ), ("Weight application and reduction happens in the combine kernel.")
@@ -249,7 +241,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             topk_weights = torch.ones_like(topk_weights)
 
         self.a2a.combine(out_tokens=output,
-                         indices=topk_ids,
+                         indices=topk_ids.view(dtype=torch.uint32),
                          weights=topk_weights,
                          expert_y=fused_expert_output,
                          bound_m=bound_m)
