@@ -40,6 +40,14 @@ class LogicalCPUInfo:
     physical_core: int = -1
     numa_node: int = -1
 
+    @classmethod
+    def _int(cls, value: str) -> int:
+        try:
+            int_value = int(value)
+        except Exception:
+            int_value = -1
+        return int_value
+
     @staticmethod
     def json_decoder(obj_dict: dict):
         id = obj_dict.get("cpu")
@@ -47,9 +55,10 @@ class LogicalCPUInfo:
         numa_node = obj_dict.get("node")
 
         if not (id is None or physical_core is None or numa_node is None):
-            return LogicalCPUInfo(id=int(id),
-                                  physical_core=int(physical_core),
-                                  numa_node=int(numa_node))
+            return LogicalCPUInfo(
+                id=LogicalCPUInfo._int(id),
+                physical_core=LogicalCPUInfo._int(physical_core),
+                numa_node=LogicalCPUInfo._int(numa_node))
         else:
             return obj_dict
 
@@ -274,6 +283,12 @@ class CpuPlatform(Platform):
                                                text=True)
         logical_cpu_list: list[LogicalCPUInfo] = json.loads(
             lscpu_output, object_hook=LogicalCPUInfo.json_decoder)['cpus']
+
+        # Filter CPUs with invalid attributes
+        logical_cpu_list = [
+            x for x in logical_cpu_list
+            if -1 not in (x.id, x.physical_core, x.numa_node)
+        ]
 
         # Filter allowed CPUs
         allowed_cpu_id_list = os.sched_getaffinity(0)
