@@ -261,7 +261,7 @@ class Scheduler(SchedulerInterface):
                             no_schedule_running_reqs = [
                                 req for req in self.running
                                 if req not in scheduled_running_reqs_set
-                            ] 
+                            ]
                         preempted_req = max(
                             no_schedule_running_reqs,
                             key=lambda r: (r.priority, r.arrival_time),
