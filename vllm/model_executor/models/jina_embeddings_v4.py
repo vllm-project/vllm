@@ -50,6 +50,10 @@ class JinaVLPooler(Pooler):
         self.pooling_backend = pooling_backend
         self.observability_config = vllm_config.observability_config
 
+        # Pre-compute vision token IDs tensor for efficient checking
+        self.vision_token_ids = torch.tensor(
+            [VISION_START_TOKEN_ID, VISION_END_TOKEN_ID], dtype=torch.long)
+
         # Performance tracking
         self._pooling_time_ms = 0.0
         self._pooling_count = 0
@@ -64,10 +68,7 @@ class JinaVLPooler(Pooler):
 
     def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
         """Return pooling params for embedding task."""
-        if task == "embed":
-            return PoolingParams(logits_processing_needs_token_ids=True)
-
-        if task == "encode":
+        if task == "embed" or task == "encode":
             return PoolingParams(logits_processing_needs_token_ids=True)
 
         # The equalities are split up to keep mypy happy
@@ -206,8 +207,8 @@ class JinaVLPooler(Pooler):
                                  dtype=hidden_states.dtype)
 
             # Check for vision tokens
-            has_vision = torch.any((token_tensor >= VISION_START_TOKEN_ID)
-                                   & (token_tensor <= VISION_END_TOKEN_ID))
+            has_vision = torch.isin(token_tensor,
+                                    self.vision_token_ids.to(device)).any()
 
             if has_vision:
                 # Use Triton kernel for vision token extraction
@@ -258,8 +259,8 @@ class JinaVLPooler(Pooler):
                                       device=hidden_states.device)
 
             # Check for vision tokens
-            vision_mask = ((seq_tokens >= VISION_START_TOKEN_ID) &
-                           (seq_tokens <= VISION_END_TOKEN_ID))
+            vision_mask = torch.isin(
+                seq_tokens, self.vision_token_ids.to(seq_tokens.device))
 
             if vision_mask.any():
                 # Pool only vision tokens
