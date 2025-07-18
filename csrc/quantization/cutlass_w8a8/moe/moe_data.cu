@@ -118,6 +118,7 @@ void get_cutlass_moe_mm_data_caller(
   torch::Tensor atomic_buffer = torch::zeros(num_experts, options_int32);
 
   int num_threads = min(THREADS_PER_EXPERT, topk_ids.numel());
+
   if (topk_ids.numel() > SWAP_AB_THRESHOLD) {
     compute_problem_sizes<false><<<num_experts, num_threads, 0, stream>>>(
         static_cast<const int32_t*>(topk_ids.data_ptr()),
@@ -133,6 +134,7 @@ void get_cutlass_moe_mm_data_caller(
         static_cast<int32_t*>(atomic_buffer.data_ptr()), topk_ids.numel(), n,
         k);
   }
+
   if (blockscale_offsets.has_value()) {
     compute_expert_blockscale_offsets<<<1, 1, 0, stream>>>(
         static_cast<const int32_t*>(problem_sizes1.data_ptr()),

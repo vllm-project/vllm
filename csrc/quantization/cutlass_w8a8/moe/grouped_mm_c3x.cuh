@@ -11,6 +11,7 @@
 #include "get_group_starts.cuh"
 
 using namespace cute;
+
 namespace {
 
 using ProblemShape =
@@ -91,6 +92,7 @@ void cutlass_group_gemm_caller(
     torch::Tensor const& b_strides, torch::Tensor const& c_strides,
     bool per_act_token, bool per_out_ch) {
   static constexpr bool swap_ab = Gemm::swap_ab;
+
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
 
@@ -112,7 +114,6 @@ void cutlass_group_gemm_caller(
                             out_tensors, a_scales, b_scales);
 
   using GemmKernel = typename Gemm::GemmKernel;
-
   using StrideA = Stride<int64_t, Int<1>, Int<0>>;
   using StrideB = Stride<int64_t, Int<1>, Int<0>>;
   using StrideC = typename GemmKernel::InternalStrideC;
