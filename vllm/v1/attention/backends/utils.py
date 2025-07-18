@@ -4,8 +4,7 @@ import abc
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, ClassVar, Generic, Optional, TypeAlias,
-                    TypeVar)
+from typing import TYPE_CHECKING, ClassVar, Generic, Optional, TypeVar
 
 import numpy as np
 import torch
@@ -72,9 +71,6 @@ class UbatchSlice:
     token_slice: slice
 
 
-UBatchSlices: TypeAlias = list[UbatchSlice]
-
-
 def slice_query_start_locs(
     query_start_loc: torch.Tensor,
     request_slice: slice,
@@ -136,7 +132,7 @@ def _make_metadata_with_slice(
 
 
 def split_attn_metadata(
-    ubatch_slices: UBatchSlices,
+    ubatch_slices: list[UbatchSlice],
     common_attn_metadata: CommonAttentionMetadata,
 ) -> list[CommonAttentionMetadata]:
     """
