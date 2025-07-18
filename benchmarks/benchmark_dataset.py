@@ -312,7 +312,7 @@ class RandomDataset(BenchmarkDataset):
 
         vocab_size = tokenizer.vocab_size
         num_special_tokens = tokenizer.num_special_tokens_to_add()
-        real_input_len = input_len - num_special_tokens
+        real_input_len = input_len - num_special_tokens - prefix_len
 
         prefix_token_ids = (
             np.random.randint(0, vocab_size, size=prefix_len).tolist()
