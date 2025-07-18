@@ -10,11 +10,11 @@ from vllm.entrypoints.openai.protocol import FunctionCall, ToolCall
 from vllm.entrypoints.openai.tool_parsers import Glm4MoeModelToolParser
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
+pytest.skip("skip glm4_moe parser test", allow_module_level=True)
 # Use a common model that is likely to be available
 MODEL = "THUDM/GLM-4-MoE"
 
 
-@pytest.mark.skip(reason="Temporarily disabled due to Model is not release")
 @pytest.fixture(scope="module")
 def glm4_moe_tokenizer():
     return get_tokenizer(tokenizer_name=MODEL)
