@@ -129,10 +129,9 @@ class NixlConnector(KVConnectorBase_V1):
             # as the layout should not matter in that case,
             # which fallback to the default behavior.
             return None
-        else:
-            logger.info_once("NixlConnector detected. Setting KV cache " \
-                             "layout to HND for better xfer performance.")
-            return "HND"
+        logger.info_once("NixlConnector detected. Setting KV cache " \
+                         "layout to HND for better xfer performance.")
+        return "HND"
 
     ############################################################
     # Scheduler Side Methods
