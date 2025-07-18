@@ -2,17 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from array import array
+from typing import Optional
 
 import torch
-import torch.nn as nn
+from typing_extensions import assert_never
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import PoolerHead, PoolerNormalize
+from vllm.model_executor.layers.pooler import (Pooler, PoolerHead,
+                                               PoolerNormalize, build_output)
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
-from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
+from vllm.pooling_params import PoolingParams, PoolingTask
+from vllm.sequence import PoolerOutput
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from .interfaces import SupportsV0Only
@@ -20,7 +23,7 @@ from .interfaces import SupportsV0Only
 logger = init_logger(__name__)
 
 
-class GritLMPooler(nn.Module):
+class GritLMPooler(Pooler):
 
     def __init__(self, model_config: ModelConfig):
         super().__init__()
@@ -116,6 +119,16 @@ class GritLMPooler(nn.Module):
 
         return instruction_len
 
+    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+        # The equalities are split up to keep mypy happy
+        if task == "encode" or task == "embed":
+            return PoolingParams()
+
+        if task == "classify" or task == "score":
+            return None
+
+        assert_never(task)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -169,11 +182,7 @@ class GritLMPooler(nn.Module):
         pooled_data = self.head(mean_embeddings,
                                 pooling_metadata=pooling_metadata)
 
-        pooled_outputs = [
-            PoolingSequenceGroupOutput(data) for data in pooled_data
-        ]
-
-        return PoolerOutput(outputs=pooled_outputs)
+        return build_output(pooled_data)
 
 
 class GritLM(LlamaForCausalLM, SupportsV0Only):
