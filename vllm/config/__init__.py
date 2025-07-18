@@ -3359,6 +3359,12 @@ class ReasoningConfig:
     """Token ID that indicates the start of reasoning."""
     think_end_token_ids: Optional[int] = None
     """Token ID that indicates the end of reasoning."""
+    low_effort_token_budget: Optional[int] = 1024
+    """Token budget for low effort reasoning."""
+    medium_effort_token_budget: Optional[int] = 2048
+    """Token budget for medium effort reasoning."""
+    high_effort_token_budget: Optional[int] = 8192
+    """Token budget for high effort reasoning."""
 
     def __init__(self,
                  think_start_str: Optional[str] = None,
