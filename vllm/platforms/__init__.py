@@ -187,6 +187,18 @@ def neuron_platform_plugin() -> Optional[str]:
     return "vllm.platforms.neuron.NeuronPlatform" if is_neuron else None
 
 
+def vulkan_platform_plugin() -> Optional[str]:
+    is_vulkan = False
+    logger.debug("Checking if Vulkan platform is available.")
+    try:
+        is_vulkan = True
+        logger.debug("Confirmed Vulkan platform is available.")
+    except Exception as e:
+        logger.debug("Vulkan platform is not available because: %s", str(e))
+
+    return "vllm.platforms.vulkan.VulkanPlatform" if is_vulkan else None
+
+
 builtin_platform_plugins = {
     'tpu': tpu_platform_plugin,
     'cuda': cuda_platform_plugin,
@@ -194,6 +206,7 @@ builtin_platform_plugins = {
     'xpu': xpu_platform_plugin,
     'cpu': cpu_platform_plugin,
     'neuron': neuron_platform_plugin,
+    'vulkan': vulkan_platform_plugin,
 }
 
 
@@ -237,7 +250,7 @@ def resolve_current_platform_cls_qualname() -> str:
     else:
         platform_cls_qualname = "vllm.platforms.interface.UnspecifiedPlatform"
         logger.info(
-            "No platform detected, vLLM is running on UnspecifiedPlatform")
+            f"No platform detected, vLLM is running on UnspecifiedPlatform, activated_builtin_plugins: {activated_builtin_plugins}, activated_oot_plugins: {activated_oot_plugins}")
     return platform_cls_qualname
 
 
