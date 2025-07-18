@@ -14,6 +14,7 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 MODEL = "THUDM/GLM-4-MoE"
 
 
+@pytest.mark.skip(reason="Temporarily disabled due to Model is not release")
 @pytest.fixture(scope="module")
 def glm4_moe_tokenizer():
     return get_tokenizer(tokenizer_name=MODEL)
