@@ -24,7 +24,8 @@ from vllm.lora.request import LoRARequest
 from vllm.utils import get_open_port, get_open_zmq_inproc_path, make_zmq_socket
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType,
-                            ReconfigureDistributedRequest, UtilityOutput)
+                            ReconfigureDistributedRequest, ReconfigureRankType,
+                            UtilityOutput)
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -163,10 +164,7 @@ class EngineCoreClient(ABC):
         running state."""
         raise NotImplementedError
 
-    async def scale_up_elastic_ep(self, new_data_parallel_size: int) -> None:
-        raise NotImplementedError
-
-    async def scale_down_elastic_ep(self, new_data_parallel_size: int) -> None:
+    async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
         raise NotImplementedError
 
     async def get_output_async(self) -> EngineCoreOutputs:
@@ -1087,18 +1085,32 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self._ensure_output_queue_task()
         return future
 
-    async def scale_up_elastic_ep(self, new_data_parallel_size: int) -> None:
-        """Scale up the data parallel size by creating new engine cores
+    async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
+        """Scale elastic EP data parallel size by creating new engine cores
         and reconfiguring existing ones."""
         cur_data_parallel_size = len(self.core_engines)
 
-        assert new_data_parallel_size > cur_data_parallel_size, (
-            f"new_data_parallel_size {new_data_parallel_size} must be greater "
-            f"than cur_data_parallel_size {cur_data_parallel_size} "
-            "for scale up")
+        assert new_data_parallel_size != cur_data_parallel_size, (
+            f"new_data_parallel_size {new_data_parallel_size} must be "
+            f"different from cur_data_parallel_size {cur_data_parallel_size}")
 
         assert self.vllm_config.parallel_config.data_parallel_backend == \
-            "ray", ("Only ray DP backend supports scale up")
+            "ray", ("Only ray DP backend supports scaling elastic EP")
+
+        scale_up = new_data_parallel_size > cur_data_parallel_size
+
+        if scale_up:
+            await self._scale_up_elastic_ep(cur_data_parallel_size,
+                                            new_data_parallel_size)
+        else:
+            await self._scale_down_elastic_ep(cur_data_parallel_size,
+                                              new_data_parallel_size)
+
+    async def _scale_up_elastic_ep(self, cur_data_parallel_size: int,
+                                   new_data_parallel_size: int) -> None:
+        """Scale up the data parallel size by creating new engine cores
+        and reconfiguring existing ones."""
+        cur_data_parallel_size = len(self.core_engines)
 
         # Phase 1: Send reconfigure messages to all existing engines and wait
         # for them to be sent
@@ -1108,8 +1120,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         for engine in self.core_engines:
             reconfig_request = ReconfigureDistributedRequest(
                 new_data_parallel_size=new_data_parallel_size,
-                new_data_parallel_rank=-1,  # Keep original rank
-                new_data_parallel_rank_local=-1,  # Keep original local rank
+                new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
+                new_data_parallel_rank_local=\
+                ReconfigureRankType.KEEP_CURRENT_RANK,
                 new_data_parallel_master_ip=self.vllm_config.parallel_config.
                 data_parallel_master_ip,
                 new_data_parallel_master_port=self.vllm_config.parallel_config.
@@ -1163,18 +1176,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             "[Elastic EP] Scale up completed, new data parallel size: %s",
             new_data_parallel_size)
 
-    async def scale_down_elastic_ep(self, new_data_parallel_size: int) -> None:
+    async def _scale_down_elastic_ep(self, cur_data_parallel_size: int,
+                                     new_data_parallel_size: int) -> None:
         """Scale down the data parallel size by shutting down and
         reconfiguring existing engine cores."""
         cur_data_parallel_size = len(self.core_engines)
-
-        assert new_data_parallel_size <= cur_data_parallel_size, (
-            f"new_data_parallel_size {new_data_parallel_size} must be less "
-            f"than cur_data_parallel_size {cur_data_parallel_size} "
-            "for scale down")
-
-        assert self.vllm_config.parallel_config.data_parallel_backend == \
-            "ray", ("Only ray DP backend supports scale down")
 
         self.vllm_config.parallel_config.data_parallel_master_port = \
             get_open_port()
@@ -1183,14 +1189,16 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         for cur_dp_rank, engine in enumerate(self.core_engines):
             reconfig_request = ReconfigureDistributedRequest(
                 new_data_parallel_size=new_data_parallel_size,
-                new_data_parallel_rank=-1,  # Keep original rank
-                new_data_parallel_rank_local=-1,  # Keep original local rank
+                new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
+                new_data_parallel_rank_local=\
+                ReconfigureRankType.KEEP_CURRENT_RANK,
                 new_data_parallel_master_ip=self.vllm_config.parallel_config.
                 data_parallel_master_ip,
                 new_data_parallel_master_port=self.vllm_config.parallel_config.
                 data_parallel_master_port)
             if cur_dp_rank >= new_data_parallel_size:
-                reconfig_request.new_data_parallel_rank = -2
+                reconfig_request.new_data_parallel_rank = \
+                ReconfigureRankType.SHUTDOWN_CURRENT_RANK
             future = await self._send_reconfig_message(reconfig_request,
                                                        engine)
             reconfig_futures.append(future)

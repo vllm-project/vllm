@@ -133,7 +133,6 @@ class AsyncLLM(EngineClient):
             for stat_logger in self.stat_loggers[0]:
                 stat_logger.log_engine_initialized()
         self.output_handler: Optional[asyncio.Task] = None
-        self.scaling = False
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
             asyncio.get_running_loop()
@@ -636,43 +635,36 @@ class AsyncLLM(EngineClient):
             drain_timeout:
                 Maximum time to wait for requests to drain (seconds)
         """
-        self.scaling = True
         old_data_parallel_size = \
             self.vllm_config.parallel_config.data_parallel_size
-        try:
-            logger.info(
-                "Waiting for requests to drain before "
-                "scaling up to %s engines...", new_data_parallel_size)
-            await self.wait_for_requests_to_drain(drain_timeout)
-            logger.info(
-                "Requests have been drained, proceeding with scale "
-                "to %s engines", new_data_parallel_size)
-            if new_data_parallel_size > old_data_parallel_size:
-                await self.engine_core.scale_up_elastic_ep(
-                    new_data_parallel_size)
-            else:
-                await self.engine_core.scale_down_elastic_ep(
-                    new_data_parallel_size)
-            self.vllm_config.parallel_config.data_parallel_size = \
-                new_data_parallel_size
+        if old_data_parallel_size == new_data_parallel_size:
+            logger.info("Data parallel size is already %s, skipping scale",
+                        new_data_parallel_size)
+            return
+        logger.info(
+            "Waiting for requests to drain before "
+            "scaling up to %s engines...", new_data_parallel_size)
+        await self.wait_for_requests_to_drain(drain_timeout)
+        logger.info(
+            "Requests have been drained, proceeding with scale "
+            "to %s engines", new_data_parallel_size)
+        await self.engine_core.scale_elastic_ep(new_data_parallel_size)
+        self.vllm_config.parallel_config.data_parallel_size = \
+            new_data_parallel_size
 
-            # recreate stat loggers
-            if new_data_parallel_size > old_data_parallel_size:
-                stat_loggers: list[
-                    list[StatLoggerBase]] = setup_default_loggers(
-                        vllm_config=self.vllm_config,
-                        log_stats=self.log_stats,
-                        engine_num=new_data_parallel_size,
-                        custom_stat_loggers=None,
-                    )
-                num_new_engines = len(stat_loggers) - len(self.stat_loggers)
-                self.stat_loggers.extend(stat_loggers[-num_new_engines:])
-            else:
-                for _ in range(old_data_parallel_size -
-                               new_data_parallel_size):
-                    self.stat_loggers.pop()
-        finally:
-            self.scaling = False
+        # recreate stat loggers
+        if new_data_parallel_size > old_data_parallel_size:
+            stat_loggers: list[list[StatLoggerBase]] = setup_default_loggers(
+                vllm_config=self.vllm_config,
+                log_stats=self.log_stats,
+                engine_num=new_data_parallel_size,
+                custom_stat_loggers=None,
+            )
+            num_new_engines = len(stat_loggers) - len(self.stat_loggers)
+            self.stat_loggers.extend(stat_loggers[-num_new_engines:])
+        else:
+            for _ in range(old_data_parallel_size - new_data_parallel_size):
+                self.stat_loggers.pop()
 
     @property
     def is_running(self) -> bool:
