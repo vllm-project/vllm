@@ -40,62 +40,22 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 
-def test_maverick_serving():
+def test_maverick_serving(model: str):
     """Test Llama-4-Maverick model with vLLM LLM class using CLI equivalent
-    options with reduced layers (4 text layers, 2 vision layers).
+    options with reduced layers
 
-    This test creates a reduced-layer version of the Maverick model by:
-    1. Loading the original model configuration
-    2. Creating a reduced configuration (4 text layers, 2 vision layers)
-    3. Generating compatible safetensors files with synthetic weights
-    4. Testing the reduced model with vLLM
     """
 
-    original_model = "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
-    reduced_model_dir = "/tmp/reduced_maverick_4t_2v"
-
-    print("Creating reduced Maverick model for testing...")
-    print(f"Original Model: {original_model}")
-    print(f"Reduced Model Directory: {reduced_model_dir}")
-
     try:
-        # Step 1: Create the reduced model
-        print("\n" + "=" * 60)
-        print("STEP 1: Creating reduced model with 4 text layers and 2 vision layers")
-        print("=" * 60)
-
-        model_path = create_reduced_maverick_model(
-            original_model_name=original_model,
-            output_dir=reduced_model_dir,
-            text_layers=4,
-            vision_layers=2,
-            force_recreate=True,  # Always recreate for testing
-        )
-
-        print(f"\nReduced model created successfully at: {model_path}")
-
-        # Step 2: Load and test the reduced model
-        print("\n" + "=" * 60)
-        print("STEP 2: Loading reduced model with vLLM")
-        print("=" * 60)
-
-        # Load the reduced config to verify layer counts
-        reduced_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        print(
-            f"Reduced model text layers: {reduced_config.text_config.num_hidden_layers}"
-        )
-        print(
-            f"Reduced model vision layers: {reduced_config.vision_config.num_hidden_layers}"
-        )
-
-        # Create an LLM with the reduced model
         llm = LLM(
-            model=model_path,
+            model=model,
             max_model_len=2048,  # Smaller context for testing
             enforce_eager=True,  # for faster testing
-            tensor_parallel_size=1,  # Use single GPU for reduced model
+            tensor_parallel_size=8,  # Use single GPU for reduced model
+            enable_expert_parallel=True,
             trust_remote_code=True,
             gpu_memory_utilization=0.4,  # Conservative memory usage
+            kv_cache_dtype="fp8",
         )
 
         # Print model configuration
@@ -115,7 +75,6 @@ def test_maverick_serving():
         print(f"Hidden Size: {model_config.get_hidden_size()}")
 
         # Print HuggingFace model cache path
-
         try:
             # Try to get the model path from HuggingFace cache
             hf_cache_dir = os.environ.get(
@@ -473,12 +432,14 @@ def create_text_model_weights(text_config: Dict[str, Any]) -> Dict[str, torch.Te
     vocab_size = text_config["vocab_size"]
     hidden_size = text_config["hidden_size"]
     intermediate_size = text_config["intermediate_size"]
+    intermediate_size_mlp = text_config["intermediate_size_mlp"]
     num_layers = text_config["num_hidden_layers"]
     num_attention_heads = text_config["num_attention_heads"]
     num_key_value_heads = text_config.get("num_key_value_heads", num_attention_heads)
 
     # MoE specific parameters
     num_experts = text_config.get("num_local_experts")
+    assert num_experts is not None, "num_local_experts must be specified for MoE"
     num_experts_per_tok = text_config.get("num_experts_per_tok")
 
     head_dim = hidden_size // num_attention_heads
@@ -495,16 +456,16 @@ def create_text_model_weights(text_config: Dict[str, Any]) -> Dict[str, torch.Te
 
         # Self-attention weights (separate q, k, v projections)
         weights[f"{layer_prefix}.self_attn.q_proj.weight"] = torch.randn(
-            num_attention_heads * head_dim, hidden_size, dtype=torch.float16
+            num_attention_heads * head_dim, hidden_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.self_attn.k_proj.weight"] = torch.randn(
-            num_key_value_heads * head_dim, hidden_size, dtype=torch.float16
+            num_key_value_heads * head_dim, hidden_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.self_attn.v_proj.weight"] = torch.randn(
-            num_key_value_heads * head_dim, hidden_size, dtype=torch.float16
+            num_key_value_heads * head_dim, hidden_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.self_attn.o_proj.weight"] = torch.randn(
-            hidden_size, num_attention_heads * head_dim, dtype=torch.float16
+            hidden_size, num_attention_heads * head_dim, dtype=torch.bfloat16
         )
         print("Self-attention weights created.")
 
@@ -525,57 +486,57 @@ def create_text_model_weights(text_config: Dict[str, Any]) -> Dict[str, torch.Te
                 expert_prefix = f"{layer_prefix}.feed_forward.experts.{expert_idx}"
 
                 weights[f"{expert_prefix}.gate_proj.weight"] = torch.randn(
-                    intermediate_size, hidden_size, dtype=torch.float16
+                    intermediate_size, hidden_size, dtype=torch.float8_e4m3fn
                 )
                 weights[f"{expert_prefix}.up_proj.weight"] = torch.randn(
-                    intermediate_size, hidden_size, dtype=torch.float16
+                    intermediate_size, hidden_size, dtype=torch.float8_e4m3fn
                 )
                 weights[f"{expert_prefix}.down_proj.weight"] = torch.randn(
-                    hidden_size, intermediate_size, dtype=torch.float16
+                    hidden_size, intermediate_size, dtype=torch.float8_e4m3fn
                 )
 
                 # Expert weight scales (FP8 quantization)
-                weights[f"{expert_prefix}.gate_proj.weight_scale"] = torch.ones(1, dtype=torch.float32)
-                weights[f"{expert_prefix}.up_proj.weight_scale"] = torch.ones(1, dtype=torch.float32)
-                weights[f"{expert_prefix}.down_proj.weight_scale"] = torch.ones(1, dtype=torch.float32)
+                weights[f"{expert_prefix}.gate_proj.weight_scale"] = torch.ones(intermediate_size, dtype=torch.bfloat16)
+                weights[f"{expert_prefix}.up_proj.weight_scale"] = torch.ones(intermediate_size, dtype=torch.bfloat16)
+                weights[f"{expert_prefix}.down_proj.weight_scale"] = torch.ones(hidden_size, dtype=torch.bfloat16)
 
             # 3. Shared expert weights
             weights[f"{layer_prefix}.feed_forward.shared_expert.gate_proj.weight"] = torch.randn(
-                intermediate_size, hidden_size, dtype=torch.float16
+                intermediate_size, hidden_size, dtype=torch.bfloat16
             )
             weights[f"{layer_prefix}.feed_forward.shared_expert.up_proj.weight"] = torch.randn(
-                intermediate_size, hidden_size, dtype=torch.float16
+                intermediate_size, hidden_size, dtype=torch.bfloat16
             )
             weights[f"{layer_prefix}.feed_forward.shared_expert.down_proj.weight"] = torch.randn(
-                hidden_size, intermediate_size, dtype=torch.float16
+                hidden_size, intermediate_size, dtype=torch.bfloat16
             )
             print(f"MoE feed-forward weights created for layer {layer_idx}.")
         else:
             # Dense layer structure
             weights[f"{layer_prefix}.feed_forward.gate_proj.weight"] = torch.randn(
-                intermediate_size, hidden_size, dtype=torch.float16
+                intermediate_size_mlp, hidden_size, dtype=torch.bfloat16
             )
             weights[f"{layer_prefix}.feed_forward.up_proj.weight"] = torch.randn(
-                intermediate_size, hidden_size, dtype=torch.float16
+                intermediate_size_mlp, hidden_size, dtype=torch.bfloat16
             )
             weights[f"{layer_prefix}.feed_forward.down_proj.weight"] = torch.randn(
-                hidden_size, intermediate_size, dtype=torch.float16
+                hidden_size, intermediate_size, dtype=torch.bfloat16
             )
             print(f"Dense feed-forward weights created for layer {layer_idx}.")
 
         # Layer norms
         weights[f"{layer_prefix}.input_layernorm.weight"] = torch.ones(
-            hidden_size, dtype=torch.float16
+            hidden_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.post_attention_layernorm.weight"] = torch.ones(
-            hidden_size, dtype=torch.float16
+            hidden_size, dtype=torch.bfloat16
         )
         print("Layer norms created.")
 
     # Final layer norm and output projection
-    weights["language_model.model.norm.weight"] = torch.ones(hidden_size, dtype=torch.float16)
+    weights["language_model.model.norm.weight"] = torch.ones(hidden_size, dtype=torch.bfloat16)
     weights["language_model.lm_head.weight"] = torch.randn(
-        vocab_size, hidden_size, dtype=torch.float16
+        vocab_size, hidden_size, dtype=torch.bfloat16
     )
 
     return weights
@@ -598,79 +559,63 @@ def create_vision_model_weights(
 
     num_patches = (image_size // patch_size) ** 2
 
-    # Vision embeddings
-    weights["vision_model.model.embeddings.patch_embedding.weight"] = torch.randn(
-        hidden_size, num_channels, patch_size, patch_size, dtype=torch.float16
-    )
-    weights["vision_model.model.embeddings.position_embedding.weight"] = torch.randn(
-        num_patches + 1, hidden_size, dtype=torch.float16
-    )  # +1 for CLS token
-
     # Vision transformer layers
     for layer_idx in range(num_layers):
         layer_prefix = f"vision_model.model.layers.{layer_idx}"
 
         # Self-attention (with biases as shown in the example)
         weights[f"{layer_prefix}.self_attn.q_proj.weight"] = torch.randn(
-            hidden_size, hidden_size, dtype=torch.float16
+            hidden_size, hidden_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.self_attn.q_proj.bias"] = torch.zeros(
-            hidden_size, dtype=torch.float16
+            hidden_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.self_attn.k_proj.weight"] = torch.randn(
-            hidden_size, hidden_size, dtype=torch.float16
+            hidden_size, hidden_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.self_attn.k_proj.bias"] = torch.zeros(
-            hidden_size, dtype=torch.float16
+            hidden_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.self_attn.v_proj.weight"] = torch.randn(
-            hidden_size, hidden_size, dtype=torch.float16
+            hidden_size, hidden_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.self_attn.v_proj.bias"] = torch.zeros(
-            hidden_size, dtype=torch.float16
+            hidden_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.self_attn.o_proj.weight"] = torch.randn(
-            hidden_size, hidden_size, dtype=torch.float16
+            hidden_size, hidden_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.self_attn.o_proj.bias"] = torch.zeros(
-            hidden_size, dtype=torch.float16
+            hidden_size, dtype=torch.bfloat16
         )
 
         # Feed-forward (with biases as shown in the example)
         weights[f"{layer_prefix}.mlp.fc1.weight"] = torch.randn(
-            intermediate_size, hidden_size, dtype=torch.float16
+            intermediate_size, hidden_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.mlp.fc1.bias"] = torch.zeros(
-            intermediate_size, dtype=torch.float16
+            intermediate_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.mlp.fc2.weight"] = torch.randn(
-            hidden_size, intermediate_size, dtype=torch.float16
+            hidden_size, intermediate_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.mlp.fc2.bias"] = torch.zeros(
-            hidden_size, dtype=torch.float16
+            hidden_size, dtype=torch.bfloat16
         )
 
         # Layer norms (input_layernorm and post_attention_layernorm as shown in example)
         weights[f"{layer_prefix}.input_layernorm.weight"] = torch.ones(
-            hidden_size, dtype=torch.float16
+            hidden_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.input_layernorm.bias"] = torch.zeros(
-            hidden_size, dtype=torch.float16
+            hidden_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.post_attention_layernorm.weight"] = torch.ones(
-            hidden_size, dtype=torch.float16
+            hidden_size, dtype=torch.bfloat16
         )
         weights[f"{layer_prefix}.post_attention_layernorm.bias"] = torch.zeros(
-            hidden_size, dtype=torch.float16
+            hidden_size, dtype=torch.bfloat16
         )
-
-    # Final layer norm
-    weights["vision_model.model.post_layernorm.weight"] = torch.ones(
-        hidden_size, dtype=torch.float16
-    )
-    weights["vision_model.model.post_layernorm.bias"] = torch.zeros(
-        hidden_size, dtype=torch.float16
-    )
 
     return weights
 
@@ -683,23 +628,23 @@ def create_shared_weights(
     weights = {}
 
     text_hidden_size = text_config["hidden_size"]
-    vision_hidden_size = vision_config["hidden_size"]
+    projector_input_dim = vision_config["projector_input_dim"]
 
     # Vision-language connector (projects vision features to text space)
     weights["multi_modal_projector.linear_1.weight"] = torch.randn(
-        text_hidden_size, vision_hidden_size, dtype=torch.float16
+        text_hidden_size, projector_input_dim, dtype=torch.bfloat16
     )
-    weights["multi_modal_projector.linear_1.bias"] = torch.zeros(
-        text_hidden_size, dtype=torch.float16
-    )
+    #weights["multi_modal_projector.linear_1.bias"] = torch.zeros(
+    #    text_hidden_size, dtype=torch.float16
+    #)
 
-    # Additional connector layers if needed
-    weights["multi_modal_projector.linear_2.weight"] = torch.randn(
-        text_hidden_size, text_hidden_size, dtype=torch.float16
-    )
-    weights["multi_modal_projector.linear_2.bias"] = torch.zeros(
-        text_hidden_size, dtype=torch.float16
-    )
+    ## Additional connector layers if needed
+    #weights["multi_modal_projector.linear_2.weight"] = torch.randn(
+    #    text_hidden_size, text_hidden_size, dtype=torch.float16
+    #)
+    #weights["multi_modal_projector.linear_2.bias"] = torch.zeros(
+    #    text_hidden_size, dtype=torch.float16
+    #)
 
     return weights
 
@@ -781,6 +726,8 @@ def test_reduced_model(model_path: str) -> None:
         llm = LLM(
             model=model_path,
             trust_remote_code=True,
+            tensor_parallel_size=2,
+            enable_expert_parallelism=True,
             enforce_eager=True,  # Disable CUDA graphs for testing
             max_model_len=512,  # Small context for testing
             gpu_memory_utilization=0.3,  # Conservative memory usage
@@ -865,7 +812,7 @@ def main():
             test_reduced_model(model_path)
 
         if args.test_original:
-            test_maverick_serving()
+            test_maverick_serving(args.original_model)
 
     except Exception as e:
         print(f"Error: {e}")
