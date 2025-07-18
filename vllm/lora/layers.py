@@ -285,7 +285,6 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         packed_modules_list: list,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        return False
         return type(source_layer) is VocabParallelEmbedding
 
     @property
@@ -504,7 +503,6 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: list,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        return False
         return type(source_layer) is ReplicatedLinear
 
 
@@ -605,7 +603,6 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: list,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        return False
         return type(source_layer) is ColumnParallelLinear or (
             type(source_layer) is MergedColumnParallelLinear
             and len(packed_modules_list) == 1)
@@ -749,7 +746,6 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         packed_modules_list: list,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        return False
         return (type(source_layer) is MergedColumnParallelLinear
                 and len(packed_modules_list) == 2)
 
@@ -818,7 +814,6 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     def can_replace_layer(cls, source_layer: nn.Module,
                           lora_config: LoRAConfig, packed_modules_list: list,
                           model_config: Optional[PretrainedConfig]) -> bool:
-        return False
         return type(source_layer) is QKVParallelLinear and len(
             packed_modules_list) == 1
 
@@ -880,7 +875,6 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         packed_modules_list: list,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        return False
         return (type(source_layer) is QKVParallelLinear
                 and len(packed_modules_list) == 3)
 
@@ -970,7 +964,6 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: list,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        return False
         return type(source_layer) is RowParallelLinear
 
 
@@ -1284,7 +1277,6 @@ class LinearScalingRotaryEmbeddingWithLoRA(BaseLayerWithLoRA):
         model_config: Optional[PretrainedConfig],
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
-        return False
         return (type(source_layer) is LinearScalingRotaryEmbedding
                 or type(source_layer) is RotaryEmbedding)
 

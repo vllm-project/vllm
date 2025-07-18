@@ -188,16 +188,25 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
     """
     In vLLM, all linear layers support LoRA.
     """
+    def _maybe_add_embedding_modules(m) -> None:
+        embedding_modules = getattr(m, "embedding_modules", None)
+        if embedding_modules is None:
+            return
+        for name in embedding_modules:
+            supported_lora_modules.add(name)
+
     supported_lora_modules: set[str] = set()
     # step1: traverse the model to get all the linear subfixes.
     for name, module in model.named_modules():
+        _maybe_add_embedding_modules(module)
+
         if isinstance(module, (LinearBase, )):
             supported_lora_modules.add(name.split(".")[-1])
+
     # step 2: get the embedding modules if the model's mbedding_modules
     # is not empty.
-    if model.embedding_modules:
-        for name in model.embedding_modules:
-            supported_lora_modules.add(name)
+    _maybe_add_embedding_modules(model)
+
     return list(supported_lora_modules)
 
 

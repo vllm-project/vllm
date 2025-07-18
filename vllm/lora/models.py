@@ -530,9 +530,10 @@ class LoRAModelManager(AdapterModelManager):
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
                 logits_processor_module = self.model.get_submodule(
-                    "logits_processor")
+                    "language_model.logits_processor")
+
                 new_module = replace_submodule(
-                    self.model, "logits_processor",
+                    self.model, "language_model.logits_processor",
                     from_layer_logits_processor(logits_processor_module,
                                                 module, self.lora_slots,
                                                 self.lora_config,
