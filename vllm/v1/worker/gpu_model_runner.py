@@ -44,11 +44,14 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, check_use_alibi, get_dtype_size,
                         is_pin_memory_available, round_up)
 from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionBackend
-from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
-                                              CommonAttentionMetadata)
+from vllm.v1.attention.backends.utils import (
+    AttentionMetadataBuilder, CommonAttentionMetadata,
+    make_local_attention_virtual_batches)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
-from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
-                                        KVCacheConfig, KVCacheSpec, MambaSpec,
+from vllm.v1.kv_cache_interface import (AttentionSpec,
+                                        ChunkedLocalAttentionSpec,
+                                        FullAttentionSpec, KVCacheConfig,
+                                        KVCacheSpec, MambaSpec,
                                         SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
@@ -704,6 +707,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.speculative_config and \
                 spec_decode_common_attn_metadata is None:
                 spec_decode_common_attn_metadata = common_attn_metadata
+
+            if isinstance(kv_cache_group_spec.kv_cache_spec,
+                          ChunkedLocalAttentionSpec):
+                common_attn_metadata = make_local_attention_virtual_batches(
+                    kv_cache_group_spec.kv_cache_spec.attention_chunk_size,
+                    common_attn_metadata, self.cache_config.block_size)
 
             # Prepare for cascade attention if enabled & beneficial.
             common_prefix_len = 0
@@ -2589,6 +2598,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # TODO: Support other attention modules, e.g., cross-attention
             if attn_module.attn_type == AttentionType.DECODER:
+                use_local_attention = (self.attention_chunk_size is not None
+                                       and attn_module.impl.use_irope)
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
@@ -2597,6 +2608,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         dtype=self.kv_cache_dtype,
                         sliding_window=attn_module.sliding_window,
                         use_mla=use_mla)
+                elif use_local_attention:
+                    kv_cache_spec[layer_name] = (ChunkedLocalAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        head_size=attn_module.head_size,
+                        dtype=self.kv_cache_dtype,
+                        attention_chunk_size=self.attention_chunk_size,
+                        use_mla=use_mla))
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
                         block_size=block_size,

@@ -126,6 +126,21 @@ class FullAttentionSpec(AttentionSpec):
 
 
 @dataclass
+class ChunkedLocalAttentionSpec(AttentionSpec):
+    attention_chunk_size: int
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        max_model_len = vllm_config.model_config.max_model_len
+        return cdiv(max_model_len, self.block_size) * self.page_size_bytes
+
+    @property
+    def type_id(self) -> str:
+        return (
+            f"local_attention_{self.attention_chunk_size}_{self.block_size}_{self.page_size_bytes}"
+        )  # noqa
+
+
+@dataclass
 class SlidingWindowSpec(AttentionSpec):
     sliding_window: int
 
