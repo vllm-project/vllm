@@ -352,8 +352,8 @@ class Qwen2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        aux_hidden_states = []
         if len(self.aux_hidden_state_layers) > 0:
-            aux_hidden_states = []
             for idx, layer in enumerate(
                     self.layers[self.start_layer:self.end_layer]):
                 if idx in self.aux_hidden_state_layers:
