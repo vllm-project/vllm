@@ -35,7 +35,7 @@ The requests get subdivided into max-model-len and most-model-len categories, fo
 
 For online serving with latency requirements, consider switching to bucket padding by setting the `VLLM_TPU_BUCKET_PADDING_GAP` environment variable. Because of the layout of the TPU, try using increments of 128: 128, 256, etc.
 
-The server pads the requests into fixed lengths before sending them to the model to avoid recompilation. Currently, there are 2 ways to pad the requests:
+The server pads the requests into fixed lengths before sending them to the model to avoid recompilation. To read more about tpu padding, see [here](https://cloud.google.com/tpu/docs/performance-guide#xla-efficiencies). Currently, there are 2 ways to pad the requests:
 
 1) the default exponential padding (pad to the nearest power of 2)
 2) bucket padding (pad to the nearest linearly increasing bucket). 
