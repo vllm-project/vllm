@@ -59,13 +59,13 @@ class JinaVLForEmbedding(Qwen2VLForConditionalGeneration,
 
         # Configuration for vision pooling backend
         self.pooling_backend = getattr(vllm_config.model_config,
-                                       "jina_pooling_backend", "triton")
+                                       "jina_pooling_backend", "pytorch")
         if self.pooling_backend not in ("triton", "pytorch"):
             logger.warning(
                 "Invalid jina_pooling_backend '%s'. "
-                "Must be 'triton' or 'pytorch'. Defaulting to 'triton'.",
+                "Must be 'triton' or 'pytorch'. Defaulting to 'pytorch'.",
                 self.pooling_backend)
-            self.pooling_backend = "triton"
+            self.pooling_backend = "pytorch"
 
         # Initialize base pooler for fallback
         self._base_pooler = Pooler.from_config_with_defaults(
