@@ -3256,9 +3256,10 @@ class MultiModalConfig:
 @config
 @dataclass
 class PoolerConfig:
-    """Controls the behavior of output pooling in pooling models."""
+    """Configuration for the pooler."""
 
-    pooling_type: Optional[str] = None
+    pooling_type: Optional[Literal["last", "all", "cls", "step", "mean",
+                                   "vision"]] = None
     """
     The pooling method of the pooling model. This should be a key in
     [`vllm.model_executor.layers.pooler.PoolingType`][].

@@ -342,3 +342,40 @@ class TestAccuracyValidation:
         # embeddings should be very similar despite different text
         similarity = torch.dot(emb1, emb2).item()
         assert similarity > 0.99  # Should be nearly identical
+
+
+class TestVisionPooler:
+    """Test the VisionPooler class."""
+
+    def test_vision_pooler(self):
+        """Test that the VisionPooler correctly pools vision tokens."""
+        from vllm.config import ModelConfig
+        from vllm.model_executor.layers.pooler import VisionPooler
+        from vllm.pooling_params import PoolingParams
+        from vllm.v1.pool.metadata import PoolingMetadata
+
+        model_config = ModelConfig(model_name, task="embed")
+        model_config.hf_config.vision_start_token_id = VISION_START_TOKEN_ID
+        model_config.hf_config.vision_end_token_id = VISION_END_TOKEN_ID
+        model_config.hidden_size = 4
+
+        pooler = VisionPooler(model_config)
+
+        hidden_states = torch.randn(10, 4)
+        prompt_token_ids = torch.tensor([[
+            1, 2, VISION_START_TOKEN_ID, 4, VISION_END_TOKEN_ID, 6, 7, 8, 9, 10
+        ]])
+        prompt_lens = torch.tensor([10])
+
+        pooling_metadata = PoolingMetadata(prompt_lens=prompt_lens,
+                                           prompt_token_ids=prompt_token_ids,
+                                           pooling_params=[PoolingParams()])
+
+        output = pooler.forward(hidden_states, pooling_metadata)
+
+        vision_tokens = hidden_states[2:5]
+        expected_output = vision_tokens.mean(dim=0)
+
+        assert torch.allclose(output.outputs[0].data,
+                              expected_output,
+                              atol=1e-5)
