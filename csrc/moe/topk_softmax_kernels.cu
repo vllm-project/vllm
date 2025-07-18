@@ -63,7 +63,7 @@ __launch_bounds__(TPB) __global__
 
     const int thread_row_offset = blockIdx.x * num_cols;
 
-    cuda::std::plus<float> sum;  
+    cuda::std::plus<float> sum;
     float threadData(-FLT_MAX);
 
     // Don't touch finished rows.
