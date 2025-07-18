@@ -65,10 +65,13 @@ class JinaVLPooler(Pooler):
     def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
         """Return pooling params for embedding task."""
         if task == "embed":
-            return PoolingParams()
+            return PoolingParams(logits_processing_needs_token_ids=True)
+
+        if task == "encode":
+            return PoolingParams(logits_processing_needs_token_ids=True)
 
         # The equalities are split up to keep mypy happy
-        if task == "encode" or task == "classify" or task == "score":
+        if task == "classify" or task == "score":
             return None
 
         assert_never(task)
@@ -87,8 +90,7 @@ class JinaVLPooler(Pooler):
             return build_output(torch.empty((0, 0)))
 
         # Extract token IDs safely from metadata
-        token_ids_list, seq_ids = self._extract_token_ids_safe(
-            pooling_metadata)
+        token_ids_list = self._extract_token_ids_safe(pooling_metadata)
 
         if not token_ids_list:
             logger.warning("No valid sequences found for pooling")
@@ -127,24 +129,20 @@ class JinaVLPooler(Pooler):
         return build_output(pooled_tensor)
 
     def _extract_token_ids_safe(
-            self, pooling_metadata: PoolingMetadata
-    ) -> tuple[list[array], list[int]]:
+            self, pooling_metadata: PoolingMetadata) -> list[array]:
         """Safely extract token IDs from pooling metadata."""
         token_ids_list: list[array] = []
         try:
             if isinstance(pooling_metadata, V1PoolingMetadata):
-                # For V1, we get token IDs and sequence indices directly
+                # For V1, we get token IDs directly
                 for i, num in enumerate(pooling_metadata.prompt_lens):
                     token_ids = pooling_metadata.prompt_token_ids[
                         i, :num].tolist()
                     token_ids_list.append(array('l', token_ids))
 
-                # V1 metadata does not have explicit seq_ids, so we use indices
-                seq_ids = list(range(len(token_ids_list)))
-                return token_ids_list, seq_ids
+                return token_ids_list
 
             # For V0, we extract from seq_groups and seq_data
-            seq_ids = []
             for seq_group, _ in pooling_metadata.seq_groups:
                 for seq_id in seq_group:
                     if seq_id not in pooling_metadata.seq_data:
@@ -164,10 +162,9 @@ class JinaVLPooler(Pooler):
                                        seq_id)
                         continue
 
-                    seq_ids.append(seq_id)
                     token_ids_list.append(token_ids)
 
-            return token_ids_list, seq_ids
+            return token_ids_list
 
         except Exception as e:
             logger.error(
@@ -319,7 +316,7 @@ class JinaVLForEmbedding(Qwen2VLForConditionalGeneration,
         # Initialize the vision-aware pooler
         self.pooler = JinaVLPooler(vllm_config, self.pooling_backend)
 
-        logger.info("Initialized JinaVLForEmbedding with thread-safe pooling")
+        logger.info("Initialized JinaVLForEmbedding with vision-aware pooling")
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         """Load weights with validation and error handling."""
