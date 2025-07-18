@@ -64,22 +64,6 @@ def _is_col_major(x: torch.Tensor) -> bool:
     return x.stride(0) == m * n and x.stride(1) == 1 and x.stride(2) == m
 
 
-def next_positive_power_of_2(x: int) -> int:
-    if x < 1:
-        return 1
-    return 1 << (x - 1).bit_length()
-
-
-def _get_tile_tokens_dim(num_tokens, top_k, num_experts):
-    # Guess tokens per expert assuming perfect expert distribution first.
-    num_tokens_per_expert = (num_tokens * top_k) // num_experts
-    # And pad the number to the next power of 2.
-    tile_tokens_dim = next_positive_power_of_2(num_tokens_per_expert)
-    # Cap to 8-64 tokens per CTA tile as it's the range supported by the kernel.
-    tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
-    return tile_tokens_dim
-
-
 class Fp8Config(QuantizationConfig):
     """Config class for FP8."""
 
@@ -1015,25 +999,22 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert activation == "silu"
 
             return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
-                router_logits.to(torch.float32),
-                e_score_correction_bias,
-                x,
-                layer.w13_weight,
-                layer.w13_weight_scale_inv,
-                layer.w2_weight,
-                layer.w2_weight_scale_inv,
-                global_num_experts,
-                top_k,
-                num_expert_group,
-                topk_group,
-                layer.intermediate_size_per_partition,
-                layer.ep_rank * layer.local_num_experts,
-                layer.local_num_experts,
+                routing_logits=router_logits.to(torch.float32),
+                routing_bias=e_score_correction_bias,
+                x=x,
+                w13_weight=layer.w13_weight,
+                w13_weight_scale_inv=layer.w13_weight_scale_inv,
+                w2_weight=layer.w2_weight,
+                w2_weight_scale_inv=layer.w2_weight_scale_inv,
+                global_num_experts=global_num_experts,
+                top_k=top_k,
+                num_expert_group=num_expert_group,
+                topk_group=topk_group,
+                intermediate_size_per_partition=layer.intermediate_size_per_partition,
+                expert_offset=layer.ep_rank * layer.local_num_experts,
+                local_num_experts=layer.local_num_experts,
                 block_shape=self.quant_config.weight_block_size,
                 routed_scaling=1.0,
-                tile_tokens_dim=_get_tile_tokens_dim(x.shape[0], top_k,
-                                                     global_num_experts),
-                routing_method_type=2,
             )
         else:
             return self.fused_experts(
