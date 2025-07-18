@@ -25,6 +25,7 @@ else:
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
+from vllm.core.scheduler import SchedulerWaitingQueueFullError
 from vllm.engine.protocol import EngineClient
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -363,6 +364,12 @@ class OpenAIServing:
 
             return None
 
+        except SchedulerWaitingQueueFullError as e:
+            return self.create_error_response(
+                str(e), 
+                err_type="ServiceUnavailableError",
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE
+            )
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))

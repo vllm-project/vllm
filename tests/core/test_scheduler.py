@@ -12,7 +12,7 @@ from torch import Use  # noqa
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus
-from vllm.core.scheduler import Scheduler, SchedulingBudget
+from vllm.core.scheduler import Scheduler, SchedulingBudget, SchedulerWaitingQueueFullError
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SequenceGroup, SequenceStatus
 
@@ -69,6 +69,69 @@ def test_scheduler_abort_seq_group():
     assert scheduler.get_num_unfinished_seq_groups() == num_seq_group
     scheduler.abort_seq_group(request_ids)
     assert scheduler.get_num_unfinished_seq_groups() == 0
+
+
+def test_scheduler_max_waiting_queue_length():
+    """Test that scheduler respects max_waiting_queue_length setting."""
+    block_size = 4
+    max_waiting_queue_length = 2
+    scheduler_config = SchedulerConfig(
+        "generate",
+        max_num_batched_tokens=100,
+        max_num_seqs=64,
+        max_model_len=1,
+        max_waiting_queue_length=max_waiting_queue_length,
+    )
+    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
+    cache_config.num_cpu_blocks = 4
+    cache_config.num_gpu_blocks = 4
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+
+    # Add seq groups up to the limit
+    for i in range(max_waiting_queue_length):
+        _, seq_group = create_dummy_prompt(str(i),
+                                           block_size,
+                                           block_size=block_size)
+        scheduler.add_seq_group(seq_group)
+        assert scheduler.get_num_unfinished_seq_groups() == i + 1
+
+    # Adding one more should raise SchedulerWaitingQueueFullError
+    _, seq_group = create_dummy_prompt(str(max_waiting_queue_length),
+                                       block_size,
+                                       block_size=block_size)
+    with pytest.raises(SchedulerWaitingQueueFullError) as excinfo:
+        scheduler.add_seq_group(seq_group)
+    
+    assert "Scheduler waiting queue is full" in str(excinfo.value)
+    assert f"request {max_waiting_queue_length}" in str(excinfo.value)
+    
+    # Verify that the number of unfinished seq groups hasn't changed
+    assert scheduler.get_num_unfinished_seq_groups() == max_waiting_queue_length
+
+
+def test_scheduler_max_waiting_queue_length_disabled():
+    """Test that scheduler allows unlimited queue when max_waiting_queue_length is None."""
+    block_size = 4
+    scheduler_config = SchedulerConfig(
+        "generate",
+        max_num_batched_tokens=100,
+        max_num_seqs=64,
+        max_model_len=1,
+        max_waiting_queue_length=None,  # No limit
+    )
+    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
+    cache_config.num_cpu_blocks = 4
+    cache_config.num_gpu_blocks = 4
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+
+    # Add many seq groups - should not raise an exception
+    num_seq_groups = 10
+    for i in range(num_seq_groups):
+        _, seq_group = create_dummy_prompt(str(i),
+                                           block_size,
+                                           block_size=block_size)
+        scheduler.add_seq_group(seq_group)
+        assert scheduler.get_num_unfinished_seq_groups() == i + 1
 
 
 def test_scheduler_schedule_simple():

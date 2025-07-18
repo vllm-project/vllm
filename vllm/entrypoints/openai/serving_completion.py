@@ -5,6 +5,7 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from http import HTTPStatus
 from typing import Optional, Union, cast
 
 import jinja2
@@ -12,6 +13,7 @@ from fastapi import Request
 from typing_extensions import assert_never
 
 from vllm.config import ModelConfig
+from vllm.core.scheduler import SchedulerWaitingQueueFullError
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
@@ -230,6 +232,12 @@ class OpenAIServingCompletion(OpenAIServing):
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
+        except SchedulerWaitingQueueFullError as e:
+            return self.create_error_response(
+                str(e), 
+                err_type="ServiceUnavailableError",
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE
+            )
 
         result_generator = merge_async_iterators(*generators)
 
@@ -294,6 +302,12 @@ class OpenAIServingCompletion(OpenAIServing):
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
+        except SchedulerWaitingQueueFullError as e:
+            return self.create_error_response(
+                str(e), 
+                err_type="ServiceUnavailableError",
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE
+            )
 
         # When user requests streaming but we don't stream, we still need to
         # return a streaming response with a single event.

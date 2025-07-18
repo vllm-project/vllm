@@ -2292,6 +2292,11 @@ class SchedulerConfig:
     structured outputs, speculative decoding, and pipeline parallelism.
     """
 
+    max_waiting_queue_length: Optional[int] = None
+    """Maximum number of requests that can be in the waiting queue.
+    When the queue reaches this limit, new requests will be rejected
+    with HTTP 503 error. If None, no limit is enforced."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

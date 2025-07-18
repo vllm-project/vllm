@@ -13,7 +13,7 @@ from weakref import ReferenceType
 import vllm.envs as envs
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VllmConfig)
-from vllm.core.scheduler import SchedulerOutputs
+from vllm.core.scheduler import SchedulerOutputs, SchedulerWaitingQueueFullError
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
 from vllm.engine.llm_engine import LLMEngine, SchedulerOutputState
@@ -745,6 +745,13 @@ class AsyncLLMEngine(EngineClient):
                 await self.engine.add_request_async(**new_request)
             except ValueError as e:
                 # TODO: use a vLLM specific error for failed validation
+                self._request_tracker.process_exception(
+                    new_request["request_id"],
+                    e,
+                    verbose=self.log_requests,
+                )
+            except SchedulerWaitingQueueFullError as e:
+                # Handle scheduler queue full error
                 self._request_tracker.process_exception(
                     new_request["request_id"],
                     e,
