@@ -1106,7 +1106,6 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         lm_head: VocabParallelEmbedding,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
-
         # Get the logits for the next tokens.
         logits = lm_head.quant_method.apply(lm_head, hidden_states)
         if embedding_bias is not None:
