@@ -2623,6 +2623,10 @@ class SpeculativeConfig:
     draft_parallel_config: SkipValidation[
         ParallelConfig] = None  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
+    relaxed_thinking: Optional[bool] = False
+    """Whether to enable relaxed thinking."""
+    reasoning_model_type: Optional[str] = None
+    """Reasoning model type. Used when relaxed thinking is enabled."""
 
     def compute_hash(self) -> str:
         """

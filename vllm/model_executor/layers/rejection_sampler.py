@@ -36,7 +36,9 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 
     def __init__(self,
                  strict_mode: bool = False,
-                 use_flashinfer: Optional[bool] = None):
+                 use_flashinfer: Optional[bool] = None,
+                 relaxed_thinking: Optional[bool] = False,
+                 posterior_alpha: Optional[float] = 1.0,):
         """Create a rejection sampler.
 
         Args:
@@ -60,6 +62,9 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         else:
             logger.info("Use pytorch for rejection sampling.")
 
+        self.relaxed_thinking = relaxed_thinking
+        self._posterior_alpha = posterior_alpha
+
     def forward(
         self,
         target_with_bonus_probs: torch.Tensor,
@@ -67,6 +72,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         draft_probs: torch.Tensor,
         draft_token_ids: torch.Tensor,
         seeded_seqs: Optional[dict[int, torch.Generator]] = None,
+        thinking_states: Optional[list[bool]] = None,
     ) -> torch.Tensor:
         """Sample token ids using rejection sampling. This accepts or rejects
         tokens proposed by the draft model using the probability of each token
@@ -147,6 +153,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
                     draft_probs,
                     draft_token_ids,
                     seeded_seqs,
+                    thinking_states,
                 ))
 
             output_token_ids = self._create_output(
@@ -164,6 +171,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         draft_probs: torch.Tensor,  # [batch_size, k, vocab_size]
         draft_token_ids: torch.Tensor,  # [batch_size, k]
         seeded_seqs: Optional[dict[int, torch.Generator]],
+        thinking_states: Optional[list[bool]],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Perform modified rejection sampling on each sequence.
 
@@ -180,7 +188,8 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 
         # shape [batch_size, k]
         accepted = self._get_accepted(target_probs, draft_probs,
-                                      draft_token_ids, seeded_seqs)
+                                      draft_token_ids, seeded_seqs, 
+                                      thinking_states)
 
         recovered_probs = self._get_recovered_probs(
             target_probs, draft_probs).reshape(batch_size * k, vocab_size)
@@ -258,6 +267,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         draft_probs: torch.Tensor,  # [batch_size, k, vocab_size]
         draft_token_ids: torch.Tensor,  # [batch_size, k]
         seeded_seqs: Optional[dict[int, torch.Generator]],
+        thinking_states: Optional[list[bool]],
     ) -> torch.Tensor:
         r"""Create bool matrix over the proposed draft tokens. If
         True, then a token can be accepted, else it should be
@@ -296,9 +306,21 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
         uniform_rand = self._create_uniform_samples(seeded_seqs, batch_size,
                                                     k - 1, target_probs.device)
 
-        capped_ratio = torch.minimum(
-            selected_target_probs / selected_draft_probs,
-            torch.full((1, ), 1, device=target_probs.device))
+        if self.relaxed_thinking:
+            posterior_alpha = [self._posterior_alpha \
+                if state else 1.0 for state in thinking_states]
+            posterior_alpha = torch.tensor(
+                posterior_alpha, device=target_probs.device).unsqueeze(-1)
+
+            capped_ratio = torch.minimum(
+                selected_target_probs / (posterior_alpha * selected_draft_probs),
+                torch.ones_like(selected_target_probs))  # shape [batch_size, k]
+
+        else:
+            capped_ratio = torch.minimum(
+                selected_target_probs / selected_draft_probs,
+                torch.full((1, ), 1, device=target_probs.device))
+
         accepted = uniform_rand < capped_ratio
 
         return accepted

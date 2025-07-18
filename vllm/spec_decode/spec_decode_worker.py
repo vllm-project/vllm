@@ -4,6 +4,7 @@
 import copy
 from collections import defaultdict
 from functools import cached_property
+from transformers import PreTrainedTokenizerBase, AutoTokenizer
 from typing import Any, Dict, List, Optional, Set, Tuple, Type
 
 import torch
@@ -22,6 +23,8 @@ from vllm.model_executor.layers.spec_decode_base_sampler import (
 from vllm.model_executor.layers.typical_acceptance_sampler import (
     TypicalAcceptanceSampler)
 from vllm.platforms import current_platform
+from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
+from vllm.reasoning.qwen3_reasoning_parser import Qwen3ReasoningParser
 from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
                            CompletionSequenceGroupOutput, ExecuteModelRequest,
                            HiddenStates, SequenceGroupMetadata,
@@ -110,6 +113,9 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         disable_logprobs=speculative_config.disable_logprobs,
         disable_log_stats=speculative_config.disable_log_stats,
         num_speculative_tokens=speculative_config.num_speculative_tokens,
+        relaxed_thinking=speculative_config.relaxed_thinking,
+        reasoning_model_type=speculative_config.reasoning_model_type,
+        tokenizer = speculative_config.target_model_config.tokenizer,
     )
 
     return spec_decode_worker
@@ -156,6 +162,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         disable_logprobs: bool,
         disable_log_stats: bool,
         num_speculative_tokens: int,
+        relaxed_thinking: bool,
+        reasoning_model_type: str,
+        tokenizer: PreTrainedTokenizerBase,
     ) -> "SpecDecodeWorker":
 
         allow_zero_draft_token_step = True
@@ -212,7 +221,10 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
 
         spec_decode_sampler: SpecDecodeBaseSampler = None
         if draft_token_acceptance_method == "rejection_sampler":
-            spec_decode_sampler = RejectionSampler()
+            spec_decode_sampler = RejectionSampler(
+                relaxed_thinking=relaxed_thinking,
+                posterior_alpha=typical_acceptance_sampler_posterior_alpha,
+            )
         elif draft_token_acceptance_method == "typical_acceptance_sampler":
             spec_decode_sampler = TypicalAcceptanceSampler(
                 posterior_threshold=\
@@ -246,6 +258,25 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
                     "[Speculative Decoding] Disabling MQA scorer as the "
                     "target model is not running in eager mode.")
 
+        if relaxed_thinking:
+            logger.info("Enable relaxed thinking, sampler_posterior_alpha"
+            " is set to ", typical_acceptance_sampler_posterior_alpha)
+
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer)
+            if reasoning_model_type == 'deepseek_r1':
+                logger.info("[Relaxed Thinking] Use "
+                    "DeepSeekR1ReasoningParser as reason parser.")
+                reasoning_parser = DeepSeekR1ReasoningParser(
+                    tokenizer=tokenizer)
+            elif reasoning_model_type == 'qwen3':
+                reasoning_parser = Qwen3ReasoningParser(
+                    tokenizer=tokenizer)
+                logger.info("[Relaxed Thinking] Use "
+                    "Qwen3ReasoningParser as reason parser.")
+            else:
+                raise ValueError(
+                    f"Unknown reason model type {reasoning_model_type}")
+
         return SpecDecodeWorker(
             proposer_worker,
             scorer_worker,
@@ -256,7 +287,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             spec_decode_sampler=spec_decode_sampler,
             allow_zero_draft_token_step=allow_zero_draft_token_step,
             enable_lm_head_weight_load=enable_lm_head_weight_load,
-            num_spec_prefill_steps=num_spec_prefill_steps)
+            num_spec_prefill_steps=num_spec_prefill_steps, 
+            relaxed_thinking=relaxed_thinking,
+            reasoning_parser=reasoning_parser)
 
     def __init__(
         self,
@@ -271,6 +304,8 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         allow_zero_draft_token_step: Optional[bool] = True,
         enable_lm_head_weight_load: Optional[bool] = False,
         num_spec_prefill_steps: int = 1,
+        relaxed_thinking: bool = False,
+        reasoning_parser: PreTrainedTokenizerBase = None,
     ):
         """
         Create a SpecDecodeWorker.
@@ -341,6 +376,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         self._disable_logprobs = disable_logprobs
         self._disable_log_stats = disable_log_stats
         self._num_spec_prefill_steps = num_spec_prefill_steps
+
+        self.relaxed_thinking = relaxed_thinking
+        self.reasoning_parser = reasoning_parser
 
     def init_device(self) -> None:
         """Initialize both scorer and proposer models.
@@ -538,10 +576,14 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             disable_all_speculation, execute_model_req.seq_group_metadata_list)
 
         if no_spec:
-            return self._run_no_spec(execute_model_req,
+            sampler_output_list = self._run_no_spec(execute_model_req,
                                      skip_proposer=disable_all_speculation)
-        return self._run_speculative_decoding_step(execute_model_req,
-                                                   num_lookahead_slots)
+        else:
+            sampler_output_list = self._run_speculative_decoding_step(
+                execute_model_req, num_lookahead_slots)  
+
+        if self.relaxed_thinking:
+            self._update_thinking_states(execute_model_req, sampler_output_list)
 
     @torch.inference_mode()
     def start_worker_execution_loop(self) -> None:
@@ -855,8 +897,9 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # proposal len. This adds some complexity (splitting the batch into spec
         # and non spec sequences) and should be removed in the future. It can be
         # done by supporting per-sequence proposal lens.
-        (_, spec_indices), (_, non_spec_indices) = split_batch_by_proposal_len(
-            seq_group_metadata_list, proposal_lens_list)
+        (_, spec_indices, thinking_states), (_, non_spec_indices) = \
+            split_batch_by_proposal_len(
+                seq_group_metadata_list, proposal_lens_list)
         original_indices = spec_indices + non_spec_indices
 
         # Get probabilities of target model, including bonus tokens.
@@ -889,6 +932,7 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
             bonus_token_ids=bonus_token_ids,
             draft_probs=proposal_probs,
             draft_token_ids=proposal_token_ids,
+            thinking_states=thinking_states,
             **sampler_extra_kwargs,
         )
         # Append output tokens from non-speculative sequences to
@@ -1102,6 +1146,32 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # First `n_prefills` entries will contain prefills SamplerOutput when
         # chunked prefill is enabled, the rest is decodes in multi-step format.
         return sampler_output_list
+
+    def _update_thinking_states(self, execute_model_req: ExecuteModelRequest,
+                                sampler_output_list: List[SamplerOutput]):
+        """Update thinking states for sequences based on special tokens.
+        
+        Args:
+            execute_model_req: The model execution request containing sequence metadata.
+            sampler_output_list: List of sampler outputs containing generated tokens.
+            
+        This method checks for special thinking start/end tokens in the output and 
+        updates the corresponding sequence's thinking state accordingly. The thinking
+        state is used to track when the model is in a reasoning/thinking phase.
+        """
+        think_start_token_id = self.reasoning_parser.start_token_id
+        think_end_token_id = self.reasoning_parser.end_token_id
+        
+        for seq_idx, sgm in enumerate(execute_model_req.seq_group_metadata_list):
+            for sampler_output in sampler_output_list:
+                parent_seq_id = sampler_output.outputs[seq_idx].samples[0].parent_seq_id
+                output_token_id = sampler_output.outputs[seq_idx].samples[0].output_token
+                if output_token_id == think_start_token_id:
+                    sgm.seq_data[parent_seq_id].update_thinking_state(
+                        thinking_state=True)
+                elif output_token_id == think_end_token_id:
+                    sgm.seq_data[parent_seq_id].update_thinking_state(
+                        thinking_state=False)
 
     def _maybe_log_stage_times(self, average_time_per_proposal_tok_ms: float,
                                scoring_time_ms: float,

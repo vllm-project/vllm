@@ -3,7 +3,7 @@
 
 import time
 from contextlib import contextmanager
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 
@@ -134,20 +134,25 @@ def create_sequence_group_output(
 def split_batch_by_proposal_len(
     seq_group_metadata_list: List[SequenceGroupMetadata],
     proposal_lens: List[int],
-) -> Tuple[Tuple[List[SequenceGroupMetadata], List[int]], Tuple[
-        List[SequenceGroupMetadata], List[int]]]:
+) -> Tuple[Union[Tuple[List[SequenceGroupMetadata], List[int]], Tuple[List[SequenceGroupMetadata], List[int], List[bool]]],
+    Tuple[List[SequenceGroupMetadata], List[int]]]:
     """Utility function that splits a batch based on whether the proposal len is
     zero or not. We should remove this once vLLM supports per-sequence proposal
     lens in a batch.
     """
 
-    nonzero_lists: Tuple[List[SequenceGroupMetadata], List[int]] = ([], [])
+    nonzero_lists: Tuple[List[SequenceGroupMetadata], List[int], List[bool]] = ([], [], [])
     zero_lists: Tuple[List[SequenceGroupMetadata], List[int]] = ([], [])
     for i, (seq_group, proposal_len) in enumerate(
             zip(seq_group_metadata_list, proposal_lens)):
-        seq_groups, indices = nonzero_lists if proposal_len else zero_lists
-        seq_groups.append(seq_group)
-        indices.append(i)
+        if proposal_len:
+            nonzero_lists[0].append(seq_group)
+            nonzero_lists[1].append(i)
+            nonzero_lists[2].append(list(seq_group.seq_data.values())[0].thinking_state)
+        else:
+            zero_lists[0].append(seq_group)
+            zero_lists[1].append(i)
+            
     return nonzero_lists, zero_lists
 
 

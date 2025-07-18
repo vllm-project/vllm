@@ -189,6 +189,10 @@ class SequenceData(msgspec.Struct,
     # It is used to compute mrope_position_ids.
     _mrope_position_delta: Optional[int] = None
 
+    # Whether this sequence is in thinking mode. Used when 
+    # relaxed thinking is enabled.
+    _thinking_state: Optional[bool] = None
+
     @staticmethod
     def from_prompt_token_counts(
             *token_counts: tuple[int, int]) -> "SequenceData":
@@ -323,6 +327,13 @@ class SequenceData(msgspec.Struct,
     @mrope_position_delta.setter
     def mrope_position_delta(self, new_mrope_position_delta):
         self._mrope_position_delta = new_mrope_position_delta
+
+    @property
+    def thinking_state(self) -> Optional[bool]:
+        return self._thinking_state
+    
+    def update_thinking_state(self, thinking_state: bool):
+        self._thinking_state = thinking_state
 
     def append_token_id(self,
                         token_id: int,
