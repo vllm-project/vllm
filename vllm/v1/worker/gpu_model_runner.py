@@ -684,7 +684,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.seq_lens[:num_reqs].copy_(self.seq_lens_cpu[:num_reqs],
                                        non_blocking=True)
 
-        # Fill unused with -1. Needed for reshape_and_cache
+        # Fill unused with -1. Needed for reshape_and_cache in full cuda graph
+        # mode.
+        self.slot_mapping[total_num_scheduled_tokens:].fill_(-1)
         self.seq_lens[num_reqs:].fill_(0)
         # Note: pad query_start_loc to be non-decreasing, as kernels
         # like FlashAttention requires that
