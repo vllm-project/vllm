@@ -208,9 +208,7 @@ class PoolingModelRunner(
             assert to_update is not None, (
                 f"{pooling_params.task=} is not supported by the model")
 
-            pooling_params.use_cross_encoder = to_update.use_cross_encoder
-            pooling_params.logits_processing_needs_token_ids = (
-                to_update.logits_processing_needs_token_ids)
+            to_update.apply(pooling_params)
 
             seq_groups.append((seq_ids, pooling_params))
 

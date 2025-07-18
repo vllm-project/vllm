@@ -66,6 +66,17 @@ class ResolvedPoolingConfig:
         )
 
 
+@dataclass(frozen=True)
+class PoolingParamsUpdate:
+    use_cross_encoder: bool = False
+    logits_processing_needs_token_ids: bool = False
+
+    def apply(self, params: PoolingParams) -> None:
+        params.use_cross_encoder = self.use_cross_encoder
+        params.logits_processing_needs_token_ids = (
+            self.logits_processing_needs_token_ids)
+
+
 class Pooler(nn.Module, ABC):
     """The interface required for all poolers used in pooling models in vLLM."""
 
@@ -92,7 +103,8 @@ class Pooler(nn.Module, ABC):
 
         return SimplePooler.from_config(resolved_config)
 
-    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+    def get_pooling_params(self,
+                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
         """
         Construct the pooling parameters to use for a task,
         or `None` if the task is not supported.
@@ -164,7 +176,8 @@ class PoolingMethod(nn.Module, ABC):
         raise NotImplementedError(f"Unsupported method: {pooling_type}")
 
     @abstractmethod
-    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+    def get_pooling_params(self,
+                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
         raise NotImplementedError
 
     @abstractmethod
@@ -205,11 +218,12 @@ class PoolingMethod(nn.Module, ABC):
 
 class CLSPool(PoolingMethod):
 
-    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+    def get_pooling_params(self,
+                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
         # The equalities are split up to keep mypy happy
         if (task == "encode" or task == "embed" or task == "classify"
                 or task == "score"):
-            return PoolingParams()
+            return PoolingParamsUpdate()
 
         assert_never(task)
 
@@ -235,11 +249,12 @@ class CLSPool(PoolingMethod):
 
 class LastPool(PoolingMethod):
 
-    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+    def get_pooling_params(self,
+                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
         # The equalities are split up to keep mypy happy
         if (task == "encode" or task == "embed" or task == "classify"
                 or task == "score"):
-            return PoolingParams()
+            return PoolingParamsUpdate()
 
         assert_never(task)
 
@@ -261,9 +276,10 @@ class LastPool(PoolingMethod):
 
 class AllPool(PoolingMethod):
 
-    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+    def get_pooling_params(self,
+                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
         if task == "encode":
-            return PoolingParams()
+            return PoolingParamsUpdate()
 
         # The equalities are split up to keep mypy happy
         if task == "embed" or task == "classify" or task == "score":
@@ -298,11 +314,12 @@ class AllPool(PoolingMethod):
 
 class MeanPool(PoolingMethod):
 
-    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+    def get_pooling_params(self,
+                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
         # The equalities are split up to keep mypy happy
         if (task == "encode" or task == "embed" or task == "classify"
                 or task == "score"):
-            return PoolingParams()
+            return PoolingParamsUpdate()
 
         assert_never(task)
 
@@ -519,7 +536,8 @@ class SimplePooler(Pooler):
         self.pooling = pooling
         self.head = head
 
-    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+    def get_pooling_params(self,
+                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
         return self.pooling.get_pooling_params(task)
 
     def forward(
@@ -594,9 +612,10 @@ class StepPooler(Pooler):
 
         return pooled_data
 
-    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+    def get_pooling_params(self,
+                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
         if task == "encode":
-            return PoolingParams(logits_processing_needs_token_ids=True)
+            return PoolingParamsUpdate(logits_processing_needs_token_ids=True)
 
         # The equalities are split up to keep mypy happy
         if task == "embed" or task == "classify" or task == "score":
@@ -653,15 +672,16 @@ class ClassifierPooler(nn.Module):
         return (self.cross_encoder_act_fn
                 if use_cross_encoder else self.classification_act_fn)
 
-    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+    def get_pooling_params(self,
+                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
         if task == "encode":
-            return PoolingParams()
+            return PoolingParamsUpdate()
         if task == "embed":
             return None
         if task == "classify":
-            return PoolingParams()
+            return PoolingParamsUpdate()
         if task == "score":
-            return PoolingParams(use_cross_encoder=True)
+            return PoolingParamsUpdate(use_cross_encoder=True)
 
         assert_never(task)
 

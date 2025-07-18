@@ -10,11 +10,13 @@ from typing_extensions import assert_never
 from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import (Pooler, PoolerHead,
-                                               PoolerNormalize, build_output)
+                                               PoolerNormalize,
+                                               PoolingParamsUpdate,
+                                               build_output)
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
-from vllm.pooling_params import PoolingParams, PoolingTask
+from vllm.pooling_params import PoolingTask
 from vllm.sequence import PoolerOutput
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
@@ -119,10 +121,11 @@ class GritLMPooler(Pooler):
 
         return instruction_len
 
-    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+    def get_pooling_params(self,
+                           task: PoolingTask) -> Optional[PoolingParamsUpdate]:
         # The equalities are split up to keep mypy happy
         if task == "encode" or task == "embed":
-            return PoolingParams()
+            return PoolingParamsUpdate()
 
         if task == "classify" or task == "score":
             return None
