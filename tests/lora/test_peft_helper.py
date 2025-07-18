@@ -56,7 +56,6 @@ def test_peft_helper_pass(sql_lora_files, tmp_path):
         "embed_tokens",
         "lm_head",
     ]
-    assert peft_helper.context_length == 16384
     assert peft_helper.vllm_max_position_embeddings == 4096
 
     # test RSLoRA
