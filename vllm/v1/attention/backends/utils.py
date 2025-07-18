@@ -95,7 +95,7 @@ def _make_metadata_with_slice(
     token_slice = ubatch_slice[1]
 
     query_start_loc = slice_query_start_locs(query_start_loc, req_slice)
-
+    assert len(query_start_loc >= 2)
     query_start_loc_cpu = slice_query_start_locs(query_start_loc_cpu,
                                                  req_slice)
 
