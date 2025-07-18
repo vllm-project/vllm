@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
-from importlib.util import find_spec
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
@@ -44,6 +43,7 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import has_deep_gemm
 from vllm.utils.deep_gemm import is_blackwell_deep_gemm_used
+from vllm.utils.flashinfer import has_flashinfer_moe
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -496,8 +496,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.block_quant = self.quant_config.weight_block_size is not None
 
         self.flashinfer_moe_enabled = False
-        if (envs.VLLM_USE_FLASHINFER_MOE_FP8
-                and find_spec("flashinfer.fused_moe") is not None):
+        if envs.VLLM_USE_FLASHINFER_MOE_FP8 and has_flashinfer_moe():
             logger.info_once(
                 "Using FlashInfer MoE FP8 kernels for Fp8MoEMethod.")
             self.flashinfer_moe_enabled = True

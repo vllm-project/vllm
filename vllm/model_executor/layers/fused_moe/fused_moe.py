@@ -6,10 +6,6 @@ import json
 import os
 from typing import Any, Callable, Optional
 
-try:
-    import flashinfer.fused_moe as fi_fused_moe
-except ImportError:
-    fi_fused_moe = None
 import torch
 
 import vllm.envs as envs
@@ -1083,6 +1079,7 @@ def flashinfer_fused_moe_blockscale_fp8(
         routed_scaling: float = 1.0,
         tile_tokens_dim: int = 8,
         routing_method_type: int = 2) -> torch.Tensor:
+    from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
     assert top_k <= global_num_experts
     assert top_k <= 8
     assert topk_group <= 4
@@ -1094,8 +1091,7 @@ def flashinfer_fused_moe_blockscale_fp8(
     a_q, a_sf = per_token_group_quant_fp8(x, block_shape[1])
     # NOTE: scales of hidden states have to be transposed!
     a_sf_t = a_sf.t().contiguous()
-    assert fi_fused_moe is not None
-    return fi_fused_moe.trtllm_fp8_block_scale_moe(
+    return flashinfer_trtllm_fp8_block_scale_moe(
         routing_logits=router_logits,
         routing_bias=e_score_correction_bias,
         hidden_states=a_q,
