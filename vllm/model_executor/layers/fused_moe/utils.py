@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from math import prod
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 
@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
+from vllm.utils.flashinfer import fp4_quantize
 
 
 @triton.jit
@@ -98,6 +99,16 @@ def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
     return x.flatten()[:prod(v)].view(*v)
 
 
+def _fp4_quantize(
+    A: torch.Tensor,
+    A_scale: Optional[torch.Tensor],
+    is_sf_swizzled_layout: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return fp4_quantize(A,
+                        A_scale,
+                        is_sf_swizzled_layout=is_sf_swizzled_layout)
+
+
 def _fp8_quantize(
     A: torch.Tensor,
     A_scale: Optional[torch.Tensor],
@@ -172,11 +183,16 @@ def moe_kernel_quantize_input(
     quant_dtype: Union[None, torch.dtype, str],
     per_act_token_quant: bool,
     block_shape: Optional[list[int]] = None,
+    is_fp4_scale_swizzled: bool = True,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     if quant_dtype == torch.float8_e4m3fn:
         return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
         return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)
+    elif quant_dtype == torch.uint8:  # nvfp4
+        return _fp4_quantize(A,
+                             A_scale,
+                             is_sf_swizzled_layout=is_fp4_scale_swizzled)
     elif quant_dtype == "mxfp4":
         return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
     else:
@@ -236,3 +252,17 @@ def _validate_scale_shape(
         assert block_shape is not None
         expected = (a.shape[0], cdiv(a.shape[1], block_shape[1]))
         assert a_scale.shape == expected, f"{a_scale.shape} == {expected}"
+
+
+def extract_required_args(
+    extra_args: Optional[dict[str, Any]],
+    required_keys: list[str],
+) -> tuple[Any, ...]:
+    if extra_args is None:
+        raise ValueError("`extra_args` must be provided.")
+
+    missing_keys = [k for k in required_keys if k not in extra_args]
+    if missing_keys:
+        raise ValueError(f"Missing keys in `extra_args`: {missing_keys}")
+
+    return tuple(extra_args[k] for k in required_keys)
