@@ -500,7 +500,7 @@ class LoRAModelManager(AdapterModelManager):
     def _create_lora_modules(self):
 
         def _parent_module(module_name: str) -> str:
-            # module name is a dot separated name. 
+            # module name is a dot separated name.
             # for example:
             #  - given an input 'x.y.z' return 'x.y'
             #  - given an input 'x' return ''
@@ -540,7 +540,7 @@ class LoRAModelManager(AdapterModelManager):
                     new_module.scaling_factor_to_offset
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
-                logits_processor_module_name = 'logits_processor' 
+                logits_processor_module_name = 'logits_processor'
                 parent_module = _parent_module(module_name)
                 if parent_module:
                     logits_processor_module_name = (
