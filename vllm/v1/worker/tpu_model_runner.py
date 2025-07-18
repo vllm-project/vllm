@@ -3,7 +3,7 @@
 import bisect
 import gc
 import time
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, cast, get_args
 from unittest.mock import patch
 
 import numpy as np
@@ -25,10 +25,12 @@ from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.tpu import TPUModelLoader
+from vllm.model_executor.models.interfaces_base import is_pooling_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
                                     PlaceholderRange)
 from vllm.multimodal.utils import group_mm_inputs_by_modality
+from vllm.pooling_params import PoolingTask
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
                         is_pin_memory_available, prev_power_of_2)
@@ -482,6 +484,16 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
     def get_model(self) -> nn.Module:
         return self.model
+
+    def get_supported_pooling_tasks(self) -> list[PoolingTask]:
+        model = self.get_model()
+        if not is_pooling_model(model):
+            return []
+
+        return [
+            task for task in get_args(PoolingTask)
+            if model.pooler.get_pooling_updates(task)
+        ]
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
