@@ -172,10 +172,7 @@ def supports_multimodal_raw_input(
     model: Union[type[object], object]
 ) -> Union[TypeIs[type[SupportsMultiModalWithRawInput]],
            TypeIs[SupportsMultiModalWithRawInput]]:
-    if isinstance(model, type):
-        return isinstance(model, _SupportsMultiModalWithRawInput)
-
-    return isinstance(model, SupportsMultiModalWithRawInput)
+    return getattr(model, "supports_multimodal_raw_input", False)
 
 
 @runtime_checkable

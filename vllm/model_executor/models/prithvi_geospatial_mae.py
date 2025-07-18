@@ -103,7 +103,7 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
 
         for k, v in mm_data.items():
             mm_kwargs[k] = v
-        mm_place_holders = {"image": [PlaceholderRange(offset=0, length=0)]}
+        mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
         multimodal_kwargs_items = [
             MultiModalKwargsItem.from_elems([
@@ -121,7 +121,7 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
             prompt_token_ids=[1],
             mm_kwargs=MultiModalKwargs.from_items(multimodal_kwargs_items),
             mm_hashes=None,
-            mm_placeholders=mm_place_holders,
+            mm_placeholders=mm_placeholders,
         )
 
 
@@ -129,10 +129,9 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
     PrithviGeoSpatialMAEMultiModalProcessor,
     info=PrithviGeoSpatialMAEProcessingInfo,
     dummy_inputs=PrithviGeoSpatialMAEInputBuilder)
-
 class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree,
                            SupportsMultiModalWithRawInput):
-    """ Prithvi Masked Autoencoder"""
+    """Prithvi Masked Autoencoder"""
 
     is_pooling_model = True
 
@@ -200,13 +199,15 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree,
 
         return pixel_values, location_coords
 
-    def get_input_embeddings(self, input_ids: torch.Tensor,
-                             multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         # We do not really use any input tokens and therefore no embeddings
         # to be calculated. However, due to the mandatory token ids in
         # the input prompt we pass one token and the size of the dummy
-        #  embedding tensors must reflect that.
+        # embedding tensors must reflect that.
         return torch.empty((input_ids.shape[0], 0))
 
     def forward(
