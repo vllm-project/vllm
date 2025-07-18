@@ -24,6 +24,7 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.adapters import (as_embedding_model,
                                                  as_reward_model)
 from vllm.model_executor.models.interfaces import SupportsQuant
+from vllm.model_executor.models.registry import _TRANSFORMERS_MODELS
 from vllm.utils import is_pin_memory_available
 
 logger = init_logger(__name__)
@@ -168,9 +169,22 @@ def device_loading_context(module: torch.nn.Module,
 
 def resolve_transformers_arch(model_config: ModelConfig,
                               architectures: list[str]):
+    if model_config.model_impl == ModelImpl.VLLM:
+        raise ValueError(
+            "Attempting to resolve architecture from the Transformers library "
+            "but the model implementation is set to vLLM. This should never "
+            "happen.")
+
     for i, arch in enumerate(architectures):
-        if arch in ["TransformersForCausalLM", "TransformersForMultimodalLM"]:
+        if arch in _TRANSFORMERS_MODELS:
             continue
+
+        if model_config.model_impl == ModelImpl.AUTO:
+            logger.warning(
+                "%s has no vLLM implementation, falling back to Transformers "
+                "implementation. Some features may not be supported and "
+                "performance may not be optimal.", arch)
+
         auto_map: dict[str, str] = getattr(model_config.hf_config, "auto_map",
                                            None) or dict()
         # Make sure that config class is always initialized before model class,
@@ -198,37 +212,13 @@ def resolve_transformers_arch(model_config: ModelConfig,
                     "not present in the model config's 'auto_map' (relevant "
                     "if the model is custom).")
             model_module = auto_modules["AutoModel"]
-        # TODO(Isotr0py): Further clean up these raises.
-        # perhaps handled them in _ModelRegistry._raise_for_unsupported?
-        if model_config.model_impl == ModelImpl.TRANSFORMERS:
-            if not model_module.is_backend_compatible():
-                raise ValueError(
-                    f"The Transformers implementation of {arch} is not "
-                    "compatible with vLLM.")
-            # Check if text-config is `self`. If not most probably it is
-            # a composite config, i.e. mutlimodal
-            if model_config.hf_config.get_text_config(
-            ) != model_config.hf_config:
-                architectures[i] = "TransformersForMultimodalLM"
-            else:
-                architectures[i] = "TransformersForCausalLM"
-        if model_config.model_impl == ModelImpl.AUTO:
-            if not model_module.is_backend_compatible():
-                raise ValueError(
-                    f"{arch} has no vLLM implementation and the Transformers "
-                    "implementation is not compatible with vLLM. Try setting "
-                    "VLLM_USE_V1=0.")
-            logger.warning(
-                "%s has no vLLM implementation, falling back to Transformers "
-                "implementation. Some features may not be supported and "
-                "performance may not be optimal.", arch)
-            # Check if text-config is `self`. If not most probably it is
-            # a composite config, i.e. multimodal
-            if model_config.hf_config.get_text_config(
-            ) != model_config.hf_config:
-                architectures[i] = "TransformersForMultimodalLM"
-            else:
-                architectures[i] = "TransformersForCausalLM"
+
+        if not model_module.is_backend_compatible():
+            raise ValueError(
+                f"The Transformers implementation of '{arch}' is not "
+                "compatible with vLLM.")
+
+        architectures[i] = model_config._get_transformers_backend_cls()
     return architectures
 
 
@@ -248,8 +238,9 @@ def get_model_architecture(
     ]
 
     vllm_supported_archs = ModelRegistry.get_supported_archs()
-    vllm_not_supported = not any(arch in vllm_supported_archs
-                                 for arch in architectures)
+    is_supported = lambda arch: (arch in vllm_supported_archs and arch not in
+                                 _TRANSFORMERS_MODELS)
+    vllm_not_supported = not any(is_supported(arch) for arch in architectures)
     if (model_config.model_impl == ModelImpl.TRANSFORMERS or
             model_config.model_impl == ModelImpl.AUTO and vllm_not_supported):
         architectures = resolve_transformers_arch(model_config, architectures)
