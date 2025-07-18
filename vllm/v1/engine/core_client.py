@@ -1086,8 +1086,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         return future
 
     async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
-        """Scale elastic EP data parallel size by creating new engine cores
-        and reconfiguring existing ones."""
+        """Scale elastic EP data parallel size"""
         cur_data_parallel_size = len(self.core_engines)
 
         assert new_data_parallel_size != cur_data_parallel_size, (
