@@ -562,6 +562,10 @@ class ModelConfig:
 
             self.task = "embed"
 
+        model_info, arch = self.registry.inspect_model_cls(self.architectures)
+        self._model_info = model_info
+        self._architecture = arch
+
         all_supported_tasks = self._get_supported_tasks(self.task)
         logger.debug("Tasks supported by runner type: %s", all_supported_tasks)
         supported_runner_types = self._get_supported_runner_types(
@@ -586,15 +590,6 @@ class ModelConfig:
             self.truncation_side = "left"
         else:
             self.truncation_side = "right"
-
-        model_info, arch = self.registry.inspect_model_cls(self.architectures)
-        if (arch == "TransformersForMultimodalLM"
-                and self.hf_config == self.hf_text_config):
-            model_info, arch = self.registry.inspect_model_cls(
-                "TransformersForCausalLM")
-
-        self._model_info = model_info
-        self._architecture = arch
 
         self.pooler_config = self._init_pooler_config()
 
@@ -829,10 +824,9 @@ class ModelConfig:
             ("EmbeddingModel", "embed"),
             ("RewardModel", "reward"),
         ]
-        _, arch = self.registry.inspect_model_cls(architectures)
 
         for suffix, pref_task in suffix_to_preferred_task:
-            if arch.endswith(suffix):
+            if self.architecture.endswith(suffix):
                 return pref_task
 
         return "embed"
@@ -939,10 +933,10 @@ class ModelConfig:
             ("EmbeddingModel", "pooling"),
             ("RewardModel", "pooling"),
         ]
-        _, arch = self.registry.inspect_model_cls(self.architectures)
 
         for suffix, pref_runner in suffix_to_preferred_runner:
-            if arch.endswith(suffix) and pref_runner in supported_runner_types:
+            if self.architecture.endswith(
+                    suffix) and pref_runner in supported_runner_types:
                 return pref_runner
 
         if "classify" in supported_tasks.get("pooling", []):
