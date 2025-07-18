@@ -7,10 +7,12 @@ from typing import Optional, Union
 
 import torch
 import torch.nn.functional as F
+from typing_extensions import assert_never
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import (HAS_TRITON, Pooler, PoolingType,
+from vllm.model_executor.layers.pooler import (HAS_TRITON, Pooler, PoolingTask,
+                                               PoolingType,
                                                extract_vision_tokens_kernel)
 # yapf: disable
 from vllm.model_executor.pooling_metadata import (
@@ -18,6 +20,7 @@ from vllm.model_executor.pooling_metadata import (
 from vllm.model_executor.pooling_metadata import PoolingTensors
 # yapf: enable
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.pooling_params import PoolingParams
 from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
 from vllm.v1.pool.metadata import PoolingMetadata as V1PoolingMetadata
 
@@ -36,49 +39,98 @@ VISION_END_TOKEN_ID = 151653
 PoolingMetadata = Union[V0PoolingMetadata, V1PoolingMetadata]
 
 
-@MULTIMODAL_REGISTRY.register_processor(Qwen2VLMultiModalProcessor,
-                                        info=Qwen2VLProcessingInfo,
-                                        dummy_inputs=Qwen2VLDummyInputsBuilder)
-class JinaVLForEmbedding(Qwen2VLForConditionalGeneration,
-                         SupportsCrossEncoding, SupportsMultiModal):
-    # Weight mapping for HuggingFace checkpoint compatibility
-    weight_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            "model.": "language_model.model.",
-            "visual.": "visual.",
-            "lm_head.": "language_model.lm_head.",
-        })
+class JinaVLPooler(Pooler):
+    """Vision-aware pooler for Jina V4 with special vision token handling."""
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config,
-                         prefix=maybe_prefix(prefix, "qwen2_vl"))
-
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 pooling_backend: str = "pytorch"):
+        super().__init__()
         self.hidden_size = vllm_config.model_config.hf_config.hidden_size
-        pooler_config = vllm_config.model_config.pooler_config
+        self.pooling_backend = pooling_backend
         self.observability_config = vllm_config.observability_config
 
-        # Configuration for vision pooling backend
-        self.pooling_backend = getattr(vllm_config.model_config,
-                                       "jina_pooling_backend", "pytorch")
-        if self.pooling_backend not in ("triton", "pytorch"):
-            logger.warning(
-                "Invalid jina_pooling_backend '%s'. "
-                "Must be 'triton' or 'pytorch'. Defaulting to 'pytorch'.",
-                self.pooling_backend)
-            self.pooling_backend = "pytorch"
+        # Performance tracking
+        self._pooling_time_ms = 0.0
+        self._pooling_count = 0
 
         # Initialize base pooler for fallback
+        pooler_config = vllm_config.model_config.pooler_config
         self._base_pooler = Pooler.from_config_with_defaults(
             pooler_config,
             pooling_type=PoolingType.MEAN,
             normalize=True,
             softmax=False)
 
-        # Performance tracking
-        self._pooling_time_ms = 0.0
-        self._pooling_count = 0
+    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+        """Return pooling params for embedding task."""
+        if task == "embed":
+            return PoolingParams()
 
-        logger.info("Initialized JinaVLForEmbedding with thread-safe pooling")
+        # The equalities are split up to keep mypy happy
+        if task == "encode" or task == "classify" or task == "score":
+            return None
+
+        assert_never(task)
+
+    def forward(
+        self,
+        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
+        pooling_metadata: PoolingMetadata,
+    ) -> PoolerOutput:
+        """Apply vision-aware pooling to hidden states."""
+        start_time = time.time() if self.observability_config else None
+
+        # Validate inputs
+        if hidden_states is None or hidden_states.numel() == 0:
+            logger.warning("Empty hidden states received")
+            return PoolerOutput(outputs=[])
+
+        # Extract token IDs safely from metadata
+        token_ids_list, seq_ids = self._extract_token_ids_safe(
+            pooling_metadata)
+
+        if not token_ids_list:
+            logger.warning("No valid sequences found for pooling")
+            # Fallback to base pooler
+            return self._base_pooler(hidden_states, pooling_metadata)
+
+        # Get prompt lengths based on metadata type
+        if isinstance(pooling_metadata, V1PoolingMetadata):
+            prompt_lens = pooling_metadata.prompt_lens
+        else:
+            prompt_lens = PoolingTensors.from_pooling_metadata(
+                pooling_metadata, hidden_states.device).prompt_lens
+
+        # Validate lengths match
+        assert len(token_ids_list) == len(prompt_lens), (
+            f"Mismatch: {len(token_ids_list)} sequences vs "
+            f"{len(prompt_lens)} lengths")
+
+        # Apply pooling based on configured backend
+        if self.pooling_backend == "triton":
+            pooled_data = self._apply_vision_pooling_optimized(
+                hidden_states, token_ids_list, prompt_lens)
+        else:  # self.pooling_backend == "pytorch"
+            pooled_data = self._apply_vision_pooling_pytorch(
+                hidden_states, token_ids_list, prompt_lens)
+
+        # Build output
+        pooled_outputs = [
+            PoolingSequenceGroupOutput(data) for data in pooled_data
+        ]
+
+        # Record metrics
+        if self.observability_config:
+            elapsed_ms = (time.time() - start_time) * 1000
+            self._pooling_time_ms += elapsed_ms
+            self._pooling_count += 1
+
+            if self._pooling_count % 100 == 0:
+                avg_time = self._pooling_time_ms / self._pooling_count
+                logger.debug("Average pooling time: %.2fms", avg_time)
+
+        return PoolerOutput(outputs=pooled_outputs)
 
     def _extract_token_ids_safe(
             self, pooling_metadata: PoolingMetadata
@@ -239,64 +291,41 @@ class JinaVLForEmbedding(Qwen2VLForConditionalGeneration,
 
         return pooled_outputs
 
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        """Thread-safe pooler with production error handling."""
-        start_time = time.time() if self.observability_config else None
 
-        # Validate inputs
-        if hidden_states is None or hidden_states.numel() == 0:
-            logger.warning("Empty hidden states received")
-            return PoolerOutput(outputs=[])
+@MULTIMODAL_REGISTRY.register_processor(Qwen2VLMultiModalProcessor,
+                                        info=Qwen2VLProcessingInfo,
+                                        dummy_inputs=Qwen2VLDummyInputsBuilder)
+class JinaVLForEmbedding(Qwen2VLForConditionalGeneration,
+                         SupportsCrossEncoding, SupportsMultiModal):
 
-        # Extract token IDs safely from metadata
-        token_ids_list, seq_ids = self._extract_token_ids_safe(
-            pooling_metadata)
+    is_pooling_model = True
 
-        if not token_ids_list:
-            logger.warning("No valid sequences found for pooling")
-            # Fallback to base pooler
-            return self._base_pooler(hidden_states, pooling_metadata)
+    # Weight mapping for HuggingFace checkpoint compatibility
+    weight_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.": "language_model.model.",
+            "visual.": "visual.",
+            "lm_head.": "language_model.lm_head.",
+        })
 
-        # Get prompt lengths based on metadata type
-        if isinstance(pooling_metadata, V1PoolingMetadata):
-            prompt_lens = pooling_metadata.prompt_lens
-        else:
-            prompt_lens = PoolingTensors.from_pooling_metadata(
-                pooling_metadata, hidden_states.device).prompt_lens
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config,
+                         prefix=maybe_prefix(prefix, "qwen2_vl"))
 
-        # Validate lengths match
-        assert len(token_ids_list) == len(prompt_lens), (
-            f"Mismatch: {len(token_ids_list)} sequences vs "
-            f"{len(prompt_lens)} lengths")
+        # Configuration for vision pooling backend
+        self.pooling_backend = getattr(vllm_config.model_config,
+                                       "jina_pooling_backend", "pytorch")
+        if self.pooling_backend not in ("triton", "pytorch"):
+            logger.warning(
+                "Invalid jina_pooling_backend '%s'. "
+                "Must be 'triton' or 'pytorch'. Defaulting to 'pytorch'.",
+                self.pooling_backend)
+            self.pooling_backend = "pytorch"
 
-        # Apply pooling based on configured backend
-        if self.pooling_backend == "triton":
-            pooled_data = self._apply_vision_pooling_optimized(
-                hidden_states, token_ids_list, prompt_lens)
-        else:  # self.pooling_backend == "pytorch"
-            pooled_data = self._apply_vision_pooling_pytorch(
-                hidden_states, token_ids_list, prompt_lens)
+        # Initialize the vision-aware pooler
+        self.pooler = JinaVLPooler(vllm_config, self.pooling_backend)
 
-        # Build output
-        pooled_outputs = [
-            PoolingSequenceGroupOutput(data) for data in pooled_data
-        ]
-
-        # Record metrics
-        if self.observability_config:
-            elapsed_ms = (time.time() - start_time) * 1000
-            self._pooling_time_ms += elapsed_ms
-            self._pooling_count += 1
-
-            if self._pooling_count % 100 == 0:
-                avg_time = self._pooling_time_ms / self._pooling_count
-                logger.debug("Average pooling time: %.2fms", avg_time)
-
-        return PoolerOutput(outputs=pooled_outputs)
+        logger.info("Initialized JinaVLForEmbedding with thread-safe pooling")
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         """Load weights with validation and error handling."""
