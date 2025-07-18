@@ -25,7 +25,7 @@ This approach serves as a general rule of thumb. As latency becomes more importa
 
 ![image](most_model_len.png)
 
-Here's a nifty trick: Setting max model len too high can hurt performance when the bulk of your traffic isn't anywhere near the max length, but you still need to retain the ability to handle the off max length request. In these cases, you can try introducing most model len by specifying the `VLLM_TPU_MOST_MODEL_LEN` environment variable.
+If most of your requests are shorter than the maximum model length but you still need to accommodate occasional longer requests, setting a high maximum model length can negatively impact performance. In these cases, you can try introducing most model len by specifying the `VLLM_TPU_MOST_MODEL_LEN` environment variable.
 
 For example, 1% requests are 32k length and 99% requests are 2k length. You can pass 32k into `--max-model-len 32000` and use `VLLM_TPU_MOST_MODEL_LEN=2000`.
 
