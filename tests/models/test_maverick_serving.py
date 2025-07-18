@@ -168,7 +168,8 @@ def create_reduced_config(original_config: Any, text_layers: int,
         original_num_experts = config_dict["text_config"]["num_local_experts"]
         config_dict["text_config"]["num_local_experts"] = num_experts
         print(
-            f"Reduced num experts from {original_num_experts} to {num_experts}")
+            f"Reduced num experts from {original_num_experts} to {num_experts}"
+        )
 
         hidden_dim_divisor = 4
 
@@ -454,7 +455,7 @@ def save_weights_to_safetensors(weights: dict[str, torch.Tensor],
 
     # Calculate sizes and create shards
     shards = []
-    current_shard = {}
+    current_shard: dict[str, torch.Tensor] = {}
     current_size = 0
 
     for name, tensor in weights.items():
