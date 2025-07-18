@@ -6,7 +6,7 @@ from typing import Optional
 import torch
 
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
 
 
 def get_aiter_mla_metadata(max_batch_size: int, block_size: int,
@@ -93,8 +93,12 @@ def mla_decode_fwd_fake(
 
 
 if current_platform.is_rocm():
+    if is_torch_equal_or_newer("2.7.0"):
+        tags = ()
+    else:
+        tags = (torch.Tag.needs_fixed_stride_order, ),
     direct_register_custom_op(op_name="rocm_aiter_mla_decode_fwd",
                               op_func=mla_decode_fwd_impl,
                               mutates_args=["o"],
                               fake_impl=mla_decode_fwd_fake,
-                              tags=[torch.Tag.needs_fixed_stride_order])
+                              tags=tags)

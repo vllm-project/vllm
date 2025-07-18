@@ -33,7 +33,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     dequant_mxfp4)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils import direct_register_custom_op
+from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
 from vllm.utils.deep_gemm import is_blackwell_deep_gemm_used
 
 from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
@@ -1056,7 +1056,8 @@ direct_register_custom_op(
     op_func=inplace_fused_experts,
     mutates_args=["hidden_states"],
     fake_impl=inplace_fused_experts_fake,
-    tags=(torch.Tag.needs_fixed_stride_order, ),
+    tags=(() if is_torch_equal_or_newer("2.7.0") else
+          (torch.Tag.needs_fixed_stride_order, )),
 )
 
 
@@ -1122,7 +1123,8 @@ direct_register_custom_op(
     op_func=outplace_fused_experts,
     mutates_args=[],
     fake_impl=outplace_fused_experts_fake,
-    tags=(torch.Tag.needs_fixed_stride_order, ),
+    tags=(() if is_torch_equal_or_newer("2.7.0") else
+          (torch.Tag.needs_fixed_stride_order, )),
 )
 
 
