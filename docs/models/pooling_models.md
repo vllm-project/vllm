@@ -60,9 +60,16 @@ Other embedding models can be extended to support this feature by ensuring prope
 Enable chunked processing and configure maximum embedding input length:
 
 ```bash
+# MEAN pooling (recommended for chunked processing)
 vllm serve intfloat/multilingual-e5-large \
   --task embed \
   --override-pooler-config '{"pooling_type": "MEAN", "normalize": true, "enable_chunked_processing": true, "max_embed_len": 3072000}' \
+  --trust-remote-code
+
+# CLS pooling (processes only first chunk)
+vllm serve BAAI/bge-large-en-v1.5 \
+  --task embed \
+  --override-pooler-config '{"pooling_type": "CLS", "normalize": true, "enable_chunked_processing": true, "max_embed_len": 1048576, "allow_non_mean_chunking": true}' \
   --trust-remote-code
 ```
 
@@ -73,10 +80,17 @@ vllm serve intfloat/multilingual-e5-large \
   - When set, allows inputs longer than `max_model_len` without requiring `VLLM_ALLOW_LONG_MAX_MODEL_LEN`
   - Inputs exceeding `max_embed_len` are rejected with clear error messages
   - Chunking is triggered when inputs exceed `max_position_embeddings`
+- `allow_non_mean_chunking`: Allow non-MEAN pooling types with chunked processing (default: `false`)
+  - When `false`: CLS/LAST pooling types show warnings and may be disabled
+  - When `true`: Explicitly enables CLS/LAST pooling with performance optimizations
+  - Required to suppress warnings for non-MEAN pooling types
 
 ### Aggregation Algorithm
 
-The chunked processing uses a FastChat-inspired weighted averaging algorithm:
+The chunked processing uses different strategies based on pooling type:
+
+#### MEAN Pooling (Recommended)
+Uses weighted averaging across all chunks:
 
 ```python
 # Weighted average: sum(embedding_i * token_count_i) / total_tokens
@@ -86,13 +100,39 @@ final_embedding = weighted_sum / sum(weights)
 
 This ensures that longer chunks contribute proportionally more to the final representation.
 
+#### CLS Pooling (Performance Optimized)
+Only processes the **first chunk** to avoid computational waste:
+
+```python
+# CLS pooling: only the first chunk contains the CLS token
+final_embedding = first_chunk_embedding
+```
+
+Note: This may lose information from later parts of the text.
+
+#### LAST Pooling (Performance Optimized)
+Only processes the **last chunk** to avoid computational waste:
+
+```python
+# LAST pooling: only the last chunk contains the final token
+final_embedding = last_chunk_embedding
+```
+
+Note: This may lose information from earlier parts of the text.
+
 ### Performance Characteristics
+
+| Pooling Type | Chunks Processed | Processing Time | Semantic Coverage | Best Use Case |
+|--------------|------------------|-----------------|-------------------|---------------|
+| **MEAN** | All chunks | Highest (all chunks) | Complete | General purpose, long documents |
+| **CLS** | First chunk only | Lowest (1 chunk) | Limited to start | Classification, when start matters |
+| **LAST** | Last chunk only | Lowest (1 chunk) | Limited to end | When ending matters |
 
 | Aspect | Short Text (≤ max_position_embeddings) | Long Text (> max_position_embeddings) |
 |--------|----------------------------------------|---------------------------------------|
-| **Processing Time** | Standard | Increased (multiple inference calls) |
+| **Processing Time** | Standard | Varies by pooling type (CLS/LAST: minimal, MEAN: increased) |
 | **Memory Usage** | Standard | Reduced (chunks processed separately) |
-| **Quality** | Standard | Maintains semantic representation |
+| **Quality** | Standard | Depends on pooling type and content distribution |
 | **Compatibility** | Full | Full (backward compatible) |
 | **Input Validation** | Standard max_model_len check | Extended max_embed_len check |
 

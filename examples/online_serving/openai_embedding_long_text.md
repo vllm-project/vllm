@@ -50,9 +50,18 @@ The key parameters for chunked processing are in the `--override-pooler-config`:
   "pooling_type": "MEAN",
   "normalize": true,
   "enable_chunked_processing": true,
-  "max_embed_len": 3072000
+  "max_embed_len": 3072000,
+  "allow_non_mean_chunking": true
 }
 ```
+
+#### Pooling Type Behavior with Chunked Processing
+
+| Pooling Type | Chunks Processed | Performance | Semantic Coverage | Use Case |
+|--------------|------------------|-------------|-------------------|----------|
+| **MEAN** (recommended) | All chunks | Slower | Complete | General purpose, full documents |
+| **CLS** | First chunk only | Fastest | Limited to start | Classification, when beginning matters |
+| **LAST** | Last chunk only | Fastest | Limited to end | When ending/conclusion matters |
 
 ### Environment Variables
 
@@ -62,14 +71,21 @@ The key parameters for chunked processing are in the `--override-pooler-config`:
 | `PORT` | `31090` | Server port |
 | `GPU_COUNT` | `1` | Number of GPUs to use |
 | `MAX_EMBED_LEN` | `3072000` | Maximum embedding input length (supports very long documents) |
+| `POOLING_TYPE` | `auto` | Pooling type: `auto`, `MEAN`, `CLS`, `LAST` |
+| `ALLOW_NON_MEAN_CHUNKING` | `false` | Allow CLS/LAST pooling with chunked processing |
 | `API_KEY` | `EMPTY` | API key for authentication |
 
 ## 🔧 How It Works
 
 1. **Enhanced Input Validation**: `max_embed_len` allows accepting inputs longer than `max_model_len` without environment variables
 2. **Smart Chunking**: Text is split based on `max_position_embeddings` to maintain semantic integrity
-3. **Independent Processing**: Each chunk is processed separately through the model
-4. **Weighted Aggregation**: Results are combined using token count-based weighted averaging
+3. **Pooling-Optimized Processing**:
+   - **MEAN pooling**: All chunks processed separately through the model
+   - **CLS pooling**: Only first chunk processed (contains CLS token)
+   - **LAST pooling**: Only last chunk processed (contains final token)
+4. **Intelligent Aggregation**:
+   - **MEAN**: Results combined using token count-based weighted averaging
+   - **CLS/LAST**: Direct use of single chunk result (no aggregation needed)
 5. **Consistent Output**: Final embeddings maintain the same dimensionality as standard processing
 
 ### Input Length Handling
@@ -89,11 +105,13 @@ With `MAX_EMBED_LEN=3072000`, you can process:
 
 ## 📊 Performance Characteristics
 
-| Text Length | Processing Method | Memory Usage | Speed |
-|-------------|------------------|--------------|-------|
-| ≤ max_position_embeddings | Standard | Normal | Fast |
-| > max_position_embeddings, ≤ max_embed_len | Chunked | Reduced per chunk | Slower (multiple inferences) |
-| > max_embed_len | Rejected | N/A | Error response |
+### By Pooling Type (for long text)
+
+| Pooling Type | Chunks Processed | Processing Time | Memory Usage | Semantic Quality |
+|--------------|------------------|-----------------|--------------|------------------|
+| **MEAN** | All chunks | Highest | Moderate | Complete coverage |
+| **CLS** | First chunk only | Lowest | Minimal | Limited to beginning |
+| **LAST** | Last chunk only | Lowest | Minimal | Limited to ending |
 
 ## 🧪 Test Cases
 

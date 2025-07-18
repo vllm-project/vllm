@@ -148,6 +148,8 @@ class EmbeddingMixin(OpenAIServing):
         This uses the same logic as vLLM's _get_and_verify_max_len to determine
         the actual sequence length limit,
         considering both model config and tokenizer config.
+        When max_model_len is set and smaller than max_position_embeddings,
+        use max_model_len for chunking.
         """
         hf_config = self.model_config.hf_config
 
@@ -169,6 +171,12 @@ class EmbeddingMixin(OpenAIServing):
                     'model_max_length', derived_max_len)
                 derived_max_len = min(derived_max_len,
                                       tokenizer_model_max_length)
+
+        # Consider max_model_len when it's set and smaller than other limits
+        # max_model_len is set in OpenAIServing.__init__
+        # from model_config.max_model_len
+        if self.max_model_len is not None:
+            derived_max_len = min(derived_max_len, self.max_model_len)
 
         return int(derived_max_len)
 
@@ -224,13 +232,17 @@ class EmbeddingMixin(OpenAIServing):
                     logger.warning(
                         "Chunked processing with pooling type '%s' "
                         "may produce different results than non-chunked "
-                        "processing. Only MEAN pooling is mathematically "
-                        "equivalent when using weighted averaging aggregation. "
-                        "For other pooling types, different aggregation "
-                        "strategies will be used that approximate the original "
-                        "behavior. Set 'allow_non_mean_chunking: true' "
-                        "in pooler config to suppress this warning.",
-                        pooling_type)
+                        "processing due to limited attention scope within "
+                        "chunks. Each token can only attend to tokens within "
+                        "its chunk (similar to sliding window attention), "
+                        "which changes token representations before pooling. "
+                        "While MEAN pooling provides a reasonable "
+                        "approximation "
+                        "through weighted averaging aggregation, other pooling "
+                        "types use different aggregation strategies that "
+                        "further approximate the original behavior. Set "
+                        "'allow_non_mean_chunking: true' in pooler config "
+                        "to suppress this warning.", pooling_type)
                     # Still allow it but with warning
                 else:
                     logger.info(

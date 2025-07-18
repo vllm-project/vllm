@@ -6,17 +6,30 @@ Example script demonstrating long text embedding with chunked processing in vLLM
 
 This example shows how to use vLLM's chunked processing feature to handle text
 inputs that exceed the model's maximum token length. The feature automatically
-splits long text into chunks and aggregates the results.
+splits long text into chunks and handles different pooling types optimally.
 
 Prerequisites:
 1. Start vLLM server with chunked processing enabled:
    
+   # MEAN pooling (processes all chunks, recommended for complete coverage)
    vllm serve intfloat/multilingual-e5-large \
      --task embed \
      --override-pooler-config \
-      '{"pooling_type": "CLS", "normalize": true, ' \
-      '"enable_chunked_processing": true, "max_embed_len": 10240}' \
+      '{"pooling_type": "MEAN", "normalize": true, ' \
+      '"enable_chunked_processing": true, "max_embed_len": 3072000}' \
      --served-model-name multilingual-e5-large \
+     --trust-remote-code \
+     --port 31090 \
+     --api-key your-api-key
+
+   # OR CLS pooling (processes only first chunk, faster but limited coverage)
+   vllm serve BAAI/bge-large-en-v1.5 \
+     --task embed \
+     --override-pooler-config \
+      '{"pooling_type": "CLS", "normalize": true, ' \
+      '"enable_chunked_processing": true, "max_embed_len": 1048576, ' \
+      '"allow_non_mean_chunking": true}' \
+     --served-model-name bge-large-en-v1.5 \
      --trust-remote-code \
      --port 31090 \
      --api-key your-api-key
@@ -164,6 +177,10 @@ def test_multiple_long_texts_batch():
     print("=" * 70)
 
     # Create multiple distinct long texts that will all require chunking
+    # Note: Results depend on pooling type:
+    # - MEAN pooling: All chunks processed, full semantic coverage
+    # - CLS pooling: Only first chunk processed per text (performance optimized)
+    # - LAST pooling: Only last chunk processed per text (performance optimized)
     long_texts = [
         generate_long_text(
             "First long document about artificial intelligence and machine learning. "
@@ -335,6 +352,10 @@ def main():
     print("   - ✅ Automatic chunked processing for long text")
     print("   - ✅ Seamless handling of mixed-length batches")
     print("   - ✅ Multiple long texts in single batch (chunk ID fix)")
+    print("   - ✅ Pooling-type optimized processing:")
+    print("     • MEAN: All chunks processed (complete coverage)")
+    print("     • CLS: Only first chunk processed (performance optimized)")
+    print("     • LAST: Only last chunk processed (performance optimized)")
     print("   - ✅ Consistent embedding generation")
     print("   - ✅ Backward compatibility with short text")
     print("\n📚 For more information, see:")

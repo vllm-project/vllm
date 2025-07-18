@@ -20,8 +20,10 @@ API_KEY=${API_KEY:-"your-api-key"}
 
 # Enhanced pooling configuration with model-specific defaults
 POOLING_TYPE=${POOLING_TYPE:-"auto"}  # auto, MEAN, CLS, LAST
-ALLOW_NON_MEAN_CHUNKING=${ALLOW_NON_MEAN_CHUNKING:-"false"}
+ALLOW_NON_MEAN_CHUNKING=${ALLOW_NON_MEAN_CHUNKING:-"true"}
+export VLLM_ENABLE_CHUNKED_PROCESSING=true
 # export CUDA_VISIBLE_DEVICES=2,3,4,5
+# export VLLM_ATTENTION_BACKEND=XFORMERS
 
 echo "🚀 Starting vLLM Embedding Server with Enhanced Chunked Processing"
 echo "=================================================================="
@@ -34,19 +36,25 @@ get_optimal_pooling_type() {
     local model="$1"
     case "$model" in
         *"e5-"* | *"multilingual-e5"*)
-            echo "MEAN"  # E5 series uses mean pooling
+            echo "MEAN"  # E5 series uses mean pooling (best for chunked processing)
             ;;
         *"bge-"*)
-            echo "CLS"   # BGE series uses CLS pooling
+            echo "CLS"   # BGE series uses CLS pooling (only first chunk processed when chunked)
             ;;
         *"gte-"*)
-            echo "MEAN"  # GTE series uses mean pooling
+            echo "LAST"  # GTE series uses LAST pooling (best for chunked processing)
             ;;
         *"sentence-t5"* | *"st5"*)
-            echo "MEAN"  # Sentence-T5 uses mean pooling
+            echo "MEAN"  # Sentence-T5 uses mean pooling (best for chunked processing)
+            ;;
+        *"jina-embeddings"*)
+            echo "MEAN"  # Jina embeddings use mean pooling (optimal for chunked processing)
+            ;;
+        *"Qwen"*"Embedding"*)
+            echo "LAST"  # Qwen embeddings use LAST pooling (optimal for chunked processing)
             ;;
         *)
-            echo "MEAN"  # Default to MEAN for unknown models
+            echo "MEAN"  # Default to MEAN for unknown models (best chunked processing compatibility)
             ;;
     esac
 }
@@ -62,7 +70,7 @@ echo "📋 Configuration:"
 echo "   - Model: $MODEL_NAME"
 echo "   - Port: $PORT"
 echo "   - GPU Count: $GPU_COUNT"
-echo "   - Enhanced Chunked Processing: ENABLED"
+echo "   - Enhanced Chunked Processing: ${VLLM_ENABLE_CHUNKED_PROCESSING}"
 echo "   - Max Embed Length: ${MAX_EMBED_LEN} tokens"
 echo "   - Pooling Type: $POOLING_TYPE + Normalization"
 echo "   - Allow Non-MEAN Chunking: $ALLOW_NON_MEAN_CHUNKING"
@@ -85,10 +93,19 @@ fi
 if [ "$POOLING_TYPE" != "MEAN" ] && [ "$ALLOW_NON_MEAN_CHUNKING" != "true" ]; then
     echo ""
     echo "⚠️  IMPORTANT: Using $POOLING_TYPE pooling with chunked processing"
-    echo "   This may produce different results than non-chunked processing."
-    echo "   For BERT-type models with bidirectional attention, consider:"
-    echo "   - Using MEAN pooling for mathematically equivalent results"
-    echo "   - Setting ALLOW_NON_MEAN_CHUNKING=true to suppress this warning"
+    echo "   Chunked processing behavior for different pooling types:"
+    if [ "$POOLING_TYPE" = "CLS" ]; then
+        echo "   - CLS pooling: Only the FIRST chunk will be processed (performance optimized)"
+        echo "   - This avoids processing unnecessary chunks but may lose information"
+    elif [ "$POOLING_TYPE" = "LAST" ]; then
+        echo "   - LAST pooling: Only the LAST chunk will be processed (performance optimized)"
+        echo "   - This avoids processing unnecessary chunks but may lose information"
+    else
+        echo "   - $POOLING_TYPE pooling: All chunks processed, results may differ from non-chunked"
+    fi
+    echo "   - Each token only attends within its chunk (limited attention scope)"
+    echo "   - Consider using MEAN pooling for full semantic coverage"
+    echo "   - Set ALLOW_NON_MEAN_CHUNKING=true to suppress this warning"
     echo ""
 fi
 
@@ -96,9 +113,9 @@ echo ""
 echo "🔧 Starting server with enhanced chunked processing configuration..."
 
 # Build pooler config JSON
-POOLER_CONFIG="{\"pooling_type\": \"$POOLING_TYPE\", \"normalize\": true, \"enable_chunked_processing\": true, \"max_embed_len\": ${MAX_EMBED_LEN}"
+POOLER_CONFIG="{\"pooling_type\": \"$POOLING_TYPE\", \"normalize\": true, \"enable_chunked_processing\": ${VLLM_ENABLE_CHUNKED_PROCESSING}, \"max_embed_len\": ${MAX_EMBED_LEN}"
 
-# Add allow_non_mean_chunking if needed
+# Add allow_non_mean_chunking if needed (suppresses warnings for non-MEAN pooling types)
 if [ "$ALLOW_NON_MEAN_CHUNKING" = "true" ]; then
     POOLER_CONFIG="${POOLER_CONFIG}, \"allow_non_mean_chunking\": true"
 fi
