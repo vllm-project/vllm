@@ -68,11 +68,9 @@ class ResolvedPoolingConfig:
 
 @dataclass(frozen=True)
 class PoolingParamsUpdate:
-    use_cross_encoder: bool = False
     logits_processing_needs_token_ids: bool = False
 
     def apply(self, params: PoolingParams) -> None:
-        params.use_cross_encoder = self.use_cross_encoder
         params.logits_processing_needs_token_ids = (
             self.logits_processing_needs_token_ids)
 
@@ -668,20 +666,22 @@ class ClassifierPooler(nn.Module):
         self.cross_encoder_act_fn = get_cross_encoder_activation_function(
             config.hf_config) if act_fn is None else act_fn
 
-    def _get_act_fn(self, use_cross_encoder: bool):
-        return (self.cross_encoder_act_fn
-                if use_cross_encoder else self.classification_act_fn)
+    def _get_act_fn(self, task: PoolingTask):
+        if task == "encode" or task == "classify":
+            return self.classification_act_fn
+        if task == "score":
+            return self.cross_encoder_act_fn
+
+        raise ValueError(f"Unsupported task: {task!r}")
 
     def get_pooling_params(self,
                            task: PoolingTask) -> Optional[PoolingParamsUpdate]:
-        if task == "encode":
+        # The equalities are split up to keep mypy happy
+        if task == "encode" or task == "classify" or task == "score":
             return PoolingParamsUpdate()
+
         if task == "embed":
             return None
-        if task == "classify":
-            return PoolingParamsUpdate()
-        if task == "score":
-            return PoolingParamsUpdate(use_cross_encoder=True)
 
         assert_never(task)
 
@@ -701,27 +701,28 @@ class ClassifierPooler(nn.Module):
         else:
             pooled_output = [self.classifier(data) for data in pooled_data]
 
+        task_list: list[PoolingTask]
         if isinstance(pooling_metadata, V0PoolingMetadata):
-            use_cross_encoder_list = [
-                pooling_param.use_cross_encoder
-                for _, pooling_param in pooling_metadata.seq_groups
+            task_list = [
+                task for _, pooling_param in pooling_metadata.seq_groups
+                if (task := pooling_param.task) is not None
             ]
         else:
-            use_cross_encoder_list = [
-                pooling_param.use_cross_encoder
-                for pooling_param in pooling_metadata.pooling_params
+            task_list = [
+                task for pooling_param in pooling_metadata.pooling_params
+                if (task := pooling_param.task) is not None
             ]
 
+        assert len(task_list) == len(pooled_output)
+
         # shape of scores: (batch_size, num_labels)
-        if all(use_cross_encoder == use_cross_encoder_list[0]
-               for use_cross_encoder in use_cross_encoder_list):
-            act_fn = self._get_act_fn(use_cross_encoder_list[0])
+        if len(set(task_list)) <= 1:
+            act_fn = self._get_act_fn(task_list[0])
             scores = act_fn(pooled_output)
         else:
             scores = torch.stack([
-                self._get_act_fn(use_cross_encoder)(vecs)
-                for use_cross_encoder, vecs in zip(use_cross_encoder_list,
-                                                   pooled_output)
+                self._get_act_fn(task)(vecs)
+                for task, vecs in zip(task_list, pooled_output)
             ])
 
         return build_output(scores)

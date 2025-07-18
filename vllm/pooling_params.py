@@ -31,9 +31,6 @@ class PoolingParams(
     task: Optional[PoolingTask] = None
     """Internal use only."""
 
-    use_cross_encoder: bool = False
-    """Internal use only."""
-
     logits_processing_needs_token_ids: bool = False
     """Internal use only."""
 
@@ -42,7 +39,6 @@ class PoolingParams(
         return PoolingParams(
             dimensions=self.dimensions,
             task=self.task,
-            use_cross_encoder=self.use_cross_encoder,
             logits_processing_needs_token_ids=self.
             logits_processing_needs_token_ids,
         )
@@ -81,7 +77,6 @@ class PoolingParams(
             f"PoolingParams("
             f"dimensions={self.dimensions}, "
             f"task={self.task}, "
-            f"use_cross_encoder={self.use_cross_encoder}, "
             f"logits_processing_needs_token_ids={self.logits_processing_needs_token_ids})"
         )
 
