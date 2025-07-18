@@ -23,8 +23,9 @@ from transformers import PretrainedConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.distributed import (get_ep_group, get_pp_group,
+                              get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather)
 from vllm.distributed.utils import split_tensor_along_last_dim
@@ -43,7 +44,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
+from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -61,16 +62,40 @@ class OlmoeMoE(nn.Module):
     """
 
     def __init__(self,
-                 num_experts: int,
-                 top_k: int,
-                 hidden_size: int,
-                 intermediate_size: int,
-                 params_dtype: Optional[torch.dtype] = None,
+                 config: PretrainedConfig,
                  quant_config: Optional[QuantizationConfig] = None,
-                 tp_size: Optional[int] = None,
-                 prefix: str = ""):
+                 prefix: str = "",
+                 enable_eplb: bool = False):
         super().__init__()
+        hidden_size: int = config.hidden_size
+        intermediate_size: int = config.intermediate_size
+        num_experts: int = config.num_experts
+        top_k: int = config.num_experts_per_tok
+
         self.hidden_size = hidden_size
+
+        self.ep_group = get_ep_group().device_group
+        self.ep_rank = self.ep_group.rank()
+        self.ep_size = self.ep_group.size()
+        self.n_routed_experts = getattr(config, "n_routed_experts",
+                                        num_experts)
+        self.n_shared_experts = getattr(config, "n_shared_experts", 0)
+
+        # Load balancing settings.
+        vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
+        self.enable_eplb = enable_eplb
+
+        self.n_redundant_experts = parallel_config.num_redundant_experts
+        self.n_logical_experts = self.n_routed_experts
+        self.n_physical_experts = (self.n_logical_experts +
+                                   self.n_redundant_experts)
+        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+
+        self.physical_expert_start = (self.ep_rank *
+                                      self.n_local_physical_experts)
+        self.physical_expert_end = (self.physical_expert_start +
+                                    self.n_local_physical_experts)
 
         # Gate always runs at half / full precision for now.
         self.gate = ReplicatedLinear(hidden_size,
@@ -85,8 +110,9 @@ class OlmoeMoE(nn.Module):
                                 reduce_results=True,
                                 renormalize=False,
                                 quant_config=quant_config,
-                                tp_size=tp_size,
-                                prefix=f"{prefix}.experts")
+                                prefix=f"{prefix}.experts",
+                                enable_eplb=self.enable_eplb,
+                                num_redundant_experts=self.n_redundant_experts)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
@@ -209,6 +235,7 @@ class OlmoeDecoderLayer(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        enable_eplb: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -230,12 +257,10 @@ class OlmoeDecoderLayer(nn.Module):
         )
 
         self.mlp = OlmoeMoE(
-            num_experts=config.num_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
+            config=config,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
+            enable_eplb=enable_eplb,
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
@@ -275,6 +300,10 @@ class OlmoeModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        enable_eplb = vllm_config.parallel_config.enable_eplb
+
+        self.num_redundant_experts = (
+            vllm_config.parallel_config.num_redundant_experts)
 
         self.vocab_size = config.vocab_size
         self.config = config
@@ -284,8 +313,11 @@ class OlmoeModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: OlmoeDecoderLayer(
-                config, cache_config, quant_config, prefix=prefix),
+            lambda prefix: OlmoeDecoderLayer(config,
+                                             cache_config,
+                                             quant_config,
+                                             prefix=prefix,
+                                             enable_eplb=enable_eplb),
             prefix=f"{prefix}.layers")
         self.norm = RMSNorm(config.hidden_size, eps=1e-5)
 
@@ -337,7 +369,8 @@ class OlmoeModel(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts)
+            num_experts=self.config.num_experts,
+            num_redundant_experts=self.num_redundant_experts)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -426,7 +459,7 @@ class OlmoeModel(nn.Module):
         return loaded_params
 
 
-class OlmoeForCausalLM(nn.Module, SupportsPP):
+class OlmoeForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -454,6 +487,45 @@ class OlmoeForCausalLM(nn.Module, SupportsPP):
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+
+        self.expert_weights = []
+        self.num_moe_layers = config.num_hidden_layers
+        # OLMoE uses a single expert group
+        self.num_expert_groups = getattr(config, "n_group", 1)
+
+        self.moe_layers: list[FusedMoE] = []
+        example_moe = None
+        for layer in self.model.layers:
+            assert isinstance(layer, OlmoeDecoderLayer)
+            example_moe = layer.mlp
+            self.moe_layers.append(layer.mlp.experts)
+
+        assert example_moe is not None, (
+            "No OlmoeMoE layer found in model.layers.")
+
+        # Extract counts from the reference MoE layer
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_shared_experts = example_moe.n_shared_experts
+        self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        for layer_idx, layer in enumerate(self.moe_layers):
+            # Register expert weights for this layer.
+            self.expert_weights.append(layer.get_expert_weights())
+            layer.set_eplb_state(
+                moe_layer_idx=layer_idx,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+            )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
