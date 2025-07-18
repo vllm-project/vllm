@@ -20,7 +20,6 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include "../cuda_compat.h"
-#include "warp_size.h"
 
 #ifndef USE_ROCM
     #include <cub/util_type.cuh>

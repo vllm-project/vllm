@@ -5,7 +5,6 @@
 #include <ATen/ATen.h>
 #include <ATen/cuda/Atomic.cuh>
 
-#include "warp_size.h"
 #include "../cuda_compat.h"
 #include "../dispatch_utils.h"
 
