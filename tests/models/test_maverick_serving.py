@@ -164,13 +164,25 @@ def create_reduced_config(original_config: Any, text_layers: int,
         print(
             f"Reduced text layers from {original_text_layers} to {text_layers}"
         )
+
         original_num_expert = config_dict["text_config"]["num_local_experts"]
         config_dict["text_config"]["num_local_experts"] = num_expert
         print(
             f"Reduced num experts from {original_num_expert} to {num_expert}")
+
+        hidden_dim_divisor = 4
+
         original_hidden_size = config_dict["text_config"]["hidden_size"]
-        config_dict["text_config"]["hidden_size"] = 5120
-        print(f"Reduced hidden size from {original_hidden_size} to 5120")
+        new_hidden_size = original_hidden_size // hidden_dim_divisor
+        config_dict["text_config"]["hidden_size"] = new_hidden_size
+        print(f"Reduced hidden size from {original_hidden_size} to "
+              f"{new_hidden_size}")
+
+        original_head_dim = config_dict["text_config"]["head_dim"]
+        new_head_dim = original_head_dim // hidden_dim_divisor
+        config_dict["text_config"]["head_dim"] = new_head_dim
+        print(
+            f"Reduced hidden size from {original_head_dim} to {new_head_dim}")
 
     # Reduce vision layers
     if "vision_config" in config_dict:
@@ -203,7 +215,7 @@ def create_preprocessor_config(original_config: Any,
                                output_path: Path) -> None:
     """Create preprocessor_config.json for multimodal model."""
 
-    # Try to load the original preprocessor config first
+    # Try to load the original preprocessor config
     try:
         processor = AutoProcessor.from_pretrained(
             original_config._name_or_path
@@ -225,11 +237,9 @@ def create_reduced_safetensors(original_config: Any, reduced_config: dict[str,
 
     print("Generating synthetic weights for reduced model...")
 
-    # Get configuration parameters
     text_config = reduced_config["text_config"]
     vision_config = reduced_config["vision_config"]
 
-    # Create weight tensors
     weights = {}
 
     print("Creating text model weights...")
@@ -278,11 +288,11 @@ def create_text_model_weights(
 
         # Self-attention weights (separate q, k, v projections)
         weights[f"{layer_prefix}.self_attn.q_proj.weight"] = torch.randn(
-            num_attention_heads * head_dim, hidden_size, dtype=torch.bfloat16)
+            hidden_size, num_attention_heads * head_dim, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.self_attn.k_proj.weight"] = torch.randn(
-            num_key_value_heads * head_dim, hidden_size, dtype=torch.bfloat16)
+            hidden_size, num_key_value_heads * head_dim, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.self_attn.v_proj.weight"] = torch.randn(
-            num_key_value_heads * head_dim, hidden_size, dtype=torch.bfloat16)
+            hidden_size, num_key_value_heads * head_dim, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.self_attn.o_proj.weight"] = torch.randn(
             hidden_size, num_attention_heads * head_dim, dtype=torch.bfloat16)
         print("Self-attention weights created.")
@@ -498,7 +508,7 @@ def save_weights_to_safetensors(weights: dict[str, torch.Tensor],
           f"{index_data['metadata']['total_size'] / (1024**3):.2f} GB")
 
 
-def test_reduced_model(model_path: str) -> None:
+def test_reduced_model(model_path: str, should_profile: bool = False) -> None:
     """Test the created reduced model with vLLM."""
 
     print(f"\nTesting reduced model at {model_path}...")
@@ -522,9 +532,11 @@ def test_reduced_model(model_path: str) -> None:
                                          top_p=0.95,
                                          max_tokens=50)
 
-        llm.start_profile()
+        if should_profile:
+            llm.start_profile()
         outputs = llm.generate(PROMPTS, sampling_params)
-        llm.stop_profile()
+        if should_profile:
+            llm.stop_profile()
 
         print("Test generation successful!")
         for output in outputs:
@@ -576,6 +588,9 @@ def main():
     parser.add_argument("--test",
                         action="store_true",
                         help="Test the created model with vLLM")
+    parser.add_argument("--profile",
+                        action="store_true",
+                        help="Profile the created model with vLLM")
     parser.add_argument(
         "--test-original",
         action="store_true",
@@ -604,7 +619,7 @@ def main():
 
         # Test if requested
         if args.test:
-            test_reduced_model(model_path)
+            test_reduced_model(model_path, args.profile)
 
         if args.test_original:
             test_maverick_serving(args.original_model)
