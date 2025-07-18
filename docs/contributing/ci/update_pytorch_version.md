@@ -55,17 +55,6 @@ to point to the new releases for `torch`, `torchvision`, and `torchaudio`.
 If failures are found in the pull request, raise them as issues on vLLM and
 cc the PyTorch release team to initiate discussion on how to address them.
 
-### Update some tests to use PyTorch RC
-
-#### Python-only installation test
-
-Update tests/standalone_tests/python_only_compile.sh to
-
-```
-VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL=1 VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e . \
-  --extra-index-url https://download.pytorch.org/whl/test/cu128
-```
-
 ## Update CUDA version
 
 The PyTorch release matrix includes both stable and experimental [CUDA versions](https://github.com/pytorch/pytorch/blob/main/RELEASE.md#release-compatibility-matrix). Due to limitations, only the latest stable CUDA version (for example,
