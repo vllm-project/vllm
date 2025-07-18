@@ -16,7 +16,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
+#include "warp_size.h"
 #include "attention_kernels.cuh"
 #include "cuda_compat.h"
 
@@ -79,7 +79,7 @@ void paged_attention_v2_launcher(
   const float* k_scale_ptr = reinterpret_cast<const float*>(k_scale.data_ptr());
   const float* v_scale_ptr = reinterpret_cast<const float*>(v_scale.data_ptr());
 
-  constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
+  const int NUM_WARPS = NUM_THREADS / WARP_SIZE;
   int max_num_partitions = DIVIDE_ROUND_UP(max_seq_len, PARTITION_SIZE);
   int logits_size = PARTITION_SIZE * sizeof(float);
   int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);

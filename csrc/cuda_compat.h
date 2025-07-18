@@ -4,12 +4,6 @@
   #include <hip/hip_runtime.h>
 #endif
 
-#if defined(USE_ROCM) && defined(__GFX9__)
-  #define WARP_SIZE 64
-#else
-  #define WARP_SIZE 32
-#endif
-
 #ifndef USE_ROCM
   #define VLLM_LDG(arg) __ldg(arg)
 #else

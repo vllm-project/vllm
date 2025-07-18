@@ -20,6 +20,7 @@
 #include <hip/hip_fp8.h>
 #include <hip/hip_bf16.h>
 #include "cuda_compat.h"
+#include "warp_size.h"
 
 #include <algorithm>
 #include "../attention/dtype_fp8.cuh"
