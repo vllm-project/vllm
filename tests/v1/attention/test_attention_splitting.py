@@ -6,7 +6,8 @@ import torch
 
 from tests.v1.attention.test_attention_backends import BATCH_SPECS
 from tests.v1.attention.utils import create_common_attn_metadata
-from vllm.v1.attention.backends.utils import (_make_metadata_with_slice,
+from vllm.v1.attention.backends.utils import (UbatchSlice,
+                                              _make_metadata_with_slice,
                                               slice_query_start_locs,
                                               split_attn_metadata)
 
@@ -105,7 +106,8 @@ def mixed_small_metadata():
 def test_make_metadata_with_slice_decode_batch(small_decode_metadata):
     """Test slicing decode batch metadata"""
     # Split first request only
-    ubatch_slice = (slice(0, 1), slice(0, 1))  # First request, first token
+    ubatch_slice = UbatchSlice(slice(0, 1),
+                               slice(0, 1))  # First request, first token
 
     result = _make_metadata_with_slice(ubatch_slice, small_decode_metadata)
 
@@ -120,7 +122,8 @@ def test_make_metadata_with_slice_decode_batch(small_decode_metadata):
 def test_make_metadata_with_slice_mixed_batch(mixed_small_metadata):
     """Test slicing mixed batch metadata"""
     # Split middle requests
-    ubatch_slice = (slice(1, 3), slice(1, 7))  # Requests 1-2, tokens 1-7
+    ubatch_slice = UbatchSlice(slice(1, 3),
+                               slice(1, 7))  # Requests 1-2, tokens 1-7
 
     result = _make_metadata_with_slice(ubatch_slice, mixed_small_metadata)
 
@@ -140,9 +143,9 @@ def test_split_attn_metadata_decode_batch(large_decode_metadata):
     num_tokens = large_decode_metadata.num_reqs
     mid_point = num_tokens // 2
     ubatch_slices = [
-        (slice(0, mid_point), slice(0, mid_point)),  # First request
-        (slice(mid_point, num_tokens), slice(mid_point,
-                                             num_tokens)),  # Second request
+        UbatchSlice(slice(0, mid_point), slice(0, mid_point)),  # First request
+        UbatchSlice(slice(mid_point, num_tokens),
+                    slice(mid_point, num_tokens)),  # Second request
     ]
 
     results = split_attn_metadata(ubatch_slices, large_decode_metadata)

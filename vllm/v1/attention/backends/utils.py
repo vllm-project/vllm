@@ -66,46 +66,53 @@ class CommonAttentionMetadata:
         self.slot_mapping[self.num_actual_tokens:].fill_(-1)
 
 
-# The first slice is for requests. The second is for tokens.
-UbatchSlice: TypeAlias = tuple[slice, slice]
+@dataclass
+class UbatchSlice:
+    request_slice: slice
+    token_slice: slice
+
+
 UBatchSlices: TypeAlias = list[UbatchSlice]
 
 
 def slice_query_start_locs(
     query_start_loc: torch.Tensor,
-    req_slice: slice,
+    request_slice: slice,
 ) -> torch.Tensor:
     """
-    Creates a new query_start_loc that corresponds to the requests in req_slice.
+    Creates a new query_start_loc that corresponds to the requests in 
+    request_slice.
+
     Note: This function creates a new tensor to hold the new query_start_locs.
     This will break cudagraph compatibility.
     """
-    return query_start_loc[req_slice.start: req_slice.stop + 1] -\
-        query_start_loc[req_slice.start]
+    return query_start_loc[request_slice.start: request_slice.stop + 1] -\
+        query_start_loc[request_slice.start]
 
 
 def _make_metadata_with_slice(
         ubatch_slice: UbatchSlice,
         attn_metadata: CommonAttentionMetadata) -> CommonAttentionMetadata:
     """
-    This function creates a new CommonAttentionMetadata that covers the 
-    requests included in ubatch_slice
+    This function creates a new CommonAttentionMetadata that corresponds to 
+    the requests included in ubatch_slice
     """
 
-    req_slice = ubatch_slice[0]
-    token_slice = ubatch_slice[1]
+    request_slice = ubatch_slice.request_slice
+    token_slice = ubatch_slice.token_slice
 
     query_start_loc = slice_query_start_locs(attn_metadata.query_start_loc,
-                                             req_slice)
+                                             request_slice)
     assert len(query_start_loc >= 2)
     query_start_loc_cpu = slice_query_start_locs(
-        attn_metadata.query_start_loc_cpu, req_slice)
+        attn_metadata.query_start_loc_cpu, request_slice)
 
-    seq_lens = attn_metadata.seq_lens[req_slice]
-    seq_lens_cpu = attn_metadata.seq_lens_cpu[req_slice]
-    num_computed_tokens_cpu = attn_metadata.num_computed_tokens_cpu[req_slice]
+    seq_lens = attn_metadata.seq_lens[request_slice]
+    seq_lens_cpu = attn_metadata.seq_lens_cpu[request_slice]
+    num_computed_tokens_cpu = attn_metadata.num_computed_tokens_cpu[
+        request_slice]
 
-    num_requests = req_slice.stop - req_slice.start
+    num_requests = request_slice.stop - request_slice.start
     num_actual_tokens = token_slice.stop - token_slice.start
     max_query_len = int(
         torch.max(torch.abs(query_start_loc[1:] -
@@ -133,7 +140,7 @@ def split_attn_metadata(
     common_attn_metadata: CommonAttentionMetadata,
 ) -> list[CommonAttentionMetadata]:
     """
-    Creates a new CommonAttentionMetadata instance that covers the 
+    Creates a new CommonAttentionMetadata instance that corresponds to the 
     requests for each UbatchSlice in ubatch_slices.
 
     Note: This function does not modify common_attn_metadata
