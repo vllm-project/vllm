@@ -4,7 +4,8 @@ HOST="0.0.0.0"
 PORT=8006
 DATA_PARALLEL_SIZE=4
 REDUNDANT_EXPERTS=0
-MODEL_NAME="/models/models--deepseek-ai--DeepSeek-V2-Lite/snapshots/604d5664dddd88a0433dbae533b7fe9472482de0"
+LOCAL_MODEL_PATH="/models/models--deepseek-ai--DeepSeek-V2-Lite/snapshots/604d5664dddd88a0433dbae533b7fe9472482de0"
+MODEL_NAME="deepseek-ai/DeepSeek-V2-Lite"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -27,6 +28,10 @@ while [[ $# -gt 0 ]]; do
         --model)
             MODEL_NAME="$2"
             shift 2
+            ;;
+        --local-model)
+            MODEL_NAME=$LOCAL_MODEL_PATH
+            shift
             ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"

@@ -1067,6 +1067,11 @@ async def scale_elastic_ep(raw_request: Request):
         _scaling_elastic_ep = False
 
 
+@router.post("/is_scaling_elastic_ep")
+async def is_scaling_elastic_ep(raw_request: Request):
+    return JSONResponse({"is_scaling_elastic_ep": _scaling_elastic_ep})
+
+
 # TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
 # (requires typing_extensions >= 4.13)
 RequestType = Any
