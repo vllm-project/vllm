@@ -588,8 +588,8 @@ def unified_attention(
     #    = floor(q.shape[0] / BLOCK_Q) + num_seqs
     total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
-    TILE_SIZE_PREFILL = 16
-    TILE_SIZE_DECODE = 16
+    TILE_SIZE_PREFILL = 32
+    TILE_SIZE_DECODE = 32
 
     # if batch contains a prefill
     if max_seqlen_q > 1 or total_num_q_blocks * num_kv_heads > 128:
