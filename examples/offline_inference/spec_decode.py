@@ -74,9 +74,9 @@ def parse_args():
         action="store_false",
         help="Disable prefill token shift (default: enabled)",
     )
-    parser.add_argument("--target_kv_layer_copy_from", type=int, default=-1)
+    parser.add_argument("--target-kv-layer-copy-from", type=int, default=-1)
     parser.add_argument(
-        "--draft_kv_layer_copy_to",
+        "--draft-kv-layer-copy-to",
         type=str,
         default="",
         help="comma separated list of layer indices to copy to",
