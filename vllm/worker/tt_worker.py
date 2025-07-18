@@ -179,9 +179,6 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.mesh_device = self._open_mesh_device()
         self.device_config.device = self.mesh_device
 
-        # Enable program cache
-        self._enable_program_cache()
-
     def load_model(self):
         self.model_runner.load_model()
 
@@ -510,10 +507,6 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                     mesh_device.get_num_devices(), mesh_grid)
         return mesh_device
 
-    def _enable_program_cache(self):
-        assert self.mesh_device is not None, "Mesh device is not initialized"
-        self.mesh_device.enable_program_cache()
-
     ## Destructor (used to close devices)
 
     def __del__(self):
@@ -521,9 +514,6 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         del self.model_runner
 
         if self.mesh_device:
-            # Disable program cache
-            self.mesh_device.disable_and_clear_program_cache()
-
             # Dump device profiler
             ttnn.DumpDeviceProfiler(self.mesh_device)
 
