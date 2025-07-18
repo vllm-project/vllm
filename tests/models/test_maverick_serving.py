@@ -108,36 +108,29 @@ def create_reduced_maverick_model(
     output_path.mkdir(parents=True, exist_ok=True)
 
     try:
-        # Step 1: Load original configuration
         print("Loading original model configuration...")
         original_config = AutoConfig.from_pretrained(original_model_name,
                                                      trust_remote_code=True)
 
-        # Step 2: Create reduced configuration
         print("Creating reduced configuration...")
         reduced_config = create_reduced_config(original_config, text_layers,
                                                num_experts, vision_layers)
 
-        # Step 3: Save the reduced configuration
         config_path = output_path / "config.json"
         with open(config_path, "w") as f:
             json.dump(reduced_config, f, indent=2)
         print(f"Saved reduced config to {config_path}")
 
-        # Step 4: Copy tokenizer files
         print("Copying tokenizer files...")
         copy_tokenizer_files(original_model_name, output_path)
 
-        # Step 5: Create reduced safetensors files
         print("Creating reduced safetensors files...")
         create_reduced_safetensors(original_config, reduced_config,
                                    output_path)
 
-        ## Step 6: Create preprocessor config for multimodal model
         print("Creating preprocessor config...")
         create_preprocessor_config(original_config, output_path)
 
-        # Step 7: Create generation config if it exists
         try:
             gen_config = GenerationConfig.from_pretrained(original_model_name)
             gen_config.save_pretrained(output_path)
@@ -239,19 +232,15 @@ def create_reduced_safetensors(original_config: Any, reduced_config: dict[str,
     # Create weight tensors
     weights = {}
 
-    # 1. Text model weights (language model)
     print("Creating text model weights...")
     weights.update(create_text_model_weights(text_config))
 
-    # 2. Vision model weights
     print("Creating vision model weights...")
     weights.update(create_vision_model_weights(vision_config))
 
-    # 3. Shared/connector weights
     print("Creating shared model weights...")
     weights.update(create_shared_weights(text_config, vision_config))
 
-    # 4. Save weights to safetensors files
     print("Saving weights to safetensors files...")
     save_weights_to_safetensors(weights, output_path)
 
