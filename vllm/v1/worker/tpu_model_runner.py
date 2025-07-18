@@ -937,11 +937,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
-            if mm_embeds:
-                inputs_embeds = self.model.get_input_embeddings(
-                    input_ids, mm_embeds)
-            else:
-                inputs_embeds = self.model.get_input_embeddings(input_ids)
+            inputs_embeds = self.model.get_input_embeddings(
+                input_ids=input_ids,
+                multimodal_embeddings=mm_embeds,
+            )
             return None, inputs_embeds
         else:
             # For text-only models, we use token ids as input.
