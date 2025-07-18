@@ -285,9 +285,9 @@ class CpuPlatform(Platform):
         allowed_numa_nodes = set()
         for x in logical_cpu_list:
             allowed_numa_nodes.add(x.numa_node)  # type: ignore
-        allowed_numa_nodes = sorted(allowed_numa_nodes)  # type: ignore
+        allowed_numa_nodes_list = sorted(allowed_numa_nodes)
 
-        return allowed_numa_nodes, logical_cpu_list
+        return allowed_numa_nodes_list, logical_cpu_list
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
