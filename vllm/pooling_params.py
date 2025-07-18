@@ -31,7 +31,7 @@ class PoolingParams(
     task: Optional[PoolingTask] = None
     """Internal use only."""
 
-    logits_processing_needs_token_ids: bool = False
+    requires_token_ids: bool = False
     """Internal use only."""
 
     def clone(self) -> "PoolingParams":
@@ -39,8 +39,7 @@ class PoolingParams(
         return PoolingParams(
             dimensions=self.dimensions,
             task=self.task,
-            logits_processing_needs_token_ids=self.
-            logits_processing_needs_token_ids,
+            requires_token_ids=self.requires_token_ids,
         )
 
     def verify(self, task: PoolingTask, model_config: "ModelConfig") -> None:
@@ -73,12 +72,10 @@ class PoolingParams(
                 raise ValueError("Dimensions must be greater than 0")
 
     def __repr__(self) -> str:
-        return (
-            f"PoolingParams("
-            f"dimensions={self.dimensions}, "
-            f"task={self.task}, "
-            f"logits_processing_needs_token_ids={self.logits_processing_needs_token_ids})"
-        )
+        return (f"PoolingParams("
+                f"dimensions={self.dimensions}, "
+                f"task={self.task}, "
+                f"requires_token_ids={self.requires_token_ids})")
 
     def __post_init__(self) -> None:
         assert self.output_kind == RequestOutputKind.FINAL_ONLY,\

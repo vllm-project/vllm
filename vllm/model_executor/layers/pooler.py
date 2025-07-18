@@ -68,11 +68,10 @@ class ResolvedPoolingConfig:
 
 @dataclass(frozen=True)
 class PoolingParamsUpdate:
-    logits_processing_needs_token_ids: bool = False
+    requires_token_ids: bool = False
 
     def apply(self, params: PoolingParams) -> None:
-        params.logits_processing_needs_token_ids = (
-            self.logits_processing_needs_token_ids)
+        params.requires_token_ids = self.requires_token_ids
 
 
 class Pooler(nn.Module, ABC):
@@ -136,8 +135,7 @@ def get_prompt_token_ids(
         pooling_metadata: PoolingMetadata) -> list[torch.Tensor]:
     if isinstance(pooling_metadata, V1PoolingMetadata):
         assert pooling_metadata.prompt_token_ids is not None, (
-            "Please set `logits_processing_needs_token_ids=True` "
-            "in `get_pooling_updates`")
+            "Please set `requires_token_ids=True` in `get_pooling_updates`")
 
         return [
             pooling_metadata.prompt_token_ids[i, :num]
@@ -633,7 +631,7 @@ class StepPooler(Pooler):
         task: PoolingTask,
     ) -> Optional[PoolingParamsUpdate]:
         if task == "encode":
-            return PoolingParamsUpdate(logits_processing_needs_token_ids=True)
+            return PoolingParamsUpdate(requires_token_ids=True)
 
         # The equalities are split up to keep mypy happy
         if task == "embed" or task == "classify" or task == "score":

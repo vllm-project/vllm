@@ -368,7 +368,7 @@ class InputBatch:
         elif pooling_params := request.pooling_params:
             self.pooling_params[req_id] = pooling_params
             self.logits_processing_needs_token_ids[req_index] = (
-                pooling_params.logits_processing_needs_token_ids)
+                pooling_params.requires_token_ids)
         else:
             raise NotImplementedError(request)
 

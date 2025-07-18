@@ -141,7 +141,7 @@ class GritLMMeanPool(nn.Module):
     ) -> Optional[PoolingParamsUpdate]:
         # The equalities are split up to keep mypy happy
         if task == "encode" or task == "embed":
-            return PoolingParamsUpdate(logits_processing_needs_token_ids=True)
+            return PoolingParamsUpdate(requires_token_ids=True)
 
         if task == "classify" or task == "score":
             return None
