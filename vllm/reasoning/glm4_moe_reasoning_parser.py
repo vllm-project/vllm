@@ -19,11 +19,11 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
     """
     Reasoning parser for the Glm4MoeModel model.
 
-    The Glm4MoeModel model uses <think>...</think> tokens to denote reasoning text
-    within its output. The model provides a strict switch to disable reasoning
-    output via the 'enable_thinking=False' parameter. This parser extracts the
-    reasoning content enclosed by <think> and </think> tokens from the model's
-    output.
+    The Glm4MoeModel model uses <think>...</think> tokens to denote reasoning
+    text within its output. The model provides a strict switch to disable
+    reasoning output via the 'enable_thinking=False' parameter. This parser
+    extracts the reasoning content enclosed by <think> and </think> tokens
+    from the model's output.
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase):
@@ -41,8 +41,8 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
         if (self.think_start_token_id is None
                 or self.think_end_token_id is None):
             raise RuntimeError(
-                "Glm4MoeModel reasoning parser could not locate think start/end "
-                "tokens in the tokenizer!")
+                "Glm4MoeModel reasoning parser could not locate "
+                "think start/end tokens in the tokenizer!")
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         return self.think_end_token_id in input_ids

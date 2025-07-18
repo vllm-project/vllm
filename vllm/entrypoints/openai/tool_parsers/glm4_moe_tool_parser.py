@@ -32,7 +32,6 @@ class Glm4MoeModelToolParser(ToolParser):
         self.tool_call_start_token = "<tool_call>"
         self.tool_call_end_token = "</tool_call>"
 
-        # This is the key fix - we need to set the tool_calls_start_token used by the base class
         self.tool_calls_start_token = self.tool_call_start_token
 
         # Updated regex for the XML-based format
@@ -158,11 +157,11 @@ class Glm4MoeModelToolParser(ToolParser):
         logger.debug("delta_text: %s", delta_text)
         logger.debug("delta_token_ids: %s", delta_token_ids)
         # check to see if we should be streaming a tool call - is there a
-        if self.tool_calls_start_token_id not in current_token_ids:
+        if self.tool_call_start_token_id not in current_token_ids:
             logger.debug("No tool call tokens found!")
             return DeltaMessage(content=delta_text)
         delta_text = delta_text.replace(self.tool_calls_start_token,
-                                        "").replace(self.tool_calls_end_token,
+                                        "").replace(self.tool_call_end_token,
                                                     "")
         try:
 
