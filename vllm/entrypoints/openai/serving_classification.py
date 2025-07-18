@@ -6,6 +6,7 @@ from typing import Optional, Union, cast
 
 import numpy as np
 from fastapi import Request
+from typing_extensions import override
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -21,12 +22,14 @@ from vllm.entrypoints.openai.serving_engine import (ClassificationServeContext,
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
 from vllm.outputs import ClassificationOutput, PoolingRequestOutput
+from vllm.pooling_params import PoolingParams
 
 logger = init_logger(__name__)
 
 
 class ClassificationMixin(OpenAIServing):
 
+    @override
     async def _preprocess(
         self,
         ctx: ServeContext,
@@ -75,6 +78,7 @@ class ClassificationMixin(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
+    @override
     def _build_response(
         self,
         ctx: ServeContext,
@@ -158,3 +162,31 @@ class ServingClassification(ClassificationMixin):
         )
 
         return await super().handle(ctx)  # type: ignore
+
+    @override
+    def _validate_request(
+        self,
+        ctx: ClassificationServeContext,
+    ) -> Optional[ErrorResponse]:
+        if error := super()._validate_request(ctx):
+            return error
+
+        ctx.truncate_prompt_tokens = ctx.request.truncate_prompt_tokens
+
+        return None
+
+    @override
+    def _create_pooling_params(
+        self,
+        ctx: ClassificationServeContext,
+    ) -> Union[PoolingParams, ErrorResponse]:
+        pooling_params = super()._create_pooling_params(ctx)
+        if isinstance(pooling_params, ErrorResponse):
+            return pooling_params
+
+        try:
+            pooling_params.verify("classify", self.model_config)
+        except ValueError as e:
+            return self.create_error_response(str(e))
+
+        return pooling_params
