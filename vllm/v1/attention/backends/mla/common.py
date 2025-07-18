@@ -581,7 +581,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             "MLA only supports decode-only full CUDAGraph capture. " \
             "Make sure all cudagraph capture sizes <= max_num_seq."
 
-        m.max_query_len = 1  # decode-only
+        assert m.max_query_len == 1  # decode-only
 
         return self.build(0, m)
 
