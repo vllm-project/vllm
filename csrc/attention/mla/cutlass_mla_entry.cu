@@ -23,6 +23,23 @@ void cutlass_mla_decode_sm100a(torch::Tensor const& out,
                                torch::Tensor const& kv_c_and_k_pe_cache,
                                torch::Tensor const& seq_lens,
                                torch::Tensor const& page_table, double scale);
+#else
+// define fallback stubs
+void cutlass_mla_decode_sm100a(torch::Tensor const& out,
+                               torch::Tensor const& q_nope,
+                               torch::Tensor const& q_pe,
+                               torch::Tensor const& kv_c_and_k_pe_cache,
+                               torch::Tensor const& seq_lens,
+                               torch::Tensor const& page_table, double scale) {
+  TORCH_CHECK_NOT_IMPLEMENTED(false, "No compiled cutlass MLA");
+}
+
+int64_t sm100_cutlass_mla_get_workspace_size(int64_t max_seq_len,
+                                             int64_t num_batches,
+                                             int64_t sm_count,
+                                             int64_t num_kv_splits) {
+  TORCH_CHECK_NOT_IMPLEMENTED(false, "No compiled cutlass MLA");
+}
 #endif
 
 void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
