@@ -2628,7 +2628,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # TODO: Support other attention modules, e.g., cross-attention
             if attn_module.attn_type == AttentionType.DECODER:
                 use_local_attention = (self.attention_chunk_size is not None
-                                       and attn_module.impl.use_irope)
+                                       and attn_module.use_irope)
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
@@ -2638,13 +2638,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         sliding_window=attn_module.sliding_window,
                         use_mla=use_mla)
                 elif use_local_attention:
-                    kv_cache_spec[layer_name] = (ChunkedLocalAttentionSpec(
+                    kv_cache_spec[layer_name] = ChunkedLocalAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
                         attention_chunk_size=self.attention_chunk_size,
-                        use_mla=use_mla))
+                        use_mla=use_mla)
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
                         block_size=block_size,
