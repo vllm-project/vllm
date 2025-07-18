@@ -198,7 +198,7 @@ class RotaryEmbedding(CustomOp):
             key_ = key[..., :self.rotary_dim]
             if offsets is not None:
                 offsets = offsets.view(*query.shape[:1])
-                ops.rope_cached_thd_positions_offsets_2c_gqa_fwd_inplace(
+                ops.rope_cached_thd_positions_offsets_2c_fwd_inplace(
                     query_,
                     key_,
                     cos,
@@ -210,7 +210,7 @@ class RotaryEmbedding(CustomOp):
                     False,
                 )
             else:
-                ops.rope_cached_thd_positions_2c_gqa_fwd_inplace(
+                ops.rope_cached_thd_positions_2c_fwd_inplace(
                     query_,
                     key_,
                     cos,

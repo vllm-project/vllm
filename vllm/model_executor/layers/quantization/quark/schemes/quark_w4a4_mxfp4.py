@@ -343,7 +343,7 @@ class QuarkW4A4MXFP4(QuarkScheme):
 
                 smw, snw = layer.weight_scale.shape
                 torch.ops.vllm.gemm_afp4wfp4_preshuffled_scales_proxy(
-                    x_q, layer.weight.T, x_s,
+                    x_q, layer.weight, x_s,
                     layer.weight_scale.view(smw // 32, snw * 32),
                     self.out_dtype, y)
                 return y
@@ -358,7 +358,7 @@ class QuarkW4A4MXFP4(QuarkScheme):
                                 device=x_q.device,
                                 dtype=self.out_dtype)
 
-                torch.ops.vllm.gemm_afp4wfp4_proxy(x_q, layer.weight.T, x_s,
+                torch.ops.vllm.gemm_afp4wfp4_proxy(x_q, layer.weight, x_s,
                                                    layer.weight_scale.T,
                                                    self.out_dtype, y)
 
