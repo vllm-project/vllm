@@ -69,6 +69,7 @@ class ResolvedPoolingConfig:
 @dataclass(frozen=True)
 class PoolingParamsUpdate:
     requires_token_ids: bool = False
+    """Set this flag to enable `get_prompt_token_ids` for your pooler."""
 
     def apply(self, params: PoolingParams) -> None:
         params.requires_token_ids = self.requires_token_ids
