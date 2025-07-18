@@ -111,7 +111,8 @@ class Attention(nn.Module):
 
         # For v1 we have backend agnostic iRoPE (local chunked attention)
         #  we have to store the flag on the layer so gpu model runner can
-        #  set KVSpec appropriately
+        #  set KVSpec appropriately (and pop it so it doesnt get passed to
+        #  the backends)
         if envs.VLLM_USE_V1:
             self.use_irope = extra_impl_args.pop("use_irope", False)
 
