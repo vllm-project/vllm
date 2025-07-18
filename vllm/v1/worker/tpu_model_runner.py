@@ -937,11 +937,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
-            if mm_embeds:
-                inputs_embeds = self.model.get_input_embeddings(
-                    input_ids, mm_embeds)
-            else:
-                inputs_embeds = self.model.get_input_embeddings(input_ids)
+            inputs_embeds = self.model.get_input_embeddings(
+                input_ids=input_ids,
+                multimodal_embeddings=mm_embeds,
+            )
             return None, inputs_embeds
         else:
             # For text-only models, we use token ids as input.
@@ -969,7 +968,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         else:
             mm_embeds = []
         xm.mark_step()
-        # Prepare inputs, the requests might be splitted into multiple
+        # Prepare inputs, the requests might be split into multiple
         # executions, combine the result of each execution.
         start_index = 0
         combined_selected_tokens: list[torch.Tensor] = []
@@ -1863,8 +1862,9 @@ def _get_num_slices_per_kv_cache_update_block(page_size_bytes: int) -> int:
     out of scalar registers. Thus this function will limit the number of
     slices to 64.
     """
-    # Conservative VMEM usage limit: 32 MiB
-    vmem_limit = 32 * 1024 * 1024
+    # The default vmem_limit_bytes of a pallas kernel is 32MB. Here we
+    # calculate num_slices_per_block based on 16MB in case any register spills.
+    vmem_limit = 16 * 1024 * 1024
     num_slices_per_block = vmem_limit // page_size_bytes
     assert num_slices_per_block > 0, "Number of slices should be positive"
     num_slices_per_block = prev_power_of_2(num_slices_per_block)

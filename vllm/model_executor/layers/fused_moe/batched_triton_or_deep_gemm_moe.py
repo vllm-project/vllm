@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -116,6 +116,7 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
+        expert_tokens_metadata: Optional[mk.ExpertTokensMetadata],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
@@ -123,11 +124,13 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         if self.allow_deep_gemm:
             assert self.batched_deep_gemm_experts is not None
             return self.batched_deep_gemm_experts.workspace_shapes(
-                a, aq, M, N, K, topk, global_num_experts, local_num_experts)
+                a, aq, M, N, K, topk, global_num_experts, local_num_experts,
+                expert_tokens_metadata)
         else:
             assert self.batched_triton_experts is not None
             return self.batched_triton_experts.workspace_shapes(
-                a, aq, M, N, K, topk, global_num_experts, local_num_experts)
+                a, aq, M, N, K, topk, global_num_experts, local_num_experts,
+                expert_tokens_metadata)
 
     def apply(self, output: torch.Tensor, hidden_states: torch.Tensor,
               w1: torch.Tensor, w2: torch.Tensor, topk_weights: torch.Tensor,
@@ -139,7 +142,8 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
               a2_scale: Optional[torch.Tensor], workspace13: torch.Tensor,
               workspace2: torch.Tensor,
               expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-              apply_router_weight_on_input: bool):
+              apply_router_weight_on_input: bool,
+              extra_expert_args: Optional[dict[str, Any]]):
         experts = (self.batched_deep_gemm_experts
                    if self.allow_deep_gemm else self.batched_triton_experts)
         assert experts is not None
@@ -147,4 +151,4 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                       activation, global_num_experts, expert_map, w1_scale,
                       w2_scale, w1_zp, w2_zp, a1q_scale, a2_scale, workspace13,
                       workspace2, expert_tokens_meta,
-                      apply_router_weight_on_input)
+                      apply_router_weight_on_input, extra_expert_args)
