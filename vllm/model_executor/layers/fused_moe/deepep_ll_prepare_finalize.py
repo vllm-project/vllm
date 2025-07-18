@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import deep_ep
 import torch
@@ -111,16 +111,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         return x, x_scales
 
     def prepare(
-        self,
-        a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        apply_router_weight_on_input: bool,
+        self, a1: torch.Tensor, a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor], topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor, num_experts: int,
+        expert_map: Optional[torch.Tensor], apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        extra_prepare_args: Optional[dict[str, Any]]
     ) -> tuple[torch.Tensor, Optional[torch.Tensor],
                Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
                Optional[torch.Tensor]]:
@@ -169,7 +165,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
                  topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  apply_router_weight_on_input: bool,
-                 weight_and_reduce_impl: mk.TopKWeightAndReduce) -> None:
+                 weight_and_reduce_impl: mk.TopKWeightAndReduce,
+                 extra_finalize_args: Optional[dict[str, Any]]) -> None:
         assert isinstance(
             weight_and_reduce_impl, TopKWeightAndReduceDelegate
         ), ("Weight application and reduction happens in the combine kernel.")
