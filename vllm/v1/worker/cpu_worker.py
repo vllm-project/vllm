@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 
@@ -45,11 +45,13 @@ class CPUWorker(Worker):
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
         if omp_cpuids == "auto":
             if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
-                # For SMT-8, use 4 CPUs per core
-                self.local_omp_cpuid = self._get_autobind_cpu_ids(4)
+                # For POWERPC SMT-8/4/2
+                self.local_omp_cpuid = self._get_autobind_cpu_ids(
+                    lambda cpus: [cpu for cpu in cpus if cpu.id % 8 < 4])
             elif current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-                # For SMT-2, use 1 CPU per core
-                self.local_omp_cpuid = self._get_autobind_cpu_ids(1)
+                # For x86 SMT-2, use 1 CPU per core
+                self.local_omp_cpuid = self._get_autobind_cpu_ids(
+                    lambda cpus: cpus[-1:])
             else:
                 self.local_omp_cpuid = "all"
         else:
@@ -115,13 +117,19 @@ class CPUWorker(Worker):
         assert isinstance(output, ModelRunnerOutput)
         return output if self.is_driver_worker else None
 
-    def _get_autobind_cpu_ids(self, cpu_num_per_core: int) -> str:
+    def _get_autobind_cpu_ids(
+        self, cpu_selector: Callable[[list[LogicalCPUInfo]],
+                                     list[LogicalCPUInfo]]
+    ) -> str:
         """
         Return CPU ids to bind based on NUMA nodes. 
         Currently for rank N, only CPU ids on the N-th node in available NUMA 
         node list will be selected.
         Args:
-            cpu_num_per_core: max number of CPUs to be used per physical core. 
+            cpu_selector: a callable object to select CPUs from a CPU list 
+            of a physical core. The input is a LogicalCPUInfo list, sorted by
+            the LogicalCPUInfo.id. A selected LogicalCPUInfo list should be 
+            returned.
         """
 
         allowed_numa_nodes, logical_cpu_list = \
@@ -148,7 +156,7 @@ class CPUWorker(Worker):
         logical_cpu_list = []
         for cpu_list in core_to_cpus.values():
             cpu_list = sorted(cpu_list, key=lambda x: x.id)
-            logical_cpu_list.extend(cpu_list[-cpu_num_per_core:])
+            logical_cpu_list.extend(cpu_selector(cpu_list))
         logical_cpu_list = sorted(logical_cpu_list, key=lambda x: x.id)
 
         # Reserve CPUs for other processes
