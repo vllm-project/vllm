@@ -381,9 +381,6 @@ class Processor:
     ):
         model_config = self.model_config
 
-        tokenizer = (None if model_config.skip_tokenizer_init else
-                     self.tokenizer.get_lora_tokenizer(lora_request))
-
         prompt_ids = prompt_inputs["prompt_token_ids"]
         if not prompt_ids:
             if prompt_type == "encoder" and model_config.is_multimodal_model:
@@ -391,7 +388,10 @@ class Processor:
             else:
                 raise ValueError(f"The {prompt_type} prompt cannot be empty")
 
-        if tokenizer:
+        if self.model_config.skip_tokenizer_init:
+            tokenizer = None
+        else:
+            tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
             max_input_id = max(prompt_ids, default=0)
             if max_input_id > tokenizer.max_token_id:
                 raise ValueError(

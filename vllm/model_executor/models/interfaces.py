@@ -151,11 +151,6 @@ class SupportsMultiModalWithRawInput(SupportsMultiModal, Protocol):
     """
 
 
-@runtime_checkable
-class _SupportsMultiModalWithRawInput(Protocol):
-    supports_multimodal_raw_input: ClassVar[Literal[True]]
-
-
 @overload
 def supports_multimodal_raw_input(
         model: object) -> TypeIs[SupportsMultiModalWithRawInput]:

@@ -643,7 +643,7 @@ class ModelConfig:
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
         self.multimodal_config = self._init_multimodal_config()
         self.model_supports_multimodal_raw_input = (
-            self._init_model_supports_multimodal_raw_input())
+            self.registry.supports_multimodal_raw_input(self.architectures))
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
 
@@ -754,9 +754,6 @@ class ModelConfig:
                              "supported for multimodal models.")
 
         return None
-
-    def _init_model_supports_multimodal_raw_input(self):
-        return self.registry.supports_multimodal_raw_input(self.architectures)
 
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
