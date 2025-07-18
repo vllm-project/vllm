@@ -7,7 +7,8 @@ from typing import Callable
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
+from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
+                                        FullAttentionSpec, KVCacheSpec,
                                         MambaSpec, SlidingWindowSpec)
 from vllm.v1.request import Request
 
@@ -256,8 +257,10 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
     ) -> tuple[list[KVCacheBlock], ...]:
-        assert isinstance(kv_cache_spec, FullAttentionSpec), (
-            "FullAttentionManager can only be used for full attention groups")
+        assert isinstance(
+            kv_cache_spec, (FullAttentionSpec, ChunkedLocalAttentionSpec)
+        ), "FullAttentionManager can only be used for full attention " \
+            "and chunked local attention groups"
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids)))
         max_num_blocks = max_length // kv_cache_spec.block_size
@@ -432,6 +435,7 @@ class MambaManager(SingleTypeKVCacheManager):
 
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     FullAttentionSpec: FullAttentionManager,
+    ChunkedLocalAttentionSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager,
     MambaSpec: MambaManager,
 }

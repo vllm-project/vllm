@@ -25,9 +25,9 @@ if is_flash_attn_varlen_func_available():
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.utils import cdiv
-from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder, CommonAttentionMetadata, get_kv_cache_layout,
-    make_local_attention_virtual_batches)
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata,
+                                              get_kv_cache_layout)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
@@ -130,18 +130,6 @@ class FlashAttentionMetadata:
     prefix_scheduler_metadata: Optional[torch.Tensor] = None
     max_num_splits: int = 0
 
-    # for local attention
-    @dataclass
-    class LocalAttentionMetadata:
-        local_query_start_loc: torch.Tensor
-        local_seqused_k: torch.Tensor
-        local_block_table: torch.Tensor
-        local_max_query_len: int
-        local_max_seq_len: int
-        local_scheduler_metadata: Optional[torch.Tensor]
-
-    local_attn_metadata: Optional[LocalAttentionMetadata] = None
-
 
 def _get_sliding_window_configs(
         vllm_config: VllmConfig) -> set[Optional[tuple[int, int]]]:
@@ -221,7 +209,6 @@ class FlashAttentionMetadataBuilder(
         max_query_len = common_attn_metadata.max_query_len
         max_seq_len = int(common_attn_metadata.seq_lens_cpu.max())
         query_start_loc = common_attn_metadata.query_start_loc
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         block_table_tensor = common_attn_metadata.block_table_tensor
@@ -265,40 +252,6 @@ class FlashAttentionMetadataBuilder(
                     num_splits=self.max_num_splits,
                 )
             return None
-
-        # for local attention
-        local_attn_metadata = None
-        if self.model_config.attention_chunk_size is not None:
-            seqlens_q_local_np, virt_q_cu_seqlens_np, virt_k_seqlens_np, \
-                virt_block_table_tensor = make_local_attention_virtual_batches(
-                    self.model_config.attention_chunk_size,
-                    query_start_loc_cpu.numpy(),
-                    seq_lens_cpu.numpy(),
-                    block_table_tensor,
-                    self.block_size,
-                )
-            local_query_start_loc = torch.from_numpy(virt_q_cu_seqlens_np).to(
-                self.device, non_blocking=True)
-            local_seqused_k = torch.from_numpy(virt_k_seqlens_np).to(
-                self.device, non_blocking=True)
-            local_max_query_len = seqlens_q_local_np.max()
-            local_max_seq_len = virt_k_seqlens_np.max()
-            local_scheduler_metadata = schedule(
-                batch_size=local_query_start_loc.shape[0] - 1,
-                cu_query_lens=local_query_start_loc,
-                max_query_len=local_max_query_len,
-                seqlens=local_seqused_k,
-                max_seq_len=local_max_seq_len,
-                causal=True)
-
-            local_attn_metadata = FlashAttentionMetadata.LocalAttentionMetadata(
-                local_query_start_loc=local_query_start_loc,
-                local_seqused_k=local_seqused_k,
-                local_block_table=virt_block_table_tensor,
-                local_max_query_len=local_max_query_len,
-                local_max_seq_len=local_max_seq_len,
-                local_scheduler_metadata=local_scheduler_metadata,
-            )
 
         use_cascade = common_prefix_len > 0
 
@@ -371,7 +324,6 @@ class FlashAttentionMetadataBuilder(
             cu_prefix_query_lens=cu_prefix_query_lens,
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
-            local_attn_metadata=local_attn_metadata,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
         )
@@ -517,27 +469,13 @@ class FlashAttentionImpl(AttentionImpl):
                 layer._q_scale)
             query = query.reshape((num_tokens, num_heads, head_size))
 
-        # Compute attention and update output up to `num_actual_tokens`.
-        use_local_attn = \
-            (self.use_irope and attn_metadata.local_attn_metadata is not None)
-
-        if not attn_metadata.use_cascade or use_local_attn:
-            if use_local_attn:
-                assert attn_metadata.local_attn_metadata is not None
-                local_metadata = attn_metadata.local_attn_metadata
-                cu_seqlens_q = local_metadata.local_query_start_loc
-                seqused_k = local_metadata.local_seqused_k
-                max_seqlen_q = local_metadata.local_max_query_len
-                max_seqlen_k = local_metadata.local_max_seq_len
-                block_table = local_metadata.local_block_table
-                scheduler_metadata = local_metadata.local_scheduler_metadata
-            else:
-                cu_seqlens_q = attn_metadata.query_start_loc
-                seqused_k = attn_metadata.seq_lens
-                max_seqlen_q = attn_metadata.max_query_len
-                max_seqlen_k = attn_metadata.max_seq_len
-                block_table = attn_metadata.block_table
-                scheduler_metadata = attn_metadata.scheduler_metadata
+        if not attn_metadata.use_cascade:
+            cu_seqlens_q = attn_metadata.query_start_loc
+            seqused_k = attn_metadata.seq_lens
+            max_seqlen_q = attn_metadata.max_query_len
+            max_seqlen_k = attn_metadata.max_seq_len
+            block_table = attn_metadata.block_table
+            scheduler_metadata = attn_metadata.scheduler_metadata
 
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
@@ -565,8 +503,6 @@ class FlashAttentionImpl(AttentionImpl):
             )
             return output
 
-        assert not use_local_attn, (
-            "Cascade attention does not support local attention.")
         # Cascade attention (rare case).
         cascade_attention(
             output[:num_actual_tokens],
