@@ -961,7 +961,7 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
                                     "... H (two D) -> ... (H two) D",
                                     two=2)
 
-        else:  # re-use the kv cache, full attention
+        else:  # reuse the kv cache, full attention
             q = q.view(-1, self.num_heads, self.head_size)
             q1, q2 = self.split_heads(q)
             # kv_cache shape is (2, num_blocks, block_size, num_kv_heads, head_size) # noqa: E501

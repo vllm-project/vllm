@@ -106,8 +106,6 @@ if TYPE_CHECKING:
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
-    VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
-    VLLM_HPU_USE_DELAYED_SAMPLING: bool = False
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
@@ -139,6 +137,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: Optional[int] = None
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 120
+    VLLM_USE_CUDNN_PREFILL: bool = False
+    VLLM_LOOPBACK_IP: str = ""
 
 
 def get_default_cache_root():
@@ -778,19 +778,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CUDART_SO_PATH":
     lambda: os.getenv("VLLM_CUDART_SO_PATH", None),
 
-    # Contiguous cache fetching to avoid using costly gather operation on
-    # Gaudi3. This is only applicable to HPU contiguous cache. If set to true,
-    # contiguous cache fetch will be used.
-    "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH":
-    lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in
-    ("1", "true"),
-
-    # Use delayed sampling for HPU to reduce host cpu overhead
-    # between each step.
-    "VLLM_HPU_USE_DELAYED_SAMPLING":
-    lambda: os.environ.get("VLLM_DELAYED_SAMPLING", "false").lower() in
-    ("1", "true"),
-
     # Rank of the process in the data parallel setting
     "VLLM_DP_RANK":
     lambda: int(os.getenv("VLLM_DP_RANK", "0")),
@@ -961,9 +948,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NIXL_ABORT_REQUEST_TIMEOUT":
     lambda: int(os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "120")),
 
+    # Controls whether or not to use cudnn prefill
+    "VLLM_USE_CUDNN_PREFILL":
+    lambda: bool(int(os.getenv("VLLM_USE_CUDNN_PREFILL", "0"))),
+
     # If set to 1, use the TRTLLM Decode Attention backend in flashinfer.
     "VLLM_USE_TRTLLM_DECODE_ATTENTION":
     lambda: os.getenv("VLLM_USE_TRTLLM_DECODE_ATTENTION", None),
+
+    # Used to force set up loopback IP
+    "VLLM_LOOPBACK_IP":
+    lambda: os.getenv("VLLM_LOOPBACK_IP", ""),
 }
 
 # --8<-- [end:env-vars-definition]

@@ -30,8 +30,8 @@ from vllm.distributed.device_communicators.shm_broadcast import (Handle,
 from vllm.executor.multiproc_worker_utils import (
     _add_prefix, set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
-from vllm.utils import (get_distributed_init_method, get_mp_context,
-                        get_open_port)
+from vllm.utils import (get_distributed_init_method, get_loopback_ip,
+                        get_mp_context, get_open_port)
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -63,9 +63,9 @@ class MultiprocExecutor(Executor):
 
         # Multiprocessing-based executor does not support multi-node setting.
         # Since it only works for single node, we can use the loopback address
-        # 127.0.0.1 for communication.
+        # get_loopback_ip() for communication.
         distributed_init_method = get_distributed_init_method(
-            "127.0.0.1", get_open_port())
+            get_loopback_ip(), get_open_port())
 
         # Initialize worker and set up message queues for SchedulerOutputs
         # and ModelRunnerOutputs
@@ -273,10 +273,8 @@ class MultiprocExecutor(Executor):
         output = outputs[self.output_rank]
 
         # set the aggregated finished_sending / finished_recving
-        if finished_sending:
-            output.finished_sending = finished_sending
-        if finished_recving:
-            output.finished_recving = finished_recving
+        output.finished_sending = finished_sending if finished_sending else None
+        output.finished_recving = finished_recving if finished_recving else None
 
         return output
 

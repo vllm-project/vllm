@@ -70,7 +70,7 @@ export VLLM_XLA_CACHE_PATH=
 echo "Using VLLM V1"
 
 echo "--- Hardware Information ---"
-tpu-info
+# tpu-info
 echo "--- Starting Tests ---"
 set +e
 overall_script_exit_code=0
