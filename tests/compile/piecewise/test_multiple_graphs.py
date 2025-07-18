@@ -155,10 +155,8 @@ class SimpleModelWithTwoGraphs(ParentModel):
         return x
 
 
-def test_ignore_torch_compile_decorator(monkeypatch):
+def test_ignore_torch_compile_decorator():
     assert VLLM_USE_V1
-
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     # piecewise
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
@@ -260,10 +258,8 @@ def run_model(vllm_config, model: nn.Module, inputs: torch.Tensor):
         return output.cpu()
 
 
-def test_multi_graph_piecewise_compile(monkeypatch):
+def test_multi_graph_piecewise_compile():
     assert VLLM_USE_V1
-
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     outputs = []
 
