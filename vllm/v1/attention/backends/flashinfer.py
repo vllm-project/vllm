@@ -159,7 +159,7 @@ class FlashInferMetadata:
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
-    qo_indptr: torch.Tensor
+    qo_indptr_cpu: torch.Tensor
     # An example for paged_kv_indices, paged_kv_indptr:
     # request 1, page indices [0, 5, 8]
     # request 2, page indices [1, 6, 7]
@@ -212,14 +212,6 @@ class FlashInferMetadata:
     prefill_wrapper: Optional[BatchPrefillWithPagedKVCacheWrapper] = None
     decode_wrapper: Optional[BatchDecodeWithPagedKVCacheWrapper] = None
     cascade_wrapper: Optional[MultiLevelCascadeAttentionWrapper] = None
-
-    # CPU version for FlashInfer planning
-    qo_indptr_cpu: Optional[torch.Tensor] = None
-
-    @property
-    def query_start_loc(self):
-        # The GPUModelRunner expects to be able to access this property.
-        return self.qo_indptr
 
     def __post_init__(self):
         if self.head_dim is not None:
@@ -397,7 +389,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             split_decodes_and_prefills(common_attn_metadata)
 
         page_size = self.kv_cache_spec.block_size
-        qo_indptr = common_attn_metadata.query_start_loc
         max_seq_len = common_attn_metadata.seq_lens_cpu.max()
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
@@ -458,7 +449,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             kv_cache_dtype = self.kv_cache_spec.dtype
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
-            qo_indptr=qo_indptr,
             qo_indptr_cpu=common_attn_metadata.query_start_loc_cpu,
             paged_kv_indptr_cpu=paged_kv_indptr_cpu,
             paged_kv_indices=paged_kv_indices,
