@@ -182,8 +182,6 @@ class OpenAIServingEmbedding(EmbeddingMixin):
             chat_template_content_format=self.chat_template_content_format,
         )
 
-        print("handle request")
-
         return await super().handle(ctx)  # type: ignore
 
     @override
