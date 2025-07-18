@@ -13,20 +13,21 @@ from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
 from ..utils import create_new_process_for_each_test
-from .registry import HF_EXAMPLE_MODELS
+from .registry import AUTO_EXAMPLE_MODELS, HF_EXAMPLE_MODELS, HfExampleModels
 
 
-@pytest.mark.parametrize("model_arch", HF_EXAMPLE_MODELS.get_supported_archs())
 @create_new_process_for_each_test()
-def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
-    """The reason for using create_new_process_for_each_test is to avoid 
-    the WARNING: 
-        "We must use the 'spawn' multiprocessing start method. Overriding 
+def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
+                   EXAMPLE_MODELS: HfExampleModels):
+    """The reason for using create_new_process_for_each_test is to avoid
+    the WARNING:
+        "We must use the 'spawn' multiprocessing start method. Overriding
         VLLM_WORKER_MULTIPROC_METHOD to 'spawn'."
-    The spawn process causes the _initialize_kv_caches_v1 function below to 
+    The spawn process causes the _initialize_kv_caches_v1 function below to
     become ineffective.
     """
-    model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
+
+    model_info = EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
@@ -127,3 +128,15 @@ def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
             load_format="dummy",
             hf_overrides=hf_overrides,
         )
+
+
+@pytest.mark.parametrize("model_arch", HF_EXAMPLE_MODELS.get_supported_archs())
+def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
+    can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
+
+
+@pytest.mark.parametrize("model_arch",
+                         AUTO_EXAMPLE_MODELS.get_supported_archs())
+def test_implicit_converted_models(model_arch: str,
+                                   monkeypatch: pytest.MonkeyPatch):
+    can_initialize(model_arch, monkeypatch, AUTO_EXAMPLE_MODELS)
