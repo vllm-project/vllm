@@ -17,6 +17,15 @@ from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
+# LMCache imports
+try:
+    from lmcache.observability import LMCStatsMonitor
+    from lmcache.observability import (
+        PrometheusLogger as LMCachePrometheusLogger)
+except ImportError:
+    LMCStatsMonitor = None
+    LMCachePrometheusLogger = None
+
 logger = init_logger(__name__)
 
 StatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
@@ -498,8 +507,89 @@ class PrometheusStatLogger(StatLoggerBase):
             self.gauge_lora_info.labels(**lora_info_labels)\
                                 .set_to_current_time()
 
+        # LMCache monitoring
+        try:
+            if hasattr(self,
+                       'lmcache_monitor') and self.lmcache_monitor is not None:
+                lmcache_stats = self.lmcache_monitor.get_stats_and_clear()
+                if lmcache_stats and hasattr(
+                        self, 'lmcache_logger') and self.lmcache_logger:
+                    self.lmcache_logger.log_prometheus(lmcache_stats)
+        except Exception as e:
+            logger.warning(f"[LMCache] V1 Error in LMCache monitoring: {e}")
+
     def log_engine_initialized(self):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
+
+        # LMCache initialization
+        self.lmcache_monitor = None
+        self.lmcache_logger = None
+
+        if LMCStatsMonitor is not None and LMCachePrometheusLogger is not None and self._is_lmcache_enabled(
+                self.vllm_config):
+            try:
+                # Ensure we get the same singleton instance that LMCache operations use
+                self.lmcache_monitor = LMCStatsMonitor.GetOrCreate()
+
+                # Create metadata for LMCache logger
+                import torch
+
+                from lmcache.config import LMCacheEngineMetadata
+
+                # Get model configuration parameters
+                model_config = self.vllm_config.model_config
+                cache_config = self.vllm_config.cache_config
+                parallel_config = self.vllm_config.parallel_config
+
+                # Calculate KV cache parameters
+                num_layers = getattr(model_config.hf_text_config,
+                                     'num_hidden_layers', 32)
+                num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+                head_size = model_config.get_head_size()
+                block_size = cache_config.block_size or 16
+
+                # Determine KV cache dtype
+                if cache_config.cache_dtype == "auto":
+                    kv_dtype = model_config.dtype
+                else:
+                    kv_dtype = getattr(torch, cache_config.cache_dtype,
+                                       torch.float16)
+
+                metadata = LMCacheEngineMetadata(
+                    model_name=model_config.served_model_name,
+                    world_size=parallel_config.world_size,
+                    worker_id=self.engine_index,
+                    fmt="vllm",
+                    kv_dtype=kv_dtype,
+                    kv_shape=(num_layers, 2, block_size, num_kv_heads,
+                              head_size),
+                    use_mla=model_config.use_mla)
+
+                # Pass the vLLM prometheus registry to LMCache
+                from vllm.v1.metrics.prometheus import get_prometheus_registry
+                registry = get_prometheus_registry()
+                self.lmcache_logger = LMCachePrometheusLogger.GetOrCreate(
+                    metadata, registry=registry)
+            except Exception as e:
+                logger.warning(
+                    f"[LMCache] V1 Failed to initialize LMCache components: {e}"
+                )
+                self.lmcache_monitor = None
+                self.lmcache_logger = None
+
+    def _is_lmcache_enabled(self, vllm_config: VllmConfig) -> bool:
+        """Check if LMCache is enabled based on kv_transfer_config."""
+        if not hasattr(vllm_config, 'kv_transfer_config'):
+            return False
+
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is None:
+            return False
+
+        kv_connector = getattr(kv_transfer_config, 'kv_connector', None)
+        return kv_connector in [
+            'lmcache', 'LMCacheConnector', 'LMCacheConnectorV1'
+        ]
 
 
 def build_buckets(mantissa_lst: list[int], max_value: int) -> list[int]:
