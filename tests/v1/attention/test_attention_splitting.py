@@ -23,7 +23,7 @@ def test_basic_slice_middle(sample_query_start_loc):
     req_slice = slice(1, 3)  # slice from index 1 to 3
     result = slice_query_start_locs(sample_query_start_loc, req_slice)
 
-    expected = torch.tensor([0, 7, 15])  # [5, 12, 20] - 5
+    expected = torch.tensor([0, 7, 15])
     assert torch.equal(result, expected)
 
 
@@ -32,7 +32,7 @@ def test_slice_from_beginning(sample_query_start_loc):
     req_slice = slice(0, 2)  # slice from index 0 to 2
     result = slice_query_start_locs(sample_query_start_loc, req_slice)
 
-    expected = torch.tensor([0, 5, 12])  # [0, 5, 12] - 0
+    expected = torch.tensor([0, 5, 12])
     assert torch.equal(result, expected)
 
 
@@ -41,16 +41,16 @@ def test_slice_to_end(sample_query_start_loc):
     req_slice = slice(3, 5)  # slice from index 3 to 5 (last index)
     result = slice_query_start_locs(sample_query_start_loc, req_slice)
 
-    expected = torch.tensor([0, 15, 30])  # [20, 35, 50] - 20
+    expected = torch.tensor([0, 15, 30])
     assert torch.equal(result, expected)
 
 
 def test_single_element_slice(sample_query_start_loc):
     """Test slice that results in single element"""
-    req_slice = slice(2, 2)  # slice from index 2 to 2
+    req_slice = slice(2, 3)  # slice from index 2 to 3
     result = slice_query_start_locs(sample_query_start_loc, req_slice)
 
-    expected = torch.tensor([0])  # [12] - 12
+    expected = torch.tensor([0, 8])
     assert torch.equal(result, expected)
 
 
@@ -59,7 +59,7 @@ def test_full_tensor_slice(sample_query_start_loc):
     req_slice = slice(0, 5)  # slice entire tensor
     result = slice_query_start_locs(sample_query_start_loc, req_slice)
 
-    expected = torch.tensor([0, 5, 12, 20, 35, 50])  # original - 0
+    expected = torch.tensor([0, 5, 12, 20, 35, 50])
     assert torch.equal(result, expected)
 
 
@@ -106,46 +106,40 @@ def mixed_small_metadata():
 def test_make_metadata_with_slice_decode_batch(small_decode_metadata):
     """Test slicing decode batch metadata"""
     # Split first request only
-    ubatch_slice = UbatchSlice(slice(0, 1),
-                               slice(0, 1))  # First request, first token
+    ubatch_slice = UbatchSlice(slice(0, 1), slice(0, 1))
 
     result = _make_metadata_with_slice(ubatch_slice, small_decode_metadata)
 
     # Check sliced results
-    assert result.num_reqs == 1  # slice(0, 0) gives 0 requests
+    assert result.num_reqs == 1  # slice(0, 1) gives 1 requests
     assert result.num_actual_tokens == 1  # slice(0, 1) gives 1 token
-    assert result.max_query_len == 1  # Always set to 1
+    assert result.max_query_len == 1
     assert torch.equal(result.query_start_loc, torch.tensor([0, 1]))
     assert torch.equal(result.seq_lens, torch.tensor([32]))
 
 
 def test_make_metadata_with_slice_mixed_batch(mixed_small_metadata):
     """Test slicing mixed batch metadata"""
-    # Split middle requests
     ubatch_slice = UbatchSlice(slice(1, 3),
-                               slice(1, 7))  # Requests 1-2, tokens 1-7
+                               slice(1, 7))  # Requests 1-3, tokens 1-7
 
     result = _make_metadata_with_slice(ubatch_slice, mixed_small_metadata)
 
-    # Check sliced results
     assert result.num_reqs == 2  # slice(1, 3) gives 2 requests
-    assert result.num_actual_tokens == 6  # slice(1, 7) gives 5 tokens
+    assert result.num_actual_tokens == 6  # slice(1, 7) gives 6 tokens
     assert result.max_query_len == 5
-    # Query start should be offset: [1, 2] -> [0, 1]
     assert torch.equal(result.query_start_loc, torch.tensor([0, 1, 6]))
-    # Should get second sequence length
     assert torch.equal(result.seq_lens, torch.tensor([40, 48]))
 
 
-# # Tests for split_attn_metadata
 def test_split_attn_metadata_decode_batch(large_decode_metadata):
-    """Test splitting decode batch into two parts"""
+    """Test splitting decode batch into two equal parts"""
     num_tokens = large_decode_metadata.num_reqs
     mid_point = num_tokens // 2
     ubatch_slices = [
-        UbatchSlice(slice(0, mid_point), slice(0, mid_point)),  # First request
-        UbatchSlice(slice(mid_point, num_tokens),
-                    slice(mid_point, num_tokens)),  # Second request
+        UbatchSlice(slice(0, mid_point), slice(0, mid_point)),
+        UbatchSlice(slice(mid_point, num_tokens), slice(mid_point,
+                                                        num_tokens)),
     ]
 
     results = split_attn_metadata(ubatch_slices, large_decode_metadata)
