@@ -9,14 +9,13 @@ from torch import nn
 from transformers import RobertaConfig
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.pooler import ClassifierPooler
+from vllm.model_executor.layers.pooler import ClassifierPooler, CLSPool
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.models.bert import BertEmbeddingModel, BertModel
 from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
                                               maybe_prefix)
-from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.sequence import IntermediateTensors
 
 from .bert_with_rope import BertWithRope, JinaRobertaModel
 from .interfaces import SupportsCrossEncoding, SupportsV0Only
@@ -106,8 +105,8 @@ class RobertaClassificationHead(nn.Module):
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.out_proj = nn.Linear(config.hidden_size, config.num_labels)
 
-    def forward(self, features, **kwargs):
-        x = features[0, :]  # take <s> token (equiv. to [CLS])
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # CLSPool has already been applied in `pooling`
         x = self.dense(x)
         x = torch.tanh(x)
         x = self.out_proj(x)
@@ -165,6 +164,7 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
        _pooler: An instance of Pooler used for pooling operations.
    """
 
+    is_pooling_model = True
     jina_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             'emb_ln': "embeddings.LayerNorm",
@@ -188,19 +188,15 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
                                  add_pooling_layer=False)
         self.classifier = RobertaClassificationHead(config)
 
-        self._pooler = ClassifierPooler(vllm_config.model_config,
-                                        self.classifier)
+        self.pooler = ClassifierPooler(
+            vllm_config.model_config,
+            pooling=CLSPool(),
+            classifier=self.classifier,
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.jina_to_vllm_mapper)
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)
 
     def forward(
         self,

@@ -24,11 +24,12 @@ import torch.nn as nn
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.pooler import (AllPool, PoolerHead,
+                                               PoolerIdentity, SimplePooler)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
-    IsAttentionFree, SupportsMultiModalWithRawInput)
+    IsAttentionFree, MultiModalEmbeddings, SupportsMultiModalWithRawInput)
 from vllm.model_executor.models.utils import AutoWeightsLoader
-from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalFieldElem, MultiModalInputs,
@@ -38,8 +39,7 @@ from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.sequence import (IntermediateTensors, PoolerOutput,
-                           PoolingSequenceGroupOutput)
+from vllm.sequence import IntermediateTensors
 
 
 class PrithviGeoSpatialMAEProcessingInfo(BaseProcessingInfo):
@@ -129,9 +129,12 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
     PrithviGeoSpatialMAEMultiModalProcessor,
     info=PrithviGeoSpatialMAEProcessingInfo,
     dummy_inputs=PrithviGeoSpatialMAEInputBuilder)
+
 class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree,
                            SupportsMultiModalWithRawInput):
     """ Prithvi Masked Autoencoder"""
+
+    is_pooling_model = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
@@ -177,6 +180,8 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree,
                 "Only SemanticSegmentationTask is supported for now "
                 "by PrithviGeospatialMAE.")
 
+        self.pooler = SimplePooler(AllPool(), PoolerHead(PoolerIdentity()))
+
     def _parse_and_validate_multimodal_data(
             self, **kwargs) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
 
@@ -195,7 +200,9 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree,
 
         return pixel_values, location_coords
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def get_input_embeddings(self, input_ids: torch.Tensor,
+                             multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> torch.Tensor:
         # We do not really use any input tokens and therefore no embeddings
         # to be calculated. However, due to the mandatory token ids in
         # the input prompt we pass one token and the size of the dummy
@@ -210,23 +217,12 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ):
-
         pixel_values, location_coords = (
             self._parse_and_validate_multimodal_data(**kwargs))
         model_output = self.model(pixel_values,
                                   location_coords=location_coords)
 
         return model_output.output
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return PoolerOutput([
-            PoolingSequenceGroupOutput(hidden_state)
-            for hidden_state in hidden_states
-        ])
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

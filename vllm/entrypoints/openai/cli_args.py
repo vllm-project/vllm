@@ -182,13 +182,9 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     """If set to True, enable tracking server_load_metrics in the app state."""
     enable_force_include_usage: bool = False
     """If set to True, including usage on every request."""
-    expand_tools_even_if_tool_choice_none: bool = False
-    """Include tool definitions in prompts even when `tool_choice='none'`.
-
-    This is a transitional option that will be removed in v0.10.0. In
-    v0.10.0, tool definitions will always be included regardless of
-    `tool_choice` setting. Use this flag to test the upcoming behavior
-    before the breaking change."""
+    enable_tokenizer_info_endpoint: bool = False
+    """Enable the /get_tokenizer_info endpoint. May expose chat
+    templates and other tokenizer configuration."""
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -199,7 +195,6 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
         # Special case: allowed_origins, allowed_methods, allowed_headers all
         # need json.loads type
         # Should also remove nargs
-        print(frontend_kwargs["allowed_origins"])
         frontend_kwargs["allowed_origins"]["type"] = json.loads
         frontend_kwargs["allowed_methods"]["type"] = json.loads
         frontend_kwargs["allowed_headers"]["type"] = json.loads
@@ -225,11 +220,6 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
         valid_tool_parsers = list(ToolParserManager.tool_parsers.keys())
         frontend_kwargs["tool_call_parser"]["choices"] = valid_tool_parsers
 
-        # Special case for expand-tools-even-if-tool-choice-none because of
-        # the deprecation field
-        frontend_kwargs["expand_tools_even_if_tool_choice_none"]\
-            ["deprecated"] = True
-
         frontend_group = parser.add_argument_group(
             title="Frontend",
             description=FrontendArgs.__doc__,
@@ -248,6 +238,34 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     register all arguments instead of manually enumerating them here. This
     avoids code duplication and keeps the argument definitions in one place.
     """
+    parser.add_argument("model_tag",
+                        type=str,
+                        nargs="?",
+                        help="The model tag to serve "
+                        "(optional if specified in config)")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        default=False,
+        help="Run in headless mode. See multi-node data parallel "
+        "documentation for more details.")
+    parser.add_argument(
+        "--data-parallel-start-rank",
+        "-dpr",
+        type=int,
+        default=0,
+        help="Starting data parallel rank for secondary nodes. "
+        "Requires --headless.")
+    parser.add_argument("--api-server-count",
+                        "-asc",
+                        type=int,
+                        default=1,
+                        help="How many API server processes to run.")
+    parser.add_argument(
+        "--config",
+        help="Read CLI options from a config file. "
+        "Must be a YAML with the following options: "
+        "https://docs.vllm.ai/en/latest/configuration/serve_args.html")
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
 

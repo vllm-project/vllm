@@ -17,6 +17,7 @@ cloudpickle
 fastapi
 msgspec
 openai
+partial-json-parser
 pillow
 psutil
 pybase64
