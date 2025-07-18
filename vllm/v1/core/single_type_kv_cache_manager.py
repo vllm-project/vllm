@@ -257,8 +257,10 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
     ) -> tuple[list[KVCacheBlock], ...]:
-        assert isinstance(kv_cache_spec, FullAttentionSpec), (
-            "FullAttentionManager can only be used for full attention groups")
+        assert isinstance(
+            kv_cache_spec, (FullAttentionSpec, ChunkedLocalAttentionSpec)
+        ), "FullAttentionManager can only be used for full attention " \
+            "and chunked local attention groups"
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids)))
         max_num_blocks = max_length // kv_cache_spec.block_size
