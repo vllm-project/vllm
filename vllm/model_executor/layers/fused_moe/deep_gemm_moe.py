@@ -50,17 +50,33 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
     M = hidden_states.size(0)
     _, K, N = w2.size()
     if not _valid_deep_gemm_shape(M, N, K):
-        logger.debug("DeepGemm disabled: unaligned problem size.")
+        logger.debug_once(
+            "DeepGemm disabled: unaligned problem size. M: %s, N: %s, K: %s",
+            M,
+            N,
+            K,
+        )
         return False
 
     if (w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn):
-        logger.debug("DeepGemm disabled: invalid weight dtype(s).")
+        logger.debug_once(
+            "DeepGemm disabled: invalid weight dtype(s). "
+            "w1.dtype: %s, w2.dtype: %s",
+            w1.dtype,
+            w2.dtype,
+        )
         return False
 
     if (not hidden_states.is_contiguous() or not w1.is_contiguous()
             or not w2.is_contiguous()):
-        logger.debug(
-            "DeepGemm disabled: weights or activations not contiguous.")
+        logger.debug_once(
+            "DeepGemm disabled: weights or activations not contiguous. "
+            "hidden_states.is_contiguous(): %s, w1.is_contiguous(): %s, "
+            "w2.is_contiguous(): %s",
+            hidden_states.is_contiguous(),
+            w1.is_contiguous(),
+            w2.is_contiguous(),
+        )
         return False
 
     return True
