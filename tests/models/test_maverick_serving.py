@@ -150,7 +150,7 @@ def create_reduced_maverick_model(
 
 
 def create_reduced_config(original_config: Any, text_layers: int,
-                          num_expert: int,
+                          num_experts: int,
                           vision_layers: int) -> dict[str, Any]:
     """Create a reduced configuration based on the original."""
 
@@ -165,10 +165,10 @@ def create_reduced_config(original_config: Any, text_layers: int,
             f"Reduced text layers from {original_text_layers} to {text_layers}"
         )
 
-        original_num_expert = config_dict["text_config"]["num_local_experts"]
-        config_dict["text_config"]["num_local_experts"] = num_expert
+        original_num_experts = config_dict["text_config"]["num_local_experts"]
+        config_dict["text_config"]["num_local_experts"] = num_experts
         print(
-            f"Reduced num experts from {original_num_expert} to {num_expert}")
+            f"Reduced num experts from {original_num_experts} to {num_experts}")
 
         hidden_dim_divisor = 4
 
