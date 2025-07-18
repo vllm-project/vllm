@@ -307,14 +307,20 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
                                                     k - 1, target_probs.device)
 
         if self.relaxed_thinking:
-            posterior_alpha = [self._posterior_alpha \
-                if state else 1.0 for state in thinking_states]
-            posterior_alpha = torch.tensor(
-                posterior_alpha, device=target_probs.device).unsqueeze(-1)
+            if thinking_states is None:
+                raise ValueError(
+                    "thinking_states must be provided when relaxed_thinking is "
+                    "enabled.")
+
+            posterior_alpha = torch.tensor([
+                self._posterior_alpha if state else 1.0
+                for state in thinking_states
+            ], device=target_probs.device).unsqueeze(-1)
 
             capped_ratio = torch.minimum(
                 selected_target_probs / (posterior_alpha * selected_draft_probs),
                 torch.ones_like(selected_target_probs))  # shape [batch_size, k]
+
 
         else:
             capped_ratio = torch.minimum(
