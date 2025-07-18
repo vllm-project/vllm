@@ -1232,6 +1232,8 @@ torch::Tensor wvSplitK(at::Tensor& in_a, at::Tensor& in_b,
   auto K_in = in_a.size(1);
   auto N_in = in_b.size(0);
 
+	std::cout << "HELLO WVSPLITK\n";
+
   TORCH_CHECK(in_a.dtype() == in_b.dtype());
   TORCH_CHECK(K_in % 8 == 0, "k % 8 == 0");
   TORCH_CHECK(in_a.dtype() == torch::kFloat16 ||
