@@ -496,10 +496,6 @@ class FlashInferImpl(AttentionImpl):
         kv_sharing_target_layer_name: Optional[int] = None,
         use_irope: bool = False,
     ) -> None:
-        if use_irope:
-            logger.warning_once(
-                "Using irope in FlashInfer is not supported yet, it will fall"
-                " back to global attention for long context.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -514,6 +510,7 @@ class FlashInferImpl(AttentionImpl):
         self.kv_cache_dtype = kv_cache_dtype
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        self.use_irope = use_irope
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
