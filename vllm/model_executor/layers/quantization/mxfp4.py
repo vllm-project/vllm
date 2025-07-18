@@ -20,15 +20,18 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
 
 def swizzle_mxfp4(quant_tensor, scale):
     value_layout = StridedLayout
     scale_layout = StridedLayout
-    if torch.cuda.get_device_capability()[0] == 9:
-        value_layout = HopperMXValueLayout
-        scale_layout = HopperMXScaleLayout
-    # import pdb; pdb.set_trace()
+    if current_platform.is_cuda():
+        if torch.cuda.get_device_capability()[0] == 9:
+            value_layout = HopperMXValueLayout
+            scale_layout = HopperMXScaleLayout
+        if torch.cuda.get_device_capability()[0] == 10:
+            scale_layout = BlackwellMXScaleLayout
     quant_tensor = quant_tensor.transpose(-2, -1)
     scale = scale.transpose(-2, -1)
     quant_tensor = convert_layout(wrap_torch_tensor(quant_tensor, dtype=FP4),
