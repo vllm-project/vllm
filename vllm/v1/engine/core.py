@@ -33,7 +33,8 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType,
-                            ReconfigureDistributedRequest, UtilityOutput)
+                            ReconfigureDistributedRequest, ReconfigureRankType,
+                            UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.v1.executor.abstract import Executor
@@ -142,7 +143,7 @@ class EngineCore:
 
         has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
         if has_kv_cache:
-            if os.environ.get("VLLM_EEP_SCALE_UP_LAUNCH") == "1":
+            if os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1":
                 dp_group = getattr(self, "dp_group", None)
                 assert dp_group is not None
                 self.available_gpu_memory_for_kv_cache = \
@@ -1010,7 +1011,8 @@ class DPEngineCoreProc(EngineCoreProc):
             parallel_config.data_parallel_rank = \
                 reconfig_request.new_data_parallel_rank
         # local rank specifies device visibility, it should not be changed
-        assert reconfig_request.new_data_parallel_rank_local == -1
+        assert reconfig_request.new_data_parallel_rank_local == \
+            ReconfigureRankType.KEEP_CURRENT_RANK
         parallel_config.data_parallel_master_ip = \
             reconfig_request.new_data_parallel_master_ip
         parallel_config.data_parallel_master_port = \
@@ -1032,7 +1034,8 @@ class DPEngineCoreProc(EngineCoreProc):
             # NOTE(yongji): newly joined workers require dummy_run even
             # CUDA graph is not used
             self.model_executor.collective_rpc("compile_or_warm_up_model")
-        if reconfig_request.new_data_parallel_rank == -2:
+        if reconfig_request.new_data_parallel_rank == \
+        ReconfigureRankType.SHUTDOWN_CURRENT_RANK:
             self.shutdown()
             logger.info("DPEngineCoreProc %s shutdown", self.dp_rank)
         else:

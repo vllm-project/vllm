@@ -202,7 +202,7 @@ class CoordinatorProc:
 
                     decoded = msgspec.msgpack.decode(buffer)
                     if isinstance(decoded, (list, tuple)) and len(
-                            decoded) == 2 and decoded[0] == "SCALE_DP":
+                            decoded) == 2 and decoded[0] == "SCALE_ELASTIC_EP":
                         # Handle scale up notification
                         new_engine_count = decoded[1]
                         current_count = len(self.engines)

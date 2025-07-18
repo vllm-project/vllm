@@ -403,8 +403,8 @@ class CoreEngineActorManager:
 
         return placement_groups, local_dp_ranks
 
-    def scale_up(self, cur_vllm_config: VllmConfig,
-                 new_data_parallel_size: int) -> None:
+    def scale_up_elastic_ep(self, cur_vllm_config: VllmConfig,
+                            new_data_parallel_size: int) -> None:
         import copy
 
         import ray
@@ -431,7 +431,7 @@ class CoreEngineActorManager:
         new_local_engines = 0
 
         runtime_env = RuntimeEnv(env_vars=self.env_vars_dict
-                                 | {"VLLM_EEP_SCALE_UP_LAUNCH": "1"})
+                                 | {"VLLM_ELASTIC_EP_SCALE_UP_LAUNCH": "1"})
         for i, (pg,
                 local_rank) in enumerate(zip(placement_groups,
                                              local_dp_ranks)):
@@ -498,8 +498,8 @@ class CoreEngineActorManager:
             cur_vllm_config.parallel_config.data_parallel_size_local += \
                 new_local_engines
 
-    def scale_down(self, cur_data_parallel_size: int,
-                   new_data_parallel_size: int) -> None:
+    def scale_down_elastic_ep(self, cur_data_parallel_size: int,
+                              new_data_parallel_size: int) -> None:
         import ray
         assert cur_data_parallel_size > new_data_parallel_size, (
             f"cur_data_parallel_size {cur_data_parallel_size} must be greater "

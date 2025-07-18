@@ -181,8 +181,15 @@ class EngineCoreRequestType(enum.Enum):
 
 class ReconfigureDistributedRequest(msgspec.Struct):
     new_data_parallel_size: int
-    new_data_parallel_rank: int  # -1 means keep current rank
-    new_data_parallel_rank_local: int  # -1 means keep current local rank
-    # for NCCL/GLOO initialization
+    new_data_parallel_rank: int
+    new_data_parallel_rank_local: int
     new_data_parallel_master_ip: str
     new_data_parallel_master_port: int
+
+
+class ReconfigureRankType(enum.IntEnum):
+    """
+    Rank type for reconfiguring distributed request.
+    """
+    KEEP_CURRENT_RANK = -1
+    SHUTDOWN_CURRENT_RANK = -2

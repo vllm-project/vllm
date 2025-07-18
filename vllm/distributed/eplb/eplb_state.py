@@ -192,9 +192,9 @@ class EplbState:
             device=device,
         )
         # Assuming 8 GPUs per node, this supports up to
-        # (255 + 1) / 8 = 32 nodes for now.
+        # (1023 + 1) / 8 = 128 nodes for now.
         # TODO(rui): make this configurable
-        MAX_EXPERT_REDUNDANCY = 255
+        MAX_EXPERT_REDUNDANCY = 1023
         assert model.num_redundant_experts <= MAX_EXPERT_REDUNDANCY, (
             f"num_redundant_experts {model.num_redundant_experts} "
             f"must be less than or equal to {MAX_EXPERT_REDUNDANCY}")

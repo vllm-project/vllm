@@ -6,7 +6,7 @@ from typing import Union
 
 from vllm.executor.ray_distributed_executor import (  # noqa
     RayDistributedExecutor as RayDistributedExecutorV0)
-from vllm.v1.engine import ReconfigureDistributedRequest
+from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
 
@@ -67,6 +67,7 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
     def reinitialize_distributed(
             self, reconfig_request: ReconfigureDistributedRequest) -> None:
         self._run_workers("reinitialize_distributed", reconfig_request)
-        if reconfig_request.new_data_parallel_rank == -2:
+        if reconfig_request.new_data_parallel_rank == \
+        ReconfigureRankType.SHUTDOWN_CURRENT_RANK:
             self.shutdown()
         return

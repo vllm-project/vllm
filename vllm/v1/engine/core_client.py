@@ -163,10 +163,10 @@ class EngineCoreClient(ABC):
         running state."""
         raise NotImplementedError
 
-    async def scale_up(self, new_data_parallel_size: int) -> None:
+    async def scale_up_elastic_ep(self, new_data_parallel_size: int) -> None:
         raise NotImplementedError
 
-    async def scale_down(self, new_data_parallel_size: int) -> None:
+    async def scale_down_elastic_ep(self, new_data_parallel_size: int) -> None:
         raise NotImplementedError
 
     async def get_output_async(self) -> EngineCoreOutputs:
@@ -923,13 +923,15 @@ class DPAsyncMPClient(AsyncMPClient):
                             flags=zmq.NOBLOCK).result()
 
                         decoded = msgspec.msgpack.decode(buf)
-                        if isinstance(decoded, (list, tuple)) and len(
-                                decoded) == 2 and decoded[0] == "SCALE_DP":
+                        if isinstance(
+                                decoded,
+                            (list, tuple)) and len(decoded) == 2 and decoded[
+                                0] == "SCALE_ELASTIC_EP":
                             # Extract new engine count from the decoded message
                             new_engine_count = decoded[1]
                             # Send scale up notification to coordinator
                             scale_msg = msgspec.msgpack.encode(
-                                ("SCALE_DP", new_engine_count))
+                                ("SCALE_ELASTIC_EP", new_engine_count))
                             await socket.send(scale_msg)
                             continue
 
@@ -1085,7 +1087,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self._ensure_output_queue_task()
         return future
 
-    async def scale_up(self, new_data_parallel_size: int) -> None:
+    async def scale_up_elastic_ep(self, new_data_parallel_size: int) -> None:
         """Scale up the data parallel size by creating new engine cores
         and reconfiguring existing ones."""
         cur_data_parallel_size = len(self.core_engines)
@@ -1123,8 +1125,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # CoreEngineActorManager for RayDPClient
         assert isinstance(self.resources.engine_manager,
                           CoreEngineActorManager)
-        self.resources.engine_manager.scale_up(self.vllm_config,
-                                               new_data_parallel_size)
+        self.resources.engine_manager.scale_up_elastic_ep(
+            self.vllm_config, new_data_parallel_size)
 
         # Create new CoreEngine objects for the new engines
         new_engine_identities = set()
@@ -1151,7 +1153,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # stats_update_task connection
         self._ensure_stats_update_task()
         scale_up_marker = msgspec.msgpack.encode(
-            ("SCALE_DP", new_data_parallel_size))
+            ("SCALE_ELASTIC_EP", new_data_parallel_size))
         await self.first_req_send_socket.send(scale_up_marker)
 
         # Update the parallel config
@@ -1161,7 +1163,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             "[Elastic EP] Scale up completed, new data parallel size: %s",
             new_data_parallel_size)
 
-    async def scale_down(self, new_data_parallel_size: int) -> None:
+    async def scale_down_elastic_ep(self, new_data_parallel_size: int) -> None:
         """Scale down the data parallel size by shutting down and
         reconfiguring existing engine cores."""
         cur_data_parallel_size = len(self.core_engines)
@@ -1200,12 +1202,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         assert isinstance(self.resources.engine_manager,
                           CoreEngineActorManager)
-        self.resources.engine_manager.scale_down(cur_data_parallel_size,
-                                                 new_data_parallel_size)
+        self.resources.engine_manager.scale_down_elastic_ep(
+            cur_data_parallel_size, new_data_parallel_size)
 
         self._ensure_stats_update_task()
         scale_down_marker = msgspec.msgpack.encode(
-            ("SCALE_DP", new_data_parallel_size))
+            ("SCALE_ELASTIC_EP", new_data_parallel_size))
         await self.first_req_send_socket.send(scale_down_marker)
 
         self.vllm_config.parallel_config.data_parallel_size = \

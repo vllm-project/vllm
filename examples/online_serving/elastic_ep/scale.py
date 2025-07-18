@@ -10,7 +10,7 @@ import requests
 
 
 def scale(host, port, new_dp_size):
-    url = f"http://{host}:{port}/scale"
+    url = f"http://{host}:{port}/scale_elastic_ep"
     payload = {"new_data_parallel_size": new_dp_size}
     headers = {"Content-Type": "application/json"}
 

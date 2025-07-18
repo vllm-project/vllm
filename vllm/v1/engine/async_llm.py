@@ -625,9 +625,9 @@ class AsyncLLM(EngineClient):
         raise TimeoutError(f"Timeout reached after {drain_timeout} seconds "
                            "waiting for requests to drain.")
 
-    async def scale(self,
-                    new_data_parallel_size: int,
-                    drain_timeout: int = 300):
+    async def scale_elastic_ep(self,
+                               new_data_parallel_size: int,
+                               drain_timeout: int = 300):
         """
         Scale up or down the data parallel size by adding or removing
         engine cores.
@@ -648,9 +648,11 @@ class AsyncLLM(EngineClient):
                 "Requests have been drained, proceeding with scale "
                 "to %s engines", new_data_parallel_size)
             if new_data_parallel_size > old_data_parallel_size:
-                await self.engine_core.scale_up(new_data_parallel_size)
+                await self.engine_core.scale_up_elastic_ep(
+                    new_data_parallel_size)
             else:
-                await self.engine_core.scale_down(new_data_parallel_size)
+                await self.engine_core.scale_down_elastic_ep(
+                    new_data_parallel_size)
             self.vllm_config.parallel_config.data_parallel_size = \
                 new_data_parallel_size
 

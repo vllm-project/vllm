@@ -1005,7 +1005,7 @@ if envs.VLLM_SERVER_DEV_MODE:
         return JSONResponse(content={"is_sleeping": is_sleeping})
 
 
-@router.post("/scale",
+@router.post("/scale_elastic_ep",
              dependencies=[Depends(validate_json_request)],
              responses={
                  HTTPStatus.OK.value: {
@@ -1021,7 +1021,7 @@ if envs.VLLM_SERVER_DEV_MODE:
                      "model": ErrorResponse
                  },
              })
-async def scale(raw_request: Request):
+async def scale_elastic_ep(raw_request: Request):
     try:
         body = await raw_request.json()
     except json.JSONDecodeError as e:
@@ -1046,11 +1046,11 @@ async def scale(raw_request: Request):
                             detail="drain_timeout must be a positive integer")
 
     # Set scaling flag to prevent new requests
-    global _scaling_state
-    _scaling_state = True
+    global _scaling_elastic_ep
+    _scaling_elastic_ep = True
     client = engine_client(raw_request)
     try:
-        await client.scale(new_data_parallel_size, drain_timeout)
+        await client.scale_elastic_ep(new_data_parallel_size, drain_timeout)
         return JSONResponse({
             "message":
             f"Scaled to {new_data_parallel_size} "
@@ -1064,7 +1064,7 @@ async def scale(raw_request: Request):
         logger.error("Scale failed: %s", e)
         raise HTTPException(status_code=500, detail="Scale failed") from e
     finally:
-        _scaling_state = False
+        _scaling_elastic_ep = False
 
 
 # TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
@@ -1266,7 +1266,7 @@ class XRequestIdMiddleware:
 
 
 # Global variable to track scaling state
-_scaling_state = False
+_scaling_elastic_ep = False
 
 
 class ScalingMiddleware:
@@ -1287,8 +1287,8 @@ class ScalingMiddleware:
             return self.app(scope, receive, send)
 
         # Check global scaling state
-        global _scaling_state
-        if _scaling_state:
+        global _scaling_elastic_ep
+        if _scaling_elastic_ep:
             # Return 503 Service Unavailable response
             response = JSONResponse(content={
                 "error":
