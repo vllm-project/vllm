@@ -251,11 +251,12 @@ def get_model_architecture(
                                           "ForCausalLM")
             causal_lm_arch_vllm_supported = (causal_lm_arch
                                              in vllm_supported_archs)
+            if not causal_lm_arch_vllm_supported:
+                continue
 
-            if causal_lm_arch_vllm_supported:
-                architectures = [causal_lm_arch]
-                vllm_not_supported = False
-                break
+            architectures = [causal_lm_arch]
+            vllm_not_supported = False
+            break
 
     if (model_config.model_impl == ModelImpl.TRANSFORMERS or
             model_config.model_impl != ModelImpl.VLLM and vllm_not_supported):

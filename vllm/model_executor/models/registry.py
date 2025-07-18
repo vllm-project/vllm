@@ -12,7 +12,7 @@ import sys
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Set
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from typing import Callable, Optional, TypeVar, Union
 
@@ -272,7 +272,7 @@ _SUBPROCESS_COMMAND = [
 ]
 
 
-@dataclass()
+@dataclass(frozen=True)
 class _ModelInfo:
     architecture: str
     is_text_generation_model: bool
@@ -470,12 +470,11 @@ class _ModelRegistry:
             info = _try_inspect_model_cls(causal_lm_arch,
                                           self.models[causal_lm_arch])
 
-            # Create a copy to avoid mutating the cached object
-            import copy
-            info = copy.copy(info)
-
-            info.architecture = model_arch
-            info.supports_cross_encoding = True
+            info = _ModelInfo(**dict(
+                asdict(info), **{
+                    "architecture": model_arch,
+                    "supports_cross_encoding": True
+                }))
             return info
 
         return None
