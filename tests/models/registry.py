@@ -450,8 +450,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
 }
 
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
-    "EAGLEModel": _HfExamplesInfo("JackFram/llama-68m",
-                                  speculative_model="abhigoyal/vllm-eagle-llama-68m-random"),  # noqa: E501
     "MedusaModel": _HfExamplesInfo("JackFram/llama-68m",
                                    speculative_model="abhigoyal/vllm-medusa-llama-68m-random"),  # noqa: E501
     "MLPSpeculatorPreTrainedModel": _HfExamplesInfo("JackFram/llama-160m",
