@@ -96,7 +96,6 @@ def _make_metadata_with_slice(
 
     query_start_loc = slice_query_start_locs(query_start_loc, req_slice)
 
-    # TODO (Sage) Make sure that this is correct
     query_start_loc_cpu = slice_query_start_locs(query_start_loc_cpu,
                                                  req_slice)
 
@@ -106,7 +105,9 @@ def _make_metadata_with_slice(
 
     num_requests = req_slice.stop - req_slice.start
     num_actual_tokens = token_slice.stop - token_slice.start
-    max_query_len = 1
+    max_query_len = int(
+        torch.max(torch.abs(query_start_loc[1:] -
+                            query_start_loc[:-1])).item())
 
     block_table_tensor = block_table_tensor[token_slice]
     slot_mapping = slot_mapping[token_slice]
