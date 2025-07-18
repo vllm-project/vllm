@@ -283,8 +283,8 @@ class CutlassExpertsFp8(mk.FusedMoEPermuteExpertsUnpermute):
                           (N // 2))
             output = (self.max_experts_per_worker, padded_M, K)
         else:
-            workspace1 = (M * topk, max(2 * N, K))
-            workspace2 = (M * topk, N)
+            workspace1 = (M * topk, max(N, K))
+            workspace2 = (M * topk, N // 2)
             output = (M * topk, K)
         return (workspace1, workspace2, output,
                 self.out_dtype if self.out_dtype is not None else a.dtype)
