@@ -505,6 +505,10 @@ class LoRAModelManager(AdapterModelManager):
             #  - given an input 'x.y.z' return 'x.y'
             #  - given an input 'x' return ''
             parts = module_name.rsplit('.', maxsplit=1)
+            n_parts = len(parts)
+            assert n_parts in [1, 2], (
+                f"num {module_name} split-parts is expected to be 1 or 2."
+                f" got {n_parts}")
             if len(parts) == 1:
                 return ''
             return parts[0]
