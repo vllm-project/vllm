@@ -1,36 +1,7 @@
 #!/bin/bash
 
 # This script aims to tune the best server parameter combinations to maximize throughput for given requirement. 
-# The current server parameter combination is  max_num_seqs and max_num_batched_tokens
-# It also supports additional requirement: e2e latency and prefix cache. 
-
-# Pre-requisite:
-# 1. Checkout to your branch, install/ update the correct running env. For TPU, activate conda env and install the corresponding torch, xla version. 
-# 2. If the model is customized, replace the MODEL's config with the customized config.
-# 3. Set variables (ALL REQUIRED)
-#   BASE: your directory for vllm repo
-#   MODEL: the model served by vllm
-#   SYSTEM: the hardware, choice TPU or GPU, for other systems, "get best profile" might not support.
-#   TP: ways of tensor parallelism
-#   DOWNLOAD_DIR: directory to download and load model weights.
-#   INPUT_LEN: request input len
-#   OUTPUT_LEN: request output len
-#   MIN_CACHE_HIT_PCT: prefix cache rate
-#   MAX_LATENCY_ALLOWED_MS: (e2e) latency requirement. If there's no latency requirement, set it to a large number like 1000000000
-#   NUM_SEQS_LIST: a list of `max-num-seqs` you want to loop with.
-#   NUM_BATCHED_TOKENS_LIST: a list of `max-num-batched-tokens` you want to loop with.
-#   Note that the default NUM_SEQS_LIST and NUM_BATCHED_TOKENS_LIST are set for medium size input/output len, for extra short context (such as 20:20), you might need to include larger numbers in NUM_SEQS_LIST.
-# 4. Run the script, it might take a long time, you can use tmux to avoid the script stop if disconnection happens.
-# 5. The final result will be saved in RESULT file. 
-
-
-# Example use cases 
-# 1. Given input_len=1800, output_len=20, what's the best max_num_seqs and max_num_batched_tokens to get highest throughput?
-# Use INPUT_LEN=1800,  OUTPUT_LEN=20, MIN_CACHE_HIT_PCT=0, MAX_LATENCY_ALLOWED_MS=100000000000
-# 2. If we have latency requirement to be lower than 500ms, what's the best server parameter?
-# Use INPUT_LEN=1800,  OUTPUT_LEN=20, MIN_CACHE_HIT_PCT=0, MAX_LATENCY_ALLOWED_MS=500
-# 3. If we want to reach 60% prefix cache, what's the best server parameter? 
-# Use INPUT_LEN=1800,  OUTPUT_LEN=20, MIN_CACHE_HIT_PCT=60, MAX_LATENCY_ALLOWED_MS=500
+# See details in README (benchmarks/auto_tune/README.md).
 
 TAG=$(date +"%Y_%m_%d_%H_%M")
 BASE=""
