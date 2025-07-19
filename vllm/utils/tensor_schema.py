@@ -48,7 +48,7 @@ class TensorSchema:
                 for arg in args:
                     if isinstance(arg, TensorShape):
                         expected_shape = arg.dims
-                        if isinstance(value, list) or isinstance(value, tuple):
+                        if isinstance(value, (list, tuple)):
                             if not value:
                                 raise ValueError(f"{field_name} is an empty list")
 
@@ -59,8 +59,9 @@ class TensorSchema:
                                     raise ValueError(f"{field_name}[{i}] is not a torch.Tensor")
                                 if v.shape != first.shape:
                                     raise ValueError(
-                                        f"{field_name} contains inconsistent shapes: "
-                                        f"{first.shape} vs {v.shape} at index {i}"
+                                        f"{field_name} contains inconsistent "
+                                        f"shapes: {first.shape} vs {v.shape} "
+                                        f"at index {i}"
                                     )
 
                             # Treat the list as a stacked tensor: shape = (len(list), *tensor.shape)
@@ -79,13 +80,16 @@ class TensorSchema:
                             if isinstance(dim, int):
                                 if actual_shape[i] != dim:
                                     raise ValueError(
-                                        f"{field_name} dim[{i}] expected {dim}, got {actual_shape[i]}"
+                                        f"{field_name} dim[{i}] expected "
+                                        f"{dim}, got {actual_shape[i]}"
                                     )
                             elif isinstance(dim, str):
                                 if dim in shape_env:
                                     if actual_shape[i] != shape_env[dim]:
                                         raise ValueError(
-                                            f"{field_name} dim[{i}] expected '{dim}'={shape_env[dim]}, got {actual_shape[i]}"
+                                            f"{field_name} dim[{i}] expected "
+                                            f"'{dim}'={shape_env[dim]}, got "
+                                            f"{actual_shape[i]}"
                                         )
                                 else:
                                     shape_env[dim] = actual_shape[i]

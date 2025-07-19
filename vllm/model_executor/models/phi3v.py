@@ -105,7 +105,7 @@ class Phi3VImagePixelInputs(TensorSchema):
         - w: Width of each patch
     """
 
-    type: Literal["pixel_values"] = "pixel_values"
+    type: Literal["pixel_values", "image_embeds"] = "pixel_values"
 
     # Supports either a stacked tensor or a list of (p, 3, h, w) tensors
     data: Annotated[
