@@ -3014,12 +3014,7 @@ class LoRAConfig:
     (added to the base model vocabulary)."""
     lora_vocab_padding_size: ClassVar[int] = current_platform\
         .get_lora_vocab_padding_size()
-    long_lora_scaling_factors: Optional[tuple[float, ...]] = None
-    """Specify multiple scaling factors (which can be different from base model
-    scaling factor - see eg. Long LoRA) to allow for multiple LoRA adapters
-    trained with those scaling factors to be used at the same time. If not
-    specified, only adapters trained with the base model scaling factor are
-    allowed."""
+
     default_mm_loras: Optional[dict[str, str]] = None
     """Dictionary mapping specific modalities to LoRA model paths; this field
     is only applicable to multimodal models and should be leveraged when a
@@ -3052,7 +3047,6 @@ class LoRAConfig:
         factors.append(self.lora_dtype)
         factors.append(self.lora_extra_vocab_size)
         factors.append(self.lora_vocab_padding_size)
-        factors.append(self.long_lora_scaling_factors)
         factors.append(self.bias_enabled)
         hash_str = hashlib.md5(str(factors).encode(),
                                usedforsecurity=False).hexdigest()
@@ -3090,11 +3084,6 @@ class LoRAConfig:
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
-
-    def verify_lora_support(self):
-        if self.long_lora_scaling_factors is not None and envs.VLLM_USE_V1:
-            raise ValueError(
-                "V1 LoRA does not support long LoRA, please use V0.")
 
 
 @config
@@ -4564,7 +4553,6 @@ class VllmConfig:
         if self.lora_config is not None:
             self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
-            self.lora_config.verify_lora_support()
         if self.prompt_adapter_config is not None:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
