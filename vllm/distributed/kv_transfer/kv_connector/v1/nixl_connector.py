@@ -1024,6 +1024,7 @@ class NixlConnectorWorker:
             remote_xfer_side_handle,
             remote_block_descs_ids,
             notif_msg=notif_id,
+            skip_desc_merge=True,
         )
 
         # Begin async xfer.
