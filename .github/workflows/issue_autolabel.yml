@@ -1,0 +1,129 @@
+name: Label issues based on keywords
+on:
+  issues:
+    types: [opened, edited, reopened]
+permissions:
+  issues: write          # needed so the workflow can add labels
+  contents: read
+concurrency:
+  group: issue-labeler-${{ github.event.issue.number }}
+  cancel-in-progress: true
+jobs:
+  add-labels:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Label issues based on keywords
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
+        with:
+          script: |
+            // Configuration: Add new labels and keywords here
+            const labelConfig = {
+              rocm: {
+                keywords: [
+                  // Core ROCm/AMD terms
+                  'rocm', 'roc', 'amd', 'hip',
+                  
+                  // GPU Models - Instinct Series
+                  'mi300', 'mi300x', 'mi300a', 'mi250x', 'mi250', 
+                  'mi210x', 'mi210', 'mi325x', 'mi350x', 'mi355x',
+                  
+                  // GPU Models - Radeon Series
+                  'amd radeon rx 9070', 'amd radeon rx 9070 xt', 'amd radeon rx 9070 gre',
+                  'amd radeon ai pro r9700', 'amd radeon rx 9060 xt',
+                  'amd radeon rx 7900 xtx', 'amd radeon rx 7900 xt', 'amd radeon rx 7900 gre',
+                  'amd radeon rx 7800 xt',
+                  
+                  // GPU Models - Pro Series
+                  'amd radeon pro w7900', 'amd radeon pro w7900 dual slot',
+                  'amd radeon pro w7800', 'amd radeon pro w7800 48gb',
+                  'amd radeon pro w7700', 'amd radeon pro v710', 'amd radeon pro v620',
+                  'amd radeon pro w6800',
+                  
+                  // GPU Models - Full Instinct Names
+                  'amd instinct mi325x', 'amd instinct mi300x', 'amd instinct mi300a',
+                  'amd instinct mi250x', 'amd instinct mi250', 'amd instinct mi210',
+                  'amd instinct mi350x', 'amd instinct mi355x',
+                  
+                  // Architecture codes
+                  'cdna3', 'cdna2', 'cdna4', 'cdna',
+                  'gfx942', 'gfx90a', 'gfx1100', 'gfx1101', 'gfx1201', 'gfx1200',
+                  'gfx1030', 'gfx950', 'gfx908',
+                  'rdna4', 'rdna3', 'rdna2',
+                  
+                  // Libraries and tools
+                  'composable kernel', 'aiter', 'rccl', 'migraphx', 'hipgraph'
+                ],
+                exclusions: [
+                  // More flexible patterns to match the original exclusion logic
+                  'rocm used to build pytorch',
+                  'rocm used to build pytorch: n/a',
+                  'rocm used to build pytorch: none', 
+                  'rocm used to build pytorch: 0.0.0',
+                  'rocm used to build pytorch: not available'
+                ]
+              }
+              
+              // Add more label configurations here:
+              // cuda: {
+              //   keywords: ['cuda', 'nvidia', 'gpu', 'tensorrt'],
+              //   exclusions: []
+              // },
+              // performance: {
+              //   keywords: ['slow', 'performance', 'speed', 'optimization'],
+              //   exclusions: []
+              // }
+            };
+
+            // Helper function to create regex from keywords and exclusions
+            function createRegex(keywords, exclusions = []) {
+              // Escape both keywords and exclusions for literal matching
+              const escapedKeywords = keywords
+                .map(keyword => keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+              const escapedExclusions = exclusions
+                .map(exclusion => exclusion.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+              
+              const keywordPattern = escapedKeywords.join('|');
+              
+              if (escapedExclusions.length === 0) {
+                return new RegExp(`\\b(${keywordPattern})\\b`, 'i');
+              }
+
+              const exclusionPattern = escapedExclusions.join('|');
+              return new RegExp(`\\b(?!.*(?:${exclusionPattern}))(${keywordPattern})\\b`, 'i');
+            }
+
+            // Helper function to check if label should be added
+            async function processLabel(labelName, config) {
+              const regex = createRegex(config.keywords, config.exclusions);
+              const body = context.payload.issue.body || "";
+              const title = context.payload.issue.title || "";
+              
+              const hit = regex.test(title) || regex.test(body);
+              
+              if (hit) {
+                const existingLabels = context.payload.issue.labels.map(l => l.name);
+                
+                if (!existingLabels.includes(labelName)) {
+                  await github.rest.issues.addLabels({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: context.issue.number,
+                    labels: [labelName],
+                  });
+                  core.notice(`Label "${labelName}" added.`);
+                  return true;
+                }
+                core.notice(`Label "${labelName}" already present.`);
+                return false;
+              }
+              core.notice(`No keywords found for label "${labelName}".`);
+              return false;
+            }
+
+            // Process all configured labels
+            const processLabels = Object.entries(labelConfig)
+              .map(([labelName, config]) => processLabel(labelName, config));
+            const labelsAdded = await Promise.all(processLabels);
+            const numLabelsAdded = labelsAdded.reduce((x, y) => x + y, 0);
+  
+            core.notice(`Processing complete. ${numLabelsAdded} label(s) added.`);
