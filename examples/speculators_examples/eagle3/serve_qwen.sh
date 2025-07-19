@@ -1,0 +1,1 @@
+VLLM_USE_V1=1 vllm serve nm-testing/Speculator-Qwen3-8B-Eagle3-converted-0717 >output_speculators_qwen.txt

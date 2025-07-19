@@ -26,6 +26,8 @@ from vllm.transformers_utils.configs.nvlm_d import NVLM_D_Config
 from vllm.transformers_utils.configs.ovis import OvisConfig
 from vllm.transformers_utils.configs.skyworkr1v import SkyworkR1VChatConfig
 from vllm.transformers_utils.configs.solar import SolarConfig
+from vllm.transformers_utils.configs.speculators_eagle import (
+    SpeculatorsEagleConfig, extract_speculators_info)
 from vllm.transformers_utils.configs.telechat2 import Telechat2Config
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
@@ -40,6 +42,8 @@ __all__ = [
     "MedusaConfig",
     "EAGLEConfig",
     "ExaoneConfig",
+    "SpeculatorsEagleConfig",
+    "extract_speculators_info",
     "MiniMaxText01Config",
     "MiniMaxVL01Config",
     "MllamaConfig",
