@@ -29,7 +29,6 @@ QuantizationMethods = Literal[
     "qqq",
     "hqq",
     "experts_int8",
-    "neuron_quant",
     "ipex",
     "quark",
     "moe_wna16",
@@ -110,7 +109,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .marlin import MarlinConfig
     from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
     from .moe_wna16 import MoeWNA16Config
-    from .neuron_quant import NeuronQuantConfig
     from .ptpc_fp8 import PTPCFp8Config
     from .qqq import QQQConfig
     from .rtn import RTNConfig
@@ -140,7 +138,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "qqq": QQQConfig,
         "hqq": HQQMarlinConfig,
         "experts_int8": ExpertsInt8Config,
-        "neuron_quant": NeuronQuantConfig,
         "ipex": IPEXConfig,
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,
