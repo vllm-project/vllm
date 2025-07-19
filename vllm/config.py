@@ -4014,9 +4014,12 @@ class CompilationConfig:
         certain small batchsizes, where inductor is good at optimizing.
     """
     # Top-level Compilation control
-    level: int = 0
+    level: Optional[int] = None
     """The level of compilation:
 
+    - None: Indicator that the user did not set the CompilationLevel.
+      Will be translated to the default level.
+      See NOTE: [Default Compilation Level]
     - 0: no compilation.
     - 1: dynamo as is.
     - 2: dynamo once.
@@ -4581,6 +4584,24 @@ class VllmConfig:
                 "To workaround this limitation, vLLM will set 'ieee' input "
                 "precision for chunked prefill triton kernels.")
 
+        # NOTE: [Default Compilation Level]
+        # If the user does not explicitly set a compilation level, then
+        # we use the default level. The default level depends on other
+        # settings (see the below code).
+        if envs.VLLM_USE_V1:
+            if (self.model_config is not None
+                    and self.model_config.enforce_eager):
+                self.compilation_config.level = CompilationLevel.NO_COMPILATION
+            else:
+                if self.compilation_config.level is None:
+                    self.compilation_config.level = CompilationLevel.PIECEWISE
+        else:
+            # BUG: in V0, if you pass both enforce_eager and a CompilationLevel,
+            # enforce_eager doesn't fully turn the compilation off...
+            # This is load bearing for a lot of tests.
+            if self.compilation_config.level is None:
+                self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
         if self.compilation_config.pass_config.enable_async_tp:
@@ -4593,7 +4614,6 @@ class VllmConfig:
             # By default, V1 uses piecewise CUDA graphs. If full_cuda_graph
             # is set to True, full CUDA graphs will be used.
             self.compilation_config.cudagraph_num_of_warmups = 1
-            self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
 
         self._set_cudagraph_sizes()
