@@ -721,7 +721,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.use_marlin = False
         self.allow_flashinfer_cutlass = False
 
-        if envs.VLLM_USE_FLASHINFER_MOE:
+        if envs.VLLM_USE_FLASHINFER_MOE_FP4:
             if self.cutlass_nvfp4_supported and current_platform.is_cuda() \
                and current_platform.is_device_capability(100):
                 logger.info_once(
@@ -800,10 +800,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             assert moe.dp_size > 1
             logger.debug_once("Using CutlassExpertsFp4")
             # Currently CutlassExpertsFp4 doesn't support DP
-            raise ValueError(
-                "CutlassExpertsFp4 doesn't support DP. "
-                "Use flashinfer CUTLASS FusedMoE(VLLM_USE_FLASHINFER_MOE)"
-                " backend instead.")
+            raise ValueError("CutlassExpertsFp4 doesn't support DP. "
+                             "Use flashinfer CUTLASS FusedMoE backend instead "
+                             "(set VLLM_USE_FLASHINFER_MOE_FP4=1)")
 
         return experts
 
