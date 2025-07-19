@@ -2761,12 +2761,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if len(static_cache_layers) > 0:
             if self.vllm_config.speculative_config is not None:
                 raise NotImplementedError(
-                    "Static cache models with speculative decoding is not "
-                    "yet supported.")
-            if not self.vllm_config.model_config.enforce_eager:
-                raise NotImplementedError(
-                    "Static cache models with cuda graph is not "
-                    "yet supported.")
+                    "Mamba with speculative decoding is not supported yet.")
             if self.vllm_config.cache_config.enable_prefix_caching:
                 raise NotImplementedError(
                     "Prefix caching for static cache models is not "

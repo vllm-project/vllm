@@ -109,7 +109,7 @@ def test_models(
                 m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
             with vllm_runner(model,
                              max_num_seqs=MAX_NUM_SEQS,
-                             **V1_HYBRID_UNSUPPORTED_ARGS) as vllm_model:
+                             enable_prefix_caching=False) as vllm_model:
                 vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
                     example_prompts, max_tokens, num_logprobs)
     else:
