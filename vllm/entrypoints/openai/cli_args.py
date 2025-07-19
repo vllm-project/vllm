@@ -141,7 +141,7 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     """Whether client certificate is required (see stdlib ssl module's)."""
     root_path: Optional[str] = None
     """FastAPI root_path when app is behind a path based routing proxy."""
-    middleware: Optional[str] = None
+    middleware: list[str] = field(default_factory=lambda: [])
     """Additional ASGI middleware to apply to the app. We accept multiple 
     --middleware arguments. The value should be an import path. If a function 
     is provided, vLLM will add it to the server using 
@@ -215,6 +215,9 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
 
         # Special case: Middleware needs append action
         frontend_kwargs["middleware"]["action"] = "append"
+        frontend_kwargs["middleware"]["type"] = str
+        if "nargs" in frontend_kwargs["middleware"]:
+            del frontend_kwargs["middleware"]["nargs"]
         frontend_kwargs["middleware"]["default"] = []
 
         # Special case: Tool call parser shows built-in options.
