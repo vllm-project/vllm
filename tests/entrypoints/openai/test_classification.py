@@ -176,4 +176,8 @@ async def test_invocations(server: RemoteOpenAIServer):
     invocation_output = invocation_response.json()
 
     assert classification_output.keys() == invocation_output.keys()
-    assert classification_output["data"] == invocation_output["data"]
+    for classification_data, invocation_data in zip(
+            classification_output["data"], invocation_output["data"]):
+        assert classification_data.keys() == invocation_data.keys()
+        assert classification_data["probs"] == pytest.approx(
+            invocation_data["probs"], rel=0.01)

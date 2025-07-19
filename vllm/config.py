@@ -26,7 +26,7 @@ from pydantic import (ConfigDict, SkipValidation, TypeAdapter, field_validator,
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.distributed import ProcessGroup, ReduceOp
-from typing_extensions import Self, deprecated, runtime_checkable
+from typing_extensions import Self, runtime_checkable
 
 import vllm.envs as envs
 from vllm import version
@@ -551,7 +551,7 @@ class ModelConfig:
         # For pooling models, self.task is used to indicate the
         # user-selected task
         if self.task == "score":
-            if self.registry.is_cross_encoder_model(self.architectures):
+            if self._is_classify_task(self.architectures):
                 self.task = "classify"
             else:
                 self.task = "embed"
@@ -806,6 +806,12 @@ class ModelConfig:
                 f"one of {get_args(TokenizerMode)}.")
         self.tokenizer_mode = tokenizer_mode
 
+    def _is_classify_task(self, architectures: list[str]):
+        for arch in architectures:
+            if arch.endswith("ForSequenceClassification"):
+                return True
+        return self.registry.is_cross_encoder_model(architectures)
+
     def _get_preferred_pooling_task(
         self,
         architectures: list[str],
@@ -813,14 +819,11 @@ class ModelConfig:
         model_id = self.model
         if get_pooling_config(model_id, self.revision):
             return "embed"
-        if self.registry.is_cross_encoder_model(architectures):
-            return "classify"
         if self.registry.is_transcription_model(architectures):
             return "transcription"
 
         suffix_to_preferred_task: list[tuple[str, _ResolvedTask]] = [
             # Other models follow this pattern
-            ("ForSequenceClassification", "classify"),
             ("EmbeddingModel", "embed"),
             ("RewardModel", "reward"),
         ]
@@ -878,11 +881,14 @@ class ModelConfig:
         self,
         task_option: TaskOption,
     ) -> dict[RunnerType, list[_ResolvedTask]]:
-        return {
-            "generate": self._get_supported_generation_tasks(task_option),
-            "pooling": self._get_supported_pooling_tasks(task_option),
-            "draft": ["draft"]
-        }
+        if self._is_classify_task(self.architectures):
+            return {"generate": [], "pooling": ["classify"], "draft": []}
+        else:
+            return {
+                "generate": self._get_supported_generation_tasks(task_option),
+                "pooling": self._get_supported_pooling_tasks(task_option),
+                "draft": ["draft"]
+            }
 
     def _get_supported_runner_types(
         self,
@@ -925,12 +931,16 @@ class ModelConfig:
                     f"Available tasks for runner={task_runner!r}: "
                     f"{supported_tasks[task_runner]}")
 
+        if "classify" in supported_tasks.get("pooling", []):
+            # When multiple pooling tasks are present, default to
+            # pooling (eg cross-encoder) for non-standard architectures.
+            return "pooling"
+
         suffix_to_preferred_runner: list[tuple[str, RunnerType]] = [
             ("ForCausalLM", "generate"),
             ("ForConditionalGeneration", "generate"),
             ("ChatModel", "generate"),
             ("LMHeadModel", "generate"),
-            ("ForSequenceClassification", "pooling"),
             ("EmbeddingModel", "pooling"),
             ("RewardModel", "pooling"),
         ]
@@ -940,10 +950,6 @@ class ModelConfig:
             if arch.endswith(suffix) and pref_runner in supported_runner_types:
                 return pref_runner
 
-        if "classify" in supported_tasks.get("pooling", []):
-            # When multiple pooling tasks are present, default to
-            # pooling (eg cross-encoder) for non-standard architectures.
-            return "pooling"
         if "generate" in supported_runner_types:
             return "generate"
         if "pooling" in supported_runner_types:
@@ -963,7 +969,7 @@ class ModelConfig:
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
             "awq_marlin", "fbgemm_fp8", "compressed-tensors", "experts_int8",
-            "quark", "modelopt_fp4", "bitblas", "gptq_bitblas"
+            "quark", "modelopt_fp4", "bitblas", "gptq_bitblas", "inc"
         ]
         if self.quantization is not None:
             self.quantization = cast(me_quant.QuantizationMethods,
@@ -1525,7 +1531,7 @@ class ModelConfig:
 
     @property
     def is_matryoshka(self) -> bool:
-        return (hasattr(self.hf_config, "matryoshka_dimensions")
+        return (bool(getattr(self.hf_config, "matryoshka_dimensions", None))
                 or getattr(self.hf_config, "is_matryoshka", False))
 
     @property
@@ -1539,13 +1545,11 @@ class ModelConfig:
         return getattr(self.hf_config, "use_pad_token", True)
 
     def get_and_verify_max_len(self, max_model_len: int):
-        # For pooling models, the tokenizer's `model_max_length` is often a
-        # reliable source for the maximum sequence length. However, for
-        # generative models, this can be incorrect and unduly limit the
-        # context window (e.g., DeepSeek-R1). Therefore, we only consider
-        # tokenizer_config for pooling models.
+        # Consider max_model_len in tokenizer_config only when
+        # pooling models use absolute position_embedding.
         tokenizer_config = None
-        if self.runner_type == "pooling":
+        if (self.runner_type == "pooling" and getattr(
+                self.hf_config, "position_embedding_type", "") == "absolute"):
             tokenizer_config = try_get_tokenizer_config(
                 self.tokenizer,
                 trust_remote_code=self.trust_remote_code,
@@ -1563,7 +1567,7 @@ class ModelConfig:
 
 
 BlockSize = Literal[1, 8, 16, 32, 64, 128]
-CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
+CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"]
 PrefixCachingHashAlgo = Literal["builtin", "sha256", "sha256_cbor_64bit"]
 
 
@@ -1593,7 +1597,7 @@ class CacheConfig:
     cache_dtype: CacheDType = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
-    fp8 (=fp8_e4m3)."""
+    fp8 (=fp8_e4m3). Intel Gaudi (HPU) supports fp8 (using fp8_inc)."""
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
@@ -1630,6 +1634,9 @@ class CacheConfig:
     checkpoint if available. Otherwise, the scales will default to 1.0."""
     cpu_kvcache_space_bytes: Optional[int] = None
     """(CPU backend only) CPU key-value cache space."""
+    mamba_page_size_padded: Optional[int] = None
+    """ Optional override for mamba page size; used by hybrid mamba/attention
+    models to ensure exact alignment with attention page size."""
 
     # Will be set after profiling.
     num_gpu_blocks: Optional[int] = field(default=None, init=False)
@@ -1688,7 +1695,7 @@ class CacheConfig:
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
                 "Meanwhile, it may cause accuracy drop without a proper "
-                "scaling factor")
+                "scaling factor.")
         else:
             raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype}")
 
@@ -1725,35 +1732,6 @@ class CacheConfig:
             raise ValueError("Too large swap space. " + msg)
         elif cpu_memory_usage > 0.4 * total_cpu_memory:
             logger.warning("Possibly too large swap space. %s", msg)
-
-
-@config
-@dataclass
-class TokenizerPoolConfig:
-    """This config is deprecated and will be removed in a future release.
-
-    Passing these parameters will have no effect. Please remove them from your
-    configurations.
-    """
-
-    pool_size: int = 0
-    """This parameter is deprecated and will be removed in a future release.
-    Passing this parameter will have no effect. Please remove it from your
-    configurations."""
-    pool_type: str = "ray"
-    """This parameter is deprecated and will be removed in a future release.
-    Passing this parameter will have no effect. Please remove it from your
-    configurations."""
-    extra_config: dict = field(default_factory=dict)
-    """This parameter is deprecated and will be removed in a future release.
-    Passing this parameter will have no effect. Please remove it from your
-    configurations."""
-
-    def __post_init__(self) -> None:
-        logger.warning_once(
-            "TokenizerPoolConfig is deprecated and will be removed in a "
-            "future release. Passing this parameter will have no effect. "
-            "Please remove it from your configurations.")
 
 
 class LoadFormat(str, enum.Enum):
@@ -1807,6 +1785,9 @@ class LoadConfig:
         default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
     corresponding to the chosen load_format."""
+    device: Optional[str] = None
+    """Device to which model weights will be loaded, default to
+    device_config.device"""
     ignore_patterns: Optional[Union[list[str], str]] = None
     """The list of patterns to ignore when loading the model. Default to
     "original/**/*" to avoid repeated loading of llama's checkpoints."""
@@ -1919,10 +1900,6 @@ class ParallelConfig:
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
-    tokenizer_pool_config: Optional[TokenizerPoolConfig] = None
-    """This parameter is deprecated and will be removed in a future release.
-    Please remove it from your configs"""
-
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
 
@@ -1937,7 +1914,7 @@ class ParallelConfig:
     or equal to the number of GPUs available, "mp" will be used to
     keep processing on a single host. Otherwise, this will default
     to "ray" if Ray is installed and fail otherwise. Note that tpu
-    and hpu only support Ray for distributed inference."""
+    only support Ray for distributed inference."""
 
     worker_cls: str = "auto"
     """The full name of the worker class to use. If "auto", the worker class
@@ -2030,6 +2007,19 @@ class ParallelConfig:
         torch.distributed.all_reduce(tensor, op=ReduceOp.MAX, group=dp_group)
         aggregated_has_unfinished = bool(tensor.item())
         return aggregated_has_unfinished
+
+    @staticmethod
+    def sync_kv_cache_memory_size(dp_group: "ProcessGroup",
+                                  kv_cache_memory: int) -> int:
+        if kv_cache_memory == -1:
+            kv_cache_memory = torch.iinfo(torch.int64).max
+        tensor = torch.tensor([kv_cache_memory],
+                              dtype=torch.int64,
+                              device="cpu")
+        # we cannot use broadcast for stateless dp group since it depends
+        # on global rank
+        torch.distributed.all_reduce(tensor, op=ReduceOp.MIN, group=dp_group)
+        return tensor.item()
 
     def compute_hash(self):
         """
@@ -2308,6 +2298,13 @@ class SchedulerConfig:
     like full attention and sliding window attention.
     """
 
+    async_scheduling: bool = False
+    """EXPERIMENTAL: If set to True, perform async scheduling. This may help
+    reduce the CPU overheads, leading to better latency and throughput. However,
+    async scheduling is currently not supported with some features such as
+    structured outputs, speculative decoding, and pipeline parallelism.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -2401,6 +2398,10 @@ class SchedulerConfig:
         if not self.cuda_graph_sizes:
             self.cuda_graph_sizes = [min(self.max_num_seqs * 2, 512)]
 
+        if self.async_scheduling:
+            self.scheduler_cls = (
+                "vllm.v1.core.sched.async_scheduler.AsyncScheduler")
+
     @model_validator(mode='after')
     def _verify_args(self) -> Self:
         if (self.max_num_batched_tokens < self.max_model_len
@@ -2468,7 +2469,7 @@ class SchedulerConfig:
         return self.num_scheduler_steps > 1
 
 
-Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu", "hpu"]
+Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu"]
 
 
 @config
@@ -3678,18 +3679,6 @@ GuidedDecodingBackend = Literal[GuidedDecodingBackendV0,
 class DecodingConfig:
     """Dataclass which contains the decoding strategy of the engine."""
 
-    @property
-    @deprecated(
-        "`guided_decoding_backend` is deprecated and has been renamed to "
-        "`backend`. This will be removed in v0.10.0. Please use the "
-        "`backend` argument instead.")
-    def guided_decoding_backend(self) -> GuidedDecodingBackend:
-        return self.backend
-
-    @guided_decoding_backend.setter
-    def guided_decoding_backend(self, value: GuidedDecodingBackend):
-        self.backend = value
-
     backend: GuidedDecodingBackend = "auto" if envs.VLLM_USE_V1 else "xgrammar"
     """Which engine will be used for guided decoding (JSON schema / regex etc)
     by default. With "auto", we will make opinionated choices based on request
@@ -3732,9 +3721,6 @@ class DecodingConfig:
         return hash_str
 
     def __post_init__(self):
-        if ":" in self.backend:
-            self._extract_backend_options()
-
         if envs.VLLM_USE_V1:
             valid_guided_backends = get_args(GuidedDecodingBackendV1)
         else:
@@ -3749,24 +3735,6 @@ class DecodingConfig:
         if (self.disable_additional_properties and self.backend != "guidance"):
             raise ValueError("disable_additional_properties is only supported "
                              "for the guidance backend.")
-
-    @deprecated(
-        "Passing guided decoding backend options inside backend in the format "
-        "'backend:...' is deprecated. This will be removed in v0.10.0. Please "
-        "use the dedicated arguments '--disable-fallback', "
-        "'--disable-any-whitespace' and '--disable-additional-properties' "
-        "instead.")
-    def _extract_backend_options(self):
-        """Extract backend options from the backend string."""
-        backend, options = self.backend.split(":")
-        self.backend = cast(GuidedDecodingBackend, backend)
-        options_set = set(options.strip().split(","))
-        if "no-fallback" in options_set:
-            self.disable_fallback = True
-        if "disable-any-whitespace" in options_set:
-            self.disable_any_whitespace = True
-        if "no-additional-properties" in options_set:
-            self.disable_additional_properties = True
 
 
 DetailedTraceModules = Literal["model", "worker", "all"]
@@ -4871,10 +4839,14 @@ class VllmConfig:
         if architecture is None:
             return
 
-        from vllm.model_executor.models.config import MODELS_CONFIG_MAP
+        from vllm.model_executor.models.config import (
+            MODELS_CONFIG_MAP, HybridAttentionMambaModelConfig)
         cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_config(self)
+
+        if self.model_config.is_hybrid:
+            HybridAttentionMambaModelConfig.verify_and_update_config(self)
 
         if self.model_config.task == "classify":
             # Maybe convert ForCausalLM into ForSequenceClassification model.
