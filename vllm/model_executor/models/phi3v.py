@@ -16,7 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, Optional, TypedDict, Union
+from typing import Annotated, Any, Literal, Optional, TypedDict, Union
 
 import regex as re
 import torch
@@ -45,6 +45,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
@@ -93,23 +94,24 @@ def _init_img_processor(hf_config: PretrainedConfig,
     return img_processor
 
 
-class Phi3VImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    data: Union[torch.Tensor, list[torch.Tensor]]
+class Phi3VImagePixelInputs(TensorSchema):
     """
-    Shape:
-    `(batch_size * num_images, 1 + num_patches, num_channels, height, width)`
+    Dimensions:
+        - b: Batch size
+        - n: Number of images
+        - p: Number of patches
+        - h: Height of each patch
+        - w: Width of each patch
+    """
 
-    Note that `num_patches` may be different per batch and image,
-    in which case the data is passed as a list instead of a batched tensor.
-    """
+    type: Literal["pixel_values"] = "pixel_values"
 
-    image_sizes: torch.Tensor
-    """
-    Shape: `(batch_size * num_images, 2)`
+    # Supports either a stacked tensor or a list of (p, 3, h, w) tensors
+    data: Annotated[Union[torch.Tensor, list[torch.Tensor]],
+                    TensorShape("bn", "p", 3, "h", "w")]
 
-    This should be in `(height, width)` format.
-    """
+    # Stacked tensor with height and width for each image
+    image_sizes: Annotated[torch.Tensor, TensorShape("bn", 2)]
 
 
 class Phi3VImageEmbeddingInputs(TypedDict):
