@@ -265,9 +265,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         prepare_finalize: FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
     ) -> FusedMoEPermuteExpertsUnpermute:
-
-        assert self.fused_experts == fused_experts
-
         if (prepare_finalize.activation_format ==
                 FusedMoEActivationFormat.BatchedExperts):
             logger.debug("BatchedTritonExperts %s", self.moe)
@@ -399,7 +396,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             enable_eplb=enable_eplb,
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
-            logical_replica_count=logical_replica_count
+            logical_replica_count=logical_replica_count,
         )
 
     def forward_cuda(
@@ -446,8 +443,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_map=expert_map,
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
-            logical_replica_count=logical_replica_count
-        )
+            logical_replica_count=logical_replica_count)
 
         if self.rocm_aiter_moe_enabled:
             return self.rocm_aiter_fused_experts(
@@ -752,19 +748,17 @@ class FusedMoE(torch.nn.Module):
         if self.enable_eplb:
             from vllm.model_executor.layers.quantization.fp8 import (
                 Fp8MoEMethod)
-            
-            # TODO: Add support for additional quantization methods.
-            SUPPORTED_MOE_QUANT_METHODS = {
-                UnquantizedFusedMoEMethod,
-                Fp8MoEMethod,
-            }
-            quant_method_type = type(quant_method)
-
-            if quant_method_type not in SUPPORTED_MOE_QUANT_METHODS:
-                raise NotImplementedError(
-                    "EPLB is only supported the following quantization methods: "
-                    f"{[cls.__name__ for cls in SUPPORTED_MOE_QUANT_METHODS]}"
-                )
+            if not isinstance(quant_method,
+                              (Fp8MoEMethod, UnquantizedFusedMoEMethod)):
+                # TODO: Add support for additional quantization methods.
+                # The implementation for other quantization methods does not
+                # contain essential differences, but the current quant API
+                # design causes duplicated work when extending to new
+                # quantization methods, so I'm leaving it for now.
+                # If you plan to add support for more quantization methods,
+                # please refer to the implementation in `Fp8MoEMethod`.
+                raise NotImplementedError("EPLB is only supported for FP8 "
+                                          "quantization for now.")
 
         moe_quant_params = {
             "num_experts": self.local_num_experts,
@@ -845,6 +839,15 @@ class FusedMoE(torch.nn.Module):
     @property
     def use_flashinfer_cutlass_kernels(self):
         return self.moe_parallel_config.use_flashinfer_cutlass_kernels
+
+    def update_expert_map(self):
+        # ep_size and ep_rank should already be updated
+        assert self.expert_map is not None
+        with self.expert_map.device:
+            self.local_num_experts, self.expert_map = determine_expert_map(
+                ep_size=self.ep_size,
+                ep_rank=self.ep_rank,
+                global_num_experts=self.global_num_experts)
 
     def _load_per_tensor_weight_scale(self, shard_id: str,
                                       param: torch.nn.Parameter,
