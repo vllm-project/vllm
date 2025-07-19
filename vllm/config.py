@@ -1337,7 +1337,6 @@ class ModelConfig:
                 or self.hf_config.model_type == "glm4_moe_mtp"):
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_nextn_predict_layers", 0)
-            print(total_num_hidden_layers)
         else:
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_hidden_layers", 0)
@@ -2524,8 +2523,7 @@ class DeviceConfig:
 
 
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
-                            "mlp_speculator", "draft_model", "deepseek_mtp",
-                            "glm4_moe_mtp"]
+                            "mlp_speculator", "draft_model", "deepseek_mtp"]
 SpeculativeAcceptanceMethod = Literal["rejection_sampler",
                                       "typical_acceptance_sampler"]
 
@@ -2666,14 +2664,7 @@ class SpeculativeConfig:
                 "n_predict": n_predict,
                 "architectures": ["DeepSeekMTPModel"]
             })
-        if hf_config.architectures[0] == "Glm4MoeForCausalLM":
-            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
-            if n_predict:  # GLM-MoE have both MTP and Not MTP model
-                hf_config.update({
-                    "model_type": "glm4_moe_mtp",
-                    "n_predict": n_predict,
-                    "architectures": ["Glm4MoeMTPModel"]
-                })
+
         if hf_config.architectures[0] == "MiMoForCausalLM":
             hf_config.model_type = "mimo_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
@@ -2682,6 +2673,8 @@ class SpeculativeConfig:
                 "n_predict": n_predict,
                 "architectures": ["MiMoMTPModel"]
             })
+            return hf_config
+
         return hf_config
 
     def __post_init__(self):
@@ -2698,8 +2691,10 @@ class SpeculativeConfig:
             # TODO(Shangming): Refactor mtp configuration logic when supporting
             # mtp acceleration for more models besides deepseek_v3
             if self.target_model_config and \
-                (self.target_model_config.hf_text_config.model_type in
-                 ('deepseek_v3', 'mimo', 'glm4_moe')):
+                (self.target_model_config.hf_text_config.model_type \
+                        == "deepseek_v3" or
+                    self.target_model_config.hf_text_config.model_type \
+                        == "mimo"):
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
             elif self.method in ("ngram", "[ngram]"):
@@ -2788,10 +2783,8 @@ class SpeculativeConfig:
                 elif (self.draft_model_config.hf_config.model_type ==
                       "mlp_speculator"):
                     self.method = "mlp_speculator"
-                elif (self.draft_model_config.hf_config.model_type
-                      == "deepseek_mtp"
-                      or self.draft_model_config.hf_config.model_type
-                      == "glm4_moe_mtp"):
+                elif (self.draft_model_config.hf_config.model_type ==
+                      "deepseek_mtp"):
                     self.method = "deepseek_mtp"
                     if self.num_speculative_tokens > 1:
                         logger.warning(

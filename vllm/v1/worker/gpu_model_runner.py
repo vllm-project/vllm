@@ -862,6 +862,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         use_sliding_window = (isinstance(kv_cache_spec, SlidingWindowSpec) or
                               (isinstance(kv_cache_spec, FullAttentionSpec)
                                and kv_cache_spec.sliding_window is not None))
+        use_local_attention = (
+            isinstance(kv_cache_spec, ChunkedLocalAttentionSpec)
+            or (isinstance(kv_cache_spec, FullAttentionSpec)
+                and kv_cache_spec.attention_chunk_size is not None))
         assert isinstance(kv_cache_spec, AttentionSpec)
         use_cascade = attn_metadata_builder.use_cascade_attention(
             common_prefix_len=common_prefix_len,
@@ -870,6 +874,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_kv_heads=kv_cache_spec.num_kv_heads,
             use_alibi=self.use_alibi,
             use_sliding_window=use_sliding_window,
+            use_local_attention=use_local_attention,
             num_sms=self.num_sms,
         )
         return common_prefix_len if use_cascade else 0
@@ -1745,8 +1750,40 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             new_config = update_config(config, config_overrides)
             setattr(self, config_name, new_config)
 
-    def load_model(self) -> None:
+    def load_model(self, eep_scale_up: bool = False) -> None:
+        """
+        Args:
+            eep_scale_up: the model loading is for elastic EP scale up.
+        """
         logger.info("Starting to load model %s...", self.model_config.model)
+        if eep_scale_up:
+            from vllm.distributed.parallel_state import get_ep_group
+            num_local_physical_experts = torch.empty(1,
+                                                     dtype=torch.int32,
+                                                     device="cpu")
+            torch.distributed.broadcast(num_local_physical_experts,
+                                        group=get_ep_group().cpu_group,
+                                        group_src=0)
+            num_local_physical_experts = int(num_local_physical_experts.item())
+            new_ep_size = get_ep_group().world_size
+            global_expert_load, old_global_expert_indices = (
+                EplbState.recv_state())
+            num_logical_experts = global_expert_load.shape[1]
+            self.parallel_config.num_redundant_experts = (
+                num_local_physical_experts * new_ep_size - num_logical_experts)
+            assert old_global_expert_indices.shape[
+                1] % num_local_physical_experts == 0
+            old_ep_size = old_global_expert_indices.shape[
+                1] // num_local_physical_experts
+            rank_mapping = {
+                old_ep_rank: old_ep_rank
+                for old_ep_rank in range(old_ep_size)
+            }
+        else:
+            global_expert_load = None
+            old_global_expert_indices = None
+            rank_mapping = None
+
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             time_before_load = time.perf_counter()
             model_loader = get_model_loader(self.load_config)
@@ -1788,6 +1825,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.model,
                 self.device,
                 self.parallel_config,
+                global_expert_load,
+                old_global_expert_indices,
+                rank_mapping,
             )
 
     def save_tensorized_model(
@@ -2628,7 +2668,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # TODO: Support other attention modules, e.g., cross-attention
             if attn_module.attn_type == AttentionType.DECODER:
                 use_local_attention = (self.attention_chunk_size is not None
-                                       and attn_module.impl.use_irope)
+                                       and getattr(attn_module.impl,
+                                                   "use_irope", False))
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
@@ -2637,6 +2678,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         dtype=self.kv_cache_dtype,
                         sliding_window=attn_module.sliding_window,
                         use_mla=use_mla)
+                    assert not use_local_attention, (
+                        "attention module can not be with ",
+                        "both local attention and sliding window")
                 elif use_local_attention:
                     kv_cache_spec[layer_name] = (ChunkedLocalAttentionSpec(
                         block_size=block_size,

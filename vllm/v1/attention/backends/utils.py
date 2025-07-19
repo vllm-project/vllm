@@ -120,6 +120,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         num_kv_heads: int,
         use_alibi: bool,
         use_sliding_window: bool,
+        use_local_attention: bool,
         num_sms: int,
     ) -> bool:
         return False
