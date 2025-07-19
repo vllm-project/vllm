@@ -305,6 +305,9 @@ def test_propose(num_speculative_tokens):
                                    dtype=torch.int32,
                                    device=device)
     sampling_metadata = mock.MagicMock()
+    # Simulate mixed greedy and non-greedy requests
+    sampling_metadata.all_greedy = False
+    sampling_metadata.temperature = torch.tensor([-1, 0.7], device=device)
 
     attn_metadata_builder_cls, _ = get_attention_backend(
         _Backend.FLASH_ATTN_VLLM_V1)
@@ -317,31 +320,43 @@ def test_propose(num_speculative_tokens):
     # Mock runner for attention metadata building
     proposer.runner = mock.MagicMock()
     proposer.runner.attn_metadata_builders = [attn_metadata_builder]
+    # Call the method under test
+    result, result_probs = proposer.propose(
+        target_token_ids=target_token_ids,
+        target_positions=target_positions,
+        target_hidden_states=target_hidden_states,
+        next_token_ids=next_token_ids,
+        common_attn_metadata=common_attn_metadata,
+        sampling_metadata=sampling_metadata)
 
-    result = proposer.propose(target_token_ids=target_token_ids,
-                              target_positions=target_positions,
-                              target_hidden_states=target_hidden_states,
-                              next_token_ids=next_token_ids,
-                              common_attn_metadata=common_attn_metadata,
-                              sampling_metadata=sampling_metadata)
-
-    assert result.shape == (batch_size, num_speculative_tokens)
+    assert len(result) == batch_size
+    assert len(result_probs) == batch_size
+    assert all(len(tokens) == num_speculative_tokens for tokens in result)
+    assert all(r.shape == (num_speculative_tokens, vocab_size)
+               for r in result_probs)
 
     # Create expected tokens based on our token pattern
     if num_speculative_tokens == 1:
         # Example for num_speculative_tokens=1:
         # [[42], [60]]
-        expected_tokens = torch.tensor(
-            [[base_token_ids[0]], [base_token_ids[1]]], device=device)
+        expected_tokens = torch.tensor([[base_token_ids[0]],
+                                        [base_token_ids[1]]])
+        expected_probs = torch.zeros((batch_size, 1, vocab_size),
+                                     device=device)
+        for i, token_id in enumerate(base_token_ids):
+            expected_probs[i, 0, token_id] = 1.0
     else:
         # Example for num_speculative_tokens=3:
         # [[42, 43, 44], [60, 61, 62]]
         expected_tokens = torch.zeros((batch_size, num_speculative_tokens),
-                                      dtype=torch.int64,
-                                      device=device)
+                                      dtype=torch.int64)
+        expected_probs = torch.zeros(
+            (batch_size, num_speculative_tokens, vocab_size), device=device)
         for i in range(batch_size):
             for j in range(num_speculative_tokens):
                 expected_tokens[i, j] = base_token_ids[i] + j
+                expected_probs[i, j, base_token_ids[i] + j] = 1.0
 
     # Verify all tokens match our expectations
-    assert torch.equal(result, expected_tokens)
+    assert torch.equal(torch.tensor(result), expected_tokens)
+    torch.testing.assert_close(torch.stack(result_probs), expected_probs)
