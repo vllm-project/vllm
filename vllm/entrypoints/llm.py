@@ -1534,6 +1534,11 @@ class LLM:
                 sleep is good for sleeping and waking up the engine to run a
                 different model or update the model, where previous model
                 weights are not needed. It reduces CPU memory pressure.
+                Level 3 sleep will offload the model weights to disk and
+                discard the kv cache. The model weights are not backed up in
+                CPU memory. The content of kv cache is forgotten. Level 3
+                sleep helps use minimum CPU memory and loads efficiently
+                from disk when woken up.
         """
         self.reset_prefix_cache()
         self.llm_engine.sleep(level=level)
