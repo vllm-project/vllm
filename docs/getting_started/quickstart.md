@@ -110,14 +110,14 @@ for output in outputs:
         [{"role": "user", "content": prompt}]
         for prompt in prompts
     ]
-    text = tokenizer.apply_chat_template(
-        messages,
+    texts = tokenizer.apply_chat_template(
+        messages_list,
         tokenize=False,
         add_generation_prompt=True,
     )
     
     # Generate outputs
-    outputs = llm.generate([text], sampling_params)
+    outputs = llm.generate(texts, sampling_params)
     
     # Print the outputs.
     for output in outputs:
@@ -128,7 +128,7 @@ for output in outputs:
     # Using chat interface.
     outputs = llm.chat(messages_list, sampling_params)
     for idx, output in enumerate(outputs):
-        prompt = messages_list[idx][0]["content"]
+        prompt = prompts[idx]
         generated_text = output.outputs[0].text
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     ```
