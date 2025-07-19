@@ -879,12 +879,12 @@ class NixlConnectorWorker:
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
             in_progress = False
-            for handle, _xfer_stime in handles:
+            for handle, _xfer_stime, remote_id in handles:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
                     self.nixl_wrapper.release_xfer_handle(handle)
-                    logger.debug("[nixl connector] req_id %s transfer time: %s",
-                                 req_id, current_time - _xfer_stime)
+                    logger.debug("[nixl connector] req_id %s transfer time remote_engine_id %s: %s",
+                                 req_id, remote_id, current_time - _xfer_stime)
                 elif xfer_state == "PROC":
                     in_progress = True
                     continue
@@ -1036,7 +1036,7 @@ class NixlConnectorWorker:
         # Use handle to check completion in future step().
         # TODO (NickLucche) surface xfer elapsed time
         self._recving_transfers[request_id].append(
-            (handle, time.perf_counter()))
+            (handle, time.perf_counter(), dst_engine_id))
 
     def _get_block_descs_ids(self,
                              engine_id: str,
