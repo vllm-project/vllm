@@ -71,11 +71,9 @@ def default_unquantized_gemm(layer: torch.nn.Module,
     return torch.nn.functional.linear(x, weight, bias)
 
 
-@torch.library.custom_op("vllm::rocm_unquantized_gemm_impl", mutates_args=())
 def rocm_unquantized_gemm_impl(x: torch.Tensor,
                                weight: torch.Tensor,
                                bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    # print(f"rocm_unquantized_gemm_impl")
     from vllm.platforms.rocm import on_gfx9
     k = weight.shape[1]
     use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM and on_gfx9() and \
@@ -98,53 +96,25 @@ def rocm_unquantized_gemm_impl(x: torch.Tensor,
         return out.view(*x.shape[:-1], weight.shape[0])
     return torch.nn.functional.linear(x, weight, bias)
 
-# @rocm_unquantized_gemm_impl.register_fake
-# def rocm_unquantized_gemm_impl_fake(x: torch.Tensor,
-                               # weight: torch.Tensor,
-                               # bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    # out = torch.nn.functional.linear(x, weight, bias)
-    # # print(f"out.shape={out.shape}, x.shape={x.shape}, weight.shape={weight.shape}, out.device={out.device}, x.device={x.device}, weight.device={weight.device}")
-    # # import os
-    # # print(f"rocm_unquantized_gemm_impl_fake:pid={os.getpid()}")
-    # # out = torch.empty(x.shape[0], weight.shape[0], device=x.device)
-    # # from torchdistx.fake import fake_mode
-    # # out = torch.zeros((x.shape[0], weight.shape[0]), device=x.device)
-    # return out
 
-# def rocm_unquantized_gemm_impl_fake(x: torch.tensor,
-                               # weight: torch.tensor,
-                               # bias: optional[torch.tensor] = none) -> torch.tensor:
-    # out = torch.nn.functional.linear(x, weight, bias)
-    # return out
-
-@rocm_unquantized_gemm_impl.register_fake
 def rocm_unquantized_gemm_impl_fake(x: torch.Tensor,
                                weight: torch.Tensor,
                                bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    # out = torch.nn.functional.linear(x, weight, bias)
-    # print(f"out.shape={out.shape}, x.shape={x.shape}, weight.shape={weight.shape}, out.device={out.device}, x.device={x.device}, weight.device={weight.device}")
-    # import os
-    # print(f"rocm_unquantized_gemm_impl_fake:pid={os.getpid()}")
-    out = weight.new_empty([x.shape[0], weight.shape[0]])
-    # out = torch.empty([x.shape[0], weight.shape[0]], device=weight.device)
-
-    # from torchdistx.fake import fake_mode
-    # out = torch.zeros((x.shape[0], weight.shape[0]), device=x.device)
-    return out
+    return weight.new_empty([x.shape[0], weight.shape[0]])
 
 def rocm_unquantized_gemm(layer: torch.nn.Module,
                           x: torch.Tensor,
                           weight: torch.Tensor,
                           bias: Optional[torch.Tensor] = None):
-    return rocm_unquantized_gemm_impl(x, weight, bias)
+    return torch.ops.vllm.rocm_unquantized_gemm_impl(x, weight, bias)
 
-# direct_register_custom_op(
-    # op_name="rocm_unquantized_gemm_impl",
-    # op_func=rocm_unquantized_gemm_impl,
-    # mutates_args=[],
-    # fake_impl=rocm_unquantized_gemm_impl_fake,
-    # dispatch_key=current_platform.dispatch_key,
-# )
+direct_register_custom_op(
+    op_name="rocm_unquantized_gemm_impl",
+    op_func=rocm_unquantized_gemm_impl,
+    mutates_args=[],
+    fake_impl=rocm_unquantized_gemm_impl_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
 
 def cpu_unquantized_gemm(layer: torch.nn.Module,
                          x: torch.Tensor,
