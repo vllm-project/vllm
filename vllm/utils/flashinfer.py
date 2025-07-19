@@ -64,6 +64,8 @@ def _lazy_import_wrapper(module_name: str,
 
 
 # Create lazy wrappers for each function
+flashinfer_trtllm_fp8_block_scale_moe = _lazy_import_wrapper(
+    "flashinfer.fused_moe", "trtllm_fp8_block_scale_moe")
 flashinfer_cutlass_fused_moe = _lazy_import_wrapper("flashinfer.fused_moe",
                                                     "cutlass_fused_moe")
 fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
@@ -78,9 +80,15 @@ autotune = _lazy_import_wrapper(
 
 
 @functools.cache
+def has_flashinfer_moe() -> bool:
+    """Return ``True`` if FlashInfer MoE module is available."""
+    return importlib.util.find_spec("flashinfer.fused_moe") is not None
+
+
+@functools.cache
 def has_flashinfer_cutlass_fused_moe() -> bool:
     """Return ``True`` if FlashInfer CUTLASS fused MoE is available."""
-    if not has_flashinfer():
+    if not has_flashinfer_moe():
         return False
 
     # Check if all required functions are available
@@ -99,9 +107,11 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
 
 __all__ = [
     "has_flashinfer",
-    "has_flashinfer_cutlass_fused_moe",
+    "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
     "fp4_quantize",
     "fp4_swizzle_blockscale",
     "autotune",
+    "has_flashinfer_moe",
+    "has_flashinfer_cutlass_fused_moe",
 ]
