@@ -1188,9 +1188,15 @@ class IntermediateTensors:
     """For all pipeline stages except the last, we need to return the hidden
     states and residuals to be sent to the next stage. This data structure
     contains the hidden states and residuals for a request.
+    
+    Each stage also needs to handle its own finished_sending and 
+    finished_recving in case of kv transfer.
     """
 
     tensors: dict[str, torch.Tensor]
+    # [req_ids]
+    finished_sending: Optional[set[str]] = None
+    finished_recving: Optional[set[str]] = None
 
     def __init__(self, tensors):
         # manually define this function, so that
