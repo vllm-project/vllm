@@ -71,6 +71,12 @@ def _print_warning_once(logger: Logger, msg: str, *args: Hashable) -> None:
     logger.warning(msg, *args, stacklevel=2)
 
 
+def _extremely_dangerous(logger: Logger, msg: str, *args: Hashable) -> None:
+    template = (f"\n===== EXTREMELY DANGEROUS =====\n"
+                f"{msg}\n===============================\n")
+    logger.warning(template, *args, stacklevel=2)
+
+
 class _VllmLogger(Logger):
     """
     Note:
@@ -100,6 +106,9 @@ class _VllmLogger(Logger):
         the same message are silently dropped.
         """
         _print_warning_once(self, msg, *args)
+
+    def extremely_dangerous(self, param, *args):
+        _extremely_dangerous(param, *args)
 
 
 def _configure_vllm_root_logger() -> None:
@@ -148,6 +157,7 @@ def init_logger(name: str) -> _VllmLogger:
         "debug_once": _print_debug_once,
         "info_once": _print_info_once,
         "warning_once": _print_warning_once,
+        "extremely_dangerous": _extremely_dangerous
     }
 
     for method_name, method in methods_to_patch.items():
