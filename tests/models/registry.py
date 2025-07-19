@@ -449,7 +449,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                          tokenizer="Isotr0py/Florence-2-tokenizer",  # noqa: E501
                                                          trust_remote_code=True),  # noqa: E501
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
-    "VoxtralForConditionalGeneration": _HfExamplesInfo("mistralai/Voxtral-Mini-3B-2507", tokenizer_mode="mistral"),  # noqa: E501
+    "VoxtralForConditionalGeneration": _HfExamplesInfo(
+        "mistralai/Voxtral-Mini-3B-2507",
+        tokenizer_mode="mistral",
+        min_transformers_version="4.54"
+    ),
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
 
     # [Cross-encoder]
