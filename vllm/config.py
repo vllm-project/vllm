@@ -3256,7 +3256,7 @@ class MultiModalConfig:
 @config
 @dataclass
 class PoolerConfig:
-    """Configuration for the pooler."""
+    """Controls the behavior of output pooling in pooling models."""
 
     pooling_type: Optional[Literal["last", "all", "cls", "step", "mean",
                                    "vision"]] = None

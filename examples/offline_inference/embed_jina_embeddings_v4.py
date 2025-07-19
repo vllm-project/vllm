@@ -1,16 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Example of offline inference with Jina Embeddings V4 multimodal model.
-
-This example demonstrates:
-1. Text-only embeddings
-2. Image-only embeddings
-3. Cross-modal embeddings (text-to-image similarity)
-
-The model supports both text and vision inputs through a unified architecture.
-"""
-
 import torch
 
 from vllm import LLM

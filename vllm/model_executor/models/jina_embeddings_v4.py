@@ -6,7 +6,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import Pooler, PoolingTask
+from vllm.model_executor.layers.pooler import Pooler, PoolingTask, VisionPooler
 # yapf: disable
 from vllm.model_executor.pooling_metadata import (
     PoolingMetadata as V0PoolingMetadata)
@@ -32,8 +32,6 @@ PoolingMetadata = Union[V0PoolingMetadata, V1PoolingMetadata]
 
 
 class JinaVLPooler(Pooler):
-    """Vision-aware pooler for Jina V4 with special vision token handling."""
-
     def __init__(self, vllm_config: VllmConfig):
         super().__init__()
         self.vision_pooler = VisionPooler(vllm_config.model_config)
