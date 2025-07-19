@@ -1075,15 +1075,8 @@ class FusedMoE(torch.nn.Module):
             per_tensor_conditions = (
                 "weight_scale_2" in weight_name if uses_weight_scale_2 else
                 "weight_scale" in weight_name) or "input_scale" in weight_name
-            if "w13_weight_scale" in weight_name:
-                print(f"Special handle for {weight_name}")
-                self._load_w13_weight_scale(
-                    shard_dim=shard_dim,
-                    loaded_weight=loaded_weight,
-                    param=param,
-                    tp_rank=self.tp_rank
-                )
-            elif per_tensor_conditions:
+
+            if per_tensor_conditions:
                 self._load_per_tensor_weight_scale(
                     shard_id=shard_id,
                     param=param,

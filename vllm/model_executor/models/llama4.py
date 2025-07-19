@@ -490,23 +490,24 @@ class Llama4Model(LlamaModel):
                                                'supports_moe_loading', False)
 
                         if supports_moe:
+                            # w13_weight_scale
                             # This is a MoE weight loader
-                            if "w13_" in name:
-                                shard_id = "w1"
-                                if loaded_weight.dtype == torch.uint8 or loaded_weight.dtype == torch.float8_e4m3fn:
-                                    loaded_weight = loaded_weight.transpose(-1, -2)
-                            elif "w2_" in name:
-                                shard_id = "w2"
-                                if loaded_weight.dtype == torch.uint8 or loaded_weight.dtype == torch.float8_e4m3fn:
-                                    loaded_weight = loaded_weight.transpose(-1, -2)
-                            else:
-                                shard_id = "w1"
-
-                            weight_loader(param,
-                                          loaded_weight,
-                                          name,
-                                          shard_id=shard_id,
-                                          expert_id=0)
+                            # weight_name, expert_id, shard_id
+                            expert_scale_params_mapping = [
+                                ("w13_", 0, 'w1'),
+                                ("w13_", 0, 'w3'),
+                                ("w2_",  0, 'w2')
+                            ]
+                            if loaded_weight.dtype == torch.uint8 or loaded_weight.dtype == torch.float8_e4m3fn:
+                                loaded_weight = loaded_weight.transpose(-1, -2)
+                                param.data.fill_(0)
+                            for (expert_name, expert_id, shard_id) in expert_scale_params_mapping:
+                                if expert_name in name:
+                                    weight_loader(param,
+                                                loaded_weight,
+                                                name,
+                                                shard_id=shard_id,
+                                                expert_id=expert_id)
                         else:
                             # Regular weight loader (handles both
                             # param.weight_loader and default_weight_loader)
