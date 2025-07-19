@@ -324,3 +324,9 @@ class EngineClient(ABC):
     async def add_lora(self, lora_request: LoRARequest) -> None:
         """Load a new LoRA adapter into the engine for future requests."""
         ...
+
+    async def scale_elastic_ep(self,
+                               new_data_parallel_size: int,
+                               drain_timeout: int = 300) -> None:
+        """Scale the engine"""
+        raise NotImplementedError
