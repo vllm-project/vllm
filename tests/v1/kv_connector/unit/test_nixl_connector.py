@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+import tempfile
+import textwrap
 import time
-import uuid
-from collections import defaultdict
-from typing import Optional
 from unittest.mock import patch
 
 import pytest
+import ray
 
 from vllm import LLM
 from vllm.config import KVTransferConfig
@@ -15,9 +16,30 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     KVConnectorRole, NixlAgentMetadata, NixlConnector, NixlConnectorMetadata,
     NixlConnectorWorker)
 from vllm.forward_context import ForwardContext
+from vllm.mocks.mock_nixl_connector import FakeNixlWrapper
 from vllm.sampling_params import SamplingParams
 
 from .utils import create_request, create_scheduler, create_vllm_config
+
+
+def _make_stub_pkg() -> str:
+    """Return a directory that makes
+       `from nixl._api import nixl_agent` resolve to our FakeNixlWrapper."""
+    td = tempfile.mkdtemp()
+    pkg_root = os.path.join(td, "nixl", "_api")
+    os.makedirs(pkg_root, exist_ok=True)
+
+    stub = textwrap.dedent("""\
+        # Forward the real FakeNixlWrapper that the driver already defined.
+        print("In fake package")
+        from vllm.mocks.mock_nixl_connector import FakeNixlWrapper as nixl_agent
+    """)
+    with open(os.path.join(pkg_root, "__init__.py"), "w") as f:
+        f.write(stub)
+
+    # touch parent package
+    open(os.path.join(td, "nixl", "__init__.py"), "w").close()
+    return td
 
 
 def test_basic_interface():
@@ -85,77 +107,6 @@ def test_prompt_less_than_block_size():
 
     # This request should be scheduled regularly.
     assert len(scheduler_output.scheduled_new_reqs) == 1
-
-
-class FakeNixlWrapper:
-    """Mock implementation of NixlWrapper for testing.
-    
-    We don't inherit from nixl._api.nixl_agent because nixl may not be
-    installed.
-    """
-
-    AGENT_METADATA = b"fake_agent_metadata"
-    REMOTE_AGENT_NAME = "remote_agent"
-
-    def __init__(self, agent_name: str, *args, **kwargs):
-        self._cycles_before_xfer_done = 0
-        self._check_xfer_state_cycles: defaultdict[int, int] = defaultdict(
-            lambda: 0)
-
-    def get_reg_descs(self, caches_data, memory_type: str) -> list:
-        return [str(uuid.uuid4()) for _ in caches_data]
-
-    def register_memory(self, descs) -> None:
-        pass
-
-    def get_xfer_descs(self, blocks_data, memory_type: str) -> list:
-        return [str(uuid.uuid4()) for _ in blocks_data]
-
-    def prep_xfer_dlist(self, agent_name: str, descs: list) -> int:
-        return uuid.uuid4().int
-
-    def get_agent_metadata(self) -> bytes:
-        return self.AGENT_METADATA
-
-    def add_remote_agent(self, agent_metadata: bytes) -> str:
-        return self.REMOTE_AGENT_NAME
-
-    def get_new_notifs(self) -> dict[str, list[bytes]]:
-        # Used to collect done_sending, which we don't test yet.
-        return {}
-
-    def check_xfer_state(self, handle: int) -> str:
-        if self._check_xfer_state_cycles[
-                handle] >= self._cycles_before_xfer_done:
-            return "DONE"
-        self._check_xfer_state_cycles[handle] += 1
-        return "PROC"
-
-    def release_xfer_handle(self, handle: int) -> None:
-        pass
-
-    def send_notif(self, agent_name: str, notif_msg: bytes) -> None:
-        pass
-
-    def make_prepped_xfer(self,
-                          xfer_type: str,
-                          local_xfer_side_handle: int,
-                          local_block_descs_ids: list[int],
-                          remote_xfer_side_handle: int,
-                          remote_block_descs_ids: list[int],
-                          notif_msg: Optional[bytes] = None) -> int:
-        return uuid.uuid4().int
-
-    def transfer(self, handle: int) -> str:
-        return "PROC"
-
-    ############################################################
-    # Follow are for changing the behavior during testing.
-    ############################################################
-
-    def set_cycles_before_xfer_done(self, cycles: int):
-        """Set the number of cycles before a transfer is considered done."""
-        self._cycles_before_xfer_done = cycles
 
 
 class FakeNixlConnectorWorker(NixlConnectorWorker):
@@ -378,10 +329,14 @@ class TestNixlHandshake:
         raise TimeoutError("Took too long to complete async handshake.")
 
 
+# NOTE: resource cleanup in mp backend is a bit finicky, so the order in which
+# we put here is important. First run ray, it will clean up the resources, then
+# the rest of the tests.
+@pytest.mark.parametrize("distributed_executor_backend", ["ray", None])
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FakeNixlWrapper)
-def test_abort_timeout_on_prefiller(monkeypatch):
+def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
     """
     Test lifecycle of an aborted Remote Prefill request hitting the timeout.
     -----> P 
@@ -399,11 +354,23 @@ def test_abort_timeout_on_prefiller(monkeypatch):
     timeout = 6
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", str(timeout))
+
+    # Build runtime_env only if we’re using Ray
+    if distributed_executor_backend == "ray":
+        runtime_env = {
+            "working_dir": _make_stub_pkg(),  # ship stub package
+            "env_vars": {
+                "VLLM_NIXL_ABORT_REQUEST_TIMEOUT": str(timeout),
+            },
+        }
+        ray.init(runtime_env=runtime_env)
+
     llm = LLM(
         model=model_name,
         enforce_eager=True,
         gpu_memory_utilization=0.5,
         kv_transfer_config=kv_transfer_config,
+        distributed_executor_backend=distributed_executor_backend,
     )
     remote_prefill_opts = {
         "do_remote_decode": True,
