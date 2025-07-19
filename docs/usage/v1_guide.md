@@ -111,7 +111,7 @@ disabling prefix caching in V1.
 
 Models that combine Mamba-2 layers with standard attention layers are also supported (e.g., `BambaForCausalLM`,
 `Zamba2ForCausalLM`, `NemotronHForCausalLM`, `FalconH1ForCausalLM` and `GraniteMoeHybridForCausalLM`). Please note that
-these models currently require disabling prefix caching, and using the FlashInfer attention backend in V1.
+these models currently require disabling prefix caching and using the FlashInfer attention backend in V1.
 
 #### Encoder-Decoder Models
 
