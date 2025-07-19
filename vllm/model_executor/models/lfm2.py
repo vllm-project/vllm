@@ -9,6 +9,7 @@ from transformers import Lfm2Config
 
 from vllm import envs
 from vllm.attention import Attention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
@@ -293,16 +294,19 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.operator_norm(
                 hidden_states, residual)
-        hidden_states = self.conv(
+        output = torch.empty_like(hidden_states)
+        self.conv(
             hidden_states,
+            output,
             conv_cache_params=conv_cache_params,
             conv_metadata=conv_metadata,
         )
-        hidden_states, residual = self.ffn_norm(hidden_states, residual)
+        hidden_states, residual = self.ffn_norm(output, residual)
         hidden_states = self.feed_forward(hidden_states)
         return hidden_states, residual
 
 
+@support_torch_compile
 class Lfm2Model(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
