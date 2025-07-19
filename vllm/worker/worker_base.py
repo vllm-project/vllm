@@ -397,8 +397,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         model_input, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
-        if execute_model_req is not None and execute_model_req.spec_step_idx:
-            kwargs["spec_step_idx"] = execute_model_req.spec_step_idx
 
         self.execute_worker(worker_input)
 

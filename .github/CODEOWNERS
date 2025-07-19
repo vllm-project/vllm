@@ -43,7 +43,6 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/multimodal @DarkLight1337 @ywang96
 /tests/prefix_caching @comaniac @KuntaiDu
 /tests/quantization @mgoin @robertgshaw2-redhat
-/tests/spec_decode @njhill @LiuXiaoxuanPKU
 /tests/test_inputs.py @DarkLight1337 @ywang96
 /tests/v1/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
 /tests/v1/structured_output @mgoin @russellb @aarnphm
