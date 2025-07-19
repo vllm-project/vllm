@@ -167,10 +167,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
                                       "are not implemented for "
                                       "PallasAttentionBackendImpl")
 
-        tpu_version = torch_xla.tpu.version()
-        if tpu_version < 4:
-            raise NotImplementedError("TPU version must be 4 or higher.")
-
     def forward(
         self,
         layer: AttentionLayer,
