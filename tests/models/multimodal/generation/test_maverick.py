@@ -182,8 +182,7 @@ def create_reduced_config(original_config: Any, text_layers: int,
         original_head_dim = config_dict["text_config"]["head_dim"]
         new_head_dim = original_head_dim // hidden_dim_divisor
         config_dict["text_config"]["head_dim"] = new_head_dim
-        print(
-            f"Reduced hidden size from {original_head_dim} to {new_head_dim}")
+        print(f"Reduced head dim from {original_head_dim} to {new_head_dim}")
 
     # Reduce vision layers
     if "vision_config" in config_dict:
@@ -293,7 +292,7 @@ def create_text_model_weights(
         weights[f"{layer_prefix}.self_attn.k_proj.weight"] = torch.randn(
             hidden_size, num_key_value_heads * head_dim, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.self_attn.v_proj.weight"] = torch.randn(
-            hidden_size, num_key_value_heads * head_dim, dtype=torch.bfloat16)
+            num_key_value_heads * head_dim, hidden_size, dtype=torch.bfloat16)
         weights[f"{layer_prefix}.self_attn.o_proj.weight"] = torch.randn(
             hidden_size, num_attention_heads * head_dim, dtype=torch.bfloat16)
         print("Self-attention weights created.")
@@ -327,12 +326,12 @@ def create_text_model_weights(
                 # Expert weight scales (FP8 quantization)
                 weights[
                     f"{expert_prefix}.gate_proj.weight_scale"] = torch.ones(
-                        intermediate_size, dtype=torch.bfloat16)
+                        intermediate_size, 1, dtype=torch.bfloat16)
                 weights[f"{expert_prefix}.up_proj.weight_scale"] = torch.ones(
-                    intermediate_size, dtype=torch.bfloat16)
+                    intermediate_size, 1, dtype=torch.bfloat16)
                 weights[
                     f"{expert_prefix}.down_proj.weight_scale"] = torch.ones(
-                        hidden_size, dtype=torch.bfloat16)
+                        hidden_size, 1, dtype=torch.bfloat16)
 
             # 3. Shared expert weights
             shared_expert_prefix = f"{layer_prefix}.feed_forward.shared_expert"
@@ -355,7 +354,7 @@ def create_text_model_weights(
                             dtype=torch.bfloat16))
             weights[f"{layer_prefix}.feed_forward.down_proj.weight"] = (
                 torch.randn(hidden_size,
-                            intermediate_size,
+                            intermediate_size_mlp,
                             dtype=torch.bfloat16))
             print(f"Dense feed-forward weights created for layer {layer_idx}.")
 
@@ -509,57 +508,53 @@ def save_weights_to_safetensors(weights: dict[str, torch.Tensor],
           f"{index_data['metadata']['total_size'] / (1024**3):.2f} GB")
 
 
-def run_reduced_model(model_path: str, should_profile: bool = False) -> None:
+def run_reduced_model(model_path: str,
+                      should_profile: bool = False,
+                      **kwargs) -> None:
     """Test the created reduced model with vLLM."""
 
     print(f"\nTesting reduced model at {model_path}...")
 
-    try:
-        from vllm import LLM, SamplingParams
+    llm = LLM(
+        model=model_path,
+        trust_remote_code=True,
+        max_model_len=512,  # Small context for testing
+        gpu_memory_utilization=0.3,  # Conservative memory usage
+        **kwargs,
+    )
 
-        llm = LLM(
-            model=model_path,
-            trust_remote_code=True,
-            tensor_parallel_size=2,
-            enable_expert_parallel=True,
-            enforce_eager=True,  # Disable CUDA graphs for testing
-            max_model_len=512,  # Small context for testing
-            gpu_memory_utilization=0.3,  # Conservative memory usage
-        )
+    sampling_params = SamplingParams(temperature=0.8,
+                                     top_p=0.95,
+                                     max_tokens=50)
 
-        sampling_params = SamplingParams(temperature=0.8,
-                                         top_p=0.95,
-                                         max_tokens=50)
+    if should_profile:
+        llm.start_profile()
+    outputs = llm.generate(PROMPTS, sampling_params)
+    if should_profile:
+        llm.stop_profile()
 
-        if should_profile:
-            llm.start_profile()
-        outputs = llm.generate(PROMPTS, sampling_params)
-        if should_profile:
-            llm.stop_profile()
-
-        print("Test generation successful!")
-        for output in outputs:
-            print(f"Prompt: {output.prompt}")
-            print(f"Output (expected to be empty with random tensor): "
-                  f"{output.outputs[0].text}")
-            print("-" * 40)
-
-    except Exception as e:
-        print(f"Test failed: {e}")
-        print(
-            "This is expected if the model architecture doesn't match exactly."
-        )
+    print("Test generation successful!")
+    for output in outputs:
+        print(f"Prompt: {output.prompt}")
+        print(f"Output: "
+              f"{output.outputs[0].text}")
+        print("-" * 40)
 
 
 @pytest.mark.parametrize(
     "original_model_name,text_layers,num_experts,vision_layers,",
     [("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", 4, 4, 2)])
+@pytest.mark.parametrize("enforce_eager", [True, False])
+@pytest.mark.parametrize("tp,ep", [(2, True)])
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_dummy_maverick(
     original_model_name: str,
     text_layers: int,
     num_experts: int,
     vision_layers: int,
+    enforce_eager: bool,
+    tp: int,
+    ep: bool,
     output_dir: str = "/tmp/reduced_maverick",
     force_recreate: bool = True,
     profile: bool = False,
@@ -575,7 +570,11 @@ def test_dummy_maverick(
 
     print(f"\nReduced model created successfully at: {model_path}")
 
-    run_reduced_model(model_path, profile)
+    run_reduced_model(model_path=model_path,
+                      should_profile=profile,
+                      enforce_eager=enforce_eager,
+                      tensor_parallel_size=tp,
+                      enable_expert_parallel=ep)
 
 
 def main():
@@ -637,6 +636,9 @@ def main():
                             num_experts=args.num_experts,
                             vision_layers=args.vision_layers,
                             force_recreate=args.force_recreate,
+                            tp=2,
+                            ep=True,
+                            enforce_eager=True,
                             profile=args.profile)
 
     if args.test_original:
