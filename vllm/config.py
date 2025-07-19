@@ -2671,7 +2671,7 @@ class SpeculativeConfig:
             hf_config.update({
                 "num_hidden_layers": 0,
                 "n_predict": n_predict,
-                "architectures": ["Glm4MoeMTP"]
+                "architectures": ["Glm4MoeMTPModel"]
             })
 
         return hf_config
