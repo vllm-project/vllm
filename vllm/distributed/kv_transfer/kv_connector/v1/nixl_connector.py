@@ -1019,10 +1019,14 @@ class NixlConnectorWorker:
             remote_xfer_side_handle,
             remote_block_descs_ids,
             notif_msg=notif_id,
+            skip_desc_merge=True,
         )
 
         # Begin async xfer.
+        start = time.perf_counter()
         self.nixl_wrapper.transfer(handle)
+        end = time.perf_counter()
+        logger.info("========== TRANSFER: %s ==========", end - start)
 
         # Use handle to check completion in future step().
         # TODO (NickLucche) surface xfer elapsed time
