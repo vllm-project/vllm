@@ -17,6 +17,7 @@ from transformers import Zamba2Config
 
 from vllm import envs
 from vllm.attention.layer import Attention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
@@ -548,14 +549,16 @@ class Zamba2MambaDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Process through Mamba mixer
-        hidden_states = self.mamba(
+        output = torch.empty_like(hidden_states)
+        self.mamba(
             hidden_states,
+            output,
             mamba_cache_params=mamba_cache_params,
             mamba2_metadata=mamba2_metadata,
         )
 
         # residual connection after mamba
-        hidden_states = residual + hidden_states
+        hidden_states = residual + output
 
         return hidden_states
 
@@ -646,6 +649,7 @@ class Zamba2HybridLayer(nn.Module):
         return layer_outputs
 
 
+@support_torch_compile
 class Zamba2Model(nn.Module):
     """Core Zamba2 model combining transformer and Mamba architectures.
     
