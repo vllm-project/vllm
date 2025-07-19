@@ -58,6 +58,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec,
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
+from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
@@ -68,7 +69,6 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
-from ..sample.logits_processor import LogitsProcessorManager
 from .utils import (bind_kv_cache, gather_mm_placeholders,
                     initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
@@ -214,6 +214,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.cache_config.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
+            logitsprocs=build_logitsprocs(self.vllm_config, self.device,
+                                          self.pin_memory),
         )
 
         self.use_cuda_graph = (
@@ -2179,7 +2181,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             output_token_ids=[[] for _ in range(num_reqs)],
             allowed_token_ids_mask=None,
             bad_words_token_ids={},
-            logitsprocs=LogitsProcessorManager(),
+            logitsprocs=LogitsProcessors(),
         )
         try:
             sampler_output = self.sampler(logits=logits,
@@ -2483,6 +2485,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 vocab_size=self.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
                 is_spec_decode=bool(self.vllm_config.speculative_config),
+                logitsprocs=self.input_batch.logitsprocs,
             )
 
     def _allocate_kv_cache_tensors(

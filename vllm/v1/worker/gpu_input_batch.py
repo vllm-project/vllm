@@ -16,8 +16,8 @@ from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
-                                             MoveDirectionality,
-                                             init_builtin_logitsprocs)
+                                             LogitsProcessors)
+from vllm.v1.sample.logits_processor.interface import MoveDirectionality
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
@@ -69,6 +69,7 @@ class InputBatch:
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
+        logitsprocs: Optional[LogitsProcessors] = None,
         is_spec_decode: bool = False,
     ):
         self.is_spec_decode = is_spec_decode
@@ -212,14 +213,6 @@ class InputBatch:
         # updates. Should reset each step.
         self.batch_update_builder = BatchUpdateBuilder()
 
-        # Define logits processors.
-        # TODO(andy): logits processor list should be extensible via engine
-        # constructor argument; for now the list is fixed.
-        self.logitsprocs = init_builtin_logitsprocs(
-            pin_memory_available=pin_memory,
-            max_num_reqs=max_num_reqs + 1,
-            device=device)
-
         # TODO convert this to LogitsProcessor
         self.has_allowed_token_ids: set[str] = set()
         # NOTE(lufang): In the mask tensor, if the corresponding token allowed,
@@ -234,6 +227,10 @@ class InputBatch:
                                                           dtype=bool)
 
         self.req_output_token_ids: list[Optional[list[int]]] = []
+
+        # Build logits processors. If specified by user, load custom
+        # logitsprocs constructors.
+        self.logitsprocs = logitsprocs or LogitsProcessors(None)
 
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
@@ -260,7 +257,8 @@ class InputBatch:
         params = (request.sampling_params
                   if request.sampling_params else request.pooling_params)
         self.batch_update_builder.added.append(
-            (req_index, params, request.output_token_ids))
+            (req_index, params, request.output_token_ids,
+             request.prompt_token_ids))
         return req_index
 
     def add_request(

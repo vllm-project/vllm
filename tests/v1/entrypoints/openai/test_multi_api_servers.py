@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import os
-import re
 
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+import regex as re
 import requests
 
 from tests.utils import RemoteOpenAIServer
