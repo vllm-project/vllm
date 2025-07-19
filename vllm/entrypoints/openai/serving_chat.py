@@ -34,7 +34,7 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
     MistralToolCall)
-from vllm.entrypoints.utils import get_max_tokens
+from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
@@ -71,8 +71,7 @@ class OpenAIServingChat(OpenAIServing):
                          model_config=model_config,
                          models=models,
                          request_logger=request_logger,
-                         return_tokens_as_token_ids=return_tokens_as_token_ids,
-                         enable_force_include_usage=enable_force_include_usage)
+                         return_tokens_as_token_ids=return_tokens_as_token_ids)
 
         self.response_role = response_role
         self.chat_template = chat_template
@@ -274,14 +273,8 @@ class OpenAIServingChat(OpenAIServing):
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
-                request,
-                result_generator,
-                request_id,
-                model_name,
-                conversation,
-                tokenizer,
-                request_metadata,
-                enable_force_include_usage=self.enable_force_include_usage)
+                request, result_generator, request_id, model_name,
+                conversation, tokenizer, request_metadata)
 
         try:
             return await self.chat_completion_full_generator(
@@ -416,15 +409,10 @@ class OpenAIServingChat(OpenAIServing):
         return delta_message, function_name_returned
 
     async def chat_completion_stream_generator(
-        self,
-        request: ChatCompletionRequest,
-        result_generator: AsyncIterator[RequestOutput],
-        request_id: str,
-        model_name: str,
-        conversation: list[ConversationMessage],
-        tokenizer: AnyTokenizer,
-        request_metadata: RequestResponseMetadata,
-        enable_force_include_usage: bool,
+        self, request: ChatCompletionRequest,
+        result_generator: AsyncIterator[RequestOutput], request_id: str,
+        model_name: str, conversation: list[ConversationMessage],
+        tokenizer: AnyTokenizer, request_metadata: RequestResponseMetadata
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
@@ -491,12 +479,14 @@ class OpenAIServingChat(OpenAIServing):
 
         stream_options = request.stream_options
         if stream_options:
-            include_usage = stream_options.include_usage \
-                            or enable_force_include_usage
+            include_usage = should_include_usage(
+                stream_options.include_usage, self.enable_force_include_usage)
             include_continuous_usage = include_usage and \
                                        stream_options.continuous_usage_stats
         else:
-            include_usage, include_continuous_usage = False, False
+            include_usage = should_include_usage(
+                False, self.enable_force_include_usage)
+            include_continuous_usage = False
 
         try:
             async for res in result_generator:

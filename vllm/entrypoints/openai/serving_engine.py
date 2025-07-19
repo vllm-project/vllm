@@ -205,7 +205,6 @@ class OpenAIServing:
         *,
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
-        enable_force_include_usage: bool = False,
     ):
         super().__init__()
 
@@ -217,8 +216,6 @@ class OpenAIServing:
 
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
-        self.enable_force_include_usage = enable_force_include_usage
-
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 
         self._async_tokenizer_pool: dict[AnyTokenizer,

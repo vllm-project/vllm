@@ -34,7 +34,7 @@ from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     is_text_tokens_prompt)
 # yapf: enable
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.utils import get_max_tokens
+from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.inputs.data import (EmbedsPrompt, TokensPrompt, is_embeds_prompt,
                               is_tokens_prompt)
 from vllm.logger import init_logger
@@ -66,9 +66,9 @@ class OpenAIServingCompletion(OpenAIServing):
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
-            enable_force_include_usage=enable_force_include_usage,
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
+        self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = (
             self.model_config.get_diff_sampling_param())
         if self.default_sampling_params:
@@ -255,7 +255,6 @@ class OpenAIServingCompletion(OpenAIServing):
                 num_prompts=num_prompts,
                 tokenizer=tokenizer,
                 request_metadata=request_metadata,
-                enable_force_include_usage=self.enable_force_include_usage,
             )
 
         # Non-streaming response
@@ -320,7 +319,6 @@ class OpenAIServingCompletion(OpenAIServing):
         num_prompts: int,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-        enable_force_include_usage: bool,
     ) -> AsyncGenerator[str, None]:
         num_choices = 1 if request.n is None else request.n
         previous_text_lens = [0] * num_choices * num_prompts
@@ -332,12 +330,14 @@ class OpenAIServingCompletion(OpenAIServing):
 
         stream_options = request.stream_options
         if stream_options:
-            include_usage = (stream_options.include_usage
-                             or enable_force_include_usage)
+            include_usage = should_include_usage(
+                stream_options.include_usage, self.enable_force_include_usage)
             include_continuous_usage = (include_usage and
                                         stream_options.continuous_usage_stats)
         else:
-            include_usage, include_continuous_usage = False, False
+            include_usage = should_include_usage(
+                False, self.enable_force_include_usage)
+            include_continuous_usage = False
 
         try:
             async for prompt_idx, res in result_generator:
