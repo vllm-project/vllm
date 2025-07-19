@@ -498,6 +498,14 @@ class LoRAModelManager(AdapterModelManager):
         self._active_adapters.clear()
 
     def _create_lora_modules(self):
+
+        def _parent_module(module_name: str) -> str:
+            # module name is a dot separated name.
+            # for example:
+            #  - given an input 'x.y.z' return 'x.y'
+            #  - given an input 'x' return ''
+            return module_name.rpartition('.')[0]
+
         for module_name, module in self.model.named_modules(
                 remove_duplicate=False):
             if isinstance(module, PPMissingLayer):
@@ -529,10 +537,17 @@ class LoRAModelManager(AdapterModelManager):
                     new_module.scaling_factor_to_offset
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
+                logits_processor_module_name = 'logits_processor'
+                parent_module = _parent_module(module_name)
+                if parent_module:
+                    logits_processor_module_name = (
+                        f"{parent_module}.{logits_processor_module_name}")
+
                 logits_processor_module = self.model.get_submodule(
-                    "logits_processor")
+                    logits_processor_module_name)
+
                 new_module = replace_submodule(
-                    self.model, "logits_processor",
+                    self.model, logits_processor_module_name,
                     from_layer_logits_processor(logits_processor_module,
                                                 module, self.lora_slots,
                                                 self.lora_config,
