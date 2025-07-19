@@ -1266,8 +1266,8 @@ class EngineArgs:
         )
 
         observability_config = ObservabilityConfig(
-            show_hidden_metrics_for_version=self.
-            show_hidden_metrics_for_version,
+            show_hidden_metrics_for_version=(
+                self.show_hidden_metrics_for_version),
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
         )
