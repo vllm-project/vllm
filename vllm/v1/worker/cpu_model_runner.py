@@ -45,9 +45,10 @@ class CPUModelRunner(GPUModelRunner):
             if k.endswith("_cpu_tensor") and isinstance(v, torch.Tensor):
                 replace_tensor(self.input_batch, k, k[:-11])
 
-        for k, v in vars(self.input_batch.block_table).items():
-            if k.endswith("_cpu") and isinstance(v, torch.Tensor):
-                replace_tensor(self.input_batch.block_table, k, k[:-4])
+        for block_table in self.input_batch.block_table.block_tables:
+            for k, v in vars(block_table).items():
+                if k.endswith("_cpu") and isinstance(v, torch.Tensor):
+                    replace_tensor(block_table, k, k[:-4])
 
     def load_model(self, eep_scale_up: bool = False) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
