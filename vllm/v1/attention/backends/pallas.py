@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 import torch_xla.core.xla_builder as xb
@@ -132,7 +132,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
         alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[int] = None,
@@ -142,9 +141,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
             logger.warning_once(
                 "Using irope in Pallas is not supported yet, it will fall back "
                 "to global attention for long context.")
-        if blocksparse_params is not None:
-            raise ValueError("Paged attention Pallas kernel does "
-                             "not support block-sparse attention.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -158,8 +154,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
             raise NotImplementedError("Alibi slopes is not supported.")
         if kv_cache_dtype != "auto":
             raise NotImplementedError("FP8 KV cache dtype is not supported.")
-        if blocksparse_params is not None:
-            raise NotImplementedError("Blocksparse is not supported.")
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
