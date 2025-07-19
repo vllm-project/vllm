@@ -12,7 +12,7 @@ import sys
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Set
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from typing import Callable, Optional, TypeVar, Union
 
@@ -57,6 +57,7 @@ _TEXT_GENERATION_MODELS = {
     "Ernie4_5_ForCausalLM": ("ernie45", "Ernie4_5_ForCausalLM"),
     "Ernie4_5_MoeForCausalLM": ("ernie45_moe", "Ernie4_5_MoeForCausalLM"),
     "ExaoneForCausalLM": ("exaone", "ExaoneForCausalLM"),
+    "Exaone4ForCausalLM": ("exaone4", "Exaone4ForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "Fairseq2LlamaForCausalLM": ("fairseq2_llama", "Fairseq2LlamaForCausalLM"),
     "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
@@ -181,10 +182,6 @@ _CROSS_ENCODER_MODELS = {
     "ModernBertForSequenceClassification": ("modernbert",
                                             "ModernBertForSequenceClassification"),
     # [Auto-converted (see adapters.py)]
-    "GemmaForSequenceClassification": ("gemma", "GemmaForSequenceClassification"), # noqa: E501
-    "Qwen2ForSequenceClassification": ("qwen2", "Qwen2ForSequenceClassification"), # noqa: E501
-    "Qwen3ForSequenceClassification": ("qwen3", "Qwen3ForSequenceClassification"), # noqa: E501
-    "LlamaForSequenceClassification": ("llama", "LlamaForSequenceClassification"), # noqa: E501
     "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"), # noqa: E501,
 }
 
@@ -243,14 +240,15 @@ _MULTIMODAL_MODELS = {
 
 _SPECULATIVE_DECODING_MODELS = {
     "MiMoMTPModel": ("mimo_mtp", "MiMoMTP"),
-    "EAGLEModel": ("eagle", "EAGLE"),
     "EagleLlamaForCausalLM": ("llama_eagle", "EagleLlamaForCausalLM"),
     "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "MedusaModel": ("medusa", "Medusa"),
-    "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
+    # Temporarily disabled.
+    # # TODO(woosuk): Re-enable this once the MLP Speculator is supported in V1.
+    # "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
 }
 
 _TRANSFORMERS_MODELS = {
@@ -463,10 +461,26 @@ class _ModelRegistry:
         return _try_load_model_cls(model_arch, self.models[model_arch])
 
     def _try_inspect_model_cls(self, model_arch: str) -> Optional[_ModelInfo]:
-        if model_arch not in self.models:
-            return None
+        if model_arch in self.models:
+            return _try_inspect_model_cls(model_arch, self.models[model_arch])
 
-        return _try_inspect_model_cls(model_arch, self.models[model_arch])
+        if model_arch.endswith("ForSequenceClassification"):
+            causal_lm_arch = model_arch.replace("ForSequenceClassification",
+                                                "ForCausalLM")
+            if causal_lm_arch not in self.models:
+                return None
+
+            info = _try_inspect_model_cls(causal_lm_arch,
+                                          self.models[causal_lm_arch])
+
+            info = _ModelInfo(**dict(
+                asdict(info), **{
+                    "architecture": model_arch,
+                    "supports_cross_encoding": True
+                }))
+            return info
+
+        return None
 
     def _normalize_archs(
         self,
@@ -480,6 +494,15 @@ class _ModelRegistry:
         # filter out support architectures
         normalized_arch = list(
             filter(lambda model: model in self.models, architectures))
+
+        # try automatic conversion in adapters.py
+        for arch in architectures:
+            if not arch.endswith("ForSequenceClassification"):
+                continue
+            causal_lm_arch = arch.replace("ForSequenceClassification",
+                                          "ForCausalLM")
+            if causal_lm_arch in self.models:
+                normalized_arch.append(arch)
 
         return normalized_arch
 

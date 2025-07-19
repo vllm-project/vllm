@@ -551,7 +551,7 @@ class ModelConfig:
         # For pooling models, self.task is used to indicate the
         # user-selected task
         if self.task == "score":
-            if self.registry.is_cross_encoder_model(self.architectures):
+            if self._is_classify_task(self.architectures):
                 self.task = "classify"
             else:
                 self.task = "embed"
@@ -825,6 +825,12 @@ class ModelConfig:
                 f"one of {get_args(TokenizerMode)}.")
         self.tokenizer_mode = tokenizer_mode
 
+    def _is_classify_task(self, architectures: list[str]):
+        for arch in architectures:
+            if arch.endswith("ForSequenceClassification"):
+                return True
+        return self.registry.is_cross_encoder_model(architectures)
+
     def _get_preferred_pooling_task(
         self,
         architectures: list[str],
@@ -832,14 +838,11 @@ class ModelConfig:
         model_id = self.model
         if get_pooling_config(model_id, self.revision):
             return "embed"
-        if self.registry.is_cross_encoder_model(architectures):
-            return "classify"
         if self.registry.is_transcription_model(architectures):
             return "transcription"
 
         suffix_to_preferred_task: list[tuple[str, _ResolvedTask]] = [
             # Other models follow this pattern
-            ("ForSequenceClassification", "classify"),
             ("EmbeddingModel", "embed"),
             ("RewardModel", "reward"),
         ]
@@ -896,11 +899,14 @@ class ModelConfig:
         self,
         task_option: TaskOption,
     ) -> dict[RunnerType, list[_ResolvedTask]]:
-        return {
-            "generate": self._get_supported_generation_tasks(task_option),
-            "pooling": self._get_supported_pooling_tasks(task_option),
-            "draft": ["draft"]
-        }
+        if self._is_classify_task(self.architectures):
+            return {"generate": [], "pooling": ["classify"], "draft": []}
+        else:
+            return {
+                "generate": self._get_supported_generation_tasks(task_option),
+                "pooling": self._get_supported_pooling_tasks(task_option),
+                "draft": ["draft"]
+            }
 
     def _get_supported_runner_types(
         self,
@@ -943,12 +949,16 @@ class ModelConfig:
                     f"Available tasks for runner={task_runner!r}: "
                     f"{supported_tasks[task_runner]}")
 
+        if "classify" in supported_tasks.get("pooling", []):
+            # When multiple pooling tasks are present, default to
+            # pooling (eg cross-encoder) for non-standard architectures.
+            return "pooling"
+
         suffix_to_preferred_runner: list[tuple[str, RunnerType]] = [
             ("ForCausalLM", "generate"),
             ("ForConditionalGeneration", "generate"),
             ("ChatModel", "generate"),
             ("LMHeadModel", "generate"),
-            ("ForSequenceClassification", "pooling"),
             ("EmbeddingModel", "pooling"),
             ("RewardModel", "pooling"),
         ]
@@ -958,10 +968,6 @@ class ModelConfig:
                     suffix) and pref_runner in supported_runner_types:
                 return pref_runner
 
-        if "classify" in supported_tasks.get("pooling", []):
-            # When multiple pooling tasks are present, default to
-            # pooling (eg cross-encoder) for non-standard architectures.
-            return "pooling"
         if "generate" in supported_runner_types:
             return "generate"
         if "pooling" in supported_runner_types:
@@ -1543,7 +1549,7 @@ class ModelConfig:
 
     @property
     def is_matryoshka(self) -> bool:
-        return (hasattr(self.hf_config, "matryoshka_dimensions")
+        return (bool(getattr(self.hf_config, "matryoshka_dimensions", None))
                 or getattr(self.hf_config, "is_matryoshka", False))
 
     @property
@@ -1557,13 +1563,11 @@ class ModelConfig:
         return getattr(self.hf_config, "use_pad_token", True)
 
     def get_and_verify_max_len(self, max_model_len: int):
-        # For pooling models, the tokenizer's `model_max_length` is often a
-        # reliable source for the maximum sequence length. However, for
-        # generative models, this can be incorrect and unduly limit the
-        # context window (e.g., DeepSeek-R1). Therefore, we only consider
-        # tokenizer_config for pooling models.
+        # Consider max_model_len in tokenizer_config only when
+        # pooling models use absolute position_embedding.
         tokenizer_config = None
-        if self.runner_type == "pooling":
+        if (self.runner_type == "pooling" and getattr(
+                self.hf_config, "position_embedding_type", "") == "absolute"):
             tokenizer_config = try_get_tokenizer_config(
                 self.tokenizer,
                 trust_remote_code=self.trust_remote_code,
@@ -2022,6 +2026,19 @@ class ParallelConfig:
         aggregated_has_unfinished = bool(tensor.item())
         return aggregated_has_unfinished
 
+    @staticmethod
+    def sync_kv_cache_memory_size(dp_group: "ProcessGroup",
+                                  kv_cache_memory: int) -> int:
+        if kv_cache_memory == -1:
+            kv_cache_memory = torch.iinfo(torch.int64).max
+        tensor = torch.tensor([kv_cache_memory],
+                              dtype=torch.int64,
+                              device="cpu")
+        # we cannot use broadcast for stateless dp group since it depends
+        # on global rank
+        torch.distributed.all_reduce(tensor, op=ReduceOp.MIN, group=dp_group)
+        return tensor.item()
+
     def compute_hash(self):
         """
         Provide a hash that uniquely identifies all the configs
@@ -2470,7 +2487,7 @@ class SchedulerConfig:
         return self.num_scheduler_steps > 1
 
 
-Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu", "hpu"]
+Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu"]
 
 
 @config
@@ -2537,8 +2554,6 @@ class DeviceConfig:
 
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
                             "mlp_speculator", "draft_model", "deepseek_mtp"]
-SpeculativeAcceptanceMethod = Literal["rejection_sampler",
-                                      "typical_acceptance_sampler"]
 
 
 @config
@@ -2561,13 +2576,6 @@ class SpeculativeConfig:
 
     If using `ngram` method, the related configuration `prompt_lookup_max` and
     `prompt_lookup_min` should be considered."""
-    acceptance_method: SpeculativeAcceptanceMethod = "rejection_sampler"
-    """The method to use for accepting draft tokens:\n
-    - "rejection_sampler" maps to `RejectionSampler`.\n
-    - "typical_acceptance_sampler" maps to `TypicalAcceptanceSampler`.
-
-    If using `typical_acceptance_sampler`, the related configuration
-    `posterior_threshold` and `posterior_alpha` should be considered."""
     draft_tensor_parallel_size: Optional[int] = None
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
@@ -2594,9 +2602,6 @@ class SpeculativeConfig:
     will use the default version."""
 
     # Advanced control
-    disable_mqa_scorer: bool = False
-    """Disable the MQA scorer and fall back to batch expansion for scoring
-    proposals."""
     disable_by_batch_size: Optional[int] = None
     """Disable speculative decoding for new incoming requests when the number
     of enqueued requests is larger than this value, if provided."""
@@ -2608,16 +2613,6 @@ class SpeculativeConfig:
     prompt_lookup_min: Optional[int] = None
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
-
-    # Typical acceptance sampler configuration
-    posterior_threshold: Optional[float] = None
-    """A threshold value that sets a lower bound on the posterior probability
-    of a token in the target model for it to be accepted. This threshold is
-    used only when we use the `TypicalAcceptanceSampler` for token acceptance.
-    """
-    posterior_alpha: Optional[float] = None
-    """Scaling factor for entropy-based threshold, applied when using
-    `TypicalAcceptanceSampler`."""
 
     speculative_token_tree: Optional[str] = None
     """Specifies the tree structure for speculative token generation.
@@ -2796,8 +2791,8 @@ class SpeculativeConfig:
                 elif (self.draft_model_config.hf_config.model_type ==
                       "mlp_speculator"):
                     self.method = "mlp_speculator"
-                elif (self.draft_model_config.hf_config.model_type ==
-                      "deepseek_mtp"):
+                elif (self.draft_model_config.hf_config.model_type
+                      in ("deepseek_mtp", "mimo_mtp")):
                     self.method = "deepseek_mtp"
                     if self.num_speculative_tokens > 1:
                         logger.warning(
@@ -2807,6 +2802,11 @@ class SpeculativeConfig:
                             )
                 else:
                     self.method = "draft_model"
+                    raise NotImplementedError(
+                        "Speculative decoding with draft model is not "
+                        "supported yet. Please consider using other "
+                        "speculative decoding methods such as ngram, medusa, "
+                        "eagle, or deepseek_mtp.")
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3"):
@@ -2864,12 +2864,6 @@ class SpeculativeConfig:
                     SpeculativeConfig.create_draft_parallel_config(
                         self.target_parallel_config,
                         self.draft_tensor_parallel_size))
-
-        if self.acceptance_method == "typical_acceptance_sampler":
-            if self.posterior_threshold is None:
-                self.posterior_threshold = 0.09
-            if self.posterior_alpha is None:
-                self.posterior_alpha = 0.3
 
     @staticmethod
     def _maybe_override_draft_max_model_len(
@@ -2976,30 +2970,6 @@ class SpeculativeConfig:
         if self.draft_model_config:
             self.draft_model_config.verify_with_parallel_config(
                 self.draft_parallel_config)
-            # Validate and set draft token acceptance related settings.
-
-        if self.acceptance_method is None:
-            raise ValueError("acceptance_method is not set. "
-                             "Expected values are rejection_sampler or "
-                             "typical_acceptance_sampler.")
-
-        if (self.acceptance_method != 'rejection_sampler'
-                and self.acceptance_method != 'typical_acceptance_sampler'):
-            raise ValueError(
-                "Expected acceptance_method to be either "
-                "rejection_sampler or typical_acceptance_sampler. Instead it "
-                f"is {self.acceptance_method}")
-
-        if self.acceptance_method == "typical_acceptance_sampler" and (
-            (self.posterior_threshold is not None
-             and self.posterior_threshold < 0) or
-            (self.posterior_alpha is not None and self.posterior_alpha < 0)):
-            raise ValueError(
-                "Expected the posterior_threshold and posterior_alpha of "
-                "typical_acceptance_sampler to be > 0. "
-                "Instead found posterior_threshold = "
-                f"{self.posterior_threshold} and posterior_alpha = "
-                f"{self.posterior_alpha}")
 
         if (self.disable_by_batch_size is not None
                 and self.disable_by_batch_size < 2):
@@ -4722,6 +4692,13 @@ class VllmConfig:
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
+                self.scheduler_config.disable_hybrid_kv_cache_manager = True
+            if self.model_config is not None and \
+                self.model_config.attention_chunk_size is not None and \
+                self.speculative_config is not None and \
+                self.speculative_config.use_eagle():
+                # Hybrid KV cache manager is not yet supported with chunked
+                # local attention + eagle.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
 
     def update_sizes_for_sequence_parallelism(self,

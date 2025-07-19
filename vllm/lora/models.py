@@ -29,6 +29,7 @@ from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              get_supported_lora_modules,
                              is_regex_target_modules,
                              parse_fine_tuned_lora_name, replace_submodule)
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
 from vllm.model_executor.models.interfaces import is_pooling_model
@@ -58,6 +59,17 @@ def get_lora_id():
     global _GLOBAL_LORA_ID
     _GLOBAL_LORA_ID += 1
     return _GLOBAL_LORA_ID
+
+
+def is_moe_model(model: nn.Module) -> bool:
+    """Checks if the model contains FusedMoE layers and warns the user."""
+    if any(isinstance(module, FusedMoE) for module in model.modules()):
+        logger.warning_once(
+            "For MoE models, vLLM currently does not support fused MoE LoRA "
+            "inference. Please ensure that the loaded LoRA model does not "
+            "contain expert weights.")
+        return True
+    return False
 
 
 class LoRAModel(AdapterModel):
@@ -375,6 +387,7 @@ class LoRAModelManager(AdapterModelManager):
             # text modules (e.g. ChatGLM)
             and hasattr(self.model, "get_mm_mapping"))
         self.is_pooling_model = is_pooling_model(self.model)
+        self.is_moe_model = is_moe_model(self.model)
         self.packed_modules: dict[str, list[str]] = {}
         self.modules: dict[str, BaseLayerWithLoRA] = {}
         # Dict instead of a set for compatibility with LRUCache.
@@ -485,6 +498,14 @@ class LoRAModelManager(AdapterModelManager):
         self._active_adapters.clear()
 
     def _create_lora_modules(self):
+
+        def _parent_module(module_name: str) -> str:
+            # module name is a dot separated name.
+            # for example:
+            #  - given an input 'x.y.z' return 'x.y'
+            #  - given an input 'x' return ''
+            return module_name.rpartition('.')[0]
+
         for module_name, module in self.model.named_modules(
                 remove_duplicate=False):
             if isinstance(module, PPMissingLayer):
@@ -516,10 +537,17 @@ class LoRAModelManager(AdapterModelManager):
                     new_module.scaling_factor_to_offset
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
+                logits_processor_module_name = 'logits_processor'
+                parent_module = _parent_module(module_name)
+                if parent_module:
+                    logits_processor_module_name = (
+                        f"{parent_module}.{logits_processor_module_name}")
+
                 logits_processor_module = self.model.get_submodule(
-                    "logits_processor")
+                    logits_processor_module_name)
+
                 new_module = replace_submodule(
-                    self.model, "logits_processor",
+                    self.model, logits_processor_module_name,
                     from_layer_logits_processor(logits_processor_module,
                                                 module, self.lora_slots,
                                                 self.lora_config,
