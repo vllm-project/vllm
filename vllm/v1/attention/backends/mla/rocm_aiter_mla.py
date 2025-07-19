@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Any, ClassVar, Optional
+from typing import ClassVar, Optional
 
 import torch
 
@@ -167,7 +167,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             alibi_slopes: Optional[list[float]],
             sliding_window: Optional[int],
             kv_cache_dtype: str,
-            blocksparse_params: Optional[dict[str, Any]],
             logits_soft_cap: Optional[float],
             attn_type: str,
             kv_sharing_target_layer_name: Optional[str],
@@ -175,20 +174,17 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             **mla_args) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads,
                          alibi_slopes, sliding_window, kv_cache_dtype,
-                         blocksparse_params, logits_soft_cap, attn_type,
+                         logits_soft_cap, attn_type,
                          kv_sharing_target_layer_name, **mla_args)
         assert (num_heads == 16 or num_heads == 128), (
             f"Aiter MLA only supports 16 or 128 number of heads.\n"
             f"Provided {num_heads} number of heads.\n"
             "Try adjusting tensor_parallel_size value.")
-        unsupported_features = [
-            alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
-        ]
+        unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
                 "Aiter MLA does not support one of the following: "
-                "alibi_slopes, sliding_window, blocksparse_params, "
-                "logits_soft_cap")
+                "alibi_slopes, sliding_window, logits_soft_cap")
 
         from aiter import flash_attn_varlen_func
         self.flash_attn_varlen_func = flash_attn_varlen_func

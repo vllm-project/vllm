@@ -249,10 +249,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "PersimmonForCausalLM": _HfExamplesInfo("adept/persimmon-8b-chat"),
     "PhiForCausalLM": _HfExamplesInfo("microsoft/phi-2"),
     "Phi3ForCausalLM": _HfExamplesInfo("microsoft/Phi-3-mini-4k-instruct"),
-    # Blocksparse attention not supported in V1 yet
-    "Phi3SmallForCausalLM": _HfExamplesInfo("microsoft/Phi-3-small-8k-instruct",
-                                            trust_remote_code=True,
-                                            v0_only=True),
     "Phi4FlashForCausalLM": _HfExamplesInfo("microsoft/Phi-4-mini-flash-reasoning", # noqa: E501
                                         trust_remote_code=True,
                                         v0_only=True,

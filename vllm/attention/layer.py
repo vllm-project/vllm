@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -74,7 +74,6 @@ class Attention(nn.Module):
         alibi_slopes: Optional[List[float]] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         per_layer_sliding_window: Optional[int] = None,
         use_mla: bool = False,
@@ -163,12 +162,11 @@ class Attention(nn.Module):
                                         kv_cache_dtype,
                                         block_size,
                                         is_attention_free,
-                                        blocksparse_params is not None,
                                         use_mla=use_mla)
         impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
-                             blocksparse_params, logits_soft_cap, attn_type,
+                             logits_soft_cap, attn_type,
                              kv_sharing_target_layer_name, **extra_impl_args)
         self.backend = backend_name_to_enum(attn_backend.get_name())
         self.dtype = dtype
