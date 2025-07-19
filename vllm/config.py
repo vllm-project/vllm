@@ -2694,7 +2694,10 @@ class SpeculativeConfig:
                 (self.target_model_config.hf_text_config.model_type \
                         == "deepseek_v3" or
                     self.target_model_config.hf_text_config.model_type \
-                        == "mimo"):
+                        == "mimo" or
+                    self.target_model_config.hf_text_config.model_type \
+                        == "glm4_moe"
+                ):
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
             elif self.method in ("ngram", "[ngram]"):
