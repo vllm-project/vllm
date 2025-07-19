@@ -199,7 +199,7 @@ class LLM:
         """LLM constructor."""
 
         if "disable_log_stats" not in kwargs:
-            kwargs["disable_log_stats"] = True
+            kwargs["disable_log_stats"] = False
 
         if "worker_cls" in kwargs:
             worker_cls = kwargs["worker_cls"]
