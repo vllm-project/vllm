@@ -166,8 +166,8 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         super().__init__(*args, **kwargs)
         self._hand_shake_latency = hand_shake_latency
 
-    def _nixl_handshake(self, host: str, port: int,
-                        remote_tp_size: int) -> dict[int, str]:
+    def _nixl_handshake(self, host: str, port: int, remote_tp_size: int,
+                        expected_engine_id: str) -> dict[int, str]:
         # Mimic slow _nixl_handshake, as well as bypass zmq communication.
         time.sleep(self._hand_shake_latency)
         # These should've been done in register_kv_caches(), called by
@@ -176,6 +176,8 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         self.block_len = self.slot_size_bytes * self.block_size
         self.num_blocks = 1
         self.dst_num_blocks[self.engine_id] = self.num_blocks
+
+        assert expected_engine_id == self.REMOTE_ENGINE_ID
 
         remote_agent_name = self.add_remote_agent(
             NixlAgentMetadata(

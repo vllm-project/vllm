@@ -23,11 +23,13 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    get_col_major_tma_aligned_tensor, requant_weight_ue8m0_inplace)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin,
     prepare_moe_fp8_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    is_layer_skipped)
+    GroupShape, is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp, all_close_1d, cutlass_block_fp8_supported,
     cutlass_fp8_supported, maybe_create_device_identity,
@@ -40,6 +42,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import has_deep_gemm
+from vllm.utils.deep_gemm import is_blackwell_deep_gemm_used
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -199,9 +202,17 @@ class Fp8LinearMethod(LinearMethodBase):
                                            and current_platform.is_fp8_fnuz())
 
         self.block_quant = self.quant_config.weight_block_size is not None
+        self.act_q_static = self.quant_config.activation_scheme == "static"
+        # Use per-token quantization for better perf if dynamic and cutlass
+        if not self.act_q_static and cutlass_fp8_supported():
+            self.act_q_group_shape = GroupShape.PER_TOKEN
+        else:
+            self.act_q_group_shape = GroupShape.PER_TENSOR
+
         self.fp8_linear = Fp8LinearOp(
-            # Default to using per_token quantization if cutlass is supported
-            use_per_token_if_dynamic=cutlass_fp8_supported())
+            act_quant_static=self.act_q_static,
+            act_quant_group_shape=self.act_q_group_shape,
+            cutlass_fp8_supported=cutlass_fp8_supported())
 
     def create_weights(
         self,
@@ -393,6 +404,19 @@ class Fp8LinearMethod(LinearMethodBase):
             # Activations not quantized for marlin.
             del layer.input_scale
 
+        # On B200, DeepGemm only support E8M0 scale, which means we need to
+        # requantize the weight and input to the specific scale
+        # at the same time.
+        if is_blackwell_deep_gemm_used():
+            assert layer.weight_block_size is not None
+            block_sz = tuple(layer.weight_block_size)
+            requant_weight_ue8m0_inplace(
+                layer.weight.data,
+                layer.weight_scale_inv.data if hasattr(
+                    layer, "weight_scale_inv") else layer.weight_scale.data,
+                block_sz,
+            )
+
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
@@ -464,10 +488,15 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 logger.warning_once("Failed to import DeepGemm kernels.")
             elif not self.block_quant:
                 logger.warning_once("Model is not block quantized. Not using "
-                                    " DeepGemm kernels")
+                                    "DeepGemm kernels")
             elif (current_platform.is_cuda()
-                  and current_platform.has_device_capability(90)):
+                  and current_platform.is_device_capability(90)):
                 logger.info_once("Using DeepGemm kernels for Fp8MoEMethod.")
+                self.allow_deep_gemm = True
+            elif (current_platform.is_cuda()
+                  and is_blackwell_deep_gemm_used()):
+                logger.info_once("Using DeepGemm SM100 kernels for "
+                                 "Fp8MoEMethod.")
                 self.allow_deep_gemm = True
             else:
                 logger.warning_once(
@@ -476,10 +505,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # Check for CutlassBlockScaledGroupedGemm support.
         self.allow_cutlass_block_scaled_grouped_gemm = False
         if not self.block_quant:
-            logger.warning_once("Model is not block quantized. Not using "
-                                "CutlassBlockScaledGroupedGemm kernels")
+            logger.debug_once("Model is not block quantized. Not using "
+                              "CutlassBlockScaledGroupedGemm kernels")
         elif (current_platform.is_cuda()
-              and current_platform.has_device_capability(100)):
+              and current_platform.is_device_capability(100)):
             logger.info_once(
                 "Using CutlassBlockScaledGroupedGemm kernels for Fp8MoEMethod."
             )
@@ -670,15 +699,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
             # DeepGemm scales need to be transposed and aligned.  We try to do
             # it ahead of time for performance reasons.
-            if self.allow_deep_gemm:
+            if self.allow_deep_gemm and not is_blackwell_deep_gemm_used():
                 # Lazy import to avoid CUDA initialization problems.
-                import deep_gemm as dg
                 if _is_col_major(layer.w13_weight_scale_inv):
                     layer.w13_weight_scale_inv = \
-                        dg.get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv).contiguous()
+                        get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv).contiguous()
                 if _is_col_major(layer.w2_weight_scale_inv):
                     layer.w2_weight_scale_inv = \
-                        dg.get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv).contiguous()
+                        get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv).contiguous()
 
         # If checkpoint is fp16, quantize in place.
         elif not self.quant_config.is_checkpoint_fp8_serialized:
@@ -796,6 +824,29 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # Activations not quantized for marlin.
             del layer.w13_input_scale
             del layer.w2_input_scale
+
+        if is_blackwell_deep_gemm_used():
+            assert layer.weight_block_size is not None
+            # Re-quantise the expert weights so their scales are UE8M0.
+            block_sz = tuple(layer.weight_block_size)
+            requant_weight_ue8m0_inplace(
+                layer.w13_weight.data,
+                layer.w13_weight_scale_inv.data,
+                block_sz,
+            )
+            requant_weight_ue8m0_inplace(
+                layer.w2_weight.data,
+                layer.w2_weight_scale_inv.data,
+                block_sz,
+            )
+
+            # Ensure column-major TMA alignment expected by DeepGEMM.
+            if _is_col_major(layer.w13_weight_scale_inv):
+                layer.w13_weight_scale_inv = get_col_major_tma_aligned_tensor(
+                    layer.w13_weight_scale_inv).contiguous()
+            if _is_col_major(layer.w2_weight_scale_inv):
+                layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(
+                    layer.w2_weight_scale_inv).contiguous()
 
     def select_gemm_impl(
         self,

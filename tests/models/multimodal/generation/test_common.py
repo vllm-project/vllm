@@ -152,6 +152,7 @@ VLM_TEST_SETTINGS = {
         video_idx_to_prompt=lambda idx: "<|vision_bos|><|VIDEO|><|vision_eos|>", # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
+        num_logprobs= 6 if current_platform.is_cpu() else 5,
         auto_cls=AutoModelForTextToWaveform,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         patch_hf_runner=model_utils.qwen2_5_omni_patch_hf_runner,
@@ -317,6 +318,7 @@ VLM_TEST_SETTINGS = {
         num_logprobs=10,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         auto_cls=AutoModelForImageTextToText,
+        marks=[large_gpu_mark(min_gb=32)],
     ),
     "glm4_1v-video": VLMTestInfo(
         models=["THUDM/GLM-4.1V-9B-Thinking"],
@@ -330,8 +332,7 @@ VLM_TEST_SETTINGS = {
             inputs=custom_inputs.video_with_metadata_glm4_1v(),
             limit_mm_per_prompt={"video": 1},
         )],
-        # This is needed to run on machine with 24GB VRAM
-        vllm_runner_kwargs={"gpu_memory_utilization": 0.95},
+        marks=[large_gpu_mark(min_gb=32)],
     ),
     "h2ovl": VLMTestInfo(
         models = [

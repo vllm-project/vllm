@@ -6,11 +6,11 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
-from vllm.model_executor.layers.mamba.mamba2_metadata import (
-    _query_start_loc_to_chunk_indices_offsets)
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined)
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.mamba_attn import (
+    _query_start_loc_to_chunk_indices_offsets)
 
 # Added by the IBM Team, 2024
 

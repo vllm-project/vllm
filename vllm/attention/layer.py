@@ -10,18 +10,47 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from vllm.attention import AttentionType
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
+from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group,
                                           is_v1_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op
-from vllm.v1.attention.backends.utils import validate_kv_sharing_target
+
+logger = init_logger(__name__)
+USE_XFORMERS_OPS = None
+
+
+def check_xformers_availability():
+    global USE_XFORMERS_OPS
+    if USE_XFORMERS_OPS is not None:
+        return USE_XFORMERS_OPS
+
+    if current_platform.is_cuda() and current_platform.has_device_capability(
+            100):
+        # Xformers FA is not compatible with B200
+        USE_XFORMERS_OPS = False
+    else:
+        try:
+            from importlib.util import find_spec
+
+            find_spec("xformers.ops")
+            USE_XFORMERS_OPS = True
+        except ImportError:
+            USE_XFORMERS_OPS = False
+
+    # the warning only needs to be shown once
+    if not USE_XFORMERS_OPS:
+        logger.warning("Xformers is not available, falling back.")
+
+    return USE_XFORMERS_OPS
 
 
 class Attention(nn.Module):
@@ -160,10 +189,6 @@ class Attention(nn.Module):
         self.attn_type = attn_type
 
         if kv_sharing_target_layer_name is not None:
-            if not envs.VLLM_USE_V1:
-                raise NotImplementedError(
-                    "Cross-layer KV sharing is not supported in V0.")
-
             validate_kv_sharing_target(
                 prefix,
                 kv_sharing_target_layer_name,
@@ -317,6 +342,10 @@ class MultiHeadAttention(nn.Module):
             self.attn_backend = backend if backend in {
                 _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.PALLAS_VLLM_V1
             } else _Backend.TORCH_SDPA
+
+        if (self.attn_backend == _Backend.XFORMERS
+                and not check_xformers_availability()):
+            self.attn_backend = _Backend.TORCH_SDPA
 
     def forward(
         self,
