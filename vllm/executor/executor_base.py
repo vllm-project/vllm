@@ -4,6 +4,7 @@
 import asyncio
 import time
 from abc import ABC, abstractmethod
+from functools import cached_property
 from typing import Any, Awaitable, Callable, List, Optional, Set, Union
 
 import torch.nn as nn
@@ -14,6 +15,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.pooling_params import PoolingTask
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest, PoolerOutput
 from vllm.utils import make_async
@@ -133,6 +135,11 @@ class ExecutorBase(ABC):
         returning the result for each of them.
         """
         return self.collective_rpc("apply_model", args=(func, ))
+
+    @cached_property  # Avoid unnecessary RPC calls
+    def supported_pooling_tasks(self) -> tuple[PoolingTask, ...]:
+        output = self.collective_rpc("get_supported_pooling_tasks")
+        return tuple({task for tasks in output for task in tasks})
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
