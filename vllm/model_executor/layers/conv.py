@@ -7,7 +7,7 @@ from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import get_current_vllm_config
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -17,6 +17,8 @@ from vllm.model_executor.layers.mamba.mamba2_metadata import (Mamba2Metadata,
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.model_executor.models.conv_cache import ConvCacheParams
+from vllm.platforms import current_platform
+from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionMetadata
 
 
@@ -71,16 +73,39 @@ class ShortConv(CustomOp):
         self.chunk_size = 1
         self.prefix = prefix
 
-    def forward_native(self, hidden_states: torch.Tensor,
-                       conv_cache_params: ConvCacheParams) -> torch.Tensor:
-        pass
+    def forward_native(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+        conv_cache_params: ConvCacheParams,
+        conv_metadata: Mamba2Metadata,
+    ):
+        return
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+        conv_cache_params: ConvCacheParams,
+        conv_metadata: Mamba2Metadata,
+    ):
+        if not envs.VLLM_USE_V1:
+            CustomOp.forward(self, hidden_states, output, conv_cache_params,
+                             conv_metadata)
+        else:
+            torch.ops.vllm.short_conv(
+                hidden_states,
+                output,
+                self.prefix,
+            )
 
     def forward_cuda(
         self,
         hidden_states: torch.Tensor,
+        output: torch.Tensor,
         conv_cache_params: ConvCacheParams,
         conv_metadata: Mamba2Metadata,
-    ) -> torch.Tensor:
+    ):
         forward_context = get_forward_context()
         # Mamba2Metadata contains metadata necessary for the mamba2 triton
         # kernels to operate in continuous batching and in chunked prefill
@@ -121,29 +146,30 @@ class ShortConv(CustomOp):
         num_prefill_tokens = attn_metadata.num_prefill_tokens  # token count
         has_prefill = num_prefills > 0
         has_decode = num_decodes > 0
+        num_actual_tokens = num_decodes + num_prefill_tokens
 
         # NOTE: V0 put prefill before decode, v1 puts decode before prefill
         # Separate prefill and decode by splitting varlen input
         # Split along token dimension
         if envs.VLLM_USE_V1:
             B_d, B_p = torch.split(
-                B,
+                B[:num_actual_tokens],
                 [num_decodes, num_prefill_tokens],
                 dim=0,
             )
             C_d, C_p = torch.split(
-                C,
+                C[:num_actual_tokens],
                 [num_decodes, num_prefill_tokens],
                 dim=0,
             )
             x_d, x_p = torch.split(
-                x,
+                x[:num_actual_tokens],
                 [num_decodes, num_prefill_tokens],
                 dim=0,
             )
             # Split along batch dimension
             state_indices_tensor_d, state_indices_tensor_p = torch.split(
-                state_indices_tensor,
+                state_indices_tensor[:num_actual_tokens],
                 [num_decodes, num_prefills],
                 dim=0,
             )
@@ -216,9 +242,7 @@ class ShortConv(CustomOp):
         hidden_states = torch.vstack(conv_output_list)
 
         # Final linear projection
-        contextualized_states, _ = self.out_proj(hidden_states)
-
-        return contextualized_states
+        output[:num_actual_tokens], _ = self.out_proj(hidden_states)
 
     def get_state_shape(self) -> tuple[tuple[int, ...]]:
         world_size = get_tensor_model_parallel_world_size()
@@ -228,3 +252,33 @@ class ShortConv(CustomOp):
             divide(self.conv_dim, world_size),
         )
         return (conv_state_shape, )
+
+
+def short_conv(
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    self.forward_cuda(hidden_states=hidden_states,
+                      output=output,
+                      conv_cache_params=None,
+                      conv_metadata=None)
+
+
+def short_conv_fake(
+    hidden_states: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="short_conv",
+    op_func=short_conv,
+    mutates_args=["output"],
+    fake_impl=short_conv_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
