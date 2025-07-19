@@ -49,7 +49,7 @@ def test_model_loading_with_params(vllm_runner):
 
         def check_model(model):
             assert isinstance(model, BertEmbeddingModel)
-            assert isinstance(model._pooler, CLSPool)
+            assert isinstance(model.pooler.pooling, CLSPool)
 
         vllm_model.apply_model(check_model)
 
@@ -87,7 +87,7 @@ def test_roberta_model_loading_with_params(vllm_runner):
 
         def check_model(model):
             assert isinstance(model, RobertaEmbeddingModel)
-            assert isinstance(model._pooler, MeanPool)
+            assert isinstance(model.pooler.pooling, MeanPool)
 
         vllm_model.apply_model(check_model)
 
@@ -114,7 +114,7 @@ def test_facebook_roberta_model_loading_with_params(vllm_runner):
         def check_model(model):
             assert isinstance(model, RobertaEmbeddingModel)
             assert not hasattr(model, "lm_head")
-            assert isinstance(model._pooler, CLSPool)
+            assert isinstance(model.pooler.pooling, CLSPool)
 
         vllm_model.apply_model(check_model)
 
