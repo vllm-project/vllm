@@ -98,6 +98,41 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
+!!! note
+    The generate method does not automatically apply the corresponding model's chat template to the input prompt, as this method is designed to align with OpenAI's `completions` interface rather than the `chat/completions` interface. Therefore, if you are using an Instruct model or Chat model, you should manually apply the corresponding chat template to ensure the expected behavior. Alternatively, you can use the LLM.chat method and pass properly formatted data.
+
+    ```python
+    # Using tokenizer to apply chat template
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained("/path/to/chat_model")
+    messages_list = [
+        [{"role": "user", "content": prompt}]
+        for prompt in prompts
+    ]
+    text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    
+    # Generate outputs
+    outputs = llm.generate([text], sampling_params)
+    
+    # Print the outputs.
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+    # Using chat interface.
+    outputs = llm.chat(messages_list, sampling_params)
+    for idx, output in enumerate(outputs):
+        prompt = messages_list[idx][0]["content"]
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    ```
+
 [](){ #quickstart-online }
 
 ## OpenAI-Compatible Server
