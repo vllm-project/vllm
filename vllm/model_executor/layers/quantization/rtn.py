@@ -356,11 +356,11 @@ def rtn_quantize(tensor: torch.Tensor, num_bits: int,
     input_max = torch.max(input_flat, dim=2, keepdim=True)[0]
     input_max_abs = torch.max(input_min.abs(), input_max.abs())
     scale = (input_max_abs * 2.0 / (q_range - 1))
-    """Scale each input group, truncate and round to the nearest integer.
+    """Scale each input group, round to the nearest integer, shift 
+    the range and truncate.
     """
     scaled_input = input_flat / scale
     scaled_input = scaled_input.round()
-
     scaled_input += q_range // 2
     scaled_input = scaled_input.clamp(0, q_range - 1)
 
