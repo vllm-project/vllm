@@ -228,11 +228,11 @@ steps:
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/
-  - tests/test_regression
+  - tests/regressions
   commands:
   - pip install modelscope
-  - pytest -v -s test_regression.py
-  working_dir: "/vllm-workspace/tests" # optional
+  - pytest -v -s regressions
+  - VLLM_USE_V1=0 pytest -v -s regressions
 
 - label: Engine Test # 10min
   mirror_hardwares: [amdexperimental]

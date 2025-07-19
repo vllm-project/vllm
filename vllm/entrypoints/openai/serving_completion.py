@@ -400,7 +400,7 @@ class OpenAIServingCompletion(OpenAIServing):
                             # Chunked prefill case, don't return empty chunks
                             continue
 
-                    if request.logprobs is not None:
+                    if request.logprobs is not None and output.token_ids:
                         assert out_logprobs is not None, (
                             "Did not output logprobs")
                         logprobs = self._create_completion_logprobs(
