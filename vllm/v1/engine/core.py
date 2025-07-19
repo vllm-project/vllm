@@ -870,22 +870,6 @@ class DPEngineCoreProc(EngineCoreProc):
             logger.debug("Setting kv_transfer_config.engine_id to %s",
                          vllm_config.kv_transfer_config.engine_id)
 
-        from vllm.platforms import current_platform
-        device_control_env_var = current_platform.device_control_env_var
-        world_size = vllm_config.parallel_config.world_size
-        # Set CUDA_VISIBLE_DEVICES or equivalent.
-        try:
-            os.environ[device_control_env_var] = ",".join(
-                str(current_platform.device_id_to_physical_device_id(i))
-                for i in range(local_dp_rank *
-                               world_size, (local_dp_rank + 1) * world_size))
-        except IndexError as e:
-            raise Exception(
-                f"Error setting {device_control_env_var}: "
-                f"local range: [{local_dp_rank * world_size}, "
-                f"{(local_dp_rank + 1) * world_size}) "
-                f"base value: \"{os.getenv(device_control_env_var)}\"") from e
-
         self.dp_rank = dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
 
