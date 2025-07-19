@@ -372,10 +372,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if enable_eplb:
-            assert expert_load_view is not None
-            assert logical_to_physical_map is not None
-            assert logical_replica_count is not None
-            assert isinstance(layer, FusedMoE)
+            if expert_load_view is None:
+                raise ValueError("expert_load_view must be provided when enable_eplb is True")
+            if logical_to_physical_map is None:
+                raise ValueError("logical_to_physical_map must be provided when enable_eplb is True")
+            if logical_replica_count is None:
+                raise ValueError("logical_replica_count must be provided when enable_eplb is True")
+            if not isinstance(layer, FusedMoE):
+                raise TypeError(f"Expected layer to be FusedMoE, but got {type(layer)}")
 
         return self.forward(
             x=x,
@@ -422,10 +426,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if enable_eplb:
-            assert expert_load_view is not None
-            assert logical_to_physical_map is not None
-            assert logical_replica_count is not None
-            assert isinstance(layer, FusedMoE)
+            if expert_load_view is None:
+                raise ValueError("expert_load_view must be provided when enable_eplb is True")
+            if logical_to_physical_map is None:
+                raise ValueError("logical_to_physical_map must be provided when enable_eplb is True")
+            if logical_replica_count is None:
+                raise ValueError("logical_replica_count must be provided when enable_eplb is True")
+            if not isinstance(layer, FusedMoE):
+                raise TypeError(f"Expected layer to be FusedMoE, but got {type(layer)}")
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
