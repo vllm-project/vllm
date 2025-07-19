@@ -4,6 +4,7 @@
 import asyncio
 import copy
 import functools
+import importlib
 import os
 import signal
 import subprocess
@@ -974,3 +975,14 @@ def get_client_text_logprob_generations(
     return [(text_generations, text,
              (None if x.logprobs is None else x.logprobs.top_logprobs))
             for completion in completions for x in completion.choices]
+
+
+def has_module_attribute(module_name, attribute_name):
+    """
+    Helper function to check if a module has a specific attribute.
+    """
+    try:
+        module = importlib.import_module(module_name)
+        return hasattr(module, attribute_name)
+    except ImportError:
+        return False

@@ -13,10 +13,12 @@ from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (init_distributed_environment,
                                              initialize_model_parallel)
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    GroupShape, QuantFP8)
 from vllm.platforms import current_platform
 from vllm.utils import update_environment_variables
 
-from ..utils import multi_gpu_test
+from ..utils import has_module_attribute, multi_gpu_test
 from .backend import TestBackend
 
 
@@ -62,20 +64,53 @@ class TestAllReduceFusedAddRMSNormModel(torch.nn.Module):
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
 
 
+class TestAllReduceFusedAddRMSNormStaticQuantModel(torch.nn.Module):
+
+    def __init__(self, hidden_size=16, eps=1e-6):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.eps = eps
+        self.norm = RMSNorm(hidden_size, eps)
+        self.quant_fp8 = QuantFP8(static=True,
+                                  group_shape=GroupShape.PER_TENSOR)
+        self.scale = torch.rand(1, dtype=torch.float32)
+
+    def forward(self, hidden_states, residual):
+        view = hidden_states.reshape(-1, self.hidden_size)
+        all_reduce = tensor_model_parallel_all_reduce(view)
+        norm_output, residual_output = self.norm(all_reduce, residual)
+        fp8_result, _ = self.quant_fp8(norm_output, self.scale)
+        return fp8_result, residual_output
+
+    def ops_in_model_after(self):
+        return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
+
+    def ops_in_model_before(self):
+        return [
+            torch.ops.vllm.all_reduce.default,
+            torch.ops._C.static_scaled_fp8_quant.default
+        ]
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "test_model",
-    [TestAllReduceRMSNormModel, TestAllReduceFusedAddRMSNormModel])
+    [
+        TestAllReduceRMSNormModel,
+        TestAllReduceFusedAddRMSNormModel,
+        # TestAllReduceFusedAddRMSNormStaticQuantModel
+    ])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [8])
-@pytest.mark.parametrize("hidden_size", [4096])
+@pytest.mark.parametrize("hidden_size", [16])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"],
                     reason="Only test on CUDA")
-@pytest.mark.skipif(not find_spec("flashinfer"),
-                    reason="flashinfer is not installed")
-@pytest.mark.skipif(not current_platform.is_device_capability(100),
-                    reason="Only test on SM100")
+@pytest.mark.skipif(
+    not find_spec("flashinfer")
+    or not has_module_attribute("flashinfer.comm", "trtllm_allreduce_fusion"),
+    reason="flashinfer is not found or flashinfer "
+    "is not compiled with trtllm_allreduce_fusion")
 def test_all_reduce_fusion_pass_replace(test_model: torch.nn.Module,
                                         batch_size: int, seq_len: int,
                                         hidden_size: int, dtype: torch.dtype):
@@ -113,12 +148,11 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
     init_distributed_environment()
     initialize_model_parallel(tensor_model_parallel_size=world_size)
 
-    vllm_config = VllmConfig(
-        compilation_config=CompilationConfig(level=CompilationLevel.PIECEWISE,
-                                             custom_ops=["+rms_norm"],
-                                             compile_sizes=[2, 4, 8]))
+    vllm_config = VllmConfig(compilation_config=CompilationConfig(
+        level=CompilationLevel.PIECEWISE,
+        custom_ops=["+rms_norm", "+quant_fp8"]))
     vllm_config.compilation_config.pass_config = PassConfig(
-        enable_fi_allreduce_fusion=True)
+        enable_fi_allreduce_fusion=True, enable_noop=True)
     vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
 
     # this is a fake model name to construct the model config
