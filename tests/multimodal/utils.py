@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import cv2
 import numpy as np
+import numpy.typing as npt
 from PIL import Image
 
 
@@ -31,3 +33,47 @@ def random_audio(
 ):
     audio_len = rng.randint(min_len, max_len)
     return rng.rand(audio_len), sr
+
+
+def create_video_from_image(
+    image_path: str,
+    video_path: str,
+    num_frames: int = 10,
+    fps: float = 1.0,
+    is_color: bool = True,
+    fourcc: str = "mp4v",
+):
+    image = cv2.imread(image_path)
+    if not is_color:
+        # Convert to grayscale if is_color is False
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        height, width = image.shape
+    else:
+        height, width, _ = image.shape
+
+    video_writer = cv2.VideoWriter(
+        video_path,
+        cv2.VideoWriter_fourcc(*fourcc),
+        fps,
+        (width, height),
+        isColor=is_color,
+    )
+
+    for _ in range(num_frames):
+        video_writer.write(image)
+
+    video_writer.release()
+    return video_path
+
+
+def cosine_similarity(A: npt.NDArray,
+                      B: npt.NDArray,
+                      axis: int = -1) -> npt.NDArray:
+    """Compute cosine similarity between two vectors."""
+    return (np.sum(A * B, axis=axis) /
+            (np.linalg.norm(A, axis=axis) * np.linalg.norm(B, axis=axis)))
+
+
+def normalize_image(image: npt.NDArray) -> npt.NDArray:
+    """Normalize image to [0, 1] range."""
+    return image.astype(np.float32) / 255.0
