@@ -562,15 +562,6 @@ class ModelConfig:
 
             self.task = "embed"
 
-        # The registry assumes that it can always inspect the vLLM model class
-        # for a given architecture. This assumption breaks down for the
-        # Transformers backend, which may use a different class depending on
-        # the model type. To work around this, we add the correct Transformers
-        # backend class to the architectures list. We must do this here because
-        # we need access to the `hf_config` to determine the backend class.
-        self.hf_config.architectures.append(
-            self._get_transformers_backend_cls())
-
         model_info, arch = self.registry.inspect_model_cls(self.architectures)
         self._model_info = model_info
         self._architecture = arch
@@ -700,7 +691,16 @@ class ModelConfig:
     @property
     def architectures(self) -> list[str]:
         # architectures in the model config.
-        return getattr(self.hf_config, "architectures", [])
+        architectures = getattr(self.hf_config, "architectures", [])
+        # The registry assumes that it can always inspect the vLLM model class
+        # for a given architecture. This assumption breaks down for the
+        # Transformers backend, which may use a different class depending on
+        # the model type. To work around this, we add the correct Transformers
+        # backend class to the architectures list. We must do this here because
+        # we need access to the `hf_config` to determine the backend class.
+        if self.model_impl != ModelImpl.VLLM.value:
+            architectures.append(self._get_transformers_backend_cls())
+        return architectures
 
     @property
     def architecture(self) -> str:
