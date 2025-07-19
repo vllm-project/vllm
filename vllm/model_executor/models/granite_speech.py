@@ -36,7 +36,6 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -549,7 +548,6 @@ class GraniteSpeechForConditionalGeneration(
         self.config = config
         self.quant_config = quant_config
         self.cache_config = cache_config
-        self.sampler = get_sampler()
 
         # The language model is typically a Granite LLM
         self.language_model = init_vllm_registered_model(

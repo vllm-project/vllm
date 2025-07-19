@@ -9,7 +9,6 @@ from typing import Annotated, Any, Optional, Union
 
 import msgspec
 from pydantic import BaseModel
-from typing_extensions import deprecated
 
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
@@ -83,27 +82,6 @@ class GuidedDecodingParams:
             raise ValueError(
                 "You can only use one kind of guided decoding but multiple are "
                 f"specified: {self.__dict__}")
-
-        if self.backend is not None and ":" in self.backend:
-            self._extract_backend_options()
-
-    @deprecated(
-        "Passing guided decoding backend options inside backend in the format "
-        "'backend:...' is deprecated. This will be removed in v0.10.0. Please "
-        "use the dedicated arguments '--disable-fallback', "
-        "'--disable-any-whitespace' and '--disable-additional-properties' "
-        "instead.")
-    def _extract_backend_options(self):
-        """Extract backend options from the backend string."""
-        assert isinstance(self.backend, str)
-        self.backend, options = self.backend.split(":")
-        options_set = set(options.strip().split(","))
-        if "no-fallback" in options_set:
-            self.disable_fallback = True
-        if "disable-any-whitespace" in options_set:
-            self.disable_any_whitespace = True
-        if "no-additional-properties" in options_set:
-            self.disable_additional_properties = True
 
 
 class RequestOutputKind(Enum):

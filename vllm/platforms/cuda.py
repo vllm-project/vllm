@@ -99,7 +99,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        if enforce_eager:
+        if enforce_eager and not envs.VLLM_USE_V1:
             logger.warning(
                 "To see benefits of async output processing, enable CUDA "
                 "graph. Since, enforce-eager is enabled, async output "
@@ -132,14 +132,10 @@ class CudaPlatformBase(Platform):
                     parallel_config.worker_cls = \
                         "vllm.worker.multi_step_worker.MultiStepWorker"
             elif vllm_config.speculative_config:
-                if envs.VLLM_USE_V1:
-                    parallel_config.worker_cls = \
-                            "vllm.v1.worker.gpu_worker.Worker"
-                else:
-                    parallel_config.worker_cls = \
-                        "vllm.spec_decode.spec_decode_worker.create_spec_worker"
-                    parallel_config.sd_worker_cls = \
-                        "vllm.worker.worker.Worker"
+                if not envs.VLLM_USE_V1:
+                    raise NotImplementedError(
+                        "Speculative decoding is not supported on vLLM V0.")
+                parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
             else:
                 if envs.VLLM_USE_V1:
                     parallel_config.worker_cls = \
@@ -165,6 +161,13 @@ class CudaPlatformBase(Platform):
                 cache_config.block_size = 64
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLA backend.")
+
+            use_cutlass_mla = (envs.VLLM_ATTENTION_BACKEND is not None \
+                and envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA_VLLM_V1")
+            if use_cutlass_mla and cache_config.block_size != 128:
+                cache_config.block_size = 128
+                logger.info("Forcing kv cache block size to 128 for "
+                            "CUTLASS_MLA_VLLM_V1 backend.")
 
         compilation_config = vllm_config.compilation_config
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"

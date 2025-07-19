@@ -169,6 +169,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Ernie4_5_MoeForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-21B-A3B-PT",
                                         trust_remote_code=True),
     "ExaoneForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct"),  # noqa: E501
+    "Exaone4ForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-4.0-32B"),  # noqa: E501
     "Fairseq2LlamaForCausalLM": _HfExamplesInfo("mgleize/fairseq2-dummy-Llama-3.2-1B"),  # noqa: E501
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "FalconH1ForCausalLM":_HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base",
@@ -265,7 +266,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Qwen2MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
     "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
     "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
-    "Qwen3ForSequenceClassification": _HfExamplesInfo("tomaarsen/Qwen3-Reranker-0.6B-seq-cls"),  # noqa: E501
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b"),
     "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b"),  # noqa: E501
     "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t"),
@@ -292,7 +292,6 @@ _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5", v0_only=True),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2", v0_only=True),  # noqa: E501
-    "GPT2ForSequenceClassification": _HfExamplesInfo("nie3e/sentiment-polish-gpt2-small"),  # noqa: E501
     "GritLM": _HfExamplesInfo("parasail-ai/GritLM-7B-vllm"),
     "GteModel": _HfExamplesInfo("Snowflake/snowflake-arctic-embed-m-v2.0",
                                                trust_remote_code=True),
@@ -311,7 +310,6 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "Qwen2Model": _HfExamplesInfo("ssmits/Qwen2-7B-Instruct-embed-base"),
     "Qwen2ForRewardModel": _HfExamplesInfo("Qwen/Qwen2.5-Math-RM-72B"),
     "Qwen2ForProcessRewardModel": _HfExamplesInfo("Qwen/Qwen2.5-Math-PRM-7B"),
-    "Qwen2ForSequenceClassification": _HfExamplesInfo("jason9693/Qwen2.5-1.5B-apeach"),  # noqa: E501
     "RobertaModel": _HfExamplesInfo("sentence-transformers/stsb-roberta-base-v2", v0_only=True),  # noqa: E501
     "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1", v0_only=True),  # noqa: E501
     "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-small", v0_only=True),  # noqa: E501
@@ -324,18 +322,27 @@ _EMBEDDING_EXAMPLE_MODELS = {
                                             is_available_online=False),  # noqa: E501
 }
 
-_CROSS_ENCODER_EXAMPLE_MODELS = {
-    # [Text-only]
+_SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
+    # [Decoder-only]
+    "GPT2ForSequenceClassification": _HfExamplesInfo("nie3e/sentiment-polish-gpt2-small"),  # noqa: E501
+
+    # [Cross-encoder]
     "BertForSequenceClassification": _HfExamplesInfo("cross-encoder/ms-marco-MiniLM-L-6-v2", v0_only=True),  # noqa: E501
-    "GemmaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-gemma", # noqa: E501
-                                                      v0_only=True,
-                                                      hf_overrides={"architectures": ["GemmaForSequenceClassification"], # noqa: E501
-                                                                    "classifier_from_token": ["Yes"], # noqa: E501
-                                                                    "method": "no_post_processing"}), # noqa: E501
-    "LlamaForSequenceClassification": _HfExamplesInfo("Skywork/Skywork-Reward-V2-Llama-3.2-1B"), # noqa: E501
     "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base", v0_only=True), # noqa: E501
     "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base", v0_only=True),  # noqa: E501
     "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3", v0_only=True),  # noqa: E501
+}
+
+_AUTOMATIC_CONVERTED_MODELS = {
+    # Use as_seq_cls_model for automatic conversion
+    "GemmaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-gemma",  # noqa: E501
+                                                      v0_only=True,
+                                                      hf_overrides={"architectures": ["GemmaForSequenceClassification"], # noqa: E501
+                                                                    "classifier_from_token": ["Yes"],  # noqa: E501
+                                                                    "method": "no_post_processing"}),  # noqa: E501
+    "LlamaForSequenceClassification": _HfExamplesInfo("Skywork/Skywork-Reward-V2-Llama-3.2-1B"),  # noqa: E501
+    "Qwen2ForSequenceClassification": _HfExamplesInfo("jason9693/Qwen2.5-1.5B-apeach"),  # noqa: E501
+    "Qwen3ForSequenceClassification": _HfExamplesInfo("tomaarsen/Qwen3-Reranker-0.6B-seq-cls"),  # noqa: E501
 }
 
 _MULTIMODAL_EXAMPLE_MODELS = {
@@ -401,6 +408,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                         trust_remote_code=True),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B",
                               trust_remote_code=True),
+    "Llama_Nemotron_Nano_VL" : _HfExamplesInfo("nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1", # noqa: E501
+                                                     trust_remote_code=True),
     "PaliGemmaForConditionalGeneration": _HfExamplesInfo("google/paligemma-3b-mix-224",  # noqa: E501
                                                          extras={"v2": "google/paligemma2-3b-ft-docci-448"}),  # noqa: E501
     "Phi3VForCausalLM": _HfExamplesInfo("microsoft/Phi-3-vision-128k-instruct",
@@ -440,19 +449,25 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                          tokenizer="Isotr0py/Florence-2-tokenizer",  # noqa: E501
                                                          trust_remote_code=True),  # noqa: E501
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
+    "VoxtralForConditionalGeneration": _HfExamplesInfo(
+        "mistralai/Voxtral-Mini-3B-2507",
+        tokenizer_mode="mistral",
+        min_transformers_version="4.54"
+    ),
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
 
     # [Cross-encoder]
     "JinaVLForRanking": _HfExamplesInfo("jinaai/jina-reranker-m0"),   # noqa: E501
 }
 
+
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
-    "EAGLEModel": _HfExamplesInfo("JackFram/llama-68m",
-                                  speculative_model="abhigoyal/vllm-eagle-llama-68m-random"),  # noqa: E501
     "MedusaModel": _HfExamplesInfo("JackFram/llama-68m",
                                    speculative_model="abhigoyal/vllm-medusa-llama-68m-random"),  # noqa: E501
-    "MLPSpeculatorPreTrainedModel": _HfExamplesInfo("JackFram/llama-160m",
-                                                    speculative_model="ibm-ai-platform/llama-160m-accelerator"),  # noqa: E501
+    # Temporarily disabled.
+    # TODO(woosuk): Re-enable this once the MLP Speculator is supported in V1.
+    # "MLPSpeculatorPreTrainedModel": _HfExamplesInfo("JackFram/llama-160m",
+    #                                                 speculative_model="ibm-ai-platform/llama-160m-accelerator"),  # noqa: E501
     "DeepSeekMTPModel": _HfExamplesInfo("luccafong/deepseek_mtp_main_random",
                                         speculative_model="luccafong/deepseek_mtp_draft_random",  # noqa: E501
                                         trust_remote_code=True),
@@ -464,6 +479,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                             trust_remote_code=True,
                                             speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
                                             tokenizer="meta-llama/Llama-3.1-8B-Instruct"),
+    "EagleLlama4ForCausalLM": _HfExamplesInfo(
+        "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
+        trust_remote_code=True,
+        speculative_model="morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
+        tokenizer="meta-llama/Llama-4-Scout-17B-16E-Instruct"),  # noqa: E501
     "EagleMiniCPMForCausalLM": _HfExamplesInfo("openbmb/MiniCPM-1B-sft-bf16",
                                             trust_remote_code=True,
                                             is_available_online=False,
@@ -481,7 +501,7 @@ _TRANSFORMERS_MODELS = {
 _EXAMPLE_MODELS = {
     **_TEXT_GENERATION_EXAMPLE_MODELS,
     **_EMBEDDING_EXAMPLE_MODELS,
-    **_CROSS_ENCODER_EXAMPLE_MODELS,
+    **_SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS,
     **_MULTIMODAL_EXAMPLE_MODELS,
     **_SPECULATIVE_DECODING_EXAMPLE_MODELS,
     **_TRANSFORMERS_MODELS,
@@ -514,3 +534,4 @@ class HfExampleModels:
 
 
 HF_EXAMPLE_MODELS = HfExampleModels(_EXAMPLE_MODELS)
+AUTO_EXAMPLE_MODELS = HfExampleModels(_AUTOMATIC_CONVERTED_MODELS)

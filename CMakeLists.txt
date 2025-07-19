@@ -45,7 +45,7 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from docker/Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.7.0")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.7.1")
 set(TORCH_SUPPORTED_VERSION_ROCM "2.7.0")
 
 #
@@ -554,7 +554,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   cuda_archs_loose_intersection(MLA_ARCHS "10.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND MLA_ARCHS)
     set(SRCS
-      "csrc/attention/mla/cutlass_mla_kernels.cu")
+      "csrc/attention/mla/cutlass_mla_kernels.cu"
+      "csrc/attention/mla/sm100_cutlass_mla_kernel.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${MLA_ARCHS}")

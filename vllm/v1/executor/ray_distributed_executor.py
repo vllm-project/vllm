@@ -6,6 +6,7 @@ from typing import Union
 
 from vllm.executor.ray_distributed_executor import (  # noqa
     RayDistributedExecutor as RayDistributedExecutorV0)
+from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
 
@@ -33,6 +34,8 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
         """Ray distributed executor supports pipeline parallelism,
         meaning that it allows PP size batches to be executed concurrently.
         """
+        if self.scheduler_config.async_scheduling:
+            return 2
         return self.parallel_config.pipeline_parallel_size
 
     def execute_model(
@@ -60,3 +63,11 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
         # When PP is used, we return a FutureWrapper immediately so that
         # the scheduler can yield to the next batch.
         return FutureWrapper(refs[0])
+
+    def reinitialize_distributed(
+            self, reconfig_request: ReconfigureDistributedRequest) -> None:
+        self._run_workers("reinitialize_distributed", reconfig_request)
+        if reconfig_request.new_data_parallel_rank == \
+        ReconfigureRankType.SHUTDOWN_CURRENT_RANK:
+            self.shutdown()
+        return

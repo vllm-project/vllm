@@ -20,13 +20,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
   //
 
-  // The default behavior in PyTorch 2.6 is "requires_contiguous", so we need
+  // The default behavior in PyTorch 2.6 was changed to "requires_contiguous",
+  // so we need
   // to override this for many GEMMs with the following tag. Otherwise,
   // torch.compile will force all input tensors to be contiguous(), which
   // will break many custom ops that require column-major weight matrices.
-  // TODO: remove this for PyTorch 2.8, when the default is planned to switch
-  // to match exact eager-mode strides.
-  at::Tag stride_tag = at::Tag::needs_fixed_stride_order;
+  // This was a bug and PyTorch 2.7 has since fixed this.
+#if TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 6
+  #define stride_tag at::Tag::needs_fixed_stride_order
+#else
+  #define stride_tag
+#endif
 
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
   ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
@@ -513,6 +517,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                   Tensor kv_c_and_k_pe_cache, Tensor seq_lens,"
       "                   Tensor page_table, float scale) -> ()");
   ops.impl("cutlass_mla_decode", torch::kCUDA, &cutlass_mla_decode);
+
+  // SM100 CUTLASS MLA decode
+  ops.def(
+      "sm100_cutlass_mla_decode(Tensor! out, Tensor q_nope, Tensor q_pe,"
+      "                         Tensor kv_c_and_k_pe_cache, Tensor seq_lens,"
+      "                         Tensor page_table, Tensor workspace, float "
+      "scale,"
+      "                         int num_kv_splits) -> ()");
+  // conditionally compiled so impl in source file
+
+  // SM100 CUTLASS MLA workspace
+  ops.def(
+      "sm100_cutlass_mla_get_workspace_size(int max_seq_len, int num_batches,"
+      "                                     int sm_count, int num_kv_splits) "
+      "-> int");
+  // conditionally compiled so impl in source file
 
   // Compute NVFP4 block quantized tensor.
   ops.def(
