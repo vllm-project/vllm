@@ -59,11 +59,6 @@ class CommonAttentionMetadata:
     block_table_tensor: torch.Tensor
     slot_mapping: torch.Tensor
 
-    def __post_init__(self):
-        # Fill unused with -1. Needed for reshape_and_cache in full cuda graph
-        # mode.
-        self.slot_mapping[self.num_actual_tokens:].fill_(-1)
-
 
 M = TypeVar("M")
 
