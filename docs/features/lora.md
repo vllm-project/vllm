@@ -302,7 +302,7 @@ To this end, we allow registration of default multimodal LoRAs to handle this au
         return tokenizer.apply_chat_template(chat, tokenize=False)
 
 
-    model = LLM(
+    llm = LLM(
         model=model_id,
         enable_lora=True,
         max_lora_rank=64,
@@ -329,7 +329,7 @@ To this end, we allow registration of default multimodal LoRAs to handle this au
     }
 
 
-    outputs = model.generate(
+    outputs = llm.generate(
         inputs,
         sampling_params=SamplingParams(
             temperature=0.2,

@@ -28,7 +28,7 @@ def vllm_model(vllm_runner):
 def test_stop_reason(vllm_model, example_prompts):
     tokenizer = transformers.AutoTokenizer.from_pretrained(MODEL)
     stop_token_id = tokenizer.convert_tokens_to_ids(STOP_STR)
-    llm = vllm_model.model
+    llm = vllm_model.llm
 
     # test stop token
     outputs = llm.generate(example_prompts,

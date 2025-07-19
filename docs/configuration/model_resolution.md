@@ -14,7 +14,7 @@ For example:
 ```python
 from vllm import LLM
 
-model = LLM(
+llm = LLM(
     model="cerebras/Cerebras-GPT-1.3B",
     hf_overrides={"architectures": ["GPT2LMHeadModel"]},  # GPT-2
 )
