@@ -112,13 +112,6 @@ class RequestMetrics:
         model_execute_time: The time spent in the model execute function. This
                             will include model forward, block/sync across
                             workers, cpu-gpu sync time and sampling time.
-        spec_token_acceptance_counts: number of accepted speculative tokens at
-                                      each position; the first token is from
-                                      the target model and is always accepted;
-                                      e.g., when it's [10, 8, 4, 2] for a req,
-                                      it means there were 10 forward passes in
-                                      total, and there were 8, 4, 2 accepted
-                                      tokens at 1st, 2nd, 3rd speculation step.
     """
     arrival_time: float
     last_token_time: float
@@ -129,7 +122,6 @@ class RequestMetrics:
     scheduler_time: Optional[float] = None
     model_forward_time: Optional[float] = None
     model_execute_time: Optional[float] = None
-    spec_token_acceptance_counts: Optional[list[int]] = None
 
 
 class SequenceDataDelta(
@@ -748,9 +740,7 @@ class SequenceGroup:
                                       last_token_time=arrival_time,
                                       first_scheduled_time=None,
                                       first_token_time=None,
-                                      time_in_queue=None,
-                                      spec_token_acceptance_counts=[0] *
-                                      draft_size)
+                                      time_in_queue=None)
         self.last_token_latency = 0.0
         self.lora_request = lora_request
         self.prompt_logprobs: Optional[PromptLogprobs] = None
@@ -1390,8 +1380,6 @@ class ExecuteModelRequest(
     previous_hidden_states: Optional[HiddenStates] = None
     # The number of forward steps to run.
     num_steps: int = 1
-    # The step index for spec model input.
-    spec_step_idx: Optional[int] = None
     # Finished request ids since last step.
     finished_requests_ids: list[str] = msgspec.field(default_factory=list)
     # The last sampled token ids for multi step decoding.

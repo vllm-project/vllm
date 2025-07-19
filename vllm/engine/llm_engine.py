@@ -1780,13 +1780,6 @@ class LLMEngine:
                 num_generation_tokens_from_prefill_groups)
             num_tokens_iter = (num_generation_tokens_iter +
                                num_prompt_tokens_iter)
-        # Spec decode, if enabled, emits specialized metrics from the worker in
-        # sampler output.
-        if model_output and isinstance(model_output[0], SamplerOutput) and (
-                model_output[0].spec_decode_worker_metrics is not None):
-            spec_decode_metrics = model_output[0].spec_decode_worker_metrics
-        else:
-            spec_decode_metrics = None
 
         return Stats(
             now=now,
@@ -1808,7 +1801,6 @@ class LLMEngine:
             num_tokens_iter=num_tokens_iter,
             time_to_first_tokens_iter=time_to_first_tokens_iter,
             time_per_output_tokens_iter=time_per_output_tokens_iter,
-            spec_decode_metrics=spec_decode_metrics,
             num_preemption_iter=num_preemption_iter,
 
             # Request stats

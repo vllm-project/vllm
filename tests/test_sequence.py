@@ -29,7 +29,6 @@ def test_sampler_output_initialization(sampler_output, sample_outputs):
     assert len(sampler_output) == len(sample_outputs)
     assert sampler_output.sampled_token_probs is None
     assert sampler_output.sampled_token_ids is None
-    assert sampler_output.spec_decode_worker_metrics is None
 
 
 def test_sampler_output_getitem(sampler_output, sample_outputs):
