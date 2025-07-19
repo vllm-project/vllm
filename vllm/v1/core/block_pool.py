@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import itertools
 from collections import defaultdict
 from collections.abc import Iterable
 from typing import Callable, Optional
@@ -214,20 +215,15 @@ class BlockPool:
             raise ValueError(
                 f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = []
-        idx = 0
-        while idx < num_blocks:
-            # First allocate blocks.
-            curr_block = self.free_block_queue.popleft()
-            assert curr_block.ref_cnt == 0
+        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
 
-            # If the block is cached, evict it.
-            if self.enable_caching:
-                self._maybe_evict_cached_block(curr_block)
+        if self.enable_caching:
+            for block in ret:
+                self._maybe_evict_cached_block(block)
 
-            curr_block.incr_ref()
-            ret.append(curr_block)
-            idx += 1
+        for block in ret:
+            assert block.ref_cnt == 0
+            block.ref_cnt += 1
 
         return ret
 
@@ -284,11 +280,14 @@ class BlockPool:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
         """
-        for block in ordered_blocks:
-            block.decr_ref()
-            # null_block should not be added to the free list.
-            if block.ref_cnt == 0 and not block.is_null:
-                self.free_block_queue.append(block)
+        # Create 2 iterators to allow iterateing over ordered_blocks twice.
+        blocks_iter1, blocks_iter2 = itertools.tee(ordered_blocks)
+        for block in blocks_iter1:
+            block.ref_cnt -= 1
+        self.free_block_queue.append_n([
+            block for block in blocks_iter2
+            if block.ref_cnt == 0 and not block.is_null
+        ])
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
