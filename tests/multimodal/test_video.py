@@ -9,7 +9,6 @@ import numpy.typing as npt
 import pytest
 from PIL import Image
 
-from vllm import envs
 from vllm.assets.base import get_vllm_public_assets
 from vllm.assets.video import video_to_ndarrays, video_to_pil_images_list
 from vllm.multimodal.image import ImageMediaIO
@@ -68,33 +67,34 @@ class Assert10Frames1FPSVideoLoader(VideoLoader):
         return FAKE_OUTPUT_2
 
 
-def test_video_media_io_kwargs():
-    envs.VLLM_VIDEO_LOADER_BACKEND = "assert_10_frames_1_fps"
-    imageio = ImageMediaIO()
+def test_video_media_io_kwargs(monkeypatch: pytest.MonkeyPatch):
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "assert_10_frames_1_fps")
+        imageio = ImageMediaIO()
 
-    # Verify that different args pass/fail assertions as expected.
-    videoio = VideoMediaIO(imageio, **{"num_frames": 10, "fps": 1.0})
-    _ = videoio.load_bytes(b"test")
-
-    videoio = VideoMediaIO(
-        imageio, **{
-            "num_frames": 10,
-            "fps": 1.0,
-            "not_used": "not_used"
-        })
-    _ = videoio.load_bytes(b"test")
-
-    with pytest.raises(AssertionError, match="bad num_frames"):
-        videoio = VideoMediaIO(imageio, **{})
+        # Verify that different args pass/fail assertions as expected.
+        videoio = VideoMediaIO(imageio, **{"num_frames": 10, "fps": 1.0})
         _ = videoio.load_bytes(b"test")
 
-    with pytest.raises(AssertionError, match="bad num_frames"):
-        videoio = VideoMediaIO(imageio, **{"num_frames": 9, "fps": 1.0})
+        videoio = VideoMediaIO(
+            imageio, **{
+                "num_frames": 10,
+                "fps": 1.0,
+                "not_used": "not_used"
+            })
         _ = videoio.load_bytes(b"test")
 
-    with pytest.raises(AssertionError, match="bad fps"):
-        videoio = VideoMediaIO(imageio, **{"num_frames": 10, "fps": 2.0})
-        _ = videoio.load_bytes(b"test")
+        with pytest.raises(AssertionError, match="bad num_frames"):
+            videoio = VideoMediaIO(imageio, **{})
+            _ = videoio.load_bytes(b"test")
+
+        with pytest.raises(AssertionError, match="bad num_frames"):
+            videoio = VideoMediaIO(imageio, **{"num_frames": 9, "fps": 1.0})
+            _ = videoio.load_bytes(b"test")
+
+        with pytest.raises(AssertionError, match="bad fps"):
+            videoio = VideoMediaIO(imageio, **{"num_frames": 10, "fps": 2.0})
+            _ = videoio.load_bytes(b"test")
 
 
 @pytest.mark.parametrize("is_color", [True, False])
