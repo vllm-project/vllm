@@ -53,6 +53,12 @@ class Block(ABC):
     def prev_block(self) -> Optional["Block"]:
         pass
 
+    @prev_block.setter
+    @abstractmethod
+    def prev_block(self, value: Optional["Block"]) -> None:
+        """NOTE: Do not use this API outside Block."""
+        self._prev_block = value
+
     @property
     @abstractmethod
     def extra_hash(self) -> Optional[int]:
