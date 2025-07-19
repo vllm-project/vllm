@@ -48,8 +48,7 @@ def convert_mapping(
     vocab_size: int,
     extra_vocab_size: int,
     device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-           Optional[torch.Tensor], list[int]]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[int]]:
     """Converts LoRAMapping to index tensors.
 
     Args:
