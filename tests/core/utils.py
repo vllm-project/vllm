@@ -4,15 +4,16 @@
 import time
 from collections import defaultdict
 from collections.abc import Sequence as GenericSequence
-from typing import Any, Optional
+from itertools import count
+from typing import Any, Optional, Union
 
 import torch
 
-from vllm import SamplingParams
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.inputs import EncoderDecoderInputs, embeds_inputs, token_inputs
 from vllm.lora.request import LoRARequest
-from vllm.sequence import (Logprob, Sequence, SequenceGroup,
+from vllm.sampling_params import SamplingParams
+from vllm.sequence import (Logprob, Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata)
 
 
@@ -262,3 +263,130 @@ class SchedulerProxy:
         self, ) -> tuple[list[SequenceGroupMetadata], SchedulerOutputs, Any]:
         _, _, ret = self.call_history["schedule"][-1]
         return ret
+
+
+def create_seq_group_metadata_from_prompts(
+    prompts: list[list[int]],
+    num_gpu_blocks: int,
+    block_size: int,
+    final_prompt_lens: list[int],
+    continuations: Optional[list[list[int]]] = None,
+    seq_ids: Optional[list[int]] = None,
+) -> list[SequenceGroupMetadata]:
+
+    if continuations is None:
+        continuations = [[] for _ in prompts]
+
+    if seq_ids is None:
+        seq_ids = list(i for i, _ in enumerate(prompts))
+
+    free_gpu_blocks = list(range(num_gpu_blocks))
+
+    block_allocations = {
+        i: [
+            free_gpu_blocks.pop()
+            for _ in range(round_up_to_next_block(final_len, block_size))
+        ]
+        for i, final_len in enumerate(final_prompt_lens)
+    }
+
+    seq_grou_metadata_list = []
+    for i, (prompt_token_ids,
+            cont_token_ids) in enumerate(zip(prompts, continuations)):
+        data = SequenceData.from_seqs(prompt_token_ids, cont_token_ids)
+        data.update_num_computed_tokens(
+            len(prompt_token_ids) + len(cont_token_ids) - 1)
+        seq_data = {i: data}
+        seq_grou_metadata_list.append(
+            SequenceGroupMetadata(
+                request_id=str(i),
+                is_prompt=len(cont_token_ids) == 0,
+                seq_data=seq_data,
+                sampling_params=SamplingParams(temperature=0.0),
+                block_tables={i: block_allocations[i][:]},
+            ))
+    return seq_grou_metadata_list
+
+
+def create_chunked_seq_group_metadata_from_prompt(
+        prompt: list[int],
+        num_gpu_blocks: int,
+        chunk_size: int,
+        block_size: int,
+        seq_id: Optional[int] = None) -> list[SequenceGroupMetadata]:
+
+    if seq_id is None:
+        seq_id = 0
+
+    free_gpu_blocks = list(range(num_gpu_blocks))
+
+    block_allocations = [
+        free_gpu_blocks.pop()
+        for _ in range(round_up_to_next_block(len(prompt), block_size))
+    ]
+
+    seq_group_metadata_list = []
+    for i, idx in enumerate(range(0, len(prompt), chunk_size)):
+        chunk_ids = prompt[idx:idx + chunk_size]
+        data = SequenceData.from_seqs(prompt)
+        data.update_num_computed_tokens(idx)
+        seq_data = {i: data}
+        seq_group_metadata_list.append(
+            SequenceGroupMetadata(
+                request_id=str(seq_id),
+                is_prompt=True,
+                do_sample=idx + chunk_size >= len(prompt),  # terminal chunk
+                seq_data=seq_data,
+                sampling_params=SamplingParams(temperature=0.0),
+                block_tables={i: block_allocations},
+                token_chunk_size=len(chunk_ids)))
+    return seq_group_metadata_list
+
+
+def create_batch(batch_size,
+                 k,
+                 prompt_len: Union[int, list[int]] = 10,
+                 prev_output_token_len: int = 10,
+                 seq_ids: Optional[list[int]] = None,
+                 num_gpu_blocks: Optional[int] = None,
+                 block_size: Optional[int] = None,
+                 prefill_chunk_size: Optional[int] = None):
+    if block_size is None:
+        block_size = 8
+
+    if num_gpu_blocks is None:
+        num_gpu_blocks = 2048 // block_size
+
+    iterator = count()
+
+    if isinstance(prompt_len, int):
+        prompt_lens = [prompt_len for _ in range(batch_size)]
+    else:
+        prompt_lens = prompt_len
+
+    prompts = [[next(iterator) for _ in range(p_len)] for p_len in prompt_lens]
+
+    if prefill_chunk_size:
+        # Create a batch of chunked prompts.
+        if not seq_ids:
+            seq_ids = list(range(len(prompts)))
+        seq_group_metadata_list = []
+        for p, sid in zip(prompts, seq_ids):
+            seq_group_metadata_list += \
+                create_chunked_seq_group_metadata_from_prompt(
+                p, num_gpu_blocks, prefill_chunk_size, block_size, sid)
+        seq_group_metadata_list = seq_group_metadata_list[:batch_size]
+        prev_output_tokens = []
+    else:
+        prev_output_tokens = [[
+            next(iterator) for _ in range(prev_output_token_len)
+        ] for _ in range(batch_size)]
+        final_prompt_lens = [
+            len(prompt) + len(prev_output_token) + k + 1
+            for prompt, prev_output_token in zip(prompts, prev_output_tokens)
+        ]
+
+        seq_group_metadata_list = create_seq_group_metadata_from_prompts(
+            prompts, num_gpu_blocks, block_size, final_prompt_lens,
+            prev_output_tokens, seq_ids)
+    return seq_group_metadata_list, prompts, prev_output_tokens

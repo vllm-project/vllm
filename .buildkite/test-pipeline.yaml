@@ -159,7 +159,6 @@ steps:
   - tests/distributed/test_utils
   - tests/distributed/test_pynccl
   - tests/distributed/test_events
-  - tests/spec_decode/e2e/test_integration_dist_tp4
   - tests/compile/test_basic_correctness
   - examples/offline_inference/rlhf.py
   - examples/offline_inference/rlhf_colocate.py
@@ -182,7 +181,6 @@ steps:
   - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s distributed/test_events.py
-  - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
   - pushd ../examples/offline_inference
@@ -329,17 +327,6 @@ steps:
   commands:
     - pytest -v -s samplers
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
-
-- label: Speculative decoding tests # 40min
-  mirror_hardwares: [amdexperimental]
-  source_file_dependencies:
-  - vllm/spec_decode
-  - tests/spec_decode
-  - vllm/model_executor/models/eagle.py
-  commands:
-    - pytest -v -s spec_decode/e2e/test_multistep_correctness.py
-    - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s spec_decode --ignore=spec_decode/e2e/test_multistep_correctness.py --ignore=spec_decode/e2e/test_mtp_correctness.py
-    - pytest -v -s spec_decode/e2e/test_eagle_correctness.py
 
 - label: LoRA Test %N # 15min each
   mirror_hardwares: [amdexperimental, amdproduction]
@@ -726,7 +713,6 @@ steps:
   - pytest -v -s distributed/test_sequence_parallel.py
   # this test fails consistently.
   # TODO: investigate and fix
-  # - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
   - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
   - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s kv_transfer/test_disagg.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
