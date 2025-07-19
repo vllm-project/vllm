@@ -113,6 +113,7 @@ __global__ void static_scaled_int8_quant_kernel(
   const int stride = blockDim.x;
   const int64_t token_idx = blockIdx.x;
   const float scale = *scale_ptr;
+  const float inv_s = 1.0f / scale;
 
   // Must be performed using 64-bit math to avoid integer overflow.
   const scalar_t* row_in = input + token_idx * hidden_size;
@@ -121,7 +122,7 @@ __global__ void static_scaled_int8_quant_kernel(
   vectorize_with_alignment<16>(
       row_in, row_out, hidden_size, tid, stride,
       [=] __device__(int8_t& dst, const scalar_t& src) {
-        dst = float_to_int8_rn(static_cast<float>(src) / scale);
+        dst = float_to_int8_rn(static_cast<float>(src) * inv_s);
       });
 }
 
@@ -282,6 +283,7 @@ void static_scaled_int8_quant(torch::Tensor& out,          // [..., hidden_size]
   TORCH_CHECK(input.is_contiguous());
   TORCH_CHECK(out.is_contiguous());
   TORCH_CHECK(scale.numel() == 1);
+  TORCH_CHECK(scale.item<float>() != 0.f, "Scale value must be non-zero.");
   TORCH_CHECK(!azp || azp->numel() == 1);
 
   int const hidden_size = input.size(-1);
