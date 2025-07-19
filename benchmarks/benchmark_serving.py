@@ -65,6 +65,7 @@ from benchmark_dataset import (
     HuggingFaceDataset,
     InstructCoderDataset,
     MTBenchDataset,
+    MuirBenchDataset,
     NextEditPredictionDataset,
     RandomDataset,
     SampleRequest,
@@ -357,7 +358,7 @@ async def benchmark(
         input_requests[0].multi_modal_data,
     )
 
-    assert test_mm_content is None or isinstance(test_mm_content, dict)
+    assert test_mm_content is None or isinstance(test_mm_content, (dict, list))
     test_input = RequestFuncInput(
         model=model_id,
         model_name=model_name,
@@ -795,6 +796,9 @@ def main(args: argparse.Namespace):
         elif args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS:
             dataset_class = ASRDataset
             args.hf_split = "train"
+        elif args.dataset_path in MuirBenchDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = MuirBenchDataset
+            args.hf_split = "test"
         else:
             supported_datasets = set(
                 [
