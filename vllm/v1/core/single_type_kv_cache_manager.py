@@ -9,7 +9,8 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
                                         FullAttentionSpec, KVCacheSpec,
-                                        MambaSpec, SlidingWindowSpec)
+                                        MambaSpec, ShortConvSpec,
+                                        SlidingWindowSpec)
 from vllm.v1.request import Request
 
 
@@ -529,9 +530,8 @@ class MambaManager(SingleTypeKVCacheManager):
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
     ) -> tuple[list[KVCacheBlock], ...]:
-        assert isinstance(
-            kv_cache_spec,
-            MambaSpec), ("MambaManager can only be used for mamba groups")
+        assert isinstance(kv_cache_spec, (MambaSpec, ShortConvSpec)), (
+            "MambaManager can only be used for mamba/shortconv groups")
         # Prefix caching is not supported for mamba now. Always return empty
         # list.
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
@@ -561,6 +561,7 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     SlidingWindowSpec: SlidingWindowManager,
     ChunkedLocalAttentionSpec: ChunkedLocalAttentionManager,
     MambaSpec: MambaManager,
+    ShortConvSpec: MambaManager,
 }
 
 

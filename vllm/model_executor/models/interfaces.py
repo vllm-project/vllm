@@ -446,12 +446,13 @@ class IsHybrid(Protocol):
         'layers_block_type' """
 
     @classmethod
-    def get_mamba_state_shape_from_config(
+    def get_static_cache_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
         use_v1: bool = True,
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
-        """Calculate shapes for Mamba's convolutional and state caches.
+    ) -> tuple[tuple[int, int], ...]:
+        """Calculate shapes for static caches. Currently used for 
+        convolutional and/or SSM state caches (e.g. Mamba, ShortConv).
 
         Args:
             vllm_config: vLLM config
