@@ -489,6 +489,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                             tokenizer="openbmb/MiniCPM-2B-sft-bf16"),
     "Glm4MoeMTPModel": _HfExamplesInfo("THUDM/GLM-4.5",
                                         speculative_model="THUDM/GLM-4.5",
+                                        min_transformers_version="4.54",
                                         is_available_online=False),
     "MiMoMTPModel": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
                                     trust_remote_code=True,
