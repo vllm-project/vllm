@@ -29,7 +29,6 @@ class NewRequestData:
     mm_positions: list[PlaceholderRange]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
-    block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
 
@@ -37,7 +36,6 @@ class NewRequestData:
     def from_request(
         cls,
         request: Request,
-        block_ids: tuple[list[int], ...],
     ) -> NewRequestData:
         return cls(
             req_id=request.request_id,
@@ -47,7 +45,6 @@ class NewRequestData:
             mm_positions=request.mm_positions,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
-            block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
         )
