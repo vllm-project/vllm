@@ -276,6 +276,10 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 
+# Install libnuma-dev for building packages that need NUMA headers.
+RUN apt-get update -y && \
+    apt-get install -y libnuma-dev
+
 # Workaround for #17068
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
