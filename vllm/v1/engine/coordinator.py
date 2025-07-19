@@ -200,11 +200,41 @@ class CoordinatorProc:
                         # Ignore subscription messages.
                         continue
 
+                    decoded = msgspec.msgpack.decode(buffer)
+                    if isinstance(decoded, (list, tuple)) and len(
+                            decoded) == 2 and decoded[0] == "SCALE_ELASTIC_EP":
+                        # Handle scale up notification
+                        new_engine_count = decoded[1]
+                        current_count = len(self.engines)
+                        if new_engine_count > current_count:
+                            for _ in range(new_engine_count - current_count):
+                                self.engines.append(EngineState())
+                            # NOTE(yongji): handle the case
+                            # where newly started engines have current_wave = 0
+                            # if existing engines just finished a wave
+                            # and engine_running isn't updated yet at
+                            # CoordinatorProc requests routed to newly started
+                            # engines may not wake up existing engines, as long
+                            # as 0 < request.wave < existing engines'
+                            # current_wave
+                            # we note that 0 is the wave number for the new
+                            # engine
+                            self.engines_running = False
+                            logger.info(
+                                "DPCoordinator scaled up from %s to %s "
+                                "engines", current_count, new_engine_count)
+                        else:
+                            self.engines = self.engines[:new_engine_count]
+                            logger.info(
+                                "DPCoordinator scaled down from %s to %s "
+                                "engines", current_count, new_engine_count)
+                        continue  # Skip normal engine notification processing
+
                     # We received a message on the front-end XPUB socket,
                     # from an API server sending a new request while the
                     # engines are paused, so that we can wake the other
                     # engines.
-                    engine_to_exclude, wave = msgspec.msgpack.decode(buffer)
+                    engine_to_exclude, wave = decoded
                     if not self.engines_running:
                         if wave < self.current_wave:
                             # If the wave number is stale, ensure the message

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import time
 from collections.abc import AsyncGenerator, Mapping
 from copy import copy
 from typing import Any, Optional, Union
@@ -607,6 +608,63 @@ class AsyncLLM(EngineClient):
         """
         return await self.engine_core.collective_rpc_async(
             method, timeout, args, kwargs)
+
+    async def wait_for_requests_to_drain(self, drain_timeout: int = 300):
+        """Wait for all requests to be drained."""
+        start_time = time.time()
+        while time.time() - start_time < drain_timeout:
+            if not self.engine_core.dp_engines_running():
+                logger.info("Engines are idle, requests have been drained")
+                return
+
+            logger.info(
+                "Engines are still running, waiting for requests to drain...")
+            await asyncio.sleep(1)  # Wait 1 second before checking again
+
+        raise TimeoutError(f"Timeout reached after {drain_timeout} seconds "
+                           "waiting for requests to drain.")
+
+    async def scale_elastic_ep(self,
+                               new_data_parallel_size: int,
+                               drain_timeout: int = 300):
+        """
+        Scale up or down the data parallel size by adding or removing
+        engine cores.
+        Args:
+            new_data_parallel_size: The new number of data parallel workers
+            drain_timeout:
+                Maximum time to wait for requests to drain (seconds)
+        """
+        old_data_parallel_size = \
+            self.vllm_config.parallel_config.data_parallel_size
+        if old_data_parallel_size == new_data_parallel_size:
+            logger.info("Data parallel size is already %s, skipping scale",
+                        new_data_parallel_size)
+            return
+        logger.info(
+            "Waiting for requests to drain before "
+            "scaling up to %s engines...", new_data_parallel_size)
+        await self.wait_for_requests_to_drain(drain_timeout)
+        logger.info(
+            "Requests have been drained, proceeding with scale "
+            "to %s engines", new_data_parallel_size)
+        await self.engine_core.scale_elastic_ep(new_data_parallel_size)
+        self.vllm_config.parallel_config.data_parallel_size = \
+            new_data_parallel_size
+
+        # recreate stat loggers
+        if new_data_parallel_size > old_data_parallel_size:
+            stat_loggers: list[list[StatLoggerBase]] = setup_default_loggers(
+                vllm_config=self.vllm_config,
+                log_stats=self.log_stats,
+                engine_num=new_data_parallel_size,
+                custom_stat_loggers=None,
+            )
+            num_new_engines = len(stat_loggers) - len(self.stat_loggers)
+            self.stat_loggers.extend(stat_loggers[-num_new_engines:])
+        else:
+            for _ in range(old_data_parallel_size - new_data_parallel_size):
+                self.stat_loggers.pop()
 
     @property
     def is_running(self) -> bool:

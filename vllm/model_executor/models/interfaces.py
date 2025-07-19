@@ -543,6 +543,13 @@ class MixtureOfExperts(Protocol):
         """
         ...
 
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        ...
+
 
 def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
     return isinstance(model, MixtureOfExperts)
