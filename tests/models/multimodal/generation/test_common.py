@@ -226,7 +226,7 @@ VLM_TEST_SETTINGS = {
             "disable_mm_preprocessor_cache": True,
             "enable_prefix_caching": False,
         },
-        marks=[pytest.mark.core_model],
+        marks=[large_gpu_mark(min_gb=32)],
     ),
     # Check "auto" with fallback to transformers
     "internvl-transformers": VLMTestInfo(
