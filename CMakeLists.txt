@@ -92,7 +92,8 @@ endif()
 # Forward the non-CUDA device extensions to external CMake scripts.
 #
 if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
-    NOT VLLM_TARGET_DEVICE STREQUAL "rocm")
+    NOT VLLM_TARGET_DEVICE STREQUAL "rocm" AND
+    NOT VLLM_TARGET_DEVICE STREQUAL "vulkan")
     if (VLLM_TARGET_DEVICE STREQUAL "cpu")
         include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
     else()
@@ -126,8 +127,11 @@ elseif(HIP_FOUND)
     message(WARNING "Pytorch version >= ${TORCH_SUPPORTED_VERSION_ROCM} "
       "expected for ROCm build, saw ${Torch_VERSION} instead.")
   endif()
+elseif(VLLM_TARGET_DEVICE STREQUAL "vulkan")
+  set(VLLM_GPU_LANG "VULKAN")
+  find_package(Vulkan REQUIRED)
 else()
-  message(FATAL_ERROR "Can't find CUDA or HIP installation.")
+  message(FATAL_ERROR "Can't find CUDA, HIP, or Vulkan installation.")
 endif()
 
 
@@ -855,6 +859,22 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     SOURCES ${VLLM_ROCM_EXT_SRC}
     COMPILE_FLAGS ${VLLM_GPU_FLAGS}
     ARCHITECTURES ${VLLM_GPU_ARCHES}
+    USE_SABI 3
+    WITH_SOABI)
+endif()
+
+if(VLLM_GPU_LANG STREQUAL "VULKAN")
+  #
+  # _vulkan_C extension
+  #
+  set(VLLM_VULKAN_EXT_SRC
+    "csrc/vulkan/torch_bindings.cpp")
+
+  define_gpu_extension_target(
+    _vulkan_C
+    DESTINATION vllm
+    LANGUAGE CXX
+    SOURCES ${VLLM_VULKAN_EXT_SRC}
     USE_SABI 3
     WITH_SOABI)
 endif()
