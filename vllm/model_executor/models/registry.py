@@ -253,6 +253,7 @@ _SPECULATIVE_DECODING_MODELS = {
 }
 
 _TRANSFORMERS_MODELS = {
+    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"), # noqa: E501
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
 }
 # yapf: enable
@@ -504,9 +505,6 @@ class _ModelRegistry:
             if causal_lm_arch in self.models:
                 normalized_arch.append(arch)
 
-        # make sure Transformers backend is put at the last as a fallback
-        if len(normalized_arch) != len(architectures):
-            normalized_arch.append("TransformersForCausalLM")
         return normalized_arch
 
     def inspect_model_cls(

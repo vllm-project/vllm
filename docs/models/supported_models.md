@@ -18,7 +18,7 @@ These models are what we list in [supported-text-models][supported-text-models] 
 
 ### Transformers
 
-vLLM also supports model implementations that are available in Transformers. This does not currently work for all models, but most decoder language models are supported, and vision language model support is planned!
+vLLM also supports model implementations that are available in Transformers. This does not currently work for all models, but most decoder language models and common vision language models are supported! Vision-language models currently accept only image inputs, and require setting `--disable_mm_preprocessor_cache` when running. Support for video inputs and caching of multi-modal preprocessors will be added in future releases.
 
 To check if the modeling backend is Transformers, you can simply do this:
 
@@ -28,13 +28,16 @@ llm = LLM(model=..., task="generate")  # Name or path of your model
 llm.apply_model(lambda model: print(type(model)))
 ```
 
-If it is `TransformersForCausalLM` then it means it's based on Transformers!
+If it is `TransformersForCausalLM` or `TransformersForMultimodalLM` then it means it's based on Transformers!
 
 !!! tip
     You can force the use of `TransformersForCausalLM` by setting `model_impl="transformers"` for [offline-inference](../serving/offline_inference.md) or `--model-impl transformers` for the [openai-compatible-server](../serving/openai_compatible_server.md).
 
 !!! note
     vLLM may not fully optimise the Transformers implementation so you may see degraded performance if comparing a native model to a Transformers model in vLLM.
+
+!!! note
+    In case of vision language models if you are loading with `dtype="auto"`, vLLM loads the whole model with config's `dtype` if it exists. In contrast the native Transformers will respect the `dtype` attribute of each backbone in the model. That might cause a slight difference in performance.
 
 #### Custom models
 
@@ -99,7 +102,7 @@ Here is what happens in the background when this model is loaded:
 
 1. The config is loaded.
 2. `MyModel` Python class is loaded from the `auto_map` in config, and we check that the model `is_backend_compatible()`.
-3. `MyModel` is loaded into `TransformersForCausalLM` (see <gh-file:vllm/model_executor/models/transformers.py>) which sets `self.config._attn_implementation = "vllm"` so that vLLM's attention layer is used.
+3. `MyModel` is loaded into `TransformersForCausalLM` or `TransformersForMultimodalLM` (see <gh-file:vllm/model_executor/models/transformers.py>) which sets `self.config._attn_implementation = "vllm"` so that vLLM's attention layer is used.
 
 That's it!
 
