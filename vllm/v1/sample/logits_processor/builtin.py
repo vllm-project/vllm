@@ -323,7 +323,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             "in_think": in_think,  # Currently in thinking mode
             "in_end": False,  # Currently forcing end tokens
             "think_count": think_count,  # Number of tokens in thinking section
-            "end_count": 0,   # Number of end tokens forced so far
+            "end_count": 0,  # Number of end tokens forced so far
             "prompt_tok_ids": prompt_tok_ids,
             "output_tok_ids": [],
             "thinking_token_budget": thinking_token_budget,
@@ -402,7 +402,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             return logits
 
         mask = torch.zeros(batch_size, dtype=torch.bool, device=logits.device)
-        force_token_ids = torch.full((batch_size,),
+        force_token_ids = torch.full((batch_size, ),
                                      -1,
                                      dtype=torch.long,
                                      device=logits.device)
