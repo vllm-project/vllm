@@ -3,6 +3,7 @@
 
 import pytest
 import torch
+
 from vllm.model_executor.models.phi3v import Phi3VImagePixelInputs
 
 
@@ -46,8 +47,9 @@ def test_tensor_schema_tuple_tensor_valid():
 def test_tensor_schema_inconsistent_shapes_in_list():
     with pytest.raises(ValueError, match="contains inconsistent shapes"):
         Phi3VImagePixelInputs(
-            data=[torch.randn(64, 3, 32, 32), torch.randn(64, 3, 16, 16)] +
-                 [torch.randn(64, 3, 32, 32) for _ in range(14)],
+            data=[torch.randn(64, 3, 32, 32),
+                  torch.randn(64, 3, 16, 16)] +
+            [torch.randn(64, 3, 32, 32) for _ in range(14)],
             image_sizes=torch.randint(0, 256, (16, 2)),
         )
 
@@ -59,11 +61,10 @@ def test_tensor_schema_empty_list():
             image_sizes=torch.randint(0, 256, (0, 2)),
         )
 
+
 def test_tensor_schema_validation_disabled_skips_shape_check():
     # This should NOT raise, because validation is turned off
     # This would normally fail (dim[2] should be 3, not 4)
-    Phi3VImagePixelInputs(
-        data=torch.randn(16, 64, 4, 32, 32),
-        image_sizes=torch.randint(0, 256, (16, 2)),
-        validate=False
-    )
+    Phi3VImagePixelInputs(data=torch.randn(16, 64, 4, 32, 32),
+                          image_sizes=torch.randint(0, 256, (16, 2)),
+                          validate=False)
