@@ -353,7 +353,6 @@ class FlashAttentionImpl(AttentionImpl):
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
-        use_irope: bool = False,
     ) -> None:
         if blocksparse_params is not None:
             raise ValueError(
@@ -385,7 +384,6 @@ class FlashAttentionImpl(AttentionImpl):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "FlashAttentionImpl")
-        self.use_irope = use_irope
         self.vllm_flash_attn_version = get_flash_attn_version()
         if is_quantized_kv_cache(self.kv_cache_dtype) \
             and not flash_attn_supports_fp8():

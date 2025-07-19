@@ -136,12 +136,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[int] = None,
-        use_irope: bool = False,
     ) -> None:
-        if use_irope:
-            logger.warning_once(
-                "Using irope in Pallas is not supported yet, it will fall back "
-                "to global attention for long context.")
         if blocksparse_params is not None:
             raise ValueError("Paged attention Pallas kernel does "
                              "not support block-sparse attention.")
