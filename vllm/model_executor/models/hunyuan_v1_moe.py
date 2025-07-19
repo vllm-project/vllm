@@ -56,7 +56,9 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
+from .interfaces import SupportsLoRA
+from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
+                    make_layers)
 
 
 def _get_cla_factor(config: PretrainedConfig) -> int:
@@ -617,86 +619,6 @@ class HunYuanModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-
-class HunYuanMoEV1ForCausalLM(nn.Module):
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-    }
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
-        self.config = config
-        self.quant_config = quant_config
-        self.lora_config = lora_config
-
-        self.model = HunYuanModel(vllm_config=vllm_config, prefix="model")
-        if get_pp_group().is_last_rank:
-            self.unpadded_vocab_size = config.vocab_size
-            if lora_config:
-                self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-            self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
-                config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
-                quant_config=quant_config,
-            )
-            if config.tie_word_embeddings:
-                self.lm_head.weight = self.model.embed_tokens.weight
-
-            logit_scale = getattr(config, "logit_scale", 1.0)
-            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                    config.vocab_size,
-                                                    logit_scale)
-        else:
-            self.lm_head = PPMissingLayer()
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        model_output = self.model(input_ids, positions, intermediate_tensors,
-                                  inputs_embeds)
-        return model_output
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
-        return logits
-
-    def make_empty_intermediate_tensors(
-            self, batch_size: int, dtype: torch.dtype,
-            device: torch.device) -> IntermediateTensors:
-        return IntermediateTensors({
-            "hidden_states":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
-            "residual":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
-        })
-
     def _split_qkv_weight(self, qkv: torch.Tensor):
         num_attention_heads = self.config.num_attention_heads
         num_kv_heads = getattr(self.config, "num_key_value_heads",
@@ -718,6 +640,17 @@ class HunYuanMoEV1ForCausalLM(nn.Module):
         k = k.reshape(-1, hidden_size)
         v = v.reshape(-1, hidden_size)
         return torch.concat((q, k, v))
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        return FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.num_experts,
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         cla_factor = _get_cla_factor(self.config)
@@ -745,16 +678,9 @@ class HunYuanMoEV1ForCausalLM(nn.Module):
             ),
         ]
 
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
-        )
-
         params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+        expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -806,7 +732,7 @@ class HunYuanMoEV1ForCausalLM(nn.Module):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
-
+                loaded_params.add(name)
                 is_found = True
                 break
             if is_found:
@@ -885,3 +811,93 @@ class HunYuanMoEV1ForCausalLM(nn.Module):
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
+
+class HunYuanMoEV1ForCausalLM(nn.Module, SupportsLoRA):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        self.config = config
+        self.quant_config = quant_config
+
+        self.model = HunYuanModel(vllm_config=vllm_config, prefix="model")
+        if get_pp_group().is_last_rank:
+            self.unpadded_vocab_size = config.vocab_size
+            self.lm_head = ParallelLMHead(
+                self.unpadded_vocab_size,
+                config.hidden_size,
+                org_num_embeddings=config.vocab_size,
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+                quant_config=quant_config,
+            )
+            if config.tie_word_embeddings:
+                self.lm_head.weight = self.model.embed_tokens.weight
+
+            logit_scale = getattr(config, "logit_scale", 1.0)
+            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                    config.vocab_size,
+                                                    logit_scale)
+        else:
+            self.lm_head = PPMissingLayer()
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        model_output = self.model(input_ids, positions, intermediate_tensors,
+                                  inputs_embeds)
+        return model_output
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
+        return logits
+
+    def make_empty_intermediate_tensors(
+            self, batch_size: int, dtype: torch.dtype,
+            device: torch.device) -> IntermediateTensors:
+        return IntermediateTensors({
+            "hidden_states":
+            torch.zeros((batch_size, self.config.hidden_size),
+                        dtype=dtype,
+                        device=device),
+            "residual":
+            torch.zeros((batch_size, self.config.hidden_size),
+                        dtype=dtype,
+                        device=device),
+        })
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."]
+                           if self.config.tie_word_embeddings else None),
+        )
+        return loader.load_weights(weights)
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return self.model.get_expert_mapping()
