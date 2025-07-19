@@ -176,9 +176,8 @@ def get_prompt_lens(
     if isinstance(pooling_metadata, V1PoolingMetadata):
         return pooling_metadata.prompt_lens
 
-    assert isinstance(hidden_states, torch.Tensor)
     return PoolingTensors.from_pooling_metadata(
-        pooling_metadata, hidden_states.device).prompt_lens
+        pooling_metadata, hidden_states[0].device).prompt_lens
 
 
 def get_prompt_token_ids(
