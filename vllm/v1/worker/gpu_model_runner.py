@@ -768,6 +768,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # TODO: Support prompt logprobs.
             logits_indices = query_start_loc[1:] - 1
             spec_decode_metadata = None
+            num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
         else:
             # Get the number of draft tokens for each request.
             # Iterate over the dictionary rather than all requests since not all
@@ -781,10 +782,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens)
             logits_indices = spec_decode_metadata.logits_indices
+            num_sampled_tokens = num_draft_tokens + 1
 
         # Hot-Swap lora model
         if self.lora_config:
-            self.set_active_loras(self.input_batch, num_scheduled_tokens)
+            self.set_active_loras(self.input_batch, num_scheduled_tokens, num_sampled_tokens)
 
         return (attn_metadata, attention_cuda_graphs, logits_indices,
                 spec_decode_metadata, num_scheduled_tokens,
@@ -2052,6 +2054,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
+        num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
         attn_metadata: Optional[dict[str, Any]] = None
         if capture_attn_cudagraph:
@@ -2088,7 +2091,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     attn_metadata[layer_name] = attn_metadata_i
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
-                                            num_scheduled_tokens):
+                                            num_scheduled_tokens,
+                                            num_sampled_tokens):
             model = self.model
             if self.is_multimodal_model:
                 input_ids = None
