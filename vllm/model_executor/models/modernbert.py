@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
+from collections.abc import Iterable, Set
 from typing import Optional, Union
 
 import torch
@@ -13,7 +13,8 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.pooler import (ClassifierPooler, Pooler,
+from vllm.model_executor.layers.pooler import (ClassifierPooler,
+                                               DispatchPooler, Pooler,
                                                PoolingMethod,
                                                PoolingParamsUpdate,
                                                PoolingType)
@@ -271,10 +272,10 @@ class ModernBertPooler(Pooler):
                                  eps=config.norm_eps,
                                  bias=config.norm_bias)
 
-    def get_pooling_updates(
-        self,
-        task: PoolingTask,
-    ) -> Optional[PoolingParamsUpdate]:
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return self.pooling.get_supported_tasks()
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return self.pooling.get_pooling_updates(task)
 
     def forward(
@@ -299,11 +300,28 @@ class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
         self.model = ModernBertModel(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "modernbert"))
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-        self.pooler = ClassifierPooler(
-            vllm_config.model_config,
-            pooling=ModernBertPooler(config),
-            classifier=self.classifier,
-        )
+
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+
+        self.pooler = DispatchPooler({
+            "encode":
+            Pooler.for_encode(pooler_config),
+            "classify":
+            ClassifierPooler(
+                pooling=ModernBertPooler(config),
+                classifier=self.classifier,
+                act_fn=ClassifierPooler.act_fn_for_seq_cls(
+                    vllm_config.model_config),
+            ),
+            "score":
+            ClassifierPooler(
+                pooling=ModernBertPooler(config),
+                classifier=self.classifier,
+                act_fn=ClassifierPooler.act_fn_for_cross_encoder(
+                    vllm_config.model_config),
+            ),
+        })
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
 
