@@ -17,6 +17,7 @@ from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
                                         get_adapter, list_adapters,
                                         remove_adapter, set_adapter_mapping)
 from vllm.config import LoRAConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
@@ -619,6 +620,12 @@ class LoRAModelManager(AdapterModelManager):
         ]
 
     def _create_merged_loras_inplace(self, lora_model: LoRAModel) -> None:
+        should_remove_replaced_modules = (
+            self.lora_config.max_cpu_loras == 1
+            or get_tensor_model_parallel_world_size() == 1
+            or self.lora_config.max_loras == self.lora_config.max_cpu_loras
+        )
+
         for module_name, new_module_names in self.packed_modules.items():
             replacement_loras: list[Optional[LoRALayerWeights]] = []
             replaced_module: set[str] = set()
@@ -643,9 +650,17 @@ class LoRAModelManager(AdapterModelManager):
                     module_name = replaced_module_name
             lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
                 replacement_loras)
-            # Remove the modules that have been replaced.
-            for module in replaced_module:
-                lora_model.loras.pop(module, None)
+            
+            # DO NOT Remove the modules that have been replaced when tp >= 2
+            # and cached lora > 1 and max_loras < max_cpu_loras.
+            # for case that run PackedLoRALayerWeights again
+            if should_remove_replaced_modules:
+                # Remove the modules that have been replaced when did not use tp
+                for module in replaced_module:
+                    lora_model.loras.pop(module, None)
+    
+    def re_create_merged_loras(self, lora_model: LoRAModel) -> None:
+        self._create_merged_loras_inplace(lora_model)
 
     def _get_lora_layer_weights(
             self, lora_model: LoRAModel,

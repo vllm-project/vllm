@@ -12,6 +12,7 @@ from vllm.adapter_commons.utils import (add_adapter_worker,
                                         set_active_adapters_worker)
 from vllm.adapter_commons.worker_manager import AbstractWorkerManager
 from vllm.config import LoRAConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.lora.models import (LoRAModel, LoRAModelManager,
                               LRUCacheLoRAModelManager, create_lora_manager)
@@ -196,6 +197,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     be unloaded if the cache is above capacity."""
 
     _manager_cls: type[LRUCacheLoRAModelManager] = LRUCacheLoRAModelManager
+    _previous_lora_int_id: int = -1
 
     def create_lora_manager(
         self,
@@ -248,9 +250,23 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             # Then add the new adapter to the cache
             loaded = self._adapter_manager.add_adapter(lora)
         else:
-            # If the lora is already loaded, just touch it to
-            # update its position in the caches
-            loaded = self._adapter_manager.get_adapter(
-                lora_request.lora_int_id) is not None
+            # If the lora is already loaded, need to check and
+            # rePackedLoRALayerWeights when using lora cache and tp >= 2
+            lora = self._adapter_manager.get_adapter(lora_request.lora_int_id)
+
+            needs_repacking =  (
+                self._adapter_manager.capacity > 1
+                and self._adapter_manager.lora_config.max_loras
+                < self._adapter_manager.capacity
+                and lora_request.lora_int_id != self._previous_lora_int_id
+                and get_tensor_model_parallel_world_size() > 1
+            )
+            if needs_repacking:
+                self._adapter_manager.re_create_merged_loras(lora)
+
+            loaded = lora is not None
+
         self._adapter_manager.activate_adapter(lora_request.lora_int_id)
+        self._previous_lora_int_id = lora_request.lora_int_id
+
         return loaded
