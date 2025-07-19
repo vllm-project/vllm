@@ -133,8 +133,12 @@ class AsyncTPPass(VllmInductorPass):
         AllGatherGEMMPattern(self.model_dtype,
                              self.device).register(self.patterns)
 
-    def is_applicable_for_shape(self, shape: Optional[int]) -> bool:
-        # only do replace for specific shapes
+    # This pass is applied on top of the sequence parallelism pass.
+    # It inherits the same applicability condition as `SequenceParallelismPass`.
+    # See `SequenceParallelismPass.is_applicable` for more details.
+    def is_applicable(self, shape: Optional[int]) -> bool:
+        if self.splitting_ops is None or self.splitting_ops == []:
+            return True
         tp_size = get_tensor_model_parallel_world_size()
         return shape is not None and shape % tp_size == 0
 

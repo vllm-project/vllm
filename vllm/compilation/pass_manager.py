@@ -40,7 +40,7 @@ class PostGradPassManager(CustomGraphPass):
     def __call__(self, graph: fx.Graph):
         shape = get_pass_context().runtime_shape
         for pass_ in self.passes:
-            if pass_.is_applicable_for_shape(shape):
+            if pass_.is_applicable(shape):
                 pass_(graph)
 
         # always run fix_functionalization last

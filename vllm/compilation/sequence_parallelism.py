@@ -469,7 +469,22 @@ class SequenceParallelismPass(VllmInductorPass):
             # and allow multiple values of epsilon.
             torch._inductor.pattern_matcher._seen_patterns.clear()
 
-    def is_applicable_for_shape(self, shape: Optional[int]) -> bool:
+    # When sequence parallelism is enabled, the residual tensor from RMSNorm
+    # needs to be split along the sequence dimension. However, this dimension
+    # is symbolic during piecewise compilation, and splitting symbolic shapes
+    # is not supported.
+    #
+    # This pass is therefore only applied when the sequence dimension is
+    # concrete:
+    # 1. In full-graph compilation mode (no splitting ops are used).
+    #   For this case we always pad num_tokens to be a multiple of
+    #   tensor_parallel_size, so there's no need to check shape % tp_size == 0.
+    # 2. For specific shape provided during compilation (e.g., from
+    #    `compile_sizes`), which must be divisible by the tensor-parallel
+    #    size.
+    def is_applicable(self, shape: Optional[int]) -> bool:
+        if self.splitting_ops is None or self.splitting_ops == []:
+            return True
         tp_size = get_tensor_model_parallel_world_size()
         return shape is not None and shape % tp_size == 0
 
