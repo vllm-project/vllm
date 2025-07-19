@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV-Cache Utilities."""
 
+import copy
 import os
 from collections import defaultdict, deque
 from collections.abc import Iterable, Sequence
@@ -11,40 +12,14 @@ from typing import Any, Callable, NamedTuple, Optional
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, cdiv, sha256_cbor_64bit
-from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
-                                        FullAttentionSpec, KVCacheConfig,
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
                                         KVCacheTensor, SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
-
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
+from vllm.v1.core.block_hash import BlockHash, BlockHashWithGroupId
 logger = init_logger(__name__)
-
-
-class BlockHash(NamedTuple):
-    """Hash value of a block (int), the token IDs in the block, and extra keys.
-    We keep a tuple of token IDs and extra keys to reduce the likelihood of
-    hash collisions when the hash value is the same. By using SHA256 however,
-    hash collisions are practically impossible.
-    """
-    # Hash value of the block in an integer.
-    hash_value: int
-    # Token IDs in the block.
-    token_ids: tuple[int, ...]
-    # Extra keys for the block.
-    extra_keys: Optional[Any] = None
-
-
-class BlockHashWithGroupId(NamedTuple):
-    # The hash value for the contents (e.g., token_ids) of a block without group
-    # ID. The value is the same for blocks representing the same tokens but for
-    # different groups.
-    block_hash: BlockHash
-    # The KV cache group ID.
-    group_id: int
-
-    def get_hash_value(self) -> int:
-        return self.block_hash.hash_value
 
 
 # The hash seed for the first block of any prefix block sequence.
@@ -55,7 +30,7 @@ class BlockHashWithGroupId(NamedTuple):
 # a random seed if PYTHONHASHSEED is not set.
 #
 # The function `init_none_hash` initializes this variable globally.
-NONE_HASH: int
+NONE_HASH: int = 0  # Default value, will be overridden by init_none_hash
 
 
 def init_none_hash(hash_fn: Callable):
@@ -77,8 +52,8 @@ class PrefixCachingMetrics:
     """Metrics for prefix caching with a hit rate of the max recent N requests.
 
     Args:
-        max_recent_requests: The number of the max recent requests to aggregate.
-            Defaults to 1000.
+        max_recent_requests: The number of the max recent requests to
+           aggregate. Defaults to 1000.
     """
 
     def __init__(self, max_recent_requests: int = 1000):
@@ -197,8 +172,8 @@ class FreeKVCacheBlockQueue:
     manipulating the linked list. Instead, this class manipulates the
     prev_free_block and next_free_block attributes of the given blocks.
 
-    The queue is ordered by block ID in the beginning. When a block is allocated
-    and then freed, it will be appended back with the eviction order:
+    The queue is ordered by block ID in the beginning. When a block is
+    allocated and then freed, it will be appended back with the eviction order:
     1. The least recent used block is at the front (LRU).
     2. If two blocks have the same last accessed time (allocated by the
        same sequence), the one with more hash tokens (the tail of a block
@@ -747,7 +722,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     Returns:
         The generated KVCacheConfig
     """
-
+    
     page_size = get_uniform_page_size(kv_cache_spec)
     num_blocks = get_num_blocks(vllm_config, len(kv_cache_spec),
                                 available_memory, page_size)
@@ -762,7 +737,7 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
         KVCacheTensor(size=per_layer_size, shared_by=[layer_name])
         for layer_name in kv_cache_spec
     ]
-
+    
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
@@ -949,6 +924,49 @@ def _get_kv_cache_config_attention_free() -> KVCacheConfig:
     return KVCacheConfig(num_blocks=1, kv_cache_tensors=[], kv_cache_groups=[])
 
 
+def _get_kv_cache_config_optimal_block_size(
+        vllm_config: VllmConfig,
+        kv_cache_spec: dict[str, KVCacheSpec],
+        available_memory: int) -> KVCacheConfig:
+    """Use optimal block size for hybrid models.
+    
+    Args:
+        vllm_config: The vLLM configuration.
+        kv_cache_spec: KV cache specifications for each cache type.
+        available_memory: Available memory in bytes.
+        
+    Returns:
+        KV cache configuration with optimal block size.
+    """
+    try:
+        # Import here to avoid circular dependency
+        from vllm.v1.core.kv_cache_coordinator import (
+            HybridKVCacheCoordinator)
+        
+        optimal_block_size = HybridKVCacheCoordinator.calculate_optimal_block_size(
+            kv_cache_spec)
+
+        # Update specs with optimal size.
+        updated_specs = {}
+        for name, spec in kv_cache_spec.items():
+            # The optimal block size is applied to all specs to ensure uniformity.
+            new_spec = copy.deepcopy(spec)
+            new_spec.block_size = optimal_block_size
+            updated_specs[name] = new_spec
+
+        # Use existing logic.
+        return _get_kv_cache_config_uniform_page_size(vllm_config, updated_specs,
+                                                      available_memory)
+    except Exception as e:
+        logger.warning(
+            "Failed to calculate optimal block size: %s. "
+            "Falling back to uniform page size logic.",
+            e,
+            exc_info=True)
+        return _get_kv_cache_config_uniform_page_size(vllm_config, kv_cache_spec,
+                                                      available_memory)
+
+
 def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
     """
     This function tries to convert the KV cache specs to one type if the model
@@ -977,11 +995,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
         isinstance(spec, FullAttentionSpec) for spec in kv_cache_spec.values())
     has_sliding_window = any(
         isinstance(spec, SlidingWindowSpec) for spec in kv_cache_spec.values())
-    has_chunked_local_attention = any(
-        isinstance(spec, ChunkedLocalAttentionSpec)
-        for spec in kv_cache_spec.values())
-    if has_full_attention and (has_sliding_window
-                               or has_chunked_local_attention):
+    if has_full_attention and has_sliding_window:
         for layer_name, spec in kv_cache_spec.items():
             if isinstance(spec, SlidingWindowSpec):
                 kv_cache_spec[layer_name] = FullAttentionSpec(
@@ -991,15 +1005,6 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     dtype=spec.dtype,
                     use_mla=spec.use_mla,
                     sliding_window=spec.sliding_window,
-                )
-            elif isinstance(spec, ChunkedLocalAttentionSpec):
-                kv_cache_spec[layer_name] = FullAttentionSpec(
-                    block_size=spec.block_size,
-                    num_kv_heads=spec.num_kv_heads,
-                    head_size=spec.head_size,
-                    dtype=spec.dtype,
-                    use_mla=spec.use_mla,
-                    attention_chunk_size=spec.attention_chunk_size,
                 )
 
     if is_hybrid(kv_cache_spec):
@@ -1024,6 +1029,7 @@ def get_kv_cache_config(
         The generated KVCacheConfigs
     """
     check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
+
     if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
         unify_hybrid_kv_cache_specs(kv_cache_spec)
 
@@ -1046,8 +1052,10 @@ def get_kv_cache_config(
                                                       kv_cache_spec,
                                                       available_memory)
 
-    raise NotImplementedError
-
+    else:
+        return _get_kv_cache_config_optimal_block_size(vllm_config,
+                                                       kv_cache_spec,
+                                                       available_memory)
 
 def unify_kv_cache_configs(kv_cache_configs: list[KVCacheConfig]):
     """
