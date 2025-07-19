@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any, Optional
 
+import os
+import time
 import pplx_kernels as pplx
 import torch
 
@@ -193,7 +195,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # This argument is optional, defaults to indices.size(0)
         # There's not much point setting this unless it is != indices.size(0)
         bound_m: Optional[torch.Tensor] = None
-
+        
+        start = time.perf_counter()
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
             out_expert_x=expert_x,
@@ -203,6 +206,9 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             indices=topk_ids.view(dtype=torch.uint32),
             bound_m=bound_m,
         )
+        end = time.perf_counter()
+        if os.getenv("LOG_TIME") == "1":
+            logger.info("dispatch took %.3f ms", (end - start) * 1000)
 
         if expert_x_scale is not None:
             expert_x_scale = expert_x_scale[:, :, :orig_a_scale_block_shape]
@@ -240,8 +246,12 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
+        start = time.perf_counter()
         self.a2a.combine(out_tokens=output,
                          indices=topk_ids.view(dtype=torch.uint32),
                          weights=topk_weights,
                          expert_y=fused_expert_output,
                          bound_m=bound_m)
+        end = time.perf_counter()
+        if os.getenv("LOG_TIME") == "1":
+            logger.info("combine took %.3f ms", (end - start) * 1000)
