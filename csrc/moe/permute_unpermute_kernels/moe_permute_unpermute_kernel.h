@@ -57,31 +57,19 @@ void sortAndScanExpert(int* expert_for_source_row, const int* source_rows,
 
 template <typename T>
 void expandInputRowsKernelLauncher(
-    T const* unpermuted_input, T* permuted_output,
-    const float* unpermuted_scales, int* sorted_experts,
+    T const* unpermuted_input, T* permuted_output, int* sorted_experts,
     int const* expanded_dest_row_to_expanded_source_row,
-    int* expanded_source_row_to_expanded_dest_row,
+    int* expanded_source_row_to_expanded_dest_row, int* permuted_idx,
     int64_t* expert_first_token_offset, int64_t const num_rows,
     int64_t const* num_valid_tokens_ptr, int64_t const cols, int const k,
     int num_local_experts, const int& align_block_size, cudaStream_t stream);
-
-// Final kernel to unpermute and scale
-// This kernel unpermutes the original data, does the k-way reduction and
-// performs the final skip connection.
-template <typename T, typename OutputType, bool CHECK_SKIPPED>
-__global__ void finalizeMoeRoutingKernel(
-    T const* expanded_permuted_rows, OutputType* reduced_unpermuted_output,
-    float const* scales, int const* expanded_source_row_to_expanded_dest_row,
-    int const* expert_for_source_row, int64_t const orig_cols, int64_t const k,
-    int64_t const* num_valid_ptr);
 
 template <class T, class OutputType>
 void finalizeMoeRoutingKernelLauncher(
     T const* expanded_permuted_rows, OutputType* reduced_unpermuted_output,
     float const* scales, int const* expanded_source_row_to_expanded_dest_row,
-    int const* expert_for_source_row, int64_t const num_rows,
-    int64_t const cols, int64_t const k, int64_t const* num_valid_ptr,
-    cudaStream_t stream);
+    int64_t const num_rows, int64_t const cols, int64_t const k,
+    int64_t const* num_valid_ptr, cudaStream_t stream);
 
 void preprocessTopkIdLauncher(int* topk_id_ptr, int size,
                               const int* expert_map_ptr, int num_experts,
