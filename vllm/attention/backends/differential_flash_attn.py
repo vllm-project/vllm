@@ -667,7 +667,6 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
         alibi_slopes: Optional[List[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
@@ -680,9 +679,6 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
             differential_flash_attention_config
         self.used_shared_kv_cache = kv_sharing_target_layer_name is not None
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
-        if blocksparse_params is not None:
-            raise ValueError(
-                "FlashAttention does not support block-sparse attention.")
         if use_irope:
             logger.warning(
                 "Using irope in V0 is not supported yet, it will fall back "

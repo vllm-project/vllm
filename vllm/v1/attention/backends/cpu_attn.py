@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
 import torch
@@ -443,7 +443,6 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
@@ -451,9 +450,6 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
     ) -> None:
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported in V0.")
-        if blocksparse_params is not None:
-            raise ValueError(
-                "Torch SPDA does not support block-sparse attention.")
         if logits_soft_cap is not None:
             logger.warning_once("Torch SPDA does not support logits soft cap. "
                                 "Outputs may be slightly off.")
