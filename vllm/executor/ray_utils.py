@@ -40,6 +40,15 @@ try:
         lazily initialized after Ray sets CUDA_VISIBLE_DEVICES."""
 
         def __init__(self, *args, **kwargs) -> None:
+            # For ROCm: We need to get rid of ROCR/HIP_VISIBLE_DEVICES set
+            # by Ray, to avoid any conflicts when we set
+            # CUDA_VISIBLE_DEVICES later.
+            if os.getenv(
+                    "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES") is None:
+                os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+            if os.getenv("RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES") is None:
+                os.environ.pop("HIP_VISIBLE_DEVICES", None)
+
             super().__init__(*args, **kwargs)
             # Since the compiled DAG runs a main execution
             # in a different thread that calls cuda.set_device.
