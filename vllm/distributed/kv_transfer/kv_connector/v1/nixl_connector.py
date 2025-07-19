@@ -883,7 +883,7 @@ class NixlConnectorWorker:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
                     self.nixl_wrapper.release_xfer_handle(handle)
-                    logger.debug("[nixl connector] req_id %s transfer time remote_engine_id %s: %s",
+                    logger.debug("[nixl connector] req_id %s remote_engine_id %s transfer time: %s",
                                  req_id, remote_id, current_time - _xfer_stime)
                 elif xfer_state == "PROC":
                     in_progress = True
