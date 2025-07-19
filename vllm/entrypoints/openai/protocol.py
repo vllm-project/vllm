@@ -17,9 +17,11 @@ from openai.types.chat.chat_completion_audio import (
 from openai.types.chat.chat_completion_message import (
     Annotation as OpenAIAnnotation)
 # yapf: enable
-from openai.types.responses import (ResponseInputParam, ResponseOutputItem,
+from openai.types.responses import (ResponseFunctionToolCall,
+                                    ResponseInputParam, ResponseOutputItem,
                                     ResponseOutputMessage, ResponsePrompt,
-                                    ResponseStatus, ResponseTextConfig)
+                                    ResponseStatus, ResponseTextConfig,
+                                    ToolChoiceFunction)
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
@@ -324,16 +326,7 @@ class ResponsesRequest(OpenAIBaseModel):
             top_p = default_sampling_params.get(
                 "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"])
 
-        # Structured output
-        guided_decoding = None
-        if self.text is not None and self.text.format is not None:
-            response_format = self.text.format
-            if response_format.type == "json_schema":
-                guided_decoding = GuidedDecodingParams.from_optional(
-                    json=response_format.schema_)
-            elif response_format.type == "json_object":
-                raise NotImplementedError("json_object is not supported")
-
+        guided_decoding = self._get_guided_decoding()
         # TODO: add more parameters
         return SamplingParams.from_optional(
             temperature=temperature,
@@ -372,6 +365,91 @@ class ResponsesRequest(OpenAIBaseModel):
                 raise ValueError("Parameter 'cache_salt' must be a "
                                  "non-empty string if provided.")
         return data
+
+    def _get_guided_json_from_tool(
+            self) -> Optional[Union[str, dict, BaseModel]]:
+        # user has chosen to use a named tool
+        if isinstance(self.tool_choice, ToolChoiceFunction):
+            tool_name = self.tool_choice.name
+            tools = {tool.name: tool for tool in \
+                self.tools if tool.type == "function"}
+            if tool_name not in tools:
+                raise ValueError(
+                    f"Tool '{tool_name}' has not been passed in `tools`.")
+            tool = tools[tool_name]
+            return tool.parameters
+
+        if self.tool_choice == "required":
+            # Pydantic schema generation cannot be used since the JSON schema
+            # has to be constructed for a specific instantiation of a tool list
+            # so that parameters of a function are correctly generated
+            # based on the chosen function name
+            def get_tool_schema(tool: ToolChoiceFunction) -> dict:
+                return {
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "enum": [tool.name]
+                        },
+                        # parameters are always generated as '{}' in the final
+                        # output if they are missing from the request
+                        # (i.e. are None or '{}') so the schema is
+                        # updated to produce an empty object in that case
+                        "parameters": tool.parameters if tool.parameters else {
+                            "type": "object",
+                            "properties": {}
+                        }
+                    },
+                    "required": ["name", "parameters"]
+                }
+
+            def get_tool_schema_defs(tools: list[ToolChoiceFunction]) -> dict:
+                all_defs = dict[str, dict[str, Any]]()
+                for tool in tools:
+                    if tool.parameters is None:
+                        continue
+                    defs = tool.parameters.pop("$defs", {})
+                    for def_name, def_schema in defs.items():
+                        if def_name in all_defs and all_defs[
+                                def_name] != def_schema:
+                            raise ValueError(
+                                f"Tool definition '{def_name}' has "
+                                "multiple schemas, which is not "
+                                "supported.")
+                        else:
+                            all_defs[def_name] = def_schema
+                return all_defs
+
+            json_schema = {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "anyOf": [get_tool_schema(tool) for tool in self.tools]
+                }
+            }
+            json_schema_defs = get_tool_schema_defs(self.tools)
+            if json_schema_defs:
+                json_schema["$defs"] = json_schema_defs
+            return json_schema
+
+        return None
+
+    def _get_guided_decoding(self) -> Optional[GuidedDecodingParams]:
+        # Structured output
+        guided_decoding = None
+        if self.text is not None and self.text.format is not None:
+            response_format = self.text.format
+            if response_format.type == "json_schema":
+                guided_decoding = GuidedDecodingParams.from_optional(
+                    json=response_format.schema_)
+            elif response_format.type == "json_object":
+                raise NotImplementedError("json_object is not supported")
+        # Function call
+        elif not (self.tool_choice == "none" or self.tools is None):
+            guided_decoding = GuidedDecodingParams.from_optional(
+                json=self._get_guided_json_from_tool())
+        return guided_decoding
 
 
 class ChatCompletionRequest(OpenAIBaseModel):
@@ -1695,7 +1773,8 @@ class ResponsesResponse(OpenAIBaseModel):
     metadata: Optional[Metadata] = None
     model: str
     object: Literal["response"] = "response"
-    output: list[Union[ResponseOutputMessage, ResponseReasoningItem]]
+    output: list[Union[ResponseOutputMessage, ResponseReasoningItem,
+                       ResponseFunctionToolCall]]
     parallel_tool_calls: bool
     temperature: float
     tool_choice: ToolChoice
