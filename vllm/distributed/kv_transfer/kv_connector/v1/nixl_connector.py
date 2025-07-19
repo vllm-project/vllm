@@ -1029,9 +1029,9 @@ class NixlConnectorWorker:
         # Begin async xfer.
         self.nixl_wrapper.transfer(handle)
         end = time.perf_counter()
-        logger.debug(
-            "[nixl connector]: req_id %s transfer launch time %s",
-            request_id, end - start)
+        # logger.debug(
+        #     "[nixl connector]: req_id %s transfer launch time %s",
+        #     request_id, end - start)
 
         # Use handle to check completion in future step().
         # TODO (NickLucche) surface xfer elapsed time
