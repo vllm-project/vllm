@@ -115,7 +115,7 @@ class SchedulerOutput:
     # list of the requests that are scheduled for the first time.
     # We cache the request's data in each worker process, so that we don't
     # need to re-send it every scheduling step.
-    scheduled_new_reqs: list[NewRequestData]
+    new_name_scheduled_new_reqs: list[NewRequestData]
     # list of the requests that have been scheduled before.
     # Since the request's data is already cached in the worker processes,
     # we only send the diff to minimize the communication cost.
@@ -137,7 +137,7 @@ class SchedulerOutput:
     scheduled_encoder_inputs: dict[str, list[int]]
     # Number of common prefix blocks for all requests in each KV cache group.
     # This can be used for cascade attention.
-    num_common_prefix_blocks: list[int]
+    num_common_prefix_blocks: dict[int]
 
     # Request IDs that are finished in between the previous and the current
     # steps. This is used to notify the workers about the finished requests
@@ -155,3 +155,5 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
+
+    new_fields: dict[str, object] = {}
