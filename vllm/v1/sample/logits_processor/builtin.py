@@ -290,7 +290,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
 
         if reasoning_effort is not None:
             budget = self.reasoning_effort_to_token_budget.get(reasoning_effort)
-            if budget is not None:
+            if budget is None:
                 raise ValueError(f"Unknown reasoning_effort: {reasoning_effort}")
             return budget
 
@@ -358,7 +358,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
                     params, SamplingParams) else None)
                 resolved_thinking_token_budget = self._resolve_thinking_token_budget(
                     reasoning_effort, thinking_token_budget)
-                if thinking_token_budget is not None or reasoning_effort is not None:
+                if resolved_thinking_token_budget is not None:
                     self._state[index] = self._init_state_entry(
                         prompt_tok_ids, resolved_thinking_token_budget)
                     self._state[index]["output_tok_ids"] = output_tok_ids
