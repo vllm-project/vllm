@@ -12,7 +12,7 @@ import dataclasses
 import gc
 import os
 from contextlib import contextmanager
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, NamedTuple, Optional, Union
 
 import torch
 
@@ -67,11 +67,18 @@ except ModuleNotFoundError:
 HandleType = tuple[int, int, int, int]
 
 
+class Interval(NamedTuple):
+    ptr: int
+    size: int
+    name: Optional[str] = None
+
+
 @dataclasses.dataclass
 class AllocationData:
     handle: HandleType
     tag: str
     cpu_backup_tensor: Optional[torch.Tensor] = None
+    backup_intervals: Optional[list[Interval]] = None
 
 
 def create_and_map(allocation_handle: HandleType) -> None:
@@ -101,6 +108,39 @@ def use_memory_pool_with_allocator(
     mem_pool = torch.cuda.memory.MemPool(new_alloc._allocator)
     with torch.cuda.memory.use_mem_pool(mem_pool):
         yield mem_pool, new_alloc
+
+
+def calc_interval_difference(
+        outer_intervals: list[Interval],
+        inner_intervals: list[Interval]) -> list[tuple[int, list[Interval]]]:
+    """
+    :param outer_intervals: list of intervals, musted be sorted
+    :param inner_intervals: list of intervals, musted be sorted
+    :return: list of (ptr, intervals) that are in outer but not in inner.
+    """
+    outer_intervals = sorted(outer_intervals)
+    inner_intervals = sorted(inner_intervals)
+    i = 0
+    outer_diff_intervals: list[tuple[int, list[Interval]]] = []
+    for ptr, size, _ in outer_intervals:
+        backup_intervals: list[Interval] = []
+        last_offset = ptr
+        while i < len(inner_intervals) and inner_intervals[i].ptr < ptr + size:
+            _ptr, _size, _name = inner_intervals[i]
+            assert _ptr >= ptr and _ptr + _size <= ptr + size, \
+                f"tensor {_name} is not fully covered by allocator, " \
+                f"tensor addrs: ({_ptr=}, {_size=}), " \
+                f"allocator addrs: ({ptr=}, {size=})"
+            diff = _ptr - last_offset
+            if diff > 0:
+                backup_intervals.append(Interval(last_offset, diff))
+            last_offset = _ptr + _size
+            i += 1
+        diff = ptr + size - last_offset
+        if diff > 0:
+            backup_intervals.append(Interval(last_offset, diff))
+        outer_diff_intervals.append((ptr, backup_intervals))
+    return outer_diff_intervals
 
 
 class CuMemAllocator:
@@ -171,6 +211,59 @@ class CuMemAllocator:
             data.cpu_backup_tensor = None
         return data.handle
 
+    def backup_memory_except(
+            self,
+            named_tensors: list[tuple[str, torch.Tensor]],
+            tags: Optional[Union[tuple[str, ...], str]] = None) -> None:
+        """
+        Found all mem addresses from self.pointer_to_data which matches tags,
+        backup the difference mem addresses except the ones in named_tensors.
+        The mem addresses in named_tensors should be all involved in the memory
+        from tags. After backup, the memory of the named_tensors will be
+        discarded when calling sleep level=2 but the difference mem fragments
+        will be backuped and restored when calling wake_up. This is useful for
+        the case when we do not want to backup all the memory from tags,
+        e.g. sleep level 2 will use this feature to only backup the difference
+        mem fragments and discard the model parameters since they will be
+        updated in the next step.
+        """
+        if tags is None:
+            # by default, allocated tensors's fragments will be backup
+            tags = (CuMemAllocator.default_tag, )
+        elif isinstance(tags, str):
+            tags = (tags, )
+
+        assert isinstance(tags, tuple)
+
+        diff_intervals = calc_interval_difference(
+            [
+                Interval(ptr, item.handle[1])
+                for ptr, item in self.pointer_to_data.items()
+                if item.tag in tags
+            ],
+            [
+                Interval(t.data_ptr(), t.nbytes, name)
+                for name, t in named_tensors
+            ],
+        )
+
+        for addr, intervals in diff_intervals:
+            backup_size = sum(interval.size for interval in intervals)
+            if backup_size == 0:
+                continue
+            cpu_backup_tensor = torch.empty(
+                backup_size,
+                dtype=torch.uint8,
+                device='cpu',
+                pin_memory=is_pin_memory_available())
+            offset = 0
+            for ptr, size, _ in intervals:
+                cpu_ptr = cpu_backup_tensor[offset:offset + size].data_ptr()
+                libcudart.cudaMemcpy(cpu_ptr, ptr, size)
+                offset += size
+            self.pointer_to_data[addr].backup_intervals = intervals
+            self.pointer_to_data[addr].cpu_backup_tensor = cpu_backup_tensor
+
     def sleep(
             self,
             offload_tags: Optional[Union[tuple[str, ...],
@@ -204,6 +297,7 @@ class CuMemAllocator:
                 cpu_ptr = cpu_backup_tensor.data_ptr()
                 libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
                 data.cpu_backup_tensor = cpu_backup_tensor
+                data.backup_intervals = None
             unmap_and_release(handle)
 
         gc.collect()
@@ -223,7 +317,17 @@ class CuMemAllocator:
             if tags is None or data.tag in tags:
                 handle = data.handle
                 create_and_map(handle)
-                if data.cpu_backup_tensor is not None:
+                if data.backup_intervals is not None:
+                    assert data.cpu_backup_tensor is not None
+                    offset = 0
+                    for ptr, size, _ in data.backup_intervals:
+                        cpu_ptr = data.cpu_backup_tensor[offset:offset +
+                                                         size].data_ptr()
+                        libcudart.cudaMemcpy(ptr, cpu_ptr, size)
+                        offset += size
+                    data.backup_intervals = None
+                    data.cpu_backup_tensor = None
+                elif data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
                     if cpu_backup_tensor is not None:
                         size_in_bytes = cpu_backup_tensor.numel(
