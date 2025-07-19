@@ -143,7 +143,6 @@ def get_attn_backend(
     kv_cache_dtype: Optional[str],
     block_size: int,
     is_attention_free: bool,
-    is_blocksparse: bool = False,
     use_mla: bool = False,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
@@ -157,7 +156,6 @@ def get_attn_backend(
         kv_cache_dtype=kv_cache_dtype,
         block_size=block_size,
         is_attention_free=is_attention_free,
-        is_blocksparse=is_blocksparse,
         use_v1=envs.VLLM_USE_V1,
         use_mla=use_mla,
     )
@@ -170,16 +168,9 @@ def _cached_get_attn_backend(
     kv_cache_dtype: Optional[str],
     block_size: int,
     is_attention_free: bool,
-    is_blocksparse: bool = False,
     use_v1: bool = False,
     use_mla: bool = False,
 ) -> type[AttentionBackend]:
-    if is_blocksparse:
-        logger.info("Using BlocksparseFlashAttention backend.")
-        from vllm.attention.backends.blocksparse_attn import (
-            BlocksparseFlashAttentionBackend)
-        return BlocksparseFlashAttentionBackend
-
     # If there are no attention layers (e.g. we are running Mamba),
     # use the placeholder NO_ATTENTION
     if is_attention_free:

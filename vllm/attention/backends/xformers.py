@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with xFormers and PagedAttention."""
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 from xformers import ops as xops
@@ -387,7 +387,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         alibi_slopes: Optional[List[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
@@ -396,9 +395,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported in V0 "
                                       "XFORMERS backend.")
-        if blocksparse_params is not None:
-            raise ValueError(
-                "XFormers does not support block-sparse attention.")
         if logits_soft_cap is not None:
             logger.warning_once("XFormers does not support logits soft cap. "
                                 "Outputs may be slightly off.")
