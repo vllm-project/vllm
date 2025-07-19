@@ -883,7 +883,7 @@ class NixlConnectorWorker:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
                     self.nixl_wrapper.release_xfer_handle(handle)
-                    logger.debug("[nixl] req_id: %s transfer time: %s",
+                    logger.debug("[nixl connector] req_id %s transfer time: %s",
                                  req_id, current_time - _xfer_stime)
                 elif xfer_state == "PROC":
                     in_progress = True
@@ -1016,6 +1016,7 @@ class NixlConnectorWorker:
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
         # Prepare transfer with Nixl.
+        start = time.perf_counter()
         handle = self.nixl_wrapper.make_prepped_xfer(
             "READ",
             local_xfer_side_handle,
@@ -1027,6 +1028,10 @@ class NixlConnectorWorker:
 
         # Begin async xfer.
         self.nixl_wrapper.transfer(handle)
+        end = time.perf_counter()
+        logger.debug(
+            "[nixl connector]: req_id %s transfer launch time %s",
+            request_id, end - start)
 
         # Use handle to check completion in future step().
         # TODO (NickLucche) surface xfer elapsed time
