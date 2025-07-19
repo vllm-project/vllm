@@ -25,6 +25,7 @@ from torch import nn
 
 from vllm import envs
 from vllm.attention.layer import Attention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
@@ -172,9 +173,9 @@ class NemotronHMambaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.norm(hidden_states, residual)
 
-        hidden_states = self.mixer(hidden_states, mamba_cache_params,
-                                   mamba2_metadata)
-        return hidden_states, residual
+        output = torch.empty_like(hidden_states)
+        self.mixer(hidden_states, output, mamba_cache_params, mamba2_metadata)
+        return output, residual
 
 
 class NemotronHAttention(nn.Module):
@@ -292,6 +293,7 @@ ALL_DECODER_LAYER_TYPES = {
 }
 
 
+@support_torch_compile
 class NemotronHModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
