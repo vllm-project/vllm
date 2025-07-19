@@ -2081,6 +2081,17 @@ class ParallelConfig:
                 raise ValueError(
                     "num_redundant_experts must be non-negative, but got "
                     f"{self.num_redundant_experts}.")
+            if not self.enable_expert_parallel:
+                raise ValueError(
+                    "enable_expert_parallel must be True to use EPLB.")
+            if self.tensor_parallel_size <= 1:
+                raise ValueError(
+                    "EPLB requires tensor_parallel_size to be greater than 1, "
+                    f"but got {self.tensor_parallel_size}.")
+            if self.data_parallel_size <= 1:
+                raise ValueError(
+                    "EPLB requires data_parallel_size to be greater than 1, "
+                    f"but got {self.data_parallel_size}.")
         else:
             if self.num_redundant_experts != 0:
                 raise ValueError(
