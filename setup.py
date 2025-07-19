@@ -523,7 +523,33 @@ def get_gaudi_sw_version():
 
 
 def get_vllm_version() -> str:
-    version = get_version(write_to="vllm/_version.py")
+    try:
+        version = get_version(write_to="vllm/_version.py")
+    except LookupError:
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "_version", "vllm/_version.py")
+            if spec and spec.loader:
+                _version_module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(_version_module)
+                version = _version_module.__version__
+            else:
+                raise ImportError("Could not load _version.py")
+        except (ImportError, FileNotFoundError, AttributeError):
+            try:
+                import subprocess
+                git_describe = subprocess.check_output(
+                    ["git", "describe", "--tags", "--long", "--dirty"],
+                    stderr=subprocess.DEVNULL,
+                    cwd=ROOT_DIR,
+                    universal_newlines=True).strip()
+                if git_describe.startswith('v'):
+                    git_describe = git_describe[1:]  # Remove 'v' prefix
+                version = git_describe.replace('-g',
+                                               '+g')  # PEP 440 compatible
+            except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+                version = "0.0.0+unknown"
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
     if _no_device():
