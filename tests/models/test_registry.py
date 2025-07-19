@@ -72,11 +72,15 @@ def test_registry_model_property(model_arch, is_mm, init_cuda, is_ce):
 
 
 @create_new_process_for_each_test()
-@pytest.mark.parametrize("model_arch,is_pp,init_cuda", [
-    ("MLPSpeculatorPreTrainedModel", False, False),
-    ("DeepseekV2ForCausalLM", True, False),
-    ("Qwen2VLForConditionalGeneration", True, True),
-])
+@pytest.mark.parametrize(
+    "model_arch,is_pp,init_cuda",
+    [
+        # TODO(woosuk): Re-enable this once the MLP Speculator is supported
+        # in V1.
+        # ("MLPSpeculatorPreTrainedModel", False, False),
+        ("DeepseekV2ForCausalLM", True, False),
+        ("Qwen2VLForConditionalGeneration", True, True),
+    ])
 def test_registry_is_pp(model_arch, is_pp, init_cuda):
     assert ModelRegistry.is_pp_supported_model(model_arch) is is_pp
 
