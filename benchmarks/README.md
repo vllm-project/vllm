@@ -118,6 +118,8 @@ Total generated tokens:                  2212
 Request throughput (req/s):              1.73      
 Output token throughput (tok/s):         382.89    
 Total Token throughput (tok/s):          619.85    
+Peak memory usage (GiB):                 1.59      
+Memory per request (MiB):                162.41 
 ---------------Time to First Token----------------
 Mean TTFT (ms):                          71.54     
 Median TTFT (ms):                        73.88     
