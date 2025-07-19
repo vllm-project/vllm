@@ -189,19 +189,6 @@ def test_multiple_guided_options_not_allowed(sample_json_schema, sample_regex):
         GuidedDecodingParams(json=sample_json_schema, grammar="test grammar")
 
 
-def test_guided_decoding_backend_options():
-    """Test backend-specific options"""
-    with pytest.warns(DeprecationWarning):
-        guided_decoding_params = GuidedDecodingParams(
-            backend=
-            "xgrammar:no-fallback,disable-any-whitespace,no-additional-properties"
-        )
-    assert guided_decoding_params.backend == "xgrammar"
-    assert guided_decoding_params.disable_fallback
-    assert guided_decoding_params.disable_any_whitespace
-    assert guided_decoding_params.disable_additional_properties
-
-
 def test_pickle_xgrammar_tokenizer_data():
     try:
         import xgrammar as xgr

@@ -2008,6 +2008,19 @@ class ParallelConfig:
         aggregated_has_unfinished = bool(tensor.item())
         return aggregated_has_unfinished
 
+    @staticmethod
+    def sync_kv_cache_memory_size(dp_group: "ProcessGroup",
+                                  kv_cache_memory: int) -> int:
+        if kv_cache_memory == -1:
+            kv_cache_memory = torch.iinfo(torch.int64).max
+        tensor = torch.tensor([kv_cache_memory],
+                              dtype=torch.int64,
+                              device="cpu")
+        # we cannot use broadcast for stateless dp group since it depends
+        # on global rank
+        torch.distributed.all_reduce(tensor, op=ReduceOp.MIN, group=dp_group)
+        return tensor.item()
+
     def compute_hash(self):
         """
         Provide a hash that uniquely identifies all the configs
@@ -2523,8 +2536,6 @@ class DeviceConfig:
 
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
                             "mlp_speculator", "draft_model", "deepseek_mtp"]
-SpeculativeAcceptanceMethod = Literal["rejection_sampler",
-                                      "typical_acceptance_sampler"]
 
 
 @config
@@ -2547,13 +2558,6 @@ class SpeculativeConfig:
 
     If using `ngram` method, the related configuration `prompt_lookup_max` and
     `prompt_lookup_min` should be considered."""
-    acceptance_method: SpeculativeAcceptanceMethod = "rejection_sampler"
-    """The method to use for accepting draft tokens:\n
-    - "rejection_sampler" maps to `RejectionSampler`.\n
-    - "typical_acceptance_sampler" maps to `TypicalAcceptanceSampler`.
-
-    If using `typical_acceptance_sampler`, the related configuration
-    `posterior_threshold` and `posterior_alpha` should be considered."""
     draft_tensor_parallel_size: Optional[int] = None
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
@@ -2580,9 +2584,6 @@ class SpeculativeConfig:
     will use the default version."""
 
     # Advanced control
-    disable_mqa_scorer: bool = False
-    """Disable the MQA scorer and fall back to batch expansion for scoring
-    proposals."""
     disable_by_batch_size: Optional[int] = None
     """Disable speculative decoding for new incoming requests when the number
     of enqueued requests is larger than this value, if provided."""
@@ -2594,16 +2595,6 @@ class SpeculativeConfig:
     prompt_lookup_min: Optional[int] = None
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
-
-    # Typical acceptance sampler configuration
-    posterior_threshold: Optional[float] = None
-    """A threshold value that sets a lower bound on the posterior probability
-    of a token in the target model for it to be accepted. This threshold is
-    used only when we use the `TypicalAcceptanceSampler` for token acceptance.
-    """
-    posterior_alpha: Optional[float] = None
-    """Scaling factor for entropy-based threshold, applied when using
-    `TypicalAcceptanceSampler`."""
 
     speculative_token_tree: Optional[str] = None
     """Specifies the tree structure for speculative token generation.
@@ -2782,8 +2773,8 @@ class SpeculativeConfig:
                 elif (self.draft_model_config.hf_config.model_type ==
                       "mlp_speculator"):
                     self.method = "mlp_speculator"
-                elif (self.draft_model_config.hf_config.model_type ==
-                      "deepseek_mtp"):
+                elif (self.draft_model_config.hf_config.model_type
+                      in ("deepseek_mtp", "mimo_mtp")):
                     self.method = "deepseek_mtp"
                     if self.num_speculative_tokens > 1:
                         logger.warning(
@@ -2793,6 +2784,11 @@ class SpeculativeConfig:
                             )
                 else:
                     self.method = "draft_model"
+                    raise NotImplementedError(
+                        "Speculative decoding with draft model is not "
+                        "supported yet. Please consider using other "
+                        "speculative decoding methods such as ngram, medusa, "
+                        "eagle, or deepseek_mtp.")
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3"):
@@ -2850,12 +2846,6 @@ class SpeculativeConfig:
                     SpeculativeConfig.create_draft_parallel_config(
                         self.target_parallel_config,
                         self.draft_tensor_parallel_size))
-
-        if self.acceptance_method == "typical_acceptance_sampler":
-            if self.posterior_threshold is None:
-                self.posterior_threshold = 0.09
-            if self.posterior_alpha is None:
-                self.posterior_alpha = 0.3
 
     @staticmethod
     def _maybe_override_draft_max_model_len(
@@ -2962,30 +2952,6 @@ class SpeculativeConfig:
         if self.draft_model_config:
             self.draft_model_config.verify_with_parallel_config(
                 self.draft_parallel_config)
-            # Validate and set draft token acceptance related settings.
-
-        if self.acceptance_method is None:
-            raise ValueError("acceptance_method is not set. "
-                             "Expected values are rejection_sampler or "
-                             "typical_acceptance_sampler.")
-
-        if (self.acceptance_method != 'rejection_sampler'
-                and self.acceptance_method != 'typical_acceptance_sampler'):
-            raise ValueError(
-                "Expected acceptance_method to be either "
-                "rejection_sampler or typical_acceptance_sampler. Instead it "
-                f"is {self.acceptance_method}")
-
-        if self.acceptance_method == "typical_acceptance_sampler" and (
-            (self.posterior_threshold is not None
-             and self.posterior_threshold < 0) or
-            (self.posterior_alpha is not None and self.posterior_alpha < 0)):
-            raise ValueError(
-                "Expected the posterior_threshold and posterior_alpha of "
-                "typical_acceptance_sampler to be > 0. "
-                "Instead found posterior_threshold = "
-                f"{self.posterior_threshold} and posterior_alpha = "
-                f"{self.posterior_alpha}")
 
         if (self.disable_by_batch_size is not None
                 and self.disable_by_batch_size < 2):
@@ -3048,12 +3014,7 @@ class LoRAConfig:
     (added to the base model vocabulary)."""
     lora_vocab_padding_size: ClassVar[int] = current_platform\
         .get_lora_vocab_padding_size()
-    long_lora_scaling_factors: Optional[tuple[float, ...]] = None
-    """Specify multiple scaling factors (which can be different from base model
-    scaling factor - see eg. Long LoRA) to allow for multiple LoRA adapters
-    trained with those scaling factors to be used at the same time. If not
-    specified, only adapters trained with the base model scaling factor are
-    allowed."""
+
     default_mm_loras: Optional[dict[str, str]] = None
     """Dictionary mapping specific modalities to LoRA model paths; this field
     is only applicable to multimodal models and should be leveraged when a
@@ -3086,7 +3047,6 @@ class LoRAConfig:
         factors.append(self.lora_dtype)
         factors.append(self.lora_extra_vocab_size)
         factors.append(self.lora_vocab_padding_size)
-        factors.append(self.long_lora_scaling_factors)
         factors.append(self.bias_enabled)
         hash_str = hashlib.md5(str(factors).encode(),
                                usedforsecurity=False).hexdigest()
@@ -3124,11 +3084,6 @@ class LoRAConfig:
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
-
-    def verify_lora_support(self):
-        if self.long_lora_scaling_factors is not None and envs.VLLM_USE_V1:
-            raise ValueError(
-                "V1 LoRA does not support long LoRA, please use V0.")
 
 
 @config
@@ -4598,7 +4553,6 @@ class VllmConfig:
         if self.lora_config is not None:
             self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
-            self.lora_config.verify_lora_support()
         if self.prompt_adapter_config is not None:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
@@ -4708,6 +4662,13 @@ class VllmConfig:
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
+                self.scheduler_config.disable_hybrid_kv_cache_manager = True
+            if self.model_config is not None and \
+                self.model_config.attention_chunk_size is not None and \
+                self.speculative_config is not None and \
+                self.speculative_config.use_eagle():
+                # Hybrid KV cache manager is not yet supported with chunked
+                # local attention + eagle.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
 
     def update_sizes_for_sequence_parallelism(self,
