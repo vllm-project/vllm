@@ -257,9 +257,10 @@ class Scheduler(SchedulerInterface):
                             self.running,
                             key=lambda r: (r.priority, r.arrival_time),
                         )
-                        if self.running.index(preempted_req) <= req_index:
+                        preempted_index = self.running.index(preempted_req)
+                        if preempted_index <= req_index:
                             req_index -= 1
-                        self.running.remove(preempted_req)
+                        self.running.pop(preempted_index)
                     else:
                         preempted_req = self.running.pop()
 
