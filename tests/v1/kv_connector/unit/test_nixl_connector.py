@@ -331,8 +331,8 @@ class TestNixlHandshake:
 
 # NOTE: resource cleanup in mp backend is a bit finicky, so the order in which
 # we put here is important. First run ray, it will clean up the resources, then
-# run mp tests.
-@pytest.mark.parametrize("distributed_executor_backend", ["ray", "mp"])
+# the rest of the tests.
+@pytest.mark.parametrize("distributed_executor_backend", ["ray", None])
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FakeNixlWrapper)

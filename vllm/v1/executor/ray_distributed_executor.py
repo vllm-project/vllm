@@ -34,9 +34,9 @@ class FutureWrapper(Future):
 
         if self.aggregator is None:
             return self.refs[0].get()
-        else:
-            outputs = [ref.get() for ref in self.refs]
-            return self.aggregator.aggregate(outputs, output_rank=0)
+
+        outputs = [ref.get() for ref in self.refs]
+        return self.aggregator.aggregate(outputs, output_rank=0)
 
 
 class RayDistributedExecutor(RayDistributedExecutorV0, Executor):

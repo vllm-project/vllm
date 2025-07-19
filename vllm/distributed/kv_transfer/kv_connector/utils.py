@@ -120,7 +120,6 @@ class KVOutputAggregator:
     output corresponding to Rank 0 for scheduler."""
 
     def __init__(self, world_size: int):
-        self.world_size = world_size
         # Complete transfer tracker. Used by to track finished requests
         # [req_id -> n_finished_workers]
         self._recv_remaining_count = defaultdict[str, int](lambda: world_size)

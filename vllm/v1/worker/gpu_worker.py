@@ -327,9 +327,14 @@ class Worker(WorkerBase):
             assert isinstance(output, IntermediateTensors)
             get_pp_group().send_tensor_dict(output.tensors,
                                             all_gather_group=get_tp_group())
-            empty_output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-            empty_output.finished_sending = output.finished_sending
-            empty_output.finished_recving = output.finished_recving
+
+            # In case of PP with kv transfer, we need to pass through the
+            # finished_sending and finished_recving buffers.
+            empty_output = EMPTY_MODEL_RUNNER_OUTPUT
+            if output.finished_sending or output.finished_recving:
+                empty_output = copy.copy(empty_output)
+                empty_output.finished_sending = output.finished_sending
+                empty_output.finished_recving = output.finished_recving
             output = empty_output
 
         assert isinstance(output, ModelRunnerOutput)

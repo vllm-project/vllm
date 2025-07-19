@@ -1393,6 +1393,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
             if not broadcast_pp_output:
+                if finished_sending or finished_recving:
+                    hidden_states.finished_sending = finished_sending
+                    hidden_states.finished_recving = finished_recving
                 return hidden_states
             assert isinstance(hidden_states, IntermediateTensors)
             get_pp_group().send_tensor_dict(hidden_states.tensors,
