@@ -4325,6 +4325,41 @@ class CompilationConfig:
             ]
 
 
+class ReasoningConfig:
+    """Configuration for reasoning models."""
+
+    think_start_str: Optional[str] = None
+    """String that indicates the start of reasoning."""
+    think_end_str: Optional[str] = None
+    """String that indicates the end of reasoning."""
+    think_start_token_ids: Optional[int] = None
+    """Token ID that indicates the start of reasoning."""
+    think_end_token_ids: Optional[int] = None
+    """Token ID that indicates the end of reasoning."""
+    low_effort_token_budget: Optional[int] = 1024
+    """Token budget for low effort reasoning."""
+    medium_effort_token_budget: Optional[int] = 2048
+    """Token budget for medium effort reasoning."""
+    high_effort_token_budget: Optional[int] = 8192
+    """Token budget for high effort reasoning."""
+
+    def __init__(self,
+                 think_start_str: Optional[str] = None,
+                 think_end_str: Optional[str] = None,
+                 think_start_token_ids: Optional[int] = None,
+                 think_end_token_ids: Optional[int] = None,
+                 low_effort_token_budget: Optional[int] = 1024,
+                 medium_effort_token_budget: Optional[int] = 2048,
+                 high_effort_token_budget: Optional[int] = 8192):
+        self.think_start_str = think_start_str
+        self.think_end_str = think_end_str
+        self.think_start_token_ids = think_start_token_ids
+        self.think_end_token_ids = think_end_token_ids
+        self.low_effort_token_budget = low_effort_token_budget
+        self.medium_effort_token_budget = medium_effort_token_budget
+        self.high_effort_token_budget = high_effort_token_budget
+
+
 @config
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class VllmConfig:
@@ -4381,6 +4416,8 @@ class VllmConfig:
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
+    reasoning_config: Optional[ReasoningConfig] = None
+    """The configurations for reasoning model."""
     additional_config: Union[dict, SupportsHash] = field(default_factory=dict)
     """Additional config for specified platform. Different platforms may
     support different configs. Make sure the configs are valid for the platform

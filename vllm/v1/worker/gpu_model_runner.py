@@ -42,6 +42,7 @@ from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.pooling_params import PoolingParams, PoolingTask
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, check_use_alibi, get_dtype_size,
                         is_pin_memory_available, round_up)
@@ -106,6 +107,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+
+        reasoning_config = self.vllm_config.reasoning_config
+        if reasoning_config is not None:
+            tokenizer = init_tokenizer_from_configs(
+                model_config=self.vllm_config.model_config,
+                scheduler_config=self.vllm_config.scheduler_config,
+                lora_config=self.vllm_config.lora_config,
+            ).get_lora_tokenizer(None)
+            reasoning_config.think_start_token_ids = \
+                tokenizer.convert_tokens_to_ids(
+                    tokenizer.tokenize(reasoning_config.think_start_str))
+            reasoning_config.think_end_token_ids = \
+                tokenizer.convert_tokens_to_ids(
+                    tokenizer.tokenize(reasoning_config.think_end_str))
 
         from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
         set_cpu_offload_max_bytes(
@@ -214,6 +229,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.cache_config.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
+            reasoning_config=self.vllm_config.reasoning_config,
         )
 
         self.use_cuda_graph = (
@@ -2483,6 +2499,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 vocab_size=self.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
                 is_spec_decode=bool(self.vllm_config.speculative_config),
+                reasoning_config=self.vllm_config.reasoning_config,
             )
 
     def _allocate_kv_cache_tensors(
