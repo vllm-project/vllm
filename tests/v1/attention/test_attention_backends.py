@@ -212,7 +212,7 @@ def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
 
         from vllm.v1.attention.backends.flashinfer import PerLayerParameters
 
-        def mock_get_per_layer_parameters(vllm_config):
+        def mock_get_per_layer_parameters(vllm_config, impl_cls):
             # Return mock parameters for a single layer
             head_size = vllm_config.model_config.get_head_size()
             return {
