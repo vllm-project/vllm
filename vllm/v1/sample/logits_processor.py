@@ -513,10 +513,10 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             "medium": 2048,
             "high": 8192,
         }
-        self.think_start_token_ids = getattr(
-            reasoning_config, "think_start_token_ids", [])
-        self.think_end_token_ids = getattr(
-            reasoning_config, "think_end_token_ids", [])
+        self.think_start_token_ids = getattr(reasoning_config,
+                                             "think_start_token_ids", [])
+        self.think_end_token_ids = getattr(reasoning_config,
+                                           "think_end_token_ids", [])
         self.reasoning_effort_to_token_budget['low'] = getattr(
             reasoning_config, "low_effort_token_budget",
             self.reasoning_effort_to_token_budget['low'])
@@ -532,8 +532,8 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         self._state: dict[int, dict[str, Any]] = {}
 
     @staticmethod
-    def _find_last_sequence_index(
-        target_list: list[int], token_ids: list[int]) -> int:
+    def _find_last_sequence_index(target_list: list[int],
+                                  token_ids: list[int]) -> int:
         """
         Returns the index of the last occurrence of token_ids in target_list.
 
@@ -550,8 +550,8 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         return -1
 
     def _resolve_thinking_token_budget(
-        self, reasoning_effort: Optional[str],
-        thinking_token_budget: Optional[int]) -> int:
+            self, reasoning_effort: Optional[str],
+            thinking_token_budget: Optional[int]) -> int:
         """
         Determines the final thinking token budget.
         Priority:
@@ -562,7 +562,8 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             return thinking_token_budget
 
         if reasoning_effort is not None:
-            budget = self.reasoning_effort_to_token_budget.get(reasoning_effort)
+            budget = self.reasoning_effort_to_token_budget.get(
+                reasoning_effort)
             if budget is None:
                 raise ValueError(
                     f"Unknown reasoning_effort: {reasoning_effort}")
@@ -570,22 +571,21 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
 
         return None
 
-    def _init_state_entry(
-        self, prompt_tok_ids: list[int],
-        thinking_token_budget: int) -> dict[str, Any]:
+    def _init_state_entry(self, prompt_tok_ids: list[int],
+                          thinking_token_budget: int) -> dict[str, Any]:
         """Initializes the tracking state for a given sequence index."""
-        last_start = self._find_last_sequence_index(
-            prompt_tok_ids, self.think_start_token_ids)
-        last_end = self._find_last_sequence_index(
-            prompt_tok_ids, self.think_end_token_ids)
+        last_start = self._find_last_sequence_index(prompt_tok_ids,
+                                                    self.think_start_token_ids)
+        last_end = self._find_last_sequence_index(prompt_tok_ids,
+                                                  self.think_end_token_ids)
         in_think = last_start > last_end
         think_count = len(prompt_tok_ids) - (last_start + 1) if in_think else 0
 
         return {
-            "in_think": in_think,       # Currently in thinking mode
-            "in_end": False,            # Currently forcing end tokens
-            "think_count": think_count, # Number of tokens in thinking section
-            "end_count": 0,             # Number of end tokens forced so far
+            "in_think": in_think,  # Currently in thinking mode
+            "in_end": False,  # Currently forcing end tokens
+            "think_count": think_count,  # Number of tokens in thinking section
+            "end_count": 0,   # Number of end tokens forced so far
             "prompt_tok_ids": prompt_tok_ids,
             "output_tok_ids": [],
             "thinking_token_budget": thinking_token_budget,
@@ -635,8 +635,8 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
                 reasoning_effort = (params.reasoning_effort if isinstance(
                     params, SamplingParams) else None)
                 thinking_token_budget = (params.thinking_token_budget
-                    if isinstance(
-                        params, SamplingParams) else None)
+                                         if isinstance(params, SamplingParams)
+                                         else None)
                 resolved_thinking_token_budget = \
                     self._resolve_thinking_token_budget(
                         reasoning_effort, thinking_token_budget)
@@ -664,8 +664,10 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             return logits
 
         mask = torch.zeros(batch_size, dtype=torch.bool, device=logits.device)
-        force_token_ids = torch.full((batch_size,), -1,
-                                     dtype=torch.long, device=logits.device)
+        force_token_ids = torch.full((batch_size,),
+                                     -1,
+                                     dtype=torch.long,
+                                     device=logits.device)
 
         for i in range(batch_size):
             state = self._state.get(i)
