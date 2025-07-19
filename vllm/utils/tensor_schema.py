@@ -49,7 +49,7 @@ class TensorSchema:
                 for arg in args:
                     if isinstance(arg, TensorShape):
                         expected_shape = arg.dims
-                        if isinstance(value, list) or isinstance(value, tuple):
+                        if isinstance(value, (list, tuple)):
                             if not value:
                                 raise ValueError(
                                     f"{field_name} is an empty list")
@@ -59,15 +59,18 @@ class TensorSchema:
                             for i, v in enumerate(value):
                                 if not isinstance(v, torch.Tensor):
                                     raise ValueError(
-                                        f"{field_name}[{i}] is not a torch.Tensor"
+                                        f"{field_name}[{i}] is not a "
+                                        f"torch.Tensor"
                                     )
                                 if v.shape != first.shape:
                                     raise ValueError(
-                                        f"{field_name} contains inconsistent shapes: "
-                                        f"{first.shape} vs {v.shape} at index {i}"
+                                        f"{field_name} contains inconsistent "
+                                        f"shapes: {first.shape} vs {v.shape} "
+                                        f"at index {i}"
                                     )
 
-                            # Treat the list as a stacked tensor: shape = (len(list), *tensor.shape)
+                            # Treat the list as a stacked tensor: 
+                            # shape = (len(list), *tensor.shape)
                             actual_shape = (len(value), ) + first.shape
 
                         elif isinstance(value, torch.Tensor):
@@ -75,31 +78,37 @@ class TensorSchema:
 
                         else:
                             raise ValueError(
-                                f"{field_name} is neither a Tensor, List[Tensor] or Tuple[Tensor]"
+                                f"{field_name} is neither a Tensor, "
+                                f"List[Tensor] or Tuple[Tensor]"
                             )
 
                         if len(actual_shape) != len(expected_shape):
                             raise ValueError(
-                                f"{field_name} has rank {len(actual_shape)} but expected {len(expected_shape)}"
+                                f"{field_name} has rank {len(actual_shape)} "
+                                f"but expected {len(expected_shape)}"
                             )
 
                         for i, dim in enumerate(expected_shape):
                             if isinstance(dim, int):
                                 if actual_shape[i] != dim:
                                     raise ValueError(
-                                        f"{field_name} dim[{i}] expected {dim}, got {actual_shape[i]}"
+                                        f"{field_name} dim[{i}] expected "
+                                        f"{dim}, got {actual_shape[i]}"
                                     )
                             elif isinstance(dim, str):
                                 if dim in shape_env:
                                     if actual_shape[i] != shape_env[dim]:
                                         raise ValueError(
-                                            f"{field_name} dim[{i}] expected '{dim}'={shape_env[dim]}, got {actual_shape[i]}"
+                                            f"{field_name} dim[{i}] expected "
+                                            f"'{dim}'={shape_env[dim]}, got "
+                                            f"{actual_shape[i]}"
                                         )
                                 else:
                                     shape_env[dim] = actual_shape[i]
                             else:
                                 raise TypeError(
-                                    f"{field_name} dim[{i}] has unsupported type: {type(dim)}"
+                                    f"{field_name} dim[{i}] has unsupported "
+                                    f"type: {type(dim)}"
                                 )
 
     def print_shapes(self):
