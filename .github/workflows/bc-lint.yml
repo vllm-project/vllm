@@ -13,9 +13,6 @@ jobs:
   bc_lint:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
       - name: Run BC Lint Action
         uses: pytorch/test-infra/.github/actions/bc-lint@main
         with:
