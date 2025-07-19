@@ -402,7 +402,7 @@ class BertModel(nn.Module, SupportsQuant):
                                                    torch.Tensor]]) -> set[str]:
         other_weights, loaded_stacked_params = self._load_weights(weights)
 
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(self, skip_prefixes=["pooler."])
         loaded_params = loader.load_weights(other_weights)
         loaded_params.update(loaded_stacked_params)
         return loaded_params
@@ -432,7 +432,7 @@ class BertPoolingModel(BertModel):
                                                    torch.Tensor]]) -> set[str]:
         other_weights, loaded_stacked_params = self._load_weights(weights)
 
-        loader = AutoWeightsLoader(self, skip_prefixes=["pooler."])
+        loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(other_weights)
         loaded_params.update(loaded_stacked_params)
         return loaded_params
