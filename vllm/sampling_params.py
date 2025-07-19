@@ -180,10 +180,10 @@ class SamplingParams(
             sampling implementations.
         reasoning_effort: Controls how much effort the model spend on reasoning.
             Supported values are "low", "medium", and "high".
-            Lower values may result in faster responses with fewer tokens in reasoning.
-            If thinking_token_budget is not provided, it will be determined based on this value.
+            Lower values may result in fewer tokens in reasoning.
+            If 'thinking_token_budget' is not set,
+            the thinking token count defaults to this value.
         thinking_token_budget: Maximum number of tokens allowed for thinking
-            If not explicitly set, this will default to a value derived from 'reasoning_effort'.
     """
 
     n: int = 1
