@@ -358,8 +358,6 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
     lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
     lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
-    long_lora_scaling_factors: Optional[tuple[float, ...]] = \
-        LoRAConfig.long_lora_scaling_factors
     # PromptAdapter fields
     enable_prompt_adapter: bool = False
     max_prompt_adapters: int = PromptAdapterConfig.max_prompt_adapters
@@ -723,8 +721,6 @@ class EngineArgs:
             "--lora-dtype",
             **lora_kwargs["lora_dtype"],
         )
-        lora_group.add_argument("--long-lora-scaling-factors",
-                                **lora_kwargs["long_lora_scaling_factors"])
         lora_group.add_argument("--max-cpu-loras",
                                 **lora_kwargs["max_cpu_loras"])
         lora_group.add_argument("--fully-sharded-loras",
@@ -1245,7 +1241,6 @@ class EngineArgs:
             default_mm_loras=self.default_mm_loras,
             fully_sharded_loras=self.fully_sharded_loras,
             lora_extra_vocab_size=self.lora_extra_vocab_size,
-            long_lora_scaling_factors=self.long_lora_scaling_factors,
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None

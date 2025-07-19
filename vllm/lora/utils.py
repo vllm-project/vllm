@@ -22,7 +22,6 @@ from vllm.lora.fully_sharded_layers import (
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
-                              LinearScalingRotaryEmbeddingWithLoRA,
                               LogitsProcessorWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLoRA,
@@ -56,7 +55,6 @@ _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     MergedColumnParallelLinearWithShardedLoRA,
     MergedQKVParallelLinearWithShardedLoRA,
     RowParallelLinearWithShardedLoRA,
-    LinearScalingRotaryEmbeddingWithLoRA,
 }
 
 
