@@ -28,7 +28,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP)
 from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache, moe_kernel_quantize_input)
+    _resize_cache, moe_kernel_quantize_input, per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     dequant_mxfp4)
 from vllm.platforms import current_platform
@@ -1058,6 +1058,104 @@ direct_register_custom_op(
     fake_impl=inplace_fused_experts_fake,
     tags=(() if is_torch_equal_or_newer("2.7.0") else
           (torch.Tag.needs_fixed_stride_order, )),
+)
+
+
+def next_positive_power_of_2(x: int) -> int:
+    if x < 1:
+        return 1
+    return 1 << (x - 1).bit_length()
+
+
+def _get_tile_tokens_dim(num_tokens, top_k, num_experts):
+    # Guess tokens per expert assuming perfect expert distribution first.
+    num_tokens_per_expert = (num_tokens * top_k) // num_experts
+    # And pad the number to the next power of 2.
+    tile_tokens_dim = next_positive_power_of_2(num_tokens_per_expert)
+    # Cap to 8-64 tokens per CTA tile as it's the range supported by the kernel.
+    tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
+    return tile_tokens_dim
+
+
+def flashinfer_fused_moe_blockscale_fp8(
+        routing_logits: torch.Tensor,
+        routing_bias: torch.Tensor,
+        x: torch.Tensor,
+        w13_weight: torch.Tensor,
+        w13_weight_scale_inv: torch.Tensor,
+        w2_weight: torch.Tensor,
+        w2_weight_scale_inv: torch.Tensor,
+        global_num_experts: int,
+        top_k: int,
+        num_expert_group: int,
+        topk_group: int,
+        intermediate_size: int,
+        expert_offset: int,
+        local_num_experts: int,
+        block_shape: list[int],
+        routed_scaling: float = 1.0) -> torch.Tensor:
+    from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
+    assert top_k <= global_num_experts
+    assert top_k <= 8
+    assert topk_group <= 4
+    assert global_num_experts > num_expert_group
+    assert global_num_experts % num_expert_group == 0
+    assert global_num_experts % 4 == 0
+    assert top_k < (topk_group * global_num_experts / num_expert_group)
+    assert block_shape == [128, 128]
+
+    a_q, a_sf = per_token_group_quant_fp8(x, block_shape[1])
+    # NOTE: scales of hidden states have to be transposed!
+    a_sf_t = a_sf.t().contiguous()
+    return flashinfer_trtllm_fp8_block_scale_moe(
+        routing_logits=routing_logits,
+        routing_bias=routing_bias,
+        hidden_states=a_q,
+        hidden_states_scale=a_sf_t,
+        gemm1_weights=w13_weight,
+        gemm1_weights_scale=w13_weight_scale_inv,
+        gemm2_weights=w2_weight,
+        gemm2_weights_scale=w2_weight_scale_inv,
+        num_experts=global_num_experts,
+        top_k=top_k,
+        n_group=num_expert_group,
+        topk_group=topk_group,
+        intermediate_size=intermediate_size,
+        local_expert_offset=expert_offset,
+        local_num_experts=local_num_experts,
+        routed_scaling_factor=routed_scaling,
+        tile_tokens_dim=_get_tile_tokens_dim(x.shape[0], top_k,
+                                             global_num_experts),
+        routing_method_type=2,  # DeepSeek-styled routing method
+    )
+
+
+def flashinfer_fused_moe_blockscale_fp8_fake(
+        routing_logits: torch.Tensor,
+        routing_bias: torch.Tensor,
+        x: torch.Tensor,
+        w13_weight: torch.Tensor,
+        w13_weight_scale_inv: torch.Tensor,
+        w2_weight: torch.Tensor,
+        w2_weight_scale_inv: torch.Tensor,
+        global_num_experts: int,
+        top_k: int,
+        num_expert_group: int,
+        topk_group: int,
+        intermediate_size: int,
+        expert_offset: int,
+        local_num_experts: int,
+        block_shape: list[int],
+        routed_scaling: float = 1.0) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
+direct_register_custom_op(
+    op_name="flashinfer_fused_moe_blockscale_fp8",
+    op_func=flashinfer_fused_moe_blockscale_fp8,
+    mutates_args=[],
+    fake_impl=flashinfer_fused_moe_blockscale_fp8_fake,
+    tags=(torch.Tag.needs_fixed_stride_order, ),
 )
 
 
