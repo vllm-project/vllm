@@ -215,6 +215,10 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
 
         # Special case: Middleware needs append action
         frontend_kwargs["middleware"]["action"] = "append"
+        frontend_kwargs["middleware"]["type"] = str
+        if "nargs" in frontend_kwargs["middleware"]:
+            del frontend_kwargs["middleware"]["nargs"]
+        frontend_kwargs["middleware"]["default"] = []
 
         # Special case: Tool call parser shows built-in options.
         valid_tool_parsers = list(ToolParserManager.tool_parsers.keys())
