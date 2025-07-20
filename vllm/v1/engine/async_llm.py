@@ -99,7 +99,7 @@ class AsyncLLM(EngineClient):
         self.stat_loggers = setup_default_loggers(
             vllm_config=vllm_config,
             log_stats=self.log_stats,
-            num_engines=vllm_config.parallel_config.data_parallel_size,
+            engine_num=vllm_config.parallel_config.data_parallel_size,
             custom_stat_loggers=stat_loggers,
         )
 

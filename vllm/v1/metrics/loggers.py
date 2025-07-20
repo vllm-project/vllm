@@ -149,11 +149,11 @@ class PrometheusStatLogger(StatLoggerBase):
     _histogram_cls = prometheus_client.Histogram
     _spec_decoding_cls = SpecDecodingProm
 
-    def __init__(self, vllm_config: VllmConfig, num_engines: int = 1):
+    def __init__(self, vllm_config: VllmConfig, engine_num: int = 1):
 
         # unregister_vllm_metrics()
         self.vllm_config = vllm_config
-        self.engine_indexes = range(num_engines)
+        self.engine_indexes = range(engine_num)
         # Use this flag to hide metrics that were deprecated in
         # a previous release and which will be removed future
         self.show_hidden_metrics = \
@@ -633,7 +633,7 @@ def build_1_2_5_buckets(max_value: int) -> list[int]:
 def setup_default_loggers(
     vllm_config: VllmConfig,
     log_stats: bool,
-    num_engines: int,
+    engine_num: int,
     custom_stat_loggers: Optional[list[StatLoggerFactory]] = None,
 ) -> Optional[tuple[list[list[StatLoggerBase]], PrometheusStatLogger]]:
     """Setup logging and prometheus metrics."""
@@ -649,12 +649,12 @@ def setup_default_loggers(
             factories.append(LoggingStatLogger)
 
     stat_loggers: list[list[StatLoggerBase]] = []
-    for engine_idx in range(num_engines):
+    for engine_idx in range(engine_num):
         per_engine_stat_loggers: list[StatLoggerBase] = []
         for logger_factory in factories:
             per_engine_stat_loggers.append(
                 logger_factory(vllm_config, engine_idx))
         stat_loggers.append(per_engine_stat_loggers)
 
-    prom_stat_logger = PrometheusStatLogger(vllm_config, num_engines)
+    prom_stat_logger = PrometheusStatLogger(vllm_config, engine_num)
     return stat_loggers, prom_stat_logger
