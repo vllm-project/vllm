@@ -650,18 +650,16 @@ class AsyncLLM(EngineClient):
             new_data_parallel_size
 
         # recreate stat loggers
-        # if new_data_parallel_size > old_data_parallel_size:
-        #     stat_loggers: list[list[StatLoggerBase]] = setup_default_loggers(
-        #         vllm_config=self.vllm_config,
-        #         log_stats=self.log_stats,
-        #         engine_num=new_data_parallel_size,
-        #         custom_stat_loggers=None,
-        #     )
-        #     num_new_engines = len(stat_loggers) - len(self.stat_loggers)
-        #     self.stat_loggers.extend(stat_loggers[-num_new_engines:])
-        # else:
-        #     for _ in range(old_data_parallel_size - new_data_parallel_size):
-        #         self.stat_loggers.pop()
+        if new_data_parallel_size > old_data_parallel_size and self.log_stats:
+            # TODO(rob): fix this after talking with Ray team.
+            # This resets all the prometheus metrics since we
+            # unregister during initialization. Need to understand
+            # the intended behavior here better.
+            self.logger_manager = StatLoggerManager(
+                vllm_config=self.vllm_config,
+                engine_idxs=list(range(new_data_parallel_size)),
+                custom_stat_loggers=None,
+            )
 
     @property
     def is_running(self) -> bool:
