@@ -534,13 +534,8 @@ class AsyncLLM(EngineClient):
         scheduler_outputs=None,
         model_output=None,
     ) -> None:
-        if self.stat_loggers is None:
-            return
-        # loggers, prom_logger
-        per_engine_loggers, _ = self.stat_loggers
-        for loggers in per_engine_loggers.values():
-            for stat_logger in loggers:
-                stat_logger.log()
+        if self.logger_manager:
+            self.logger_manager.log()
 
     async def check_health(self) -> None:
         logger.debug("Called check_health.")
