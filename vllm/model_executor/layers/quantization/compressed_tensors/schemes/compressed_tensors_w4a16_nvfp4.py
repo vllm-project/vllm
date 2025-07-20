@@ -18,7 +18,8 @@ __all__ = ["CompressedTensorsW4A16Fp4"]
 
 class CompressedTensorsW4A16Fp4(CompressedTensorsScheme):
 
-    def __init__(self):
+    def __init__(self, has_input_global_scale: bool = False):
+        self.has_input_global_scale = has_input_global_scale
         self.group_size = 16
 
     @classmethod
@@ -64,6 +65,13 @@ class CompressedTensorsW4A16Fp4(CompressedTensorsScheme):
 
         layer.register_parameter("weight_scale", weight_scale)
 
+        if self.has_input_global_scale:
+            input_global_scale = PerTensorScaleParameter(
+                data=torch.empty(len(output_partition_sizes),
+                                 dtype=torch.float32),
+                weight_loader=weight_loader)
+            layer.register_parameter("input_global_scale", input_global_scale)
+
     def process_weights_after_loading(self, layer) -> None:
         # Process parameters for marlin repacking
 
@@ -76,6 +84,10 @@ class CompressedTensorsW4A16Fp4(CompressedTensorsScheme):
             1 / layer.weight_global_scale.max().to(torch.float32),
             requires_grad=False)
         del layer.weight_global_scale
+
+        if self.has_input_global_scale:
+            layer.input_global_scale = torch.nn.Parameter(
+                layer.input_global_scale.data, requires_grad=False)
 
         prepare_fp4_layer_for_marlin(layer)
 

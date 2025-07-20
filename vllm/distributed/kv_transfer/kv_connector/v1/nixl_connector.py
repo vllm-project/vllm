@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import math
+import queue
 import threading
 import time
 import uuid
 from collections import defaultdict
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -22,6 +24,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
+from vllm.distributed.utils import divide
+from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.platforms import _Backend
 from vllm.utils import make_zmq_path, make_zmq_socket, round_down
@@ -30,11 +34,12 @@ from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
-    from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
 Transfer = tuple[int, float]  # (xfer_handle, start_time)
+EngineId = str
+ReqId = str
 GET_META_MSG = b"get_meta_msg"
 
 logger = init_logger(__name__)
@@ -57,7 +62,6 @@ class NixlAgentMetadata(
     agent_metadata: bytes
     kv_caches_base_addr: list[int]
     num_blocks: int
-    tp_size: int
     block_len: int
     attn_backend_name: str
 
@@ -69,25 +73,29 @@ class ReqMeta:
     remote_host: str
     remote_port: int
     remote_engine_id: str
+    tp_size: int
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
 
     def __init__(self):
-        self.requests: dict[str, ReqMeta] = {}
+        self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
+        self.reqs_to_send: dict[ReqId, float] = {}
 
     def add_new_req(
         self,
-        request_id: str,
+        request_id: ReqId,
         local_block_ids: list[int],
         kv_transfer_params: dict[str, Any],
     ):
-        self.requests[request_id] = ReqMeta(
+        self.reqs_to_recv[request_id] = ReqMeta(
             local_block_ids=local_block_ids,
             remote_block_ids=kv_transfer_params["remote_block_ids"],
             remote_engine_id=kv_transfer_params["remote_engine_id"],
             remote_host=kv_transfer_params["remote_host"],
             remote_port=kv_transfer_params["remote_port"],
+            # P workers don't need to receive tp_size from proxy here.
+            tp_size=kv_transfer_params.get("tp_size", 1),
         )
 
 
@@ -95,16 +103,17 @@ class NixlConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
         assert vllm_config.kv_transfer_config is not None
-        self.engine_id = vllm_config.kv_transfer_config.engine_id
+        assert vllm_config.kv_transfer_config.engine_id is not None
+        self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler : Optional[NixlConnectorScheduler] = \
-                NixlConnectorScheduler(vllm_config, str(self.engine_id))
+            self.connector_scheduler: Optional[NixlConnectorScheduler] = \
+                NixlConnectorScheduler(vllm_config, self.engine_id)
             self.connector_worker: Optional[NixlConnectorWorker] = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = NixlConnectorWorker(
-                vllm_config, str(self.engine_id))
+                vllm_config, self.engine_id)
 
     ############################################################
     # Scheduler Side Methods
@@ -178,18 +187,20 @@ class NixlConnectorScheduler:
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
-        self.engine_id = engine_id
+        self.engine_id: EngineId = engine_id
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
-            vllm_config.parallel_config.data_parallel_rank_local *
+            vllm_config.parallel_config.data_parallel_rank *
             vllm_config.parallel_config.tensor_parallel_size)
         logger.info("Initializing NIXL Scheduler %s", engine_id)
 
-        # Requests that need to start recv.
+        # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
+        self._reqs_need_recv: dict[ReqId, tuple[Request, list[int]]] = {}
+        # Reqs to send and their expiration time
+        self._reqs_need_send: dict[ReqId, float] = {}
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -276,6 +287,9 @@ class NixlConnectorScheduler:
         # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()
 
+        meta.reqs_to_send = self._reqs_need_send
+        self._reqs_need_send = {}
+
         return meta
 
     def request_finished(
@@ -292,8 +306,21 @@ class NixlConnectorScheduler:
         logger.debug(
             "NIXLConnector request_finished, request_status=%s, "
             "kv_transfer_params=%s", request.status, params)
+        if not params:
+            return False, None
 
-        if (params is None or not params.get("do_remote_decode")
+        if params.get("do_remote_prefill"):
+            # If do_remote_prefill is still True when the request is finished,
+            # update_state_after_alloc must not have been called (the request
+            # must have been aborted before it was scheduled).
+            # To avoid stranding the prefill blocks in the prefill instance,
+            # we must add empty block_ids to _reqs_need_recv so that our
+            # worker side will notify and free blocks in the prefill instance.
+            self._reqs_need_recv[request.request_id] = (request, [])
+            params["do_remote_prefill"] = False
+            return False, None
+
+        if (not params.get("do_remote_decode")
                 or request.status != RequestStatus.FINISHED_LENGTH_CAPPED):
             return False, None
 
@@ -304,6 +331,11 @@ class NixlConnectorScheduler:
         # If prompt < block_size, no xfer so free blocks immediately.
         delay_free_blocks = len(computed_block_ids) > 0
 
+        if delay_free_blocks:
+            # Prefill request on remote. It will be read from D upon completion
+            self._reqs_need_send[request.request_id] = time.perf_counter(
+            ) + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
+
         return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
@@ -311,7 +343,7 @@ class NixlConnectorScheduler:
             remote_engine_id=self.engine_id,
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
-        )
+            tp_size=self.vllm_config.parallel_config.tensor_parallel_size)
 
 
 class NixlConnectorWorker:
@@ -331,19 +363,19 @@ class NixlConnectorWorker:
         # Agent.
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
-        self._remote_agents: dict[str, dict[int, str]] = defaultdict(dict)
+        self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
 
         # NIXL handshake port.
         # NOTE(rob): Within a DP group, each DP rank gets its own
         # base port (which is sent in the KVTransferParams).
         # Each TP rank listens/queries on the base_port + tp_rank.
-        self.side_channel_port = (
+        self.side_channel_port: int = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT +
-            vllm_config.parallel_config.data_parallel_rank_local *
+            vllm_config.parallel_config.data_parallel_rank *
             vllm_config.parallel_config.tensor_parallel_size)
 
         # Metadata.
-        self.engine_id = engine_id
+        self.engine_id: EngineId = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
         self.tp_group = get_tp_group()
@@ -353,7 +385,7 @@ class NixlConnectorWorker:
 
         # Map of engine_id -> kv_caches_base_addr. For TP case, each local
         # rank will still only pull from a single remote TP worker.
-        self.kv_caches_base_addr: dict[str, list[int]] = {}
+        self.kv_caches_base_addr: dict[EngineId, list[int]] = {}
 
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
@@ -363,27 +395,30 @@ class NixlConnectorWorker:
         # nixl_prepped_dlist_handle.
         self.src_xfer_side_handle: int = 0
         # Map of engine_id -> nixl_prepped_dlist_handle (int)].
-        self.dst_xfer_side_handles: dict[str, int] = {}
+        self.dst_xfer_side_handles: dict[EngineId, int] = {}
 
         # Map of engine_id -> num_blocks. All ranks in the same deployment will
         # have the same number of blocks.
-        self.dst_num_blocks: dict[str, int] = {}
+        self.dst_num_blocks: dict[EngineId, int] = {}
         self._registered_descs: list[Any] = []
 
         # In progress transfers.
         # [req_id -> list[handle]]
-        self._recving_transfers = defaultdict[str, list[Transfer]](list)
+        self._recving_transfers = defaultdict[ReqId, list[Transfer]](list)
+        # Track the expiration time of requests that are waiting to be sent.
+        self._reqs_to_send: dict[ReqId, float] = {}
 
-        # Complete transfer tracker. Used by the rank 0 to track finished
-        # transactions on ranks 1 to N-1.
-        # [req_id -> count]
-        self._done_recving_count: defaultdict[str,
-                                              int] = defaultdict(lambda: 0)
-        self._done_sending_count: defaultdict[str,
-                                              int] = defaultdict(lambda: 0)
-
-        # Background thread for establishing new connections.
+        # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: Optional[threading.Thread] = None
+        # Background thread for initializing new NIXL handshakes.
+        self._handshake_initiation_executor = ThreadPoolExecutor(
+            # NIXL is not guaranteed to be thread-safe, limit 1 worker.
+            max_workers=1,
+            thread_name_prefix="vllm-nixl-handshake-initiator")
+        self._ready_requests = queue.Queue[tuple[ReqId, ReqMeta]]()
+        self._handshake_futures: dict[EngineId, Future[dict[int, str]]] = {}
+        # Protects _handshake_futures and _remote_agents.
+        self._handshake_lock = threading.RLock()
 
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
@@ -407,10 +442,16 @@ class NixlConnectorWorker:
         self._use_flashinfer = attn_backend == _Backend.FLASHINFER_VLLM_V1
         logger.debug("Detected attention backend %s", self.backend_name)
 
-        self._tp_size: dict[str, int] = {self.engine_id: self.world_size}
+        self._tp_size: dict[EngineId, int] = {self.engine_id: self.world_size}
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
-        self.consumer_notification_counts_by_req = defaultdict[str, int](int)
+        self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
+
+    def __del__(self):
+        """Cleanup background threads on destruction."""
+        self._handshake_initiation_executor.shutdown(wait=False)
+        if self._nixl_handshake_listener_t:
+            self._nixl_handshake_listener_t.join(timeout=0)
 
     @staticmethod
     def _nixl_handshake_listener(metadata: NixlAgentMetadata,
@@ -439,7 +480,13 @@ class NixlConnectorWorker:
                         "Connection listener got unexpected message %s", msg)
                 sock.send_multipart((identity, b"", encoded_data))
 
-    def _nixl_handshake(self, host: str, port: int):
+    def _nixl_handshake(
+        self,
+        host: str,
+        port: int,
+        remote_tp_size: int,
+        expected_engine_id: str,
+    ) -> dict[int, str]:
         """Do a NIXL handshake with a remote instance."""
 
         start_time = time.perf_counter()
@@ -448,39 +495,66 @@ class NixlConnectorWorker:
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
 
-        def handshake(path: str, rank: int) -> NixlAgentMetadata:
-            # Send query for the request.
-            with zmq_ctx(zmq.REQ, path) as sock:
-                sock.send(GET_META_MSG)
-                metadata_bytes = sock.recv()
-                decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
-                metadata = decoder.decode(metadata_bytes)
-                got_metadata_time = time.perf_counter()
-
-                # Register Remote agent.
-                self.add_remote_agent(metadata, rank)
-                setup_agent_time = time.perf_counter()
-
-                logger.debug("NIXL handshake: get metadata took: %s",
-                             got_metadata_time - start_time)
-                logger.debug("NIXL handshake: add agent took: %s",
-                             setup_agent_time - got_metadata_time)
-                return metadata
-
-        # Handshake with remote agent-rank0 first to get the tp_size of remote
-        path = make_zmq_path("tcp", host, port)
-        logger.debug("Querying master rank metadata on path: %s", path)
-        metadata = handshake(path, 0)
-
-        # Handshake only with the other TP remote the current local rank will
+        # Handshake only with the remote TP rank that current local rank will
         # pull from. With homogeneous TP it happens to be the same rank_i.
-        tp_ratio = self._tp_size[self.engine_id] // metadata.tp_size
+        tp_ratio = self._tp_size[self.engine_id] // remote_tp_size
         p_remote_rank = self.tp_rank // tp_ratio
-        if p_remote_rank > 0:
-            path = make_zmq_path("tcp", host, port + p_remote_rank)
-            logger.debug("Querying metadata on path: %s at remote rank %s",
-                         path, p_remote_rank)
-            _ = handshake(path, p_remote_rank)
+        path = make_zmq_path("tcp", host, port + p_remote_rank)
+        logger.debug("Querying metadata on path: %s at remote rank %s", path,
+                     p_remote_rank)
+
+        # Send query for the request.
+        with zmq_ctx(zmq.REQ, path) as sock:
+            sock.send(GET_META_MSG)
+            metadata_bytes = sock.recv()
+            decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
+            metadata = decoder.decode(metadata_bytes)
+            got_metadata_time = time.perf_counter()
+            logger.debug("NIXL handshake: get metadata took: %s",
+                         got_metadata_time - start_time)
+
+            # Ensure engine id matches.
+            if metadata.engine_id != expected_engine_id:
+                raise RuntimeError(f"Remote NIXL agent engine ID mismatch. "
+                                   f"Expected {expected_engine_id},"
+                                   f"received {metadata.engine_id}.")
+
+            # Register Remote agent.
+            remote_agent_name = self.add_remote_agent(metadata, p_remote_rank,
+                                                      remote_tp_size)
+            setup_agent_time = time.perf_counter()
+            logger.debug("NIXL handshake: add agent took: %s",
+                         setup_agent_time - got_metadata_time)
+
+        # Remote rank -> agent name.
+        return {p_remote_rank: remote_agent_name}
+
+    def _background_nixl_handshake(self, req_id: str,
+                                   remote_engine_id: EngineId, meta: ReqMeta):
+        # Do NIXL handshake in background and add to _ready_requests when done.
+        fut = self._handshake_futures.get(remote_engine_id)
+        if fut is None:
+            fut = self._handshake_initiation_executor.submit(
+                self._nixl_handshake, meta.remote_host, meta.remote_port,
+                meta.tp_size, remote_engine_id)
+            self._handshake_futures[remote_engine_id] = fut
+
+            def done_callback(f: Future[dict[int, str]], eid=remote_engine_id):
+                with self._handshake_lock:
+                    del self._handshake_futures[eid]
+                    try:
+                        self._remote_agents[eid] = f.result()
+                    except Exception:
+                        logger.exception("Handshake with %s failed", eid)
+
+            fut.add_done_callback(done_callback)
+
+        # TODO: handle failure state of future in the
+        # callback, we want to fail the request in this case.
+        def request_ready(_f: Future[Any], entry=(req_id, meta)):
+            self._ready_requests.put(entry)
+
+        fut.add_done_callback(request_ready)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
@@ -607,7 +681,6 @@ class NixlConnectorWorker:
             agent_metadata=self.nixl_wrapper.get_agent_metadata(),
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
             num_blocks=self.num_blocks,
-            tp_size=self.world_size,
             block_len=self.block_len,
             attn_backend_name=self.backend_name)
         ready_event = threading.Event()
@@ -617,11 +690,12 @@ class NixlConnectorWorker:
             daemon=True,
             name="nixl_handshake_listener")
         self._nixl_handshake_listener_t.start()
-        ready_event.wait()
+        ready_event.wait()  # Wait for listener ZMQ socket to be ready.
 
     def add_remote_agent(self,
                          nixl_agent_meta: NixlAgentMetadata,
-                         remote_tp_rank: int = 0):
+                         remote_tp_rank: int = 0,
+                         remote_tp_size: int = 1) -> str:
         """
         Add the remote NIXL agent and prepare the descriptors for reading cache
         blocks from remote.
@@ -662,28 +736,31 @@ class NixlConnectorWorker:
         """ # noqa: E501
         engine_id = nixl_agent_meta.engine_id
         # TODO re-evaluate refreshing for scaling/recovery
-        if remote_tp_rank in self._remote_agents.get(engine_id, ()):
-            return
+        if remote_tp_rank in self._remote_agents.get(engine_id, {}):
+            return self._remote_agents[engine_id][remote_tp_rank]
 
-        if engine_id in self._tp_size:
-            assert self._tp_size[engine_id] == nixl_agent_meta.tp_size
+        if engine_id not in self._tp_size:
+            self._tp_size[engine_id] = remote_tp_size
         else:
-            self._tp_size[engine_id] = nixl_agent_meta.tp_size
+            assert self._tp_size[engine_id] == remote_tp_size
         # We may eventually enable this after asserting equality in cache
         # layout and close outputs.
         assert nixl_agent_meta.attn_backend_name == self.backend_name
 
-        self._remote_agents[engine_id][
-            remote_tp_rank] = self.nixl_wrapper.add_remote_agent(
-                nixl_agent_meta.agent_metadata)
+        remote_agent_name = self.nixl_wrapper.add_remote_agent(
+            nixl_agent_meta.agent_metadata)
 
         # Number of D TP workers reading from a single P TP worker. This is
         # 1 when P and D `--tensor-parallel-size` match.
-        assert self._tp_size[self.engine_id] % self._tp_size[engine_id] == 0, (
-            "Local TP size must be divisible by remote TP size.")
-        tp_ratio = self._tp_size[self.engine_id] // self._tp_size[engine_id]
+        tp_ratio = divide(self._tp_size[self.engine_id],
+                          self._tp_size[engine_id])
         assert tp_ratio > 0, "Decode TP cannot be smaller than prefill TP"
-        if self.use_mla:
+
+        # Handle tp_size>num_kv_heads: replicate KV cache.
+        total_num_kv_heads = self.model_config.get_total_num_kv_heads()
+        is_kv_replicated = self._tp_size[engine_id] // total_num_kv_heads >= 1
+
+        if self.use_mla or is_kv_replicated:
             # With MLA the only difference is in the number of blocks.
             remote_block_size = nixl_agent_meta.block_len // (
                 self.slot_size_bytes)
@@ -700,10 +777,9 @@ class NixlConnectorWorker:
                 "local_kv_heads*tp_ratio, block_size, head_dim] and same dtype."
             )
 
-        assert self.block_size == remote_block_size, "Remote P worker with " \
-        "different block size is not supported"
-
-        assert self.num_blocks >= nixl_agent_meta.num_blocks
+        assert self.block_size == remote_block_size, (
+            "Remote P worker with different block size is not supported "
+            f"{self.block_size=} {remote_block_size=}")
 
         # Create dst descs and xfer side handles. TP workers have same #blocks.
         if engine_id in self.dst_num_blocks:
@@ -716,45 +792,39 @@ class NixlConnectorWorker:
         # rank. With heterogeneous TP, prepare the descriptors by splitting the
         # P KV cache along kv_head dim, of D worker's kv_head size (D>P).
         # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
-        p_remote_tp_rank = self.tp_rank // tp_ratio
         # Only register the remote's descriptors if current rank pulls from it.
-        if p_remote_tp_rank == remote_tp_rank:
-            self.kv_caches_base_addr[
-                engine_id] = nixl_agent_meta.kv_caches_base_addr
-            rank_offset = self.tp_rank % tp_ratio * self.block_len \
-                if not self.use_mla else 0
-            # Register all remote blocks, but only the corresponding kv heads.
-            for base_addr in nixl_agent_meta.kv_caches_base_addr:
-                for block_id in range(nixl_agent_meta.num_blocks):
-                    block_offset = block_id * nixl_agent_meta.block_len
-                    # For each block, grab the heads chunk belonging to rank_i
-                    # of size remote_nheads // tp_ratio, which correspond to
-                    # self.block_len == remote_block_len//tp_ratio bytes.
-                    addr = base_addr + block_offset + rank_offset
-                    # (addr, len, device id)
-                    blocks_data.append((addr, self.block_len, remote_tp_rank))
-            logger.debug(
-                "Created %s blocks for dst engine %s with remote rank %s and "
-                "local rank %s", len(blocks_data), engine_id, remote_tp_rank,
-                self.tp_rank)
+        self.kv_caches_base_addr[
+            engine_id] = nixl_agent_meta.kv_caches_base_addr
+        rank_offset = self.tp_rank % tp_ratio * self.block_len \
+            if not (self.use_mla or is_kv_replicated) else 0
+        # Register all remote blocks, but only the corresponding kv heads.
+        for base_addr in nixl_agent_meta.kv_caches_base_addr:
+            for block_id in range(nixl_agent_meta.num_blocks):
+                block_offset = block_id * nixl_agent_meta.block_len
+                # For each block, grab the heads chunk belonging to rank_i
+                # of size remote_nheads // tp_ratio, which correspond to
+                # self.block_len == remote_block_len//tp_ratio bytes.
+                addr = base_addr + block_offset + rank_offset
+                # (addr, len, device id)
+                blocks_data.append((addr, self.block_len, remote_tp_rank))
+        logger.debug(
+            "Created %s blocks for dst engine %s with remote rank %s and "
+            "local rank %s", len(blocks_data), engine_id, remote_tp_rank,
+            self.tp_rank)
 
-            # Register with NIXL.
-            descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
-            self.dst_xfer_side_handles[
-                engine_id] = self.nixl_wrapper.prep_xfer_dlist(
-                    self._remote_agents[engine_id][remote_tp_rank], descs)
+        # Register with NIXL.
+        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
+        self.dst_xfer_side_handles[
+            engine_id] = self.nixl_wrapper.prep_xfer_dlist(
+                remote_agent_name, descs)
+
+        return remote_agent_name
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
-        Get requests that are done sending or recving.
-
-        In TP>1 setup, each rank exchanges KVs with its counterpart
-        ranks independently. get_finished() runs in a worker creates
-        the done_sending and done_recving sets that are sent to the
-        scheduler via ModelRunnerOutput by Rank 0. To ensure trnxs
-        are done before adding to finished, Ranks 1 to N-1 communicate
-        to Rank 0 once their transaction is done + Rank 0 returns
-        finished sets to Scheduler only once all ranks are done.
+        Get requests that are done sending or recving on this specific worker.
+        The scheduler process (via the MultiprocExecutor) will use this output
+        to track which workers are done.
         """
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
@@ -764,50 +834,17 @@ class NixlConnectorWorker:
                 "and %s requests done recving", self.tp_rank,
                 len(done_sending), len(done_recving))
 
-        if self.world_size == 1:
-            return done_sending, done_recving
+        # Handle timeout to avoid stranding blocks on remote.
+        now = time.perf_counter()
+        while self._reqs_to_send:
+            req_id, expires = next(iter(self._reqs_to_send.items()))
+            # Sorted dict, oldest requests are put first so we can exit early.
+            if now < expires:
+                break
+            del self._reqs_to_send[req_id]
+            done_sending.add(req_id)
 
-        # Rank 0: get finished from all other ranks.
-        if self.tp_rank == 0:
-            for req_id in done_sending:
-                self._done_sending_count[req_id] += 1
-            for req_id in done_recving:
-                self._done_recving_count[req_id] += 1
-
-            # Keep track of how many other ranks have finished.
-            other_ranks_finished_ids: list[str] = []
-            for i in range(1, self.world_size):
-                other_ranks_finished_ids.extend(
-                    self.tp_group.recv_object(src=i))
-            for req_id in other_ranks_finished_ids:
-                if (req_id in self._done_recving_count
-                        or req_id in self._recving_transfers):
-                    self._done_recving_count[req_id] += 1
-                else:
-                    self._done_sending_count[req_id] += 1
-
-            # Return ids that finished on all ranks to the scheduler.
-            all_done_recving: set[str] = set()
-            for req_id in list(self._done_recving_count.keys()):
-                if self._done_recving_count[req_id] == self.world_size:
-                    del self._done_recving_count[req_id]
-                    all_done_recving.add(req_id)
-
-            all_done_sending: set[str] = set()
-            for req_id in list(self._done_sending_count.keys()):
-                if self._done_sending_count[req_id] == self.world_size:
-                    del self._done_sending_count[req_id]
-                    all_done_sending.add(req_id)
-
-            return all_done_sending, all_done_recving
-
-        # Ranks 1 to N-1: send finished ids to Rank 0.
-        else:
-            finished_req_ids = list(done_recving.union(done_sending))
-            self.tp_group.send_object(finished_req_ids, dst=0)
-
-            # Unused as only Rank 0 results are sent to scheduler.
-            return done_sending, done_recving
+        return done_sending, done_recving
 
     def _get_new_notifs(self) -> set[str]:
         """
@@ -825,6 +862,7 @@ class NixlConnectorWorker:
                         tp_ratio):
                     notified_req_ids.add(req_id)
                     del self.consumer_notification_counts_by_req[req_id]
+                    del self._reqs_to_send[req_id]
         return notified_req_ids
 
     def _pop_done_transfers(
@@ -838,17 +876,20 @@ class NixlConnectorWorker:
         """
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
-            for handle, xfer_stime in handles:
+            in_progress = False
+            for handle, _xfer_stime in handles:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
                     self.nixl_wrapper.release_xfer_handle(handle)
-                    done_req_ids.add(req_id)
-                    del transfers[req_id]
                 elif xfer_state == "PROC":
+                    in_progress = True
                     continue
                 else:
                     raise RuntimeError("Transfer failed with state %s",
                                        xfer_state)
+            if not in_progress:
+                done_req_ids.add(req_id)
+                del transfers[req_id]
         return done_req_ids
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
@@ -856,34 +897,45 @@ class NixlConnectorWorker:
         Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
-        for req_id, meta in metadata.requests.items():
+        for req_id, meta in metadata.reqs_to_recv.items():
+            remote_engine_id = meta.remote_engine_id
             logger.debug(
                 "start_load_kv for request %s from remote engine %s. "
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
-                meta.remote_engine_id, len(meta.local_block_ids),
+                remote_engine_id, len(meta.local_block_ids),
                 len(meta.remote_block_ids))
-            self._read_blocks(
-                request_id=req_id,
-                dst_engine_id=meta.remote_engine_id,
-                local_block_ids=meta.local_block_ids,
-                remote_block_ids=meta.remote_block_ids,
-                remote_host=meta.remote_host,
-                remote_port=meta.remote_port,
-            )
+            if remote_engine_id not in self._remote_agents:
+                # Initiate handshake with remote engine to exchange metadata.
+                with self._handshake_lock:
+                    if remote_engine_id not in self._remote_agents:
+                        self._background_nixl_handshake(
+                            req_id, remote_engine_id, meta)
+                        continue
 
-    def _read_blocks(
-        self,
-        local_block_ids: list[int],
-        remote_block_ids: list[int],
-        remote_host: str,
-        remote_port: int,
-        dst_engine_id: str,
-        request_id: str,
-    ):
-        # NOTE(rob): this takes ~2s. We need to get this off the hotpath.
-        if dst_engine_id not in self._remote_agents:
-            self._nixl_handshake(remote_host, remote_port)
+            # Handshake already completed, start async read xfer.
+            self._read_blocks_for_req(req_id, meta)
 
+        # Start transfers for requests whose handshakes have now finished.
+        while not self._ready_requests.empty():
+            self._read_blocks_for_req(*self._ready_requests.get_nowait())
+
+        # Add to requests that are waiting to be read and track expiration.
+        self._reqs_to_send.update(metadata.reqs_to_send)
+
+    def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
+        logger.debug(
+            "Remote agent %s available, calling _read_blocks for req %s",
+            meta.remote_engine_id, req_id)
+        self._read_blocks(
+            request_id=req_id,
+            dst_engine_id=meta.remote_engine_id,
+            local_block_ids=meta.local_block_ids,
+            remote_block_ids=meta.remote_block_ids,
+        )
+
+    def _read_blocks(self, local_block_ids: list[int],
+                     remote_block_ids: list[int], dst_engine_id: str,
+                     request_id: str):
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
         # after we detect the txn is complete (which means we cannot make the

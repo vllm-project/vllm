@@ -140,7 +140,7 @@ class MsgpackEncoder:
     ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
         assert self.aux_buffers is not None
         # If the array is non-contiguous, we need to copy it first
-        arr_data = obj.data if obj.data.c_contiguous else obj.tobytes()
+        arr_data = obj.data if obj.flags.c_contiguous else obj.tobytes()
         if not obj.shape or obj.nbytes < self.size_threshold:
             # Encode small arrays and scalars inline. Using this extension type
             # ensures we can avoid copying when decoding.

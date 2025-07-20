@@ -14,7 +14,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.platforms import current_platform
 
 if not current_platform.has_device_capability(100):
-    pytest.skip(reason="Nvfp4 Requires compute capability of 10 or above.",
+    pytest.skip("Nvfp4 Requires compute capability of 10 or above.",
                 allow_module_level=True)
 
 MNK_FACTORS = [
@@ -136,7 +136,7 @@ def test_cutlass_fp4_moe_no_graph(m: int, n: int, k: int, e: int, topk: int,
                                                   device=w2.device,
                                                   block_size=quant_blocksize)
 
-        torch_output = torch_moe(a_in_dtype, w1_d, w2_d, score, topk, None)
+        torch_output = torch_moe(a_in_dtype, w1_d, w2_d, score, topk)
 
         torch.testing.assert_close(torch_output,
                                    cutlass_output,

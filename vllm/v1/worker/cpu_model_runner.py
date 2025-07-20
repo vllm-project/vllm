@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from contextlib import contextmanager
 from typing import Any
 
@@ -44,11 +45,12 @@ class CPUModelRunner(GPUModelRunner):
             if k.endswith("_cpu_tensor") and isinstance(v, torch.Tensor):
                 replace_tensor(self.input_batch, k, k[:-11])
 
-        for k, v in vars(self.input_batch.block_table).items():
-            if k.endswith("_cpu") and isinstance(v, torch.Tensor):
-                replace_tensor(self.input_batch.block_table, k, k[:-4])
+        for block_table in self.input_batch.block_table.block_tables:
+            for k, v in vars(block_table).items():
+                if k.endswith("_cpu") and isinstance(v, torch.Tensor):
+                    replace_tensor(block_table, k, k[:-4])
 
-    def load_model(self) -> None:
+    def load_model(self, eep_scale_up: bool = False) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
         self.model = get_model(vllm_config=self.vllm_config)
 
@@ -60,7 +62,8 @@ class CPUModelRunner(GPUModelRunner):
     def warming_up_model(self) -> None:
         logger.info("Warming up model for the compilation...")
         # Only generate graph for the generic shape
-        self._dummy_run(max(16, self.max_num_reqs))
+        with _set_global_compilation_settings(self.vllm_config):
+            self._dummy_run(max(16, self.max_num_reqs))
         logger.info("Warming up done.")
 
     def _init_device_properties(self) -> None:
@@ -71,16 +74,15 @@ class CPUModelRunner(GPUModelRunner):
 
 
 @contextmanager
-def _set_global_compilation_settings():
+def _set_global_compilation_settings(config: VllmConfig):
     import torch._inductor.config
 
-    # Note: The CPPGEMM backend requires freezing parameters.
-    freezing_value = torch._inductor.config.freezing
-    torch._inductor.config.freezing = True
-    # Note: workaround for "ValueError: fast mode: can't pickle cyclic objects
-    # including object type dict"
-    force_disable_caches = torch._inductor.config.force_disable_caches
-    torch._inductor.config.force_disable_caches = True
-    yield
-    torch._inductor.config.freezing = freezing_value
-    torch._inductor.config.force_disable_caches = force_disable_caches
+    inductor_config = config.compilation_config.inductor_compile_config
+    try:
+        # Note: The MKLDNN and CPPGEMM backend requires freezing parameters.
+        freezing_value = torch._inductor.config.freezing
+        if inductor_config.get("max_autotune", False):
+            torch._inductor.config.freezing = True
+        yield
+    finally:
+        torch._inductor.config.freezing = freezing_value

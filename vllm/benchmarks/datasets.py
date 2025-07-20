@@ -50,6 +50,11 @@ try:
 except ImportError:
     librosa = PlaceholderModule("librosa")
 
+try:
+    from vllm.utils import FlexibleArgumentParser
+except ImportError:
+    from argparse import ArgumentParser as FlexibleArgumentParser
+
 logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
@@ -315,6 +320,8 @@ class RandomDataset(BenchmarkDataset):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
+        random.seed(self.random_seed)
+        np.random.seed(self.random_seed)
 
     def sample(
         self,
@@ -371,10 +378,11 @@ class RandomDataset(BenchmarkDataset):
             # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
             # To avoid uncontrolled change of the prompt length,
             # the encoded sequence is truncated before being decode again.
-            re_encoded_sequence = tokenizer.encode(
-                prompt, add_special_tokens=False)[:input_lens[i]]
-            prompt = tokenizer.decode(re_encoded_sequence)
             total_input_len = prefix_len + int(input_lens[i])
+            re_encoded_sequence = tokenizer.encode(
+                prompt, add_special_tokens=False)[:total_input_len]
+            prompt = tokenizer.decode(re_encoded_sequence)
+            total_input_len = len(re_encoded_sequence)
             requests.append(
                 SampleRequest(
                     prompt=prompt,
@@ -456,6 +464,263 @@ class ShareGPTDataset(BenchmarkDataset):
                 ))
         self.maybe_oversample_requests(samples, num_requests)
         return samples
+
+
+def add_dataset_parser(parser: FlexibleArgumentParser):
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--num-prompts",
+        type=int,
+        default=1000,
+        help="Number of prompts to process.",
+    )
+    parser.add_argument(
+        "--dataset-name",
+        type=str,
+        default="random",
+        choices=["sharegpt", "burstgpt", "sonnet", "random", "hf", "custom"],
+        help="Name of the dataset to benchmark on.",
+    )
+    parser.add_argument(
+        "--no-stream",
+        action="store_true",
+        help="Do not load the dataset in streaming mode.",
+    )
+    parser.add_argument(
+        "--dataset-path",
+        type=str,
+        default=None,
+        help="Path to the sharegpt/sonnet dataset. "
+        "Or the huggingface dataset ID if using HF dataset.",
+    )
+
+    # group for dataset specific arguments
+    custom_group = parser.add_argument_group("custom dataset options")
+    custom_group.add_argument(
+        "--custom-output-len",
+        type=int,
+        default=256,
+        help=
+        "Number of output tokens per request, used only for custom dataset.",
+    )
+    custom_group.add_argument(
+        "--custom-skip-chat-template",
+        action="store_true",
+        help=
+        "Skip applying chat template to prompt, used only for custom dataset.",
+    )
+
+    sonnet_group = parser.add_argument_group("sonnet dataset options")
+    sonnet_group.add_argument(
+        "--sonnet-input-len",
+        type=int,
+        default=550,
+        help=
+        "Number of input tokens per request, used only for sonnet dataset.",
+    )
+    sonnet_group.add_argument(
+        "--sonnet-output-len",
+        type=int,
+        default=150,
+        help=
+        "Number of output tokens per request, used only for sonnet dataset.",
+    )
+    sonnet_group.add_argument(
+        "--sonnet-prefix-len",
+        type=int,
+        default=200,
+        help=
+        "Number of prefix tokens per request, used only for sonnet dataset.",
+    )
+
+    sharegpt_group = parser.add_argument_group("sharegpt dataset options")
+    sharegpt_group.add_argument(
+        "--sharegpt-output-len",
+        type=int,
+        default=None,
+        help="Output length for each request. Overrides the output length "
+        "from the ShareGPT dataset.",
+    )
+
+    random_group = parser.add_argument_group("random dataset options")
+    random_group.add_argument(
+        "--random-input-len",
+        type=int,
+        default=1024,
+        help=
+        "Number of input tokens per request, used only for random sampling.",
+    )
+    random_group.add_argument(
+        "--random-output-len",
+        type=int,
+        default=128,
+        help=
+        "Number of output tokens per request, used only for random sampling.",
+    )
+    random_group.add_argument(
+        "--random-range-ratio",
+        type=float,
+        default=0.0,
+        help="Range ratio for sampling input/output length, "
+        "used only for random sampling. Must be in the range [0, 1) to define "
+        "a symmetric sampling range"
+        "[length * (1 - range_ratio), length * (1 + range_ratio)].",
+    )
+    random_group.add_argument(
+        "--random-prefix-len",
+        type=int,
+        default=0,
+        help=("Number of fixed prefix tokens before the random context "
+              "in a request. "
+              "The total input length is the sum of `random-prefix-len` and "
+              "a random "
+              "context length sampled from [input_len * (1 - range_ratio), "
+              "input_len * (1 + range_ratio)]."),
+    )
+
+    hf_group = parser.add_argument_group("hf dataset options")
+    hf_group.add_argument("--hf-subset",
+                          type=str,
+                          default=None,
+                          help="Subset of the HF dataset.")
+    hf_group.add_argument("--hf-split",
+                          type=str,
+                          default=None,
+                          help="Split of the HF dataset.")
+    hf_group.add_argument(
+        "--hf-output-len",
+        type=int,
+        default=None,
+        help="Output length for each request. Overrides the output lengths "
+        "from the sampled HF dataset.",
+    )
+
+
+def get_samples(args, tokenizer) -> list[SampleRequest]:
+    if args.dataset_name == "custom":
+        dataset = CustomDataset(dataset_path=args.dataset_path)
+        input_requests = dataset.sample(
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            output_len=args.custom_output_len,
+            skip_chat_template=args.custom_skip_chat_template,
+        )
+
+    elif args.dataset_name == "sonnet":
+        dataset = SonnetDataset(dataset_path=args.dataset_path)
+        # For the "sonnet" dataset, formatting depends on the backend.
+        if args.endpoint_type == "openai-chat":
+            input_requests = dataset.sample(
+                num_requests=args.num_prompts,
+                input_len=args.sonnet_input_len,
+                output_len=args.sonnet_output_len,
+                prefix_len=args.sonnet_prefix_len,
+                tokenizer=tokenizer,
+                return_prompt_formatted=False,
+            )
+        else:
+            assert tokenizer.chat_template or tokenizer.default_chat_template, (
+                "Tokenizer/model must have chat template for sonnet dataset.")
+            input_requests = dataset.sample(
+                num_requests=args.num_prompts,
+                input_len=args.sonnet_input_len,
+                output_len=args.sonnet_output_len,
+                prefix_len=args.sonnet_prefix_len,
+                tokenizer=tokenizer,
+                return_prompt_formatted=True,
+            )
+
+    elif args.dataset_name == "hf":
+        # all following datasets are implemented from the
+        # HuggingFaceDataset base class
+        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = VisionArenaDataset
+            args.hf_split = "train"
+            args.hf_subset = None
+        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = InstructCoderDataset
+            args.hf_split = "train"
+        elif args.dataset_path in MTBenchDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = MTBenchDataset
+            args.hf_split = "train"
+        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = ConversationDataset
+        elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = AIMODataset
+            args.hf_split = "train"
+        elif args.dataset_path in NextEditPredictionDataset.SUPPORTED_DATASET_PATHS:  # noqa: E501
+            dataset_class = NextEditPredictionDataset
+            args.hf_split = "train"
+        elif args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = ASRDataset
+            args.hf_split = "train"
+        elif args.dataset_path in MLPerfDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = MLPerfDataset
+            args.hf_split = "train"
+        else:
+            supported_datasets = set([
+                dataset_name for cls in HuggingFaceDataset.__subclasses__()
+                for dataset_name in cls.SUPPORTED_DATASET_PATHS
+            ])
+            raise ValueError(
+                f"Unsupported dataset path: {args.dataset_path}. "
+                "Huggingface dataset only supports dataset_path"
+                f" from one of following: {supported_datasets}. "
+                "Please consider contributing if you would "
+                "like to add support for additional dataset formats.")
+
+        if dataset_class.IS_MULTIMODAL and args.endpoint_type not in [
+                "openai-chat",
+                "openai-audio",
+        ]:
+            # multi-modal benchmark is only available on OpenAI Chat backend.
+            raise ValueError(
+                "Multi-modal content is only supported on 'openai-chat' and "
+                "'openai-audio' backend.")
+        input_requests = dataset_class(
+            dataset_path=args.dataset_path,
+            dataset_subset=args.hf_subset,
+            dataset_split=args.hf_split,
+            random_seed=args.seed,
+            no_stream=args.no_stream,
+        ).sample(
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            output_len=args.hf_output_len,
+        )
+
+    else:
+        # For datasets that follow a similar structure, use a mapping.
+        dataset_mapping = {
+            "sharegpt":
+            lambda: ShareGPTDataset(random_seed=args.seed,
+                                    dataset_path=args.dataset_path).sample(
+                                        tokenizer=tokenizer,
+                                        num_requests=args.num_prompts,
+                                        output_len=args.sharegpt_output_len,
+                                    ),
+            "burstgpt":
+            lambda: BurstGPTDataset(random_seed=args.seed,
+                                    dataset_path=args.dataset_path).
+            sample(tokenizer=tokenizer, num_requests=args.num_prompts),
+            "random":
+            lambda: RandomDataset(random_seed=args.seed,
+                                  dataset_path=args.dataset_path).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                prefix_len=args.random_prefix_len,
+                input_len=args.random_input_len,
+                output_len=args.random_output_len,
+                range_ratio=args.random_range_ratio,
+            ),
+        }
+
+        try:
+            input_requests = dataset_mapping[args.dataset_name]()
+        except KeyError as err:
+            raise ValueError(f"Unknown dataset: {args.dataset_name}") from err
+
+    return input_requests
 
 
 # -----------------------------------------------------------------------------
@@ -715,6 +980,7 @@ class HuggingFaceDataset(BenchmarkDataset):
         self,
         dataset_path: str,
         dataset_split: str,
+        no_stream: bool = False,
         dataset_subset: Optional[str] = None,
         **kwargs,
     ) -> None:
@@ -722,6 +988,7 @@ class HuggingFaceDataset(BenchmarkDataset):
 
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
+        self.load_stream = not no_stream
         self.load_data()
 
     def load_data(self) -> None:
@@ -730,7 +997,7 @@ class HuggingFaceDataset(BenchmarkDataset):
             self.dataset_path,
             name=self.dataset_subset,
             split=self.dataset_split,
-            streaming=True,
+            streaming=self.load_stream,
         )
         self.data = self.data.shuffle(seed=self.random_seed)
 
@@ -1181,5 +1448,84 @@ class ASRDataset(HuggingFaceDataset):
                 " what Whisper supports.",
                 skipped,
             )
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# MLPerf Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class MLPerfDataset(HuggingFaceDataset):
+    """
+    MLPerf Inference Dataset.
+
+    Dataset on HF:
+    https://huggingface.co/datasets/mgoin/mlperf-inference-llama2-data
+    https://huggingface.co/datasets/mgoin/mlperf-inference-llama3.1-data
+
+    Each record contains:
+      - "system_prompt": system role instruction.
+      - "question": user question.
+      - "output": reference answer.
+
+    We combine the system prompt and question into a chat-formatted prompt
+    (using the tokenizer's chat template) and set the expected output length to
+    the tokenized length of the provided reference answer.
+    """
+
+    SUPPORTED_DATASET_PATHS = {
+        "mgoin/mlperf-inference-llama2-data",
+        "mgoin/mlperf-inference-llama3.1-data",
+    }
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        # Force dynamic output length based on reference completion.
+        dynamic_output = output_len is None
+        sampled_requests: list[SampleRequest] = []
+
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+
+            system_prompt = item["system_prompt"]
+            question = item["question"]
+            reference_answer = item["output"]
+
+            # Build chat-style prompt using tokenizer template, if available.
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": question},
+            ]
+            prompt_formatted = tokenizer.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=False
+            )
+            prompt_len = len(tokenizer(prompt_formatted).input_ids)
+
+            # Determine output length from reference answer tokens.
+            ref_out_len = len(
+                tokenizer(reference_answer, add_special_tokens=False).input_ids
+            )
+            expected_output_len = ref_out_len if dynamic_output else output_len
+
+            # Validate sequence lengths.
+            if not is_valid_sequence(prompt_len, expected_output_len):
+                continue
+
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt_formatted,
+                    prompt_len=prompt_len,
+                    expected_output_len=expected_output_len,
+                )
+            )
+
         self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests

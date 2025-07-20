@@ -45,7 +45,6 @@ def fused_add_rms_norm(
 
 def rocm_aiter_rms_norm(x: torch.Tensor, weight: torch.Tensor,
                         variance_epsilon: float) -> torch.Tensor:
-
     import aiter as rocm_aiter
     if x.dim() > 2:
         x_original_shape = x.shape
@@ -170,26 +169,6 @@ class RMSNorm(CustomOp):
                              self.variance_epsilon)
         else:
             return norm_func(x, self.weight.data, self.variance_epsilon)
-
-    def forward_hpu(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        from vllm_hpu_extension.kernels import rms_norm
-        HPUFusedRMSNorm = rms_norm()
-        if HPUFusedRMSNorm is None:
-            return self.forward_native(x, residual)
-        if residual is not None:
-            orig_shape = x.shape
-            residual += x.view(residual.shape)
-            # Note: HPUFusedRMSNorm requires 3D tensors as inputs
-            x = HPUFusedRMSNorm.apply(residual, self.weight,
-                                      self.variance_epsilon)
-            return x.view(orig_shape), residual
-
-        x = HPUFusedRMSNorm.apply(x, self.weight, self.variance_epsilon)
-        return x
 
     def forward_xpu(
         self,

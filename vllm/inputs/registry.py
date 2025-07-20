@@ -11,7 +11,6 @@ from typing_extensions import TypeVar
 from vllm.jsontree import JSONTree, json_map_leaves
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import resolve_mm_processor_kwargs
 
 if TYPE_CHECKING:
@@ -19,6 +18,14 @@ if TYPE_CHECKING:
     from vllm.multimodal import (MultiModalDataDict, MultiModalPlaceholderDict,
                                  MultiModalRegistry)
     from vllm.sequence import SequenceData
+    from vllm.transformers_utils.tokenizer import AnyTokenizer
+else:
+    ModelConfig = Any
+    MultiModalDataDict = Any
+    MultiModalPlaceholderDict = Any
+    MultiModalRegistry = Any
+    SequenceData = Any
+    AnyTokenizer = Any
 
 _T = TypeVar("_T")
 _C = TypeVar("_C", bound=PretrainedConfig, default=PretrainedConfig)
@@ -34,7 +41,7 @@ class InputContext:
     modify the inputs.
     """
 
-    model_config: "ModelConfig"
+    model_config: ModelConfig
     """The configuration of the model."""
 
     def get_hf_config(
@@ -168,9 +175,11 @@ class InputProcessingContext(InputContext):
         try:
             output = hf_processor(**data, **merged_kwargs, return_tensors="pt")
             # this emulates output.to(dtype=self.model_config.dtype)
-            cast_output = json_map_leaves(maybe_cast_dtype, output)
             if isinstance(output, BatchFeature):
+                cast_output = json_map_leaves(maybe_cast_dtype, output.data)
                 return BatchFeature(cast_output)
+
+            cast_output = json_map_leaves(maybe_cast_dtype, output)
 
             logger.warning_once(
                 f"{type(hf_processor).__name__} did not return `BatchFeature`. "
@@ -192,9 +201,9 @@ class DummyData(NamedTuple):
     Note: This is only used in V0.
     """
 
-    seq_data: "SequenceData"
-    multi_modal_data: Optional["MultiModalDataDict"] = None
-    multi_modal_placeholders: Optional["MultiModalPlaceholderDict"] = None
+    seq_data: SequenceData
+    multi_modal_data: Optional[MultiModalDataDict] = None
+    multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
 
 
 class InputRegistry:
@@ -204,9 +213,9 @@ class InputRegistry:
 
     def dummy_data_for_profiling(
         self,
-        model_config: "ModelConfig",
+        model_config: ModelConfig,
         seq_len: int,
-        mm_registry: "MultiModalRegistry",
+        mm_registry: MultiModalRegistry,
         is_encoder_data: bool = False,
     ) -> DummyData:
         """

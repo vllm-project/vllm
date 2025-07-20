@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import os
 import platform
+import subprocess
 import sys
+from dataclasses import dataclass
 from importlib.util import find_spec
 from typing import TYPE_CHECKING, Optional
 
-import psutil
 import torch
 
 from vllm.logger import init_logger
@@ -32,11 +34,41 @@ def get_max_threads(pid=0):
         raise NotImplementedError("Unsupported OS")
 
 
+@dataclass
+class LogicalCPUInfo:
+    id: int = -1
+    physical_core: int = -1
+    numa_node: int = -1
+
+    @classmethod
+    def _int(cls, value: str) -> int:
+        try:
+            int_value = int(value)
+        except Exception:
+            int_value = -1
+        return int_value
+
+    @staticmethod
+    def json_decoder(obj_dict: dict):
+        id = obj_dict.get("cpu")
+        physical_core = obj_dict.get("core")
+        numa_node = obj_dict.get("node")
+
+        if not (id is None or physical_core is None or numa_node is None):
+            return LogicalCPUInfo(
+                id=LogicalCPUInfo._int(id),
+                physical_core=LogicalCPUInfo._int(physical_core),
+                numa_node=LogicalCPUInfo._int(numa_node))
+        else:
+            return obj_dict
+
+
 class CpuPlatform(Platform):
     _enum = PlatformEnum.CPU
     device_name: str = "cpu"
     device_type: str = "cpu"
     dispatch_key: str = "CPU"
+    dist_backend: str = "gloo"
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -64,17 +96,23 @@ class CpuPlatform(Platform):
         if selected_backend and selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         if use_mla:
-            logger.info("Using CPU MLA backend.")
-            return "vllm.attention.backends.cpu_mla.CPUMLABackend"
+            raise NotImplementedError("MLA is not supported on CPU.")
         logger.info("Using Torch SDPA backend.")
-        if use_v1:
-            return "vllm.v1.attention.backends.cpu_attn.TorchSDPABackend"
-        else:
-            return "vllm.attention.backends.torch_sdpa.TorchSDPABackend"
+        if not use_v1:
+            raise ValueError("CPU backend only supports V1.")
+        return "vllm.v1.attention.backends.cpu_attn.TorchSDPABackend"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
+        import psutil
         return psutil.virtual_memory().total
+
+    @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.cpu.set_device(device)
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
@@ -89,12 +127,9 @@ class CpuPlatform(Platform):
         import vllm.envs as envs
         from vllm.utils import GiB_bytes
         model_config = vllm_config.model_config
-        # Reminder: Please update docs/features/compatibility_matrix.md
-        # If the feature combo become valid
-        if not model_config.enforce_eager:
-            model_config.enforce_eager = True
 
-        model_config.disable_cascade_attn = True
+        if model_config is not None:
+            model_config.disable_cascade_attn = True
 
         cache_config = vllm_config.cache_config
 
@@ -121,7 +156,7 @@ class CpuPlatform(Platform):
                 "CPU backend doesn't support fp8_e4m3 KV cache type, "
                 "cast to fp8_e5m2.")
 
-        if (cache_config.cache_dtype != "auto"
+        if (cache_config.cache_dtype != "auto" and model_config is not None
                 and model_config.dtype == torch.half):
             logger.warning("FP8 KV cache on the CPU backend only does not"
                            " support fp16 for now, cast to bf16.")
@@ -151,29 +186,29 @@ class CpuPlatform(Platform):
                            parallel_config.distributed_executor_backend)
             parallel_config.distributed_executor_backend = "mp"
         if parallel_config.worker_cls == "auto":
-            if vllm_config.speculative_config:
-                parallel_config.worker_cls = \
-                    "vllm.spec_decode.spec_decode_worker.create_spec_worker"
-                parallel_config.sd_worker_cls = \
-                    "vllm.worker.cpu_worker.CPUWorker"
-            else:
-                if envs.VLLM_USE_V1:
-                    parallel_config.worker_cls = \
-                        "vllm.v1.worker.cpu_worker.CPUWorker"
-                else:
-                    parallel_config.worker_cls = \
-                        "vllm.worker.cpu_worker.CPUWorker"
+            parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
 
         # Note: workaround for v1 gpu_model_runner
         from vllm.config import CompilationLevel
         vllm_config.compilation_config.cudagraph_capture_sizes = []
 
         compilation_config = vllm_config.compilation_config
-        if (envs.VLLM_USE_V1 and vllm_config.compilation_config.level
-                == CompilationLevel.PIECEWISE):
+        if vllm_config.compilation_config.level == CompilationLevel.PIECEWISE:
+
+            # Note: vLLM V1 is using PIECEWISE level compilation, which will
+            # take time to compile kernels just-in-time with the inductor
+            # backend. For CPU CI tests, most of them are executed fast and
+            # compilations consume too much time, even with torch compile
+            # cache. So use VLLM_CPU_CI_ENV to indicate the CI environment,
+            # and just execute model with dynamo + eager mode to save time.
+            # VLLM_CPU_CI_ENV is only used as an internal variable.
+            if os.environ.get("VLLM_CPU_CI_ENV", "0") != "0":
+                backend = "eager"
+            else:
+                backend = "inductor"
+
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
-            compilation_config.backend = "eager"
-            compilation_config.custom_ops += ["none"]
+            compilation_config.backend = backend
             compilation_config.inductor_compile_config.update({
                 "dce":
                 True,
@@ -186,6 +221,8 @@ class CpuPlatform(Platform):
                 "epilogue_fusion":
                 True,
             })
+            if compilation_config.use_inductor:
+                compilation_config.custom_ops = ["none"]
 
         if vllm_config.lora_config is not None:
             compilation_config.level = CompilationLevel.NO_COMPILATION
@@ -225,7 +262,7 @@ class CpuPlatform(Platform):
         os.environ["LOCAL_WORLD_SIZE"] = str(
             vllm_config.parallel_config.tensor_parallel_size)
 
-        if vllm_config.model_config and vllm_config.model_config.use_mla:
+        if model_config is not None and model_config.use_mla:
             logger.info(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled.")
@@ -234,6 +271,38 @@ class CpuPlatform(Platform):
             vllm_config.scheduler_config.max_num_batched_tokens = max(
                 vllm_config.scheduler_config.max_model_len,
                 DEFAULT_MAX_NUM_BATCHED_TOKENS)
+
+    @classmethod
+    def get_allowed_cpu_memory_node_list(
+            cls) -> tuple[list[int], list[LogicalCPUInfo]]:
+        assert platform.system() == "Linux"
+
+        # Init LogicalCPUInfo from lscpu
+        lscpu_output = subprocess.check_output("lscpu -J -e=CPU,CORE,NODE",
+                                               shell=True,
+                                               text=True)
+        logical_cpu_list: list[LogicalCPUInfo] = json.loads(
+            lscpu_output, object_hook=LogicalCPUInfo.json_decoder)['cpus']
+
+        # Filter CPUs with invalid attributes
+        logical_cpu_list = [
+            x for x in logical_cpu_list
+            if -1 not in (x.id, x.physical_core, x.numa_node)
+        ]
+
+        # Filter allowed CPUs
+        allowed_cpu_id_list = os.sched_getaffinity(0)
+        logical_cpu_list = [
+            x for x in logical_cpu_list if x.id in allowed_cpu_id_list
+        ]
+
+        # Get allowed NUMA nodes
+        allowed_numa_nodes = set()
+        for x in logical_cpu_list:
+            allowed_numa_nodes.add(x.numa_node)  # type: ignore
+        allowed_numa_nodes_list = sorted(allowed_numa_nodes)
+
+        return allowed_numa_nodes_list, logical_cpu_list
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
@@ -261,3 +330,12 @@ class CpuPlatform(Platform):
         model configuration.
         """
         return True
+
+    @classmethod
+    def default_v1(cls, model_config) -> bool:
+        """Returns whether the current platform can use v1 by default for the
+        supplied model configuration.
+        """
+        arch = cls.get_cpu_architecture()
+        return (cls.supports_v1(model_config) and arch
+                in (CpuArchEnum.X86, CpuArchEnum.POWERPC, CpuArchEnum.ARM))

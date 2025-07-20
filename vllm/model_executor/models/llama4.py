@@ -35,7 +35,8 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, maybe_remap_kv_scale_name)
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, extract_layer_index, fast_topk,
@@ -52,7 +53,7 @@ class Llama4MoE(nn.Module):
         renormalize: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         router_scores, router_indices = fast_topk(gating_output, topk, dim=-1)
-        # psuedo-standard is that the router scores are floats
+        # pseudo-standard is that the router scores are floats
         router_scores = torch.sigmoid(router_scores.float())
         return (router_scores, router_indices.to(torch.int32))
 
@@ -148,9 +149,8 @@ class Llama4Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        # TODO: attn_temperature_tuning should be a bool in huggingface
         self.attn_temperature_tuning = self.nope and \
-            config.attn_temperature_tuning > 0
+            config.attn_temperature_tuning
 
         self.floor_scale = getattr(config, "floor_scale", 8192.0)
         self.attn_scale = getattr(config, "attn_scale", 0.1)
@@ -433,12 +433,24 @@ class Llama4Model(LlamaModel):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name or "experts" in name:
                     continue
-                name = name.replace(weight_name, param_name)
+                # This check is for ModelOpt ckpts with kv cache quant enabled
+                if not (name.endswith(
+                    (".k_scale", ".v_scale")) and "self_attn" in name):
+                    name = name.replace(weight_name, param_name)
                 if is_pp_missing_parameter(name, self):
                     continue
+                if name.endswith("scale") and "expert" not in name:
+                    # Remapping the name of FP8 kv-scale.
+                    name = maybe_remap_kv_scale_name(name, params_dict)
+                    if name is None:
+                        continue
                 param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                if weight_loader == default_weight_loader:
+                    weight_loader(param, loaded_weight)
+                else:
+                    weight_loader(param, loaded_weight, shard_id)
                 loaded_params.add(name)
                 break
             else:
@@ -453,6 +465,44 @@ class Llama4Model(LlamaModel):
                 if not moe_loaded:
                     if is_pp_missing_parameter(name, self):
                         continue
+
+                    # Handle flat expert scale parameters that
+                    # don't match per-expert patterns
+                    if ("experts." in name and ("w13_input_scale" in name
+                                                or "w13_weight_scale" in name
+                                                or "w2_input_scale" in name
+                                                or "w2_weight_scale" in name)):
+                        # These are flat expert scales that apply to all experts
+                        param = params_dict[name]
+                        weight_loader = getattr(param, "weight_loader",
+                                                default_weight_loader)
+
+                        # Check for MoE-specific loading support via
+                        # attribute instead of expensive runtime reflection
+                        supports_moe = getattr(weight_loader,
+                                               'supports_moe_loading', False)
+
+                        if supports_moe:
+                            # This is a MoE weight loader
+                            if "w13_" in name:
+                                shard_id = "w1"
+                            elif "w2_" in name:
+                                shard_id = "w2"
+                            else:
+                                shard_id = "w1"
+
+                            weight_loader(param,
+                                          loaded_weight,
+                                          name,
+                                          shard_id=shard_id,
+                                          expert_id=0)
+                        else:
+                            # Regular weight loader (handles both
+                            # param.weight_loader and default_weight_loader)
+                            weight_loader(param, loaded_weight)
+                        loaded_params.add(name)
+                        continue
+
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)

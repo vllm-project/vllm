@@ -23,7 +23,23 @@ class NoOpEliminationPass(VllmInductorPass):
     in the 2D-case. Additionally, torch internal no-op elimination pass does
     not handle certain slice variants.
 
+    Cases handled:
+      1. A chain of reshapes is equivalent to the last reshape called on the
+      base tensor (input of the first reshape).
+      2. A reshape that produces the shape of the input is redundant
+      3. A slice that produces the shape of the input is redundant
+
     Example graph 1:
+    mul_1: "f16[s0, 4096]" = ...
+    view_1: "f16[s0, 128, 32]" = torch.reshape(mul_1, [-1, 128, 32])
+    view_2: "f16[s0, 4096]" = torch.reshape(view_2, [-1, 4096])
+    view_3: "f16[s0, 128, 32]" = torch.reshape(view_3, [-1, 128, 32])
+
+    Can be replaced with:
+    mul_1: "f16[s0, 4096]" = ...
+    view_3: "f16[s0, 128, 32]" = ...
+
+    Example graph 2:
     getitem_1: "f16[s0, 4096]" = ...
     view_1: "f16[s0, 4096]" = torch.reshape(getitem_1, [-1, 4096])
     at = auto_functionalized(static_scaled_fp8_quant, input = view_1, ...)
@@ -34,7 +50,7 @@ class NoOpEliminationPass(VllmInductorPass):
     at = auto_functionalized(static_scaled_fp8_quant, input = getitem_1, ...)
     out: "f8e4m3fn[s0, 4096]" = at[1]
 
-    Example graph 2:
+    Example graph 3:
     arg0: "s0" = SymInt(s0)
     scaled_mm: "f16[s0, 4096]" = ...
     slice_1: "f16[s0, 4096]" = torch.slice(scaled_mm, -1, 0, arg0)
@@ -58,6 +74,18 @@ class NoOpEliminationPass(VllmInductorPass):
         # Remove no-op reshapes/views:
         for node in graph.nodes:
             if is_func(node, torch.ops.aten.reshape.default):
+                # Case 1: rewrite reshape chains to reshapes on the base tensor
+                input = node.args[0]
+                # If the input is a reshape, rebind to that node
+                if is_func(input, torch.ops.aten.reshape.default):
+                    # The new input is guaranteed not to be a reshape,
+                    # because we process nodes in order
+                    node.update_arg(0, input.args[0])
+                    if len(input.users) == 0:
+                        graph.erase_node(input)
+                        count += 1
+
+                # Case 2: remove this reshape if it produces the original shape
                 input, shape = node.args[:2]
                 input_shape = input.meta["val"].shape
                 if len(shape) != len(input_shape):

@@ -45,12 +45,27 @@ MODELS = [
     EmbedModelInfo("Alibaba-NLP/gte-modernbert-base",
                    architecture="ModernBertModel",
                    enable_test=True),
+    ########## Qwen3ForCausalLM
+    EmbedModelInfo("Qwen/Qwen3-Embedding-0.6B",
+                   architecture="Qwen3ForCausalLM",
+                   dtype="float32",
+                   enable_test=True),
+    EmbedModelInfo("Qwen/Qwen3-Embedding-4B",
+                   architecture="Qwen3ForCausalLM",
+                   dtype="float32",
+                   enable_test=False),
+]
+
+V1FlashAttentionImpNotSupported = [
+    "Alibaba-NLP/gte-Qwen2-1.5B-instruct", "Alibaba-NLP/gte-modernbert-base"
 ]
 
 
 @pytest.mark.parametrize("model_info", MODELS)
-def test_embed_models_mteb(hf_runner, vllm_runner,
-                           model_info: EmbedModelInfo) -> None:
+def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo,
+                           monkeypatch) -> None:
+    if model_info.name in V1FlashAttentionImpNotSupported:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
 
     vllm_extra_kwargs: dict[str, Any] = {}
     if model_info.architecture == "GteNewModel":
@@ -62,8 +77,10 @@ def test_embed_models_mteb(hf_runner, vllm_runner,
 
 @pytest.mark.parametrize("model_info", MODELS)
 def test_embed_models_correctness(hf_runner, vllm_runner,
-                                  model_info: EmbedModelInfo,
-                                  example_prompts) -> None:
+                                  model_info: EmbedModelInfo, example_prompts,
+                                  monkeypatch) -> None:
+    if model_info.name in V1FlashAttentionImpNotSupported:
+        monkeypatch.setenv("VLLM_USE_V1", "0")
 
     vllm_extra_kwargs: dict[str, Any] = {}
     if model_info.architecture == "GteNewModel":

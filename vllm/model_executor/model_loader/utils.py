@@ -21,9 +21,10 @@ from vllm.model_executor.layers.linear import QKVCrossParallelLinear
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.models import ModelRegistry
-from vllm.model_executor.models.adapters import (as_classification_model,
-                                                 as_embedding_model,
-                                                 as_reward_model)
+from vllm.model_executor.models.adapters import (as_embedding_model,
+                                                 as_reward_model,
+                                                 as_seq_cls_model)
+from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.utils import is_pin_memory_available
 
 logger = init_logger(__name__)
@@ -58,7 +59,9 @@ def initialize_model(
     all_params = [param.name for param in signatures.parameters.values()]
     if "vllm_config" in all_params and "prefix" in all_params:
         # new-style model class
-        with set_current_vllm_config(vllm_config, check_compile=True):
+        with set_current_vllm_config(vllm_config,
+                                     check_compile=True,
+                                     prefix=prefix):
             return model_class(vllm_config=vllm_config, prefix=prefix)
 
     msg = ("vLLM model class should accept `vllm_config` and `prefix` as "
@@ -86,7 +89,9 @@ def initialize_model(
         kwargs["lora_config"] = vllm_config.lora_config
     if "scheduler_config" in all_params:
         kwargs["scheduler_config"] = vllm_config.scheduler_config
-    with set_current_vllm_config(vllm_config, check_compile=True):
+    with set_current_vllm_config(vllm_config,
+                                 check_compile=True,
+                                 prefix=prefix):
         return model_class(**kwargs)
 
 
@@ -223,15 +228,40 @@ def get_model_architecture(
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
     mixtral_supported = [
-        "fp8", "compressed-tensors", "gptq_marlin", "awq_marlin", "quark"
+        "fp8",
+        "compressed-tensors",
+        "gptq_marlin",
+        "awq_marlin",
+        "quark",
+        "bitsandbytes",
     ]
 
     vllm_supported_archs = ModelRegistry.get_supported_archs()
     vllm_not_supported = not any(arch in vllm_supported_archs
                                  for arch in architectures)
+
+    if vllm_not_supported:
+        # try automatic conversion in adapters.py
+        for arch in architectures:
+            if not arch.endswith("ForSequenceClassification"):
+                continue
+
+            assert model_config.task == "classify"
+            causal_lm_arch = arch.replace("ForSequenceClassification",
+                                          "ForCausalLM")
+            causal_lm_arch_vllm_supported = (causal_lm_arch
+                                             in vllm_supported_archs)
+            if not causal_lm_arch_vllm_supported:
+                continue
+
+            architectures = [causal_lm_arch]
+            vllm_not_supported = False
+            break
+
     if (model_config.model_impl == ModelImpl.TRANSFORMERS or
             model_config.model_impl != ModelImpl.VLLM and vllm_not_supported):
         architectures = resolve_transformers_arch(model_config, architectures)
+        logger.debug_once("Resolve transformers arch %s", str(architectures))
     elif (model_config.quantization is not None
           and model_config.quantization not in mixtral_supported
           and "MixtralForCausalLM" in architectures):
@@ -239,13 +269,20 @@ def get_model_architecture(
 
     model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
     if model_config.task == "embed":
+        logger.debug_once("Automatic conversion using `as_embedding_model`.")
         model_cls = as_embedding_model(model_cls)
     elif model_config.task == "classify":
-        model_cls = as_classification_model(model_cls)
+        logger.debug_once("Automatic conversion using `as_seq_cls_model`.")
+        model_cls = as_seq_cls_model(model_cls)
     elif model_config.task == "reward":
+        logger.debug_once("Automatic conversion using `as_reward_model`.")
         model_cls = as_reward_model(model_cls)
 
     return model_cls, arch
+
+
+def get_model_cls(model_config: ModelConfig) -> type[nn.Module]:
+    return get_model_architecture(model_config)[0]
 
 
 def get_architecture_class_name(model_config: ModelConfig) -> str:
@@ -290,13 +327,16 @@ def configure_quant_config(quant_config: QuantizationConfig,
 
     Note that model attributes are passed by reference to quant_config,
     enabling them to be updated by model_class.__new__ (ex. chatglm, qwen)
+
+    Once the `SupportsQuant` mixin has been added to all models, this
+    function can be removed
     """
-    packed_mapping = getattr(model_class, "packed_modules_mapping", None)
-    if packed_mapping is not None:
-        # pass packed_modules_mapping by reference to quant_config
-        quant_config.packed_modules_mapping = packed_mapping
-    else:
-        logger.warning(
-            "The model class %s has not defined `packed_modules_mapping`, "
-            "this may lead to incorrect mapping of quantized or ignored "
-            "modules", model_class.__name__)
+    if not issubclass(model_class, SupportsQuant):
+        hf_to_vllm_mapper = getattr(model_class, "hf_to_vllm_mapper", None)
+        packed_mapping = getattr(model_class, "packed_modules_mapping", None)
+
+        # pass mappings by reference to quant_config
+        if hf_to_vllm_mapper is not None:
+            quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
+        if packed_mapping is not None:
+            quant_config.packed_modules_mapping = packed_mapping

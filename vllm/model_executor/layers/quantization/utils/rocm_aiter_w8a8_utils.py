@@ -18,43 +18,100 @@ def is_rocm_aiter_gemm_enabled():
             and envs.VLLM_ROCM_USE_AITER_LINEAR
 
 
-def rocm_aiter_gemm_a8w8_bpreshuffle_impl(
-    qinput: torch.Tensor,
-    weight: torch.Tensor,
-    scale_a: Optional[torch.Tensor] = None,
-    scale_b: Optional[torch.Tensor] = None,
-    out_dtype: Optional[torch.dtype] = None,
-) -> torch.Tensor:
-
-    # This AITER function can be used for
-    # - per-token activations + per-channel weights
-    #   e.g. vllm/model_executor/layers/quantization/utils/w8a8_utils.py
-    # accept the weight as # keep the weight as (N, K)
-    # NOTE: The weight has to be shuffled in the
-    # process_weights_after_loading of the CompressedTensorsW8A8Fp8 class
-
-    from aiter import gemm_a8w8_bpreshuffle_CK
-
-    return gemm_a8w8_bpreshuffle_CK(qinput, weight, scale_a, scale_b,
-                                    out_dtype)
-
-
-def rocm_aiter_gemm_a8w8_bpreshuffle_fake(
-    qinput: torch.Tensor,
-    weight: torch.Tensor,
-    scale_a: Optional[torch.Tensor] = None,
-    scale_b: Optional[torch.Tensor] = None,
-    out_dtype: Optional[torch.dtype] = None,
-) -> torch.Tensor:
-
-    m = qinput.shape[0]
-    n = weight.shape[0]
-    if out_dtype is None:
-        out_dtype = qinput.dtype
-    return torch.empty((m, n), dtype=out_dtype, device=qinput.device)
-
-
 if current_platform.is_rocm():
+
+    import aiter as rocm_aiter
+    from aiter import get_hip_quant
+
+    aiter_per_tensor_quant = get_hip_quant(rocm_aiter.QuantType.per_Tensor)
+    aiter_per_token_quant = get_hip_quant(rocm_aiter.QuantType.per_Token)
+
+    def rocm_aiter_per_token_quant_fp8_impl(
+        input: torch.Tensor,
+        scale: Optional[torch.Tensor] = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return aiter_per_token_quant(input.contiguous(), scale,
+                                     rocm_aiter.dtypes.fp8)
+
+    def rocm_aiter_per_token_quant_fp8_fake(
+        input: torch.Tensor,
+        scale: Optional[torch.Tensor] = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        quantized = torch.empty_like(input,
+                                     dtype=torch.float8_e4m3fnuz,
+                                     device=input.device)
+        scale_tensor = torch.empty((*input.shape[:-1], 1),
+                                   dtype=torch.float32,
+                                   device=input.device)
+        return quantized, scale_tensor
+
+    def rocm_aiter_per_tensor_quant_fp8_impl(
+        input: torch.Tensor,
+        scale: Optional[torch.Tensor] = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return aiter_per_tensor_quant(input.contiguous(), scale,
+                                      rocm_aiter.dtypes.fp8)
+
+    def rocm_aiter_per_tensor_quant_fp8_fake(
+        input: torch.Tensor,
+        scale: Optional[torch.Tensor] = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        quantized = torch.empty_like(input,
+                                     dtype=torch.float8_e4m3fnuz,
+                                     device=input.device)
+        scale_tensor = torch.empty(1, dtype=torch.float32, device=input.device)
+        return quantized, scale_tensor
+
+    def rocm_aiter_gemm_a8w8_bpreshuffle_impl(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            out_dtype: Optional[torch.dtype] = None,
+            scale_a: Optional[torch.Tensor] = None,
+            scale_b: Optional[torch.Tensor] = None) -> torch.Tensor:
+
+        # This AITER function can be used for
+        # - per-token activations + per-channel weights
+        #   e.g. vllm/model_executor/layers/quantization/utils/w8a8_utils.py
+        # accept the weight as # keep the weight as (N, K)
+        # NOTE: The weight has to be shuffled in the
+        # process_weights_after_loading of the CompressedTensorsW8A8Fp8 class
+
+        from aiter import gemm_a8w8_bpreshuffle_ck
+        m = input.shape[0]
+        n = weight.shape[0]
+        Y = torch.empty(m, n, dtype=out_dtype, device=input.device)
+        gemm_a8w8_bpreshuffle_ck(input, weight, scale_a, scale_b, Y)
+        return Y
+
+    def rocm_aiter_gemm_a8w8_bpreshuffle_fake(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            out_dtype: Optional[torch.dtype] = None,
+            scale_a: Optional[torch.Tensor] = None,
+            scale_b: Optional[torch.Tensor] = None) -> torch.Tensor:
+
+        m = input.shape[0]
+        n = weight.shape[0]
+        if out_dtype is None:
+            out_dtype = input.dtype
+        return torch.empty((m, n), dtype=out_dtype, device=input.device)
+
+    direct_register_custom_op(
+        op_name="rocm_aiter_per_token_quant_fp8",
+        op_func=rocm_aiter_per_token_quant_fp8_impl,
+        mutates_args=[],
+        fake_impl=rocm_aiter_per_token_quant_fp8_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+
+    direct_register_custom_op(
+        op_name="rocm_aiter_per_tensor_quant_fp8",
+        op_func=rocm_aiter_per_tensor_quant_fp8_impl,
+        mutates_args=[],
+        fake_impl=rocm_aiter_per_tensor_quant_fp8_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+
     direct_register_custom_op(
         op_name="rocm_aiter_gemm_a8w8_bpreshuffle",
         op_func=rocm_aiter_gemm_a8w8_bpreshuffle_impl,

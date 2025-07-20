@@ -4,14 +4,9 @@ from typing import Optional
 
 import torch
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.triton_utils import tl, triton
-from vllm.utils import round_up
-
-
-def ceil_div(a, b):
-    return (a + b - 1) // b
+from vllm.utils import cdiv, round_up
 
 
 @triton.jit
@@ -115,7 +110,7 @@ def moe_align_block_size_triton(
     cumsum = torch.zeros((num_experts + 1, ),
                          dtype=torch.int32,
                          device=topk_ids.device)
-    tokens_per_thread = ceil_div(numel, num_experts)
+    tokens_per_thread = cdiv(numel, num_experts)
 
     moe_align_block_size_stage1[grid](
         topk_ids,
@@ -158,6 +153,12 @@ def moe_align_block_size(
     """
     Aligns the token distribution across experts to be compatible with block
     size for matrix multiplication.
+
+    Note: In the case of expert_parallel, moe_align_block_size initially
+    considers all experts as valid and aligns all tokens appropriately.
+    Before the function returns it marks the experts_ids that are not in
+    the current GPU rank as -1 so the MoE matmuls could skip those blocks.
+    This requires the num_experts input arg to be the num global experts.
 
     Parameters:
     - topk_ids: A tensor of shape [total_tokens, top_k] representing the
@@ -214,29 +215,9 @@ def moe_align_block_size(
     num_tokens_post_pad = torch.empty((1),
                                       dtype=torch.int32,
                                       device=topk_ids.device)
-    if num_experts >= 224:
-        if envs.VLLM_ENABLE_MOE_ALIGN_BLOCK_SIZE_TRITON or num_experts != 256:
-            moe_align_block_size_triton(
-                topk_ids,
-                num_experts,
-                block_size,
-                sorted_ids,
-                expert_ids,
-                num_tokens_post_pad,
-            )
-        else:
-            # Currently requires num_experts=256
-            ops.sgl_moe_align_block_size(
-                topk_ids,
-                num_experts,
-                block_size,
-                sorted_ids,
-                expert_ids,
-                num_tokens_post_pad,
-            )
-    else:
-        ops.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
-                                 expert_ids, num_tokens_post_pad)
+
+    ops.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
+                             expert_ids, num_tokens_post_pad)
     if expert_map is not None:
         expert_ids = expert_map[expert_ids]
 

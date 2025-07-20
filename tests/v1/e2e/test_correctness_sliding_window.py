@@ -30,7 +30,7 @@ model_config = {
     ])
 @pytest.mark.parametrize("batch_size", [5])
 @pytest.mark.parametrize("seed", [1])
-def test_sliding_window_retrival(monkeypatch, model, batch_size, seed):
+def test_sliding_window_retrieval(monkeypatch, model, batch_size, seed):
     """
     The test does a bunch of assignments "x1 = 10\nx2 = 33\n..." and then
     asks for value of one of them (which is outside the sliding window).

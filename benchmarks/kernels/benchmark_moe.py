@@ -7,7 +7,6 @@ import time
 from contextlib import nullcontext
 from datetime import datetime
 from itertools import product
-from types import SimpleNamespace
 from typing import Any, TypedDict
 
 import ray
@@ -43,7 +42,7 @@ def benchmark_config(
     use_fp8_w8a8: bool,
     use_int8_w8a16: bool,
     num_iters: int = 100,
-    block_quant_shape: List[int] = None,
+    block_quant_shape: list[int] = None,
     use_deep_gemm: bool = False,
 ) -> float:
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
@@ -87,6 +86,9 @@ def benchmark_config(
             (num_experts, 2 * shard_intermediate_size), dtype=torch.float32
         )
         w2_scale = torch.randn((hidden_size, num_experts), dtype=torch.float32)
+    if use_deep_gemm:
+        # we use the default block shape for deepgemm
+        block_quant_shape = [128, 128]
     if use_fp8_w8a8:
         if block_quant_shape:
             block_n, block_k = block_quant_shape[0], block_quant_shape[1]
@@ -400,7 +402,7 @@ class BenchmarkWorker:
         dtype: torch.dtype,
         use_fp8_w8a8: bool,
         use_int8_w8a16: bool,
-        block_quant_shape: List[int] = None,
+        block_quant_shape: list[int] = None,
         use_deep_gemm: bool = False,
     ) -> tuple[dict[str, int], float]:
         current_platform.seed_everything(self.seed)
@@ -532,7 +534,7 @@ def save_configs(
     dtype: torch.dtype,
     use_fp8_w8a8: bool,
     use_int8_w8a16: bool,
-    block_quant_shape: List[int],
+    block_quant_shape: list[int],
 ) -> None:
     dtype_str = get_config_dtype_str(
         dtype, use_int8_w8a16=use_int8_w8a16, use_fp8_w8a8=use_fp8_w8a8
@@ -563,7 +565,6 @@ def main(args: argparse.Namespace):
     config = get_config(model=args.model, trust_remote_code=args.trust_remote_code)
     if args.model_prefix:
         config = getattr(config, args.model_prefix)
-    config = SimpleNamespace(**config)
 
     if config.architectures[0] == "DbrxForCausalLM":
         E = config.ffn_config.moe_num_experts
@@ -575,7 +576,11 @@ def main(args: argparse.Namespace):
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
-    elif config.architectures[0] in ("DeepseekV3ForCausalLM", "DeepseekV2ForCausalLM"):
+    elif config.architectures[0] in (
+        "DeepseekV3ForCausalLM",
+        "DeepseekV2ForCausalLM",
+        "Glm4MoeForCausalLM",
+    ):
         E = config.n_routed_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
@@ -584,6 +589,11 @@ def main(args: argparse.Namespace):
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
+        shard_intermediate_size = 2 * intermediate_size // args.tp_size
+    elif config.architectures[0] in ("HunYuanMoEV1ForCausalLM"):
+        E = config.num_experts
+        topk = config.moe_topk[0]
+        intermediate_size = config.moe_intermediate_size[0]
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
     else:
         # Support for llama4
@@ -595,11 +605,7 @@ def main(args: argparse.Namespace):
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
 
     hidden_size = config.hidden_size
-    dtype = (
-        torch.float16
-        if current_platform.is_rocm()
-        else getattr(torch, config.torch_dtype)
-    )
+    dtype = torch.float16 if current_platform.is_rocm() else config.torch_dtype
     use_fp8_w8a8 = args.dtype == "fp8_w8a8"
     use_int8_w8a16 = args.dtype == "int8_w8a16"
     block_quant_shape = get_weight_block_size_safety(config)
@@ -626,7 +632,7 @@ def main(args: argparse.Namespace):
             4096,
         ]
     else:
-        batch_sizes = [args.batch_size]
+        batch_sizes = args.batch_size
 
     use_deep_gemm = bool(args.use_deep_gemm)
 
@@ -734,7 +740,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--use-deep-gemm", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--batch-size", type=int, required=False)
+    parser.add_argument("--batch-size", type=int, nargs="+", required=False)
     parser.add_argument("--tune", action="store_true")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--model-prefix", type=str, required=False)

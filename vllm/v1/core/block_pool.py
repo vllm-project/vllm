@@ -89,8 +89,8 @@ class BlockPool:
                 BlockHashWithGroupId(block_hash, group_id))
             if not cached_blocks_one_group:
                 return None
-            first_block_id = next(iter(cached_blocks_one_group))
-            cached_blocks.append(cached_blocks_one_group[first_block_id])
+            first_block = next(iter(cached_blocks_one_group.values()))
+            cached_blocks.append(first_block)
         return cached_blocks
 
     def cache_full_blocks(
@@ -260,7 +260,7 @@ class BlockPool:
             return True
         return False
 
-    def touch(self, blocks: list[list[KVCacheBlock]]) -> None:
+    def touch(self, blocks: tuple[list[KVCacheBlock], ...]) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
@@ -299,7 +299,7 @@ class BlockPool:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
-        num_used_blocks = (self.num_gpu_blocks - self.get_num_free_blocks())
+        num_used_blocks = self.num_gpu_blocks - self.get_num_free_blocks()
         if num_used_blocks != 1:  # The null block is always marked as used
             logger.warning(
                 "Failed to reset prefix cache because some "

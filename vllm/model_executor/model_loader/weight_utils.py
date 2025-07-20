@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
 import filelock
-import gguf
 import huggingface_hub.constants
 import numpy as np
 import torch
@@ -39,6 +38,11 @@ except (ImportError, OSError):
         "runai_model_streamer")  # type: ignore[assignment]
     SafetensorsStreamer = runai_model_streamer.placeholder_attr(
         "SafetensorsStreamer")
+
+try:
+    import gguf
+except ImportError:
+    gguf = PlaceholderModule("gguf")
 
 try:
     from fastsafetensors import SafeTensorsFileLoader, SingleGroup
@@ -148,8 +152,8 @@ def get_quant_config(model_config: ModelConfig,
     quant_cls = get_quantization_config(model_config.quantization)
 
     # GGUF doesn't have config file
-    if model_config.quantization == "gguf":
-        return quant_cls.from_config({})
+    if model_config.quantization in ("gguf", "inc"):
+        return quant_cls()
 
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",
@@ -758,12 +762,22 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
     modelopt_scale_names = [
         ".self_attn.k_proj.k_scale", ".self_attn.v_proj.v_scale"
     ]
+    # Also support qkv_proj scale parameters (from stacked parameter processing)
+    qkv_proj_scale_names = [
+        ".self_attn.qkv_proj.k_scale", ".self_attn.qkv_proj.v_scale"
+    ]
     for scale_name in possible_scale_names:
         if name.endswith(scale_name):
             if any(mo_scale_name in name
                    for mo_scale_name in modelopt_scale_names):
                 remapped_name = name.replace(
                     f".self_attn.{scale_name[1]}_proj{scale_name}",
+                    f".self_attn.attn{scale_name}")
+            elif any(qkv_scale_name in name
+                     for qkv_scale_name in qkv_proj_scale_names):
+                # Handle qkv_proj scale parameters
+                remapped_name = name.replace(
+                    f".self_attn.qkv_proj{scale_name}",
                     f".self_attn.attn{scale_name}")
             else:
                 remapped_name = name.replace(scale_name, f".attn{scale_name}")

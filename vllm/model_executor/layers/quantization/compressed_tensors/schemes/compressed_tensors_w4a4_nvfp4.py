@@ -1,73 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Callable, Optional
 
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm._custom_ops import (cutlass_scaled_fp4_mm,
-                              cutlass_scaled_mm_supports_fp4, scaled_fp4_quant)
+import vllm.envs as envs
+from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
-    dequantize_to_dtype, ref_nvfp4_quant)
+    run_nvfp4_emulations)
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
 __all__ = ["CompressedTensorsW4A4Fp4"]
 
 
-def cutlass_fp4_supported() -> bool:
-    if not current_platform.is_cuda():
-        return False
-    capability_tuple = current_platform.get_device_capability()
-    capability = -1 if capability_tuple is None else capability_tuple.to_int()
-    return cutlass_scaled_mm_supports_fp4(capability)
-
-
 class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
 
     def __init__(self):
         self.group_size = 16
-        self.cutlass_nvfp4_supported = cutlass_fp4_supported()
-        if not self.cutlass_nvfp4_supported:
-            logger.warning("Current platform does not support cutlass NVFP4."
-                           " Running emulations.")
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # dont restrict as emulations
-        return 80
-
-    def run_nvfp4_emulations(self, x: torch.Tensor, layer):
-        x_m, x_k = x.shape
-        output_dtype = x.dtype
-
-        # quantize input to (FP4 and interleaved block scale)
-        x_fp4, x_blockscale = ref_nvfp4_quant(x, layer.input_global_scale,
-                                              self.group_size)
-
-        # dequantize input
-        x_fp4 = x_fp4.reshape(x_m, x_k // self.group_size, self.group_size)
-        x_blockscale = x_blockscale.unsqueeze(-1) / layer.input_global_scale
-        x_dq = (x_fp4 * x_blockscale).reshape(x_m, x_k).to(output_dtype)
-        del x_fp4, x_blockscale
-
-        # dequantize weight
-        w_fp4 = layer.weight.data.view(torch.uint8)
-        w_blockscale = layer.weight_scale_swizzled.data
-        w_global_scale = layer.weight_global_scale
-        w_dq = dequantize_to_dtype(w_fp4, w_blockscale, w_global_scale,
-                                   output_dtype, x.device, self.group_size)
-
-        # matmul
-        out = torch.matmul(x_dq, w_dq.t())
-        del w_dq, x_dq
-        return out
+        if envs.VLLM_USE_NVFP4_CT_EMULATIONS:
+            return 80
+        return 100
 
     def create_weights(self, layer: torch.nn.Module,
                        output_partition_sizes: list[int],
@@ -152,27 +115,35 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         # required by cutlass kernel; need Parameter, not ModelWeightParameter
         layer.weight = Parameter(layer.weight_packed.data, requires_grad=False)
 
-        if self.cutlass_nvfp4_supported:
-            layer.alpha = Parameter(layer.input_global_scale *
-                                    layer.weight_global_scale,
-                                    requires_grad=False)
+        layer.alpha = Parameter(layer.input_global_scale *
+                                layer.weight_global_scale,
+                                requires_grad=False)
 
     def apply_weights(self,
                       layer: torch.nn.Module,
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        if self.cutlass_nvfp4_supported:
-            output_dtype = x.dtype
-            output_shape = [x.shape[0], layer.weight.shape[0]]
-
-            # quantize BF16 or FP16 to (FP4 and interleaved block scale)
-            x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_global_scale)
-
-            out = cutlass_scaled_fp4_mm(x_fp4, layer.weight, x_blockscale,
-                                        layer.weight_scale_swizzled,
-                                        1 / layer.alpha, output_dtype)
+        if envs.VLLM_USE_NVFP4_CT_EMULATIONS:
+            out = run_nvfp4_emulations(
+                x=x,
+                input_global_scale=layer.input_global_scale,
+                weight=layer.weight,
+                weight_scale_swizzled=layer.weight_scale_swizzled,
+                weight_global_scale=layer.weight_global_scale)
             if bias is not None:
                 out = out + bias
-            return out.view(*output_shape)
-        return self.run_nvfp4_emulations(x, layer)
+            return out
+
+        output_dtype = x.dtype
+        output_shape = [x.shape[0], layer.weight.shape[0]]
+
+        # quantize BF16 or FP16 to (FP4 and interleaved block scale)
+        x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_global_scale)
+
+        out = cutlass_scaled_fp4_mm(x_fp4, layer.weight, x_blockscale,
+                                    layer.weight_scale_swizzled,
+                                    1 / layer.alpha, output_dtype)
+        if bias is not None:
+            out = out + bias
+        return out.view(*output_shape)

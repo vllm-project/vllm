@@ -60,5 +60,20 @@ def test_opt_125m_int4wo_model_per_module_quant(vllm_runner):
         print(output)
 
 
+@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+def test_qwenvl_int8wo_model_loading_with_params(vllm_runner):
+    torch._dynamo.reset()
+    model_name = "mobicham/Qwen2.5-VL-3B-Instruct_int8wo_ao"
+    with vllm_runner(model_name=model_name,
+                     quantization="torchao",
+                     dtype="bfloat16",
+                     pt_load_map_location="cuda:0") as llm:
+        output = llm.generate_greedy(["The capital of France is"],
+                                     max_tokens=32)
+
+        assert output
+        print(output)
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

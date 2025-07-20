@@ -14,6 +14,7 @@ from vllm.compilation.backends import VllmBackend
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import end_monitoring_torch_compile
 from vllm.config import VllmConfig
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils import weak_ref_tensors
 
@@ -137,7 +138,10 @@ class CUDAPiecewiseBackend:
             if self.is_last_graph and not self.to_be_compiled_sizes:
                 self.check_for_ending_compilation()
 
-        if not entry.use_cudagraph:
+        # Skip CUDA graphs if this entry doesn't use them OR
+        # if we're supposed to skip them globally
+        skip_cuda_graphs = get_forward_context().skip_cuda_graphs
+        if not entry.use_cudagraph or skip_cuda_graphs:
             return entry.runnable(*args)
 
         if entry.cudagraph is None:
