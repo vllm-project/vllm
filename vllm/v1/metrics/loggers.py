@@ -148,7 +148,7 @@ class PrometheusStatLogger(StatLoggerBase):
 
     def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
 
-        unregister_vllm_metrics()
+        # unregister_vllm_metrics()
         self.vllm_config = vllm_config
         self.engine_index = engine_index
         # Use this flag to hide metrics that were deprecated in
