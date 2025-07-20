@@ -303,7 +303,7 @@ def download_weights_from_hf(
             allow_patterns=allow_patterns,
             ignore_patterns=ignore_patterns,
             cache_dir=cache_dir,
-            # tqdm_class=DisabledTqdm,
+            tqdm_class=DisabledTqdm,
             revision=revision,
             local_files_only=local_only,
         )
