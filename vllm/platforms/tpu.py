@@ -35,7 +35,9 @@ class TpuPlatform(Platform):
     device_control_env_var: str = "TPU_VISIBLE_CHIPS"
     simple_compile_backend: str = "openxla"
 
-    supported_quantization: list[str] = ["tpu_int8", "compressed-tensors"]
+    supported_quantization: list[str] = [
+        "fp8", "tpu_int8", "compressed-tensors"
+    ]
 
     additional_env_vars: list[str] = [
         "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"
