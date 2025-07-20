@@ -640,8 +640,8 @@ def launch_core_engines(
 
         # Start local engines.
         if local_engine_count:
-            # In server mode, start_index and local_start_index will
-            # both be 0. << todo: update
+            # In server mode, start_index is the dp_rank and
+            # local_start_index is 0.
             local_engine_manager = CoreEngineProcManager(
                 EngineCoreProc.run_engine_core,
                 vllm_config=vllm_config,
