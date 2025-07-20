@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
-    VLLM_CPU_NUM_OF_RESERVED_CPU: int = 0
+    VLLM_CPU_NUM_OF_RESERVED_CPU: Optional[int] = None
     VLLM_CPU_MOE_PREPACK: bool = True
     VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
@@ -101,7 +101,6 @@ if TYPE_CHECKING:
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
-    VLLM_COMPILE_DEPYF: bool = False
     Q_SCALE_CONSTANT: int = 200
     K_SCALE_CONSTANT: int = 200
     V_SCALE_CONSTANT: int = 100
@@ -111,8 +110,6 @@ if TYPE_CHECKING:
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
-    VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
-    VLLM_HPU_USE_DELAYED_SAMPLING: bool = False
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
@@ -126,6 +123,8 @@ if TYPE_CHECKING:
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: Optional[int] = None
     VLLM_USE_DEEP_GEMM: bool = False
+    VLLM_USE_FLASHINFER_MOE_FP8: bool = False
+    VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -144,6 +143,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: Optional[int] = None
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 120
+    VLLM_USE_CUDNN_PREFILL: bool = False
+    VLLM_LOOPBACK_IP: str = ""
 
 
 def get_default_cache_root():
@@ -456,7 +457,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (CPU backend only) CPU cores not used by OMP threads .
     # Those CPU cores will not be used by OMP threads of a rank.
     "VLLM_CPU_NUM_OF_RESERVED_CPU":
-    lambda: int(os.getenv("VLLM_CPU_NUM_OF_RESERVED_CPU", "0")),
+    lambda: int(os.getenv("VLLM_CPU_NUM_OF_RESERVED_CPU", "0"))
+    if "VLLM_CPU_NUM_OF_RESERVED_CPU" in os.environ else None,
 
     # (CPU backend only) whether to use prepack for MoE layer. This will be
     # passed to ipex.llm.modules.GatedMLPMOE. On unsupported CPUs, you might
@@ -767,11 +769,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_COMPILE_CACHE":
     lambda: bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0"))),
 
-    # If set, vllm will decompile the torch compiled code and dump to
-    # transformed_code.py. This is useful for debugging.
-    "VLLM_COMPILE_DEPYF":
-    lambda: bool(int(os.getenv("VLLM_COMPILE_DEPYF", "0"))),
-
     # If set, vllm will run in development mode, which will enable
     # some additional endpoints for developing and debugging,
     # e.g. `/reset_prefix_cache`
@@ -808,19 +805,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # specify the path through environment variable VLLM_CUDART_SO_PATH.
     "VLLM_CUDART_SO_PATH":
     lambda: os.getenv("VLLM_CUDART_SO_PATH", None),
-
-    # Contiguous cache fetching to avoid using costly gather operation on
-    # Gaudi3. This is only applicable to HPU contiguous cache. If set to true,
-    # contiguous cache fetch will be used.
-    "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH":
-    lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in
-    ("1", "true"),
-
-    # Use delayed sampling for HPU to reduce host cpu overhead
-    # between each step.
-    "VLLM_HPU_USE_DELAYED_SAMPLING":
-    lambda: os.environ.get("VLLM_DELAYED_SAMPLING", "false").lower() in
-    ("1", "true"),
 
     # Rank of the process in the data parallel setting
     "VLLM_DP_RANK":
@@ -896,6 +880,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM":
     lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "0"))),
+
+    # Allow use of FlashInfer MoE kernels for fused moe ops.
+    "VLLM_USE_FLASHINFER_MOE_FP8":
+    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP8", "0"))),
+
+    # Allow use of FlashInfer CUTLASS kernels for fused moe ops.
+    "VLLM_USE_FLASHINFER_MOE_FP4":
+    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP4", "0"))),
 
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.
@@ -992,9 +984,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NIXL_ABORT_REQUEST_TIMEOUT":
     lambda: int(os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "120")),
 
+    # Controls whether or not to use cudnn prefill
+    "VLLM_USE_CUDNN_PREFILL":
+    lambda: bool(int(os.getenv("VLLM_USE_CUDNN_PREFILL", "0"))),
+
     # If set to 1, use the TRTLLM Decode Attention backend in flashinfer.
     "VLLM_USE_TRTLLM_DECODE_ATTENTION":
     lambda: os.getenv("VLLM_USE_TRTLLM_DECODE_ATTENTION", None),
+
+    # Used to force set up loopback IP
+    "VLLM_LOOPBACK_IP":
+    lambda: os.getenv("VLLM_LOOPBACK_IP", ""),
 }
 
 # --8<-- [end:env-vars-definition]

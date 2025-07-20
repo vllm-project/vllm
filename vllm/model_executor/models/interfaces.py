@@ -22,6 +22,7 @@ from .interfaces_base import is_pooling_model
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
+    from vllm.config import VllmConfig
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.sequence import IntermediateTensors
 
@@ -118,13 +119,6 @@ class SupportsMultiModal(Protocol):
         ...
 
 
-# We can't use runtime_checkable with ClassVar for issubclass checks
-# so we need to treat the class as an instance and use isinstance instead
-@runtime_checkable
-class _SupportsMultiModalType(Protocol):
-    supports_multimodal: Literal[True]
-
-
 @overload
 def supports_multimodal(
         model: type[object]) -> TypeIs[type[SupportsMultiModal]]:
@@ -139,10 +133,7 @@ def supports_multimodal(model: object) -> TypeIs[SupportsMultiModal]:
 def supports_multimodal(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsMultiModal]], TypeIs[SupportsMultiModal]]:
-    if isinstance(model, type):
-        return isinstance(model, _SupportsMultiModalType)
-
-    return isinstance(model, SupportsMultiModal)
+    return getattr(model, "supports_multimodal", False)
 
 
 @runtime_checkable
@@ -173,13 +164,6 @@ class SupportsScoreTemplate(Protocol):
         ...
 
 
-# We can't use runtime_checkable with ClassVar for issubclass checks
-# so we need to treat the class as an instance and use isinstance instead
-@runtime_checkable
-class _SupportsScoreTemplateType(Protocol):
-    supports_score_template: Literal[True]
-
-
 @overload
 def supports_score_template(
         model: type[object]) -> TypeIs[type[SupportsScoreTemplate]]:
@@ -194,11 +178,7 @@ def supports_score_template(model: object) -> TypeIs[SupportsScoreTemplate]:
 def supports_score_template(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsScoreTemplate]], TypeIs[SupportsScoreTemplate]]:
-
-    if isinstance(model, type):
-        return isinstance(model, _SupportsScoreTemplateType)
-
-    return isinstance(model, SupportsScoreTemplate)
+    return getattr(model, "supports_score_template", False)
 
 
 @runtime_checkable
@@ -408,11 +388,6 @@ class HasInnerState(Protocol):
     """
 
 
-@runtime_checkable
-class _HasInnerStateType(Protocol):
-    has_inner_state: ClassVar[Literal[True]]
-
-
 @overload
 def has_inner_state(model: object) -> TypeIs[HasInnerState]:
     ...
@@ -426,10 +401,7 @@ def has_inner_state(model: type[object]) -> TypeIs[type[HasInnerState]]:
 def has_inner_state(
     model: Union[type[object], object]
 ) -> Union[TypeIs[type[HasInnerState]], TypeIs[HasInnerState]]:
-    if isinstance(model, type):
-        return isinstance(model, _HasInnerStateType)
-
-    return isinstance(model, HasInnerState)
+    return getattr(model, "has_inner_state", False)
 
 
 @runtime_checkable
@@ -445,11 +417,6 @@ class IsAttentionFree(Protocol):
     """
 
 
-@runtime_checkable
-class _IsAttentionFreeType(Protocol):
-    is_attention_free: ClassVar[Literal[True]]
-
-
 @overload
 def is_attention_free(model: object) -> TypeIs[IsAttentionFree]:
     ...
@@ -463,10 +430,7 @@ def is_attention_free(model: type[object]) -> TypeIs[type[IsAttentionFree]]:
 def is_attention_free(
     model: Union[type[object], object]
 ) -> Union[TypeIs[type[IsAttentionFree]], TypeIs[IsAttentionFree]]:
-    if isinstance(model, type):
-        return isinstance(model, _IsAttentionFreeType)
-
-    return isinstance(model, IsAttentionFree)
+    return getattr(model, "is_attention_free", False)
 
 
 @runtime_checkable
@@ -481,10 +445,24 @@ class IsHybrid(Protocol):
         , also indicates that the model's hf_config has 
         'layers_block_type' """
 
+    @classmethod
+    def get_mamba_state_shape_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+        use_v1: bool = True,
+    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+        """Calculate shapes for Mamba's convolutional and state caches.
 
-@runtime_checkable
-class _IsHybridType(Protocol):
-    is_hybrid: ClassVar[Literal[True]]
+        Args:
+            vllm_config: vLLM config
+            use_v1: Get shapes for V1 (or V0)
+
+        Returns:
+            Tuple containing:
+            - conv_state_shape: Shape for convolutional state cache
+            - temporal_state_shape: Shape for state space model cache
+        """
+        ...
 
 
 @overload
@@ -500,10 +478,7 @@ def is_hybrid(model: type[object]) -> TypeIs[type[IsHybrid]]:
 def is_hybrid(
     model: Union[type[object], object]
 ) -> Union[TypeIs[type[IsHybrid]], TypeIs[IsHybrid]]:
-    if isinstance(model, type):
-        return isinstance(model, _IsHybridType)
-
-    return isinstance(model, IsHybrid)
+    return getattr(model, "is_hybrid", False)
 
 
 @runtime_checkable
@@ -568,6 +543,13 @@ class MixtureOfExperts(Protocol):
         """
         ...
 
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        ...
+
 
 def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
     return isinstance(model, MixtureOfExperts)
@@ -576,11 +558,6 @@ def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
 @runtime_checkable
 class HasNoOps(Protocol):
     has_noops: ClassVar[Literal[True]] = True
-
-
-@runtime_checkable
-class _HasNoOpsType(Protocol):
-    has_noops: ClassVar[Literal[True]]
 
 
 @overload
@@ -596,10 +573,7 @@ def has_noops(model: type[object]) -> TypeIs[type[HasNoOps]]:
 def has_noops(
     model: Union[type[object], object]
 ) -> Union[TypeIs[type[HasNoOps]], TypeIs[HasNoOps]]:
-    if isinstance(model, type):
-        return isinstance(model, _HasNoOpsType)
-
-    return isinstance(model, HasNoOps)
+    return getattr(model, "has_noops", False)
 
 
 @runtime_checkable
@@ -623,23 +597,13 @@ def supports_cross_encoding(model: object) -> TypeIs[SupportsCrossEncoding]:
 def _supports_cross_encoding(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
-
-    if isinstance(model, type):
-        return isinstance(model, SupportsCrossEncoding)
-
-    return isinstance(model, SupportsCrossEncoding)
+    return getattr(model, "supports_cross_encoding", False)
 
 
 def supports_cross_encoding(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
     return is_pooling_model(model) and _supports_cross_encoding(model)
-
-
-def has_step_pooler(model: Union[type[object], object]) -> bool:
-    """Check if the model uses step pooler."""
-    return is_pooling_model(model) and any(
-        type(module).__name__ == "StepPool" for module in model.modules())
 
 
 class SupportsQuant:
@@ -702,7 +666,8 @@ class SupportsTranscription(Protocol):
 
     @classmethod
     def get_generation_prompt(cls, audio: np.ndarray,
-                              stt_config: SpeechToTextConfig, language: str,
+                              stt_config: SpeechToTextConfig,
+                              model_config: ModelConfig, language: str,
                               task_type: str,
                               request_prompt: str) -> PromptType:
         """Get the prompt for the ASR model.
@@ -749,10 +714,7 @@ def supports_transcription(model: object) -> TypeIs[SupportsTranscription]:
 def supports_transcription(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsTranscription]], TypeIs[SupportsTranscription]]:
-    if isinstance(model, type):
-        return isinstance(model, SupportsTranscription)
-
-    return isinstance(model, SupportsTranscription)
+    return getattr(model, "supports_transcription", False)
 
 
 @runtime_checkable
@@ -775,7 +737,4 @@ def supports_v0_only(model: object) -> TypeIs[SupportsV0Only]:
 def supports_v0_only(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsV0Only]], TypeIs[SupportsV0Only]]:
-    if isinstance(model, type):
-        return isinstance(model, SupportsV0Only)
-
-    return isinstance(model, SupportsV0Only)
+    return getattr(model, "supports_v0_only", False)

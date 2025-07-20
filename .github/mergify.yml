@@ -164,10 +164,7 @@ pull_request_rules:
   description: Automatically apply speculative-decoding label
   conditions:
     - or:
-      - files~=^vllm/spec_decode/
       - files~=^vllm/v1/spec_decode/
-      - files=vllm/model_executor/layers/spec_decode_base_sampler.py
-      - files~=^tests/spec_decode/
       - files~=^tests/v1/spec_decode/
       - files~=^examples/.*(spec_decode|mlpspeculator|eagle|speculation).*\.py
       - files~=^vllm/model_executor/models/.*eagle.*\.py
