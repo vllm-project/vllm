@@ -425,29 +425,32 @@ class PrometheusStatLogger(StatLoggerBase):
         self.histogram_decode_time_request = make_per_engine(
             histogram_decode_time_request, engine_indexes, model_name)
 
-        # #
-        # # LoRA metrics
-        # #
+        #
+        # LoRA metrics
+        #
 
-        # # TODO: This metric might be incorrect in case of using multiple
-        # # api_server counts which uses prometheus mp.
-        # self.gauge_lora_info: Optional[prometheus_client.Gauge] = None
-        # if vllm_config.lora_config is not None:
-        #     self.labelname_max_lora = "max_lora"
-        #     self.labelname_waiting_lora_adapters = "waiting_lora_adapters"
-        #     self.labelname_running_lora_adapters = "running_lora_adapters"
-        #     self.max_lora = vllm_config.lora_config.max_loras
-        #     self.gauge_lora_info = \
-        #         self._gauge_cls(
-        #             name="vllm:lora_requests_info",
-        #             documentation="Running stats on lora requests.",
-        #             multiprocess_mode="sum",
-        #             labelnames=[
-        #                 self.labelname_max_lora,
-        #                 self.labelname_waiting_lora_adapters,
-        #                 self.labelname_running_lora_adapters,
-        #             ],
-        #         )
+        # TODO: This metric might be incorrect in case of using multiple
+        # api_server counts which uses prometheus mp.
+        self.gauge_lora_info: Optional[prometheus_client.Gauge] = None
+        if vllm_config.lora_config is not None:
+            if len(self.engine_indexes) > 1:
+                raise NotImplementedError(
+                    "LoRA in DP mode is not supported yet.")
+            self.labelname_max_lora = "max_lora"
+            self.labelname_waiting_lora_adapters = "waiting_lora_adapters"
+            self.labelname_running_lora_adapters = "running_lora_adapters"
+            self.max_lora = vllm_config.lora_config.max_loras
+            self.gauge_lora_info = \
+                self._gauge_cls(
+                    name="vllm:lora_requests_info",
+                    documentation="Running stats on lora requests.",
+                    multiprocess_mode="sum",
+                    labelnames=[
+                        self.labelname_max_lora,
+                        self.labelname_waiting_lora_adapters,
+                        self.labelname_running_lora_adapters,
+                    ],
+                )
 
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
         metrics_info = config_obj.metrics_info()
@@ -471,7 +474,7 @@ class PrometheusStatLogger(StatLoggerBase):
         for engine_index in self.engine_indexes:
             metrics_info = config_obj.metrics_info()
             metrics_info["engine"] = str(engine_index)
-            info_gauge.labels(*metrics_info.set(1))
+            info_gauge.labels(**metrics_info).set(1)
 
     def record(self,
                scheduler_stats: Optional[SchedulerStats],
@@ -547,18 +550,21 @@ class PrometheusStatLogger(StatLoggerBase):
                 self.histogram_max_tokens_request[engine_idx].observe(
                     finished_request.max_tokens_param)
 
-        # if self.gauge_lora_info is not None:
-        #     running_lora_adapters = \
-        #         ",".join(iteration_stats.running_lora_adapters.keys())
-        #     waiting_lora_adapters = \
-        #         ",".join(iteration_stats.waiting_lora_adapters.keys())
-        #     lora_info_labels = {
-        #         self.labelname_running_lora_adapters: running_lora_adapters,
-        #         self.labelname_waiting_lora_adapters: waiting_lora_adapters,
-        #         self.labelname_max_lora: self.max_lora,
-        #     }
-        #     self.gauge_lora_info.labels(**lora_info_labels)\
-        #                         .set_to_current_time()
+        # TODO: investigate whether LoRA works with DP and ensure
+        # that the metrics we are logging are consistent with
+
+        if self.gauge_lora_info is not None:
+            running_lora_adapters = \
+                ",".join(iteration_stats.running_lora_adapters.keys())
+            waiting_lora_adapters = \
+                ",".join(iteration_stats.waiting_lora_adapters.keys())
+            lora_info_labels = {
+                self.labelname_running_lora_adapters: running_lora_adapters,
+                self.labelname_waiting_lora_adapters: waiting_lora_adapters,
+                self.labelname_max_lora: self.max_lora,
+            }
+            self.gauge_lora_info.labels(**lora_info_labels)\
+                                .set_to_current_time()
 
     def log_engine_initialized(self):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
@@ -666,6 +672,8 @@ class StatLoggerManager:
                 logger.log()
 
     def log_engine_initialized(self):
+        self.prometheus_logger.log_engine_initialized()
+
         for per_engine_loggers in self.per_engine_logger_dict.values():
             for logger in per_engine_loggers:
                 logger.log_engine_initialized()
