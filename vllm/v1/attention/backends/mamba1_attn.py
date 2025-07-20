@@ -39,11 +39,11 @@ class Mamba1AttentionMetadata:
     num_prefill_tokens: int
     num_decodes: int
     num_decode_tokens: int
-    query_start_loc: torch.Tensor    # (batch+1,) cumulative offsets
-    seq_lens: torch.Tensor           # (batch,) total lengths (computed + new)
-    state_indices_tensor: torch.Tensor      # (batch,) one cache slot per request
-    has_initial_states: torch.Tensor # (batch,) bool mask
-    cu_seqlen: int                   # max_query_len, for buffer sizing
+    query_start_loc: torch.Tensor
+    seq_lens: torch.Tensor
+    state_indices_tensor: torch.Tensor
+    has_initial_states: torch.Tensor
+    cu_seqlen: int
     nums_dict: Optional[dict] = None
     batch_ptr: Optional[torch.Tensor] = None
 
