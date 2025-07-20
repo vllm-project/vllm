@@ -2079,7 +2079,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     block_table_tensor=self.input_batch.block_table[
                         kv_cache_group_id].get_device_tensor()[:num_reqs],
                     slot_mapping=self.input_batch.
-                    block_table[kv_cache_group_id].slot_mapping[:num_reqs])
+                    block_table[kv_cache_group_id].slot_mapping[:num_tokens])
 
                 attn_metadata_i = self.attn_metadata_builders[
                     kv_cache_group_id].build_for_cudagraph_capture(
@@ -2753,9 +2753,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.vllm_config.speculative_config is not None:
                 raise NotImplementedError(
                     "Mamba with speculative decoding is not supported yet.")
-            if not self.vllm_config.model_config.enforce_eager:
-                raise NotImplementedError(
-                    "Mamba with cuda graph is not supported yet.")
             if self.vllm_config.cache_config.enable_prefix_caching:
                 raise NotImplementedError(
                     "Prefix caching is not supported for Mamba yet.")

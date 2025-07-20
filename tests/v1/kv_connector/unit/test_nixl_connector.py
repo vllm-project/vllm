@@ -341,7 +341,7 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
     Test lifecycle of an aborted Remote Prefill request hitting the timeout.
     -----> P 
             |  {process request}
-     <-\--- |  {result is NOT delivered, eg proxy is down}
+     <-/--- |  {result is NOT delivered, eg proxy is down}
             |
             |
             |  {eventually free blocks}
