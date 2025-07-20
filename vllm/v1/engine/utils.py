@@ -609,7 +609,7 @@ def launch_core_engines(
             for i in range(dp_size)
         ]
     else:
-        # All other ranks just handshake with those that it is managing.
+        # Rank > 0 handshakes with just the local cores it is managing.
         assert vllm_config.parallel_config.data_parallel_external_lb, (
             "Attempting to launch core_engines from dp_rank > 0, but "
             "found internal DPLB, which is incompatible.")
