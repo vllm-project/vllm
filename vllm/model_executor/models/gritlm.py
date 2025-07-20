@@ -255,11 +255,10 @@ class GritLM(LlamaForCausalLM, SupportsV0Only):
         super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
         pooler_config = vllm_config.model_config.pooler_config
-        assert pooler_config is not None
-
-        self.pooler = DispatchPooler({
-            "encode":
-            Pooler.for_encode(pooler_config),
-            "embed":
-            GritLMPooler(vllm_config.model_config),
-        })
+        if pooler_config is not None:
+            self.pooler = DispatchPooler({
+                "encode":
+                Pooler.for_encode(pooler_config),
+                "embed":
+                GritLMPooler(vllm_config.model_config),
+            })

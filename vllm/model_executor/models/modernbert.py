@@ -278,13 +278,21 @@ class ModernBertPooler(Pooler):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return self.pooling.get_pooling_updates(task)
 
+    def _head(self, pooled_output: torch.Tensor):
+        return self.norm(self.act(self.dense(pooled_output)))
+
     def forward(
         self,
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
     ) -> Union[torch.Tensor, list[torch.Tensor]]:
         pooled_output = self.pooling(hidden_states, pooling_metadata)
-        pooled_output = self.norm(self.act(self.dense(pooled_output)))
+
+        if isinstance(pooled_output, list):
+            pooled_output = [self._head(output) for output in pooled_output]
+        else:
+            pooled_output = self._head(pooled_output)
+
         return pooled_output
 
 
