@@ -5,8 +5,9 @@
 # You may not use this file except in compliance with the License.
 # You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
 #
-# Inference-only Arcee (AFM) model – adds support for ReLU^2 feed-forward activation.
-
+# Inference-only Arcee (AFM) model – adds support for ReLU^2 feed-forward
+# activation.
+# ruff: noqa: E501
 import logging
 from collections.abc import Iterable
 from typing import Any, List, Optional, Tuple, Union
@@ -30,7 +31,8 @@ from vllm.sequence import IntermediateTensors
 
 
 class ArceeMLP(nn.Module):
-    """Feed-forward layer for Arcee using ReLU^2 activation (no gating as in LLaMA)."""
+    """Feed-forward layer for Arcee using ReLU^2 activation
+    (no gating as in LLaMA)."""
 
     def __init__(self,
                  hidden_size: int,
@@ -41,7 +43,8 @@ class ArceeMLP(nn.Module):
                  prefix: str = "",
                  reduce_results: bool = True) -> None:
         super().__init__()
-        # Single linear projection up to intermediate size (no separate gate projection)
+        # Single linear projection up to intermediate size
+        # (no separate gate projection)
         self.up_proj = ColumnParallelLinear(
             input_size=hidden_size,
             output_size=intermediate_size,
@@ -60,7 +63,8 @@ class ArceeMLP(nn.Module):
         )
         if hidden_act != "relu2":
             raise ValueError(
-                f"Unsupported activation: {hidden_act}. Only 'relu2' is supported for AFM."
+                f"Unsupported activation: {hidden_act}. "
+                "Only 'relu2' is supported for AFM."
             )
         # Define ReLU^2 activation: (ReLU(x))^2 elementwise
         self.act_fn = lambda x: torch.pow(torch.relu(x), 2)
@@ -73,7 +77,8 @@ class ArceeMLP(nn.Module):
 
 
 class ArceeDecoderLayer(nn.Module):
-    """Transformer decoder block for Arcee, with self-attention and ReLU^2 MLP."""
+    """Transformer decoder block for Arcee, with self-attention and
+    ReLU^2 MLP."""
 
     def __init__(self,
                  config: LlamaConfig,
@@ -88,7 +93,8 @@ class ArceeDecoderLayer(nn.Module):
         if rope_scaling is not None and getattr(
                 config, "original_max_position_embeddings", None):
             rope_scaling[
-                "original_max_position_embeddings"] = config.original_max_position_embeddings
+                "original_max_position_embeddings"] = (
+                    config.original_max_position_embeddings)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
         # Determine if attention bias is needed (some variants use bias terms)
@@ -157,7 +163,8 @@ class ArceeDecoderLayer(nn.Module):
 
 @support_torch_compile
 class ArceeModel(nn.Module):
-    """The transformer model backbone for Arcee (embedding layer + stacked decoder blocks + final norm)."""
+    """The transformer model backbone for Arcee (embedding layer + stacked
+    decoder blocks + final norm)."""
 
     def __init__(self,
                  *,
@@ -205,14 +212,17 @@ class ArceeModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        # For optional capturing of intermediate hidden states (not used by default)
+        # For optional capturing of intermediate hidden states
+        # (not used by default)
         self.aux_hidden_state_layers: Tuple[int, ...] = tuple()
 
-        # Prepare factory for empty intermediate tensors (for pipeline scheduling)
+        # Prepare factory for empty intermediate tensors
+        # (for pipeline scheduling)
         from vllm.model_executor.models.utils import (
             make_empty_intermediate_tensors_factory)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -227,11 +237,13 @@ class ArceeModel(nn.Module):
                                                         List[torch.Tensor]]]:
         # Embedding lookup (on first pipeline rank)
         if get_pp_group().is_first_rank:
-            hidden_states = inputs_embeds if inputs_embeds is not None else self.get_input_embeddings(
-                input_ids)
+            hidden_states = (inputs_embeds if inputs_embeds is not None
+                             else self.get_input_embeddings(input_ids))
             residual = None
         else:
-            assert intermediate_tensors is not None, "IntermediateTensors must be provided for non-first pipeline ranks"
+            assert intermediate_tensors is not None, (
+                "IntermediateTensors must be provided for non-first "
+                "pipeline ranks")
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
@@ -263,7 +275,8 @@ class ArceeModel(nn.Module):
             default_weight_loader, maybe_remap_kv_scale_name)
         from vllm.model_executor.models.utils import is_pp_missing_parameter
 
-        # Mapping for merging or renaming weight parameters from HF into our model
+        # Mapping for merging or renaming weight parameters from HF
+        # into our model
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -274,11 +287,15 @@ class ArceeModel(nn.Module):
         loaded_params = set()
 
         for name, loaded_weight in weights:
-            # Skip AFM's gate projection weights (they don't exist in ReLU^2 AFM)
+            # Skip AFM's gate projection weights (they don't exist in
+            # ReLU^2 AFM)
             if "gate_proj" in name:
                 continue
-            # Skip rotary cache parameters if present (not actual model weights)
-            if "rotary_emb.inv_freq" in name or "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
+            # Skip rotary cache parameters if present
+            # (not actual model weights)
+            if ("rotary_emb.inv_freq" in name or
+                    "rotary_emb.cos_cached" in name or
+                    "rotary_emb.sin_cached" in name):
                 continue
 
             # Handle quantization KV cache scales
@@ -311,7 +328,8 @@ class ArceeModel(nn.Module):
                 mapped_name = name.replace(weight_name, param_name)
                 if mapped_name.endswith(
                         ".bias") and mapped_name not in params_dict:
-                    # Skip any unexpected biases (e.g., from certain quantization or GPTQ checkpoints)
+                    # Skip any unexpected biases (e.g., from certain
+                    # quantization or GPTQ checkpoints)
                     break
                 if mapped_name in params_dict:
                     param = params_dict[mapped_name]
@@ -328,7 +346,8 @@ class ArceeModel(nn.Module):
             else:
                 # No special mapping, try direct load
                 if name in params_dict:
-                    # For tied embeddings, skip loading lm_head if it will be tied
+                    # For tied embeddings, skip loading lm_head if
+                    # it will be tied
                     if name.startswith("lm_head.") and getattr(
                             self.config, "tie_word_embeddings", False):
                         continue
@@ -338,15 +357,18 @@ class ArceeModel(nn.Module):
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
                 else:
-                    # Silently skip any unmatched parameters (e.g., vision tower weights in multimodal models)
+                    # Silently skip any unmatched parameters (e.g., vision
+                    # tower weights in multimodal models)
                     logging.debug(
                         f"Ignoring unmatched checkpoint parameter: {name}")
         return loaded_params
 
 
 class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
-    """Arcee Model for causal language modeling, integrated with vLLM runtime."""
-    # Map fused module names to their sub-module components (for quantization and LoRA)
+    """Arcee Model for causal language modeling, integrated with vLLM
+    runtime."""
+    # Map fused module names to their sub-module components
+    # (for quantization and LoRA)
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
     }
@@ -373,7 +395,8 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                 prefix=f"{prefix}model")
         # On the last pipeline stage, set up the LM head and logits processor
         if get_pp_group().is_last_rank:
-            # Determine vocabulary size (including any LoRA extra tokens for padded LM head)
+            # Determine vocabulary size (including any LoRA extra tokens
+            # for padded LM head)
             self.unpadded_vocab_size = config.vocab_size
             if lora_config:
                 self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -386,7 +409,9 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 self.unpadded_vocab_size,
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE if lora_config and lora_config.lora_extra_vocab_size > 0 else 0,
+                padding_size=(DEFAULT_VOCAB_PADDING_SIZE
+                              if lora_config and
+                              lora_config.lora_extra_vocab_size > 0 else 0),
                 quant_config=vllm_config.quant_config,
                 bias=getattr(config, "lm_head_bias", False),
                 prefix=f"{prefix}lm_head",
@@ -403,8 +428,10 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         else:
             # Placeholder for lm_head on non-last ranks
             self.lm_head = PPMissingLayer()
-        # Provide a reference to the model's method for generating empty tensors (used in pipeline parallel schedule)
-        self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+        # Provide a reference to the model's method for generating empty
+        # tensors (used in pipeline parallel schedule)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
 
     def forward(
         self,
@@ -432,12 +459,14 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        """Load weights into the model (delegates to inner model and handles tied embeddings)."""
+        """Load weights into the model (delegates to inner model and handles
+        tied embeddings)."""
         # Use AutoWeightsLoader for consistency with vLLM's loading mechanism
         from vllm.model_executor.models.utils import AutoWeightsLoader
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]
                            if self.config.tie_word_embeddings else None))
-        # No special weight name remapping needed (AFM uses standard LLaMA naming except no gate_proj)
+        # No special weight name remapping needed (AFM uses standard LLaMA
+        # naming except no gate_proj)
         return loader.load_weights(weights)
