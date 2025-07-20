@@ -334,9 +334,21 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             if is_first_multi_step:
                 model_input = cast(TTModelInput, model_input)
                 self.cached_model_input = model_input
+                balance_tokens = []
+                metadata_list = execute_model_req.seq_group_metadata_list
+                for seq_group_metadata in metadata_list:
+                    seq_datas = list(seq_group_metadata.seq_data.values())
+                    assert len(seq_datas) == 1, (
+                        "Currently only supporting one sequence per "
+                        "request group")
+                    max_tokens = seq_group_metadata.sampling_params.max_tokens
+                    balance_tokens.append(max_tokens -
+                                          seq_datas[0].get_output_len())
+                balance_tokens = max(balance_tokens)
                 worker_input = dataclasses.replace(
                     worker_input,
-                    num_steps=execute_model_req.num_lookahead_slots + 1)
+                    num_steps=min(execute_model_req.num_lookahead_slots + 1,
+                                  balance_tokens))
             else:
                 assert self.cached_model_input is not None
                 model_input = self.cached_model_input
