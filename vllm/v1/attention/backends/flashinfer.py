@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
@@ -490,7 +490,6 @@ class FlashInferImpl(AttentionImpl):
         alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[int] = None,

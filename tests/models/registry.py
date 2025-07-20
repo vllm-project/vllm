@@ -247,10 +247,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "PersimmonForCausalLM": _HfExamplesInfo("adept/persimmon-8b-chat"),
     "PhiForCausalLM": _HfExamplesInfo("microsoft/phi-2"),
     "Phi3ForCausalLM": _HfExamplesInfo("microsoft/Phi-3-mini-4k-instruct"),
-    # Blocksparse attention not supported in V1 yet
-    "Phi3SmallForCausalLM": _HfExamplesInfo("microsoft/Phi-3-small-8k-instruct",
-                                            trust_remote_code=True,
-                                            v0_only=True),
     "Phi4FlashForCausalLM": _HfExamplesInfo("microsoft/Phi-4-mini-flash-reasoning", # noqa: E501
                                         trust_remote_code=True,
                                         v0_only=True,
@@ -364,6 +360,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                         trust_remote_code=True,
                                         hf_overrides={"architectures": ["GLM4VForCausalLM"]}),  # noqa: E501
     "Glm4vForConditionalGeneration": _HfExamplesInfo("THUDM/GLM-4.1V-9B-Thinking", min_transformers_version="4.53"),  # noqa: E501
+    "Glm4MoeForCausalLM": _HfExamplesInfo("THUDM/GLM-4.5",
+                                          min_transformers_version="4.54",
+                                          is_available_online=False),   # noqa: E501
     "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m",
                                       extras={"2b": "h2oai/h2ovl-mississippi-2b"},  # noqa: E501
                                       max_transformers_version="4.48",  # noqa: E501
@@ -489,6 +488,10 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                             is_available_online=False,
                                             speculative_model="openbmb/MiniCPM-2B-sft-bf16",
                                             tokenizer="openbmb/MiniCPM-2B-sft-bf16"),
+    "Glm4MoeMTPModel": _HfExamplesInfo("THUDM/GLM-4.5",
+                                        speculative_model="THUDM/GLM-4.5",
+                                        min_transformers_version="4.54",
+                                        is_available_online=False),
     "MiMoMTPModel": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
                                     trust_remote_code=True,
                                     speculative_model="XiaomiMiMo/MiMo-7B-RL")
