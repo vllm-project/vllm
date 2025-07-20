@@ -555,8 +555,6 @@ def launch_core_engines(
     # sends requests only to colocated engines.
     client_local_only = offline_mode or external_dp_lb or (local_engine_count
                                                            == dp_size)
-    # HACK: handle case with one pod per node.
-    client_local_only = True
 
     # Set up input and output addresses.
     addresses = EngineZmqAddresses(
@@ -603,16 +601,10 @@ def launch_core_engines(
     if offline_mode or (external_dp_lb and dp_rank > 0):
         assert local_engine_count == 1
         engines_to_handshake = [CoreEngine(index=dp_rank, local=True)]
-    elif dp_rank == 0:
+    else:
         engines_to_handshake = [
             CoreEngine(index=i, local=(i < local_engine_count))
             for i in range(dp_size)
-        ]
-    else:
-        # Just handshake with local engines.
-        engines_to_handshake = [
-            CoreEngine(index=i, local=True) for i in
-            range(dp_rank, dp_rank + local_engine_count)
         ]
 
     # Whether the started engines will handshake only with co-located
@@ -624,8 +616,7 @@ def launch_core_engines(
     handshake_address = get_engine_client_zmq_addr(
         handshake_local_only, host, parallel_config.data_parallel_rpc_port)
 
-    # if external_dp_lb and dp_rank > 0:
-    if dp_rank > 0:
+    if external_dp_lb and dp_rank > 0:
         assert not handshake_local_only
         local_handshake_address = get_open_zmq_ipc_path()
         client_handshake_address = local_handshake_address
@@ -640,8 +631,8 @@ def launch_core_engines(
 
         # Start local engines.
         if local_engine_count:
-            # In server mode, start_index is the dp_rank and
-            # local_start_index is 0.
+            # In server mode, start_index and local_start_index will
+            # both be 0.
             local_engine_manager = CoreEngineProcManager(
                 EngineCoreProc.run_engine_core,
                 vllm_config=vllm_config,
