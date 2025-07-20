@@ -14,17 +14,20 @@ from typing import Any, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
-from transformers import (
-    LlamaConfig)  # Reusing HuggingFace LLaMA config for Arcee
+from transformers import LlamaConfig  # Reusing HuggingFace LLaMA config for Arcee
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
 from vllm.model_executor.models.utils import PPMissingLayer, make_layers
 from vllm.sequence import IntermediateTensors
@@ -175,6 +178,7 @@ class ArceeModel(nn.Module):
         config: LlamaConfig = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        self.quant_config = quant_config
         lora_config = vllm_config.lora_config
 
         self.config = config
@@ -409,13 +413,10 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 self.unpadded_vocab_size,
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
-                padding_size=(DEFAULT_VOCAB_PADDING_SIZE
-                              if lora_config and
-                              lora_config.lora_extra_vocab_size > 0 else 0),
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
                 quant_config=vllm_config.quant_config,
                 bias=getattr(config, "lm_head_bias", False),
                 prefix=f"{prefix}lm_head",
-                input_is_parallel=True,
             )
             if config.tie_word_embeddings:
                 # Tie output weights with input embedding matrix
