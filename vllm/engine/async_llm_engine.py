@@ -13,7 +13,8 @@ from weakref import ReferenceType
 import vllm.envs as envs
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VllmConfig)
-from vllm.core.scheduler import SchedulerOutputs, SchedulerWaitingQueueFullError
+from vllm.core.scheduler import (SchedulerOutputs,
+                                 SchedulerWaitingQueueFullError)
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
 from vllm.engine.llm_engine import LLMEngine, SchedulerOutputState

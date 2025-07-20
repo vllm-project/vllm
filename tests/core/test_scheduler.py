@@ -12,7 +12,8 @@ from torch import Use  # noqa
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus
-from vllm.core.scheduler import Scheduler, SchedulingBudget, SchedulerWaitingQueueFullError
+from vllm.core.scheduler import (Scheduler, SchedulerWaitingQueueFullError,
+                                 SchedulingBudget)
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SequenceGroup, SequenceStatus
 
@@ -101,12 +102,13 @@ def test_scheduler_max_waiting_queue_length():
                                        block_size=block_size)
     with pytest.raises(SchedulerWaitingQueueFullError) as excinfo:
         scheduler.add_seq_group(seq_group)
-    
+
     assert "Scheduler waiting queue is full" in str(excinfo.value)
     assert f"request {max_waiting_queue_length}" in str(excinfo.value)
-    
+
     # Verify that the number of unfinished seq groups hasn't changed
-    assert scheduler.get_num_unfinished_seq_groups() == max_waiting_queue_length
+    assert scheduler.get_num_unfinished_seq_groups(
+    ) == max_waiting_queue_length
 
 
 def test_scheduler_max_waiting_queue_length_disabled():

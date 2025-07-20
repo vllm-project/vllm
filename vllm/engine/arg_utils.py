@@ -441,7 +441,8 @@ class EngineArgs:
 
     async_scheduling: bool = SchedulerConfig.async_scheduling
 
-    max_waiting_queue_length: Optional[int] = SchedulerConfig.max_waiting_queue_length
+    max_waiting_queue_length: Optional[
+        int] = SchedulerConfig.max_waiting_queue_length
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -845,8 +846,9 @@ class EngineArgs:
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
         scheduler_group.add_argument("--async-scheduling",
                                      **scheduler_kwargs["async_scheduling"])
-        scheduler_group.add_argument("--max-waiting-queue-length",
-                                     **scheduler_kwargs["max_waiting_queue_length"])
+        scheduler_group.add_argument(
+            "--max-waiting-queue-length",
+            **scheduler_kwargs["max_waiting_queue_length"])
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)

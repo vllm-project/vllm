@@ -364,15 +364,9 @@ class OpenAIServing:
 
             return None
 
-        except SchedulerWaitingQueueFullError as e:
-            return self.create_error_response(
-                str(e), 
-                err_type="ServiceUnavailableError",
-                status_code=HTTPStatus.SERVICE_UNAVAILABLE
-            )
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     async def _collect_batch(
         self,
@@ -407,20 +401,30 @@ class OpenAIServing:
             return None
 
         except Exception as e:
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     def create_error_response(
             self,
-            message: str,
+            message: Union[str, Exception],
             err_type: str = "BadRequestError",
             status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> ErrorResponse:
-        return ErrorResponse(message=message,
+        # Handle SchedulerWaitingQueueFullError automatically
+        if isinstance(message, SchedulerWaitingQueueFullError):
+            return ErrorResponse(message=str(message),
+                                 type="ServiceUnavailableError",
+                                 code=HTTPStatus.SERVICE_UNAVAILABLE.value)
+        elif isinstance(message, Exception):
+            message_str = str(message)
+        else:
+            message_str = message
+
+        return ErrorResponse(message=message_str,
                              type=err_type,
                              code=status_code.value)
 
     def create_streaming_error_response(
             self,
-            message: str,
+            message: Union[str, Exception],
             err_type: str = "BadRequestError",
             status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> str:
         json_str = json.dumps({

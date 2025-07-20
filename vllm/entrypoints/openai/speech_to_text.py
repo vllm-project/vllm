@@ -171,7 +171,7 @@ class OpenAISpeechToText(OpenAIServing):
 
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         list_result_generator: Optional[list[AsyncGenerator[RequestOutput,
                                                             None]]] = None
@@ -200,7 +200,7 @@ class OpenAISpeechToText(OpenAIServing):
             ]
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         if request.stream:
             return stream_generator_method(request, list_result_generator,
@@ -218,7 +218,7 @@ class OpenAISpeechToText(OpenAIServing):
             return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     async def _speech_to_text_stream_generator(
         self,
@@ -324,7 +324,7 @@ class OpenAISpeechToText(OpenAIServing):
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error
             logger.exception("Error in %s stream generator.", self.task_type)
-            data = self.create_streaming_error_response(str(e))
+            data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"

@@ -29,6 +29,7 @@ class SchedulerWaitingQueueFullError(Exception):
     """Raised when the scheduler waiting queue is full and cannot accept new requests."""
     pass
 
+
 # Test-only. If configured, decode is preempted with
 # ARTIFICIAL_PREEMPTION_PROB% probability.
 ENABLE_ARTIFICIAL_PREEMPT = bool(
@@ -556,8 +557,9 @@ class Scheduler:
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
-        if (self.scheduler_config.max_waiting_queue_length is not None and
-                len(self.waiting) >= self.scheduler_config.max_waiting_queue_length):
+        if (self.scheduler_config.max_waiting_queue_length is not None
+                and len(self.waiting)
+                >= self.scheduler_config.max_waiting_queue_length):
             raise SchedulerWaitingQueueFullError(
                 f"Scheduler waiting queue is full. Cannot add request {seq_group.request_id}."
             )
