@@ -1097,32 +1097,17 @@ class EngineArgs:
             # but we should not do this here.
             placement_group = ray.util.get_current_placement_group()
 
-        # Organize --data-parallel-start-rank and --data-parallel-rank.
-        if self.data_parallel_start_rank is not None:
-            if self.data_parallel_rank is not None:
-                raise ValueError(
-                    "Found --data-parallel-rank and --data-parallel-start-rank."
-                    "Only one should be set (use --data-parallel-start-rank).")
-            else:
-                self.data_parallel_rank = self.data_parallel_start_rank
-
-        # Validate External LB.
-        data_parallel_hybrid_lb = True
-
-        if data_parallel_hybrid_lb:
-            if self.data_parallel_size_local is None:
-                raise ValueError(
-                    "With external LB, --data-parallel-size-local must be set."
-                )
-            if self.data_parallel_size_local >= self.data_parallel_size:
-                raise ValueError(
-                    "With external LB, --data-parallel-size-local must be "
-                    "less than --data-parallel-size.")
+        data_parallel_external_lb = self.data_parallel_rank is not None
+        if data_parallel_external_lb:
+            assert self.data_parallel_size_local in (1, None), (
+                "data_parallel_size_local must be 1 when data_parallel_rank "
+                "is set")
+            data_parallel_size_local = 1
+        elif self.data_parallel_size_local is not None:
             data_parallel_size_local = self.data_parallel_size_local
-
-        # Local DP size defaults to global DP size if not set.
-        data_parallel_size_local = (self.data_parallel_size_local
-                                    or self.data_parallel_size)
+        else:
+            # Local DP size defaults to global DP size if not set.
+            data_parallel_size_local = self.data_parallel_size
 
         # DP address, used in multi-node case for torch distributed group
         # and ZMQ sockets.
@@ -1177,7 +1162,7 @@ class EngineArgs:
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
-            data_parallel_hybrid_lb=False,
+            data_parallel_hybrid_lb=True,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.num_redundant_experts,
