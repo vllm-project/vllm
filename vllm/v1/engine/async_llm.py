@@ -653,6 +653,7 @@ class AsyncLLM(EngineClient):
         self.vllm_config.parallel_config.data_parallel_size = \
             new_data_parallel_size
 
+        # recreate stat loggers
         if new_data_parallel_size > old_data_parallel_size:
             stat_loggers: list[list[StatLoggerBase]] = setup_default_loggers(
                 vllm_config=self.vllm_config,
