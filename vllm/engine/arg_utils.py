@@ -1097,12 +1097,28 @@ class EngineArgs:
             # but we should not do this here.
             placement_group = ray.util.get_current_placement_group()
 
+        DATA_PARALLEL_HYBRID_LB = True
         data_parallel_external_lb = self.data_parallel_rank is not None
         if data_parallel_external_lb:
             assert self.data_parallel_size_local in (1, None), (
                 "data_parallel_size_local must be 1 when data_parallel_rank "
                 "is set")
             data_parallel_size_local = 1
+            # Use full external lb if we have local_size of 1.
+            DATA_PARALLEL_HYBRID_LB = False
+        elif DATA_PARALLEL_HYBRID_LB:
+            assert self.data_parallel_start_rank is not None, (
+                "data_parallel_start_rank must be set to use "
+                "data_parallel_hybrid_lb.")
+            assert self.data_parallel_size_local is not None, (
+                "data_parallel_size_local must be set to use "
+                "data_parallel_hybrid_lb.")
+            # Use full external lb if we have local_size of 1.
+            if self.data_parallel_size_local == 1:
+                data_parallel_external_lb = True
+                DATA_PARALLEL_HYBRID_LB = False
+            data_parallel_size_local = self.data_parallel_size_local
+            self.data_parallel_rank = self.data_parallel_start_rank
         elif self.data_parallel_size_local is not None:
             data_parallel_size_local = self.data_parallel_size_local
         else:
@@ -1157,12 +1173,12 @@ class EngineArgs:
             tensor_parallel_size=self.tensor_parallel_size,
             data_parallel_size=self.data_parallel_size,
             data_parallel_rank=self.data_parallel_rank or 0,
-            data_parallel_external_lb=False,
+            data_parallel_external_lb=data_parallel_external_lb,
             data_parallel_size_local=data_parallel_size_local,
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
-            data_parallel_hybrid_lb=True,
+            data_parallel_hybrid_lb=DATA_PARALLEL_HYBRID_LB,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.num_redundant_experts,
