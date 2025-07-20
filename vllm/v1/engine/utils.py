@@ -544,7 +544,8 @@ def launch_core_engines(
     local_start_index = parallel_config.data_parallel_rank_local
     dp_rank = parallel_config.data_parallel_rank
     host = parallel_config.data_parallel_master_ip
-    external_dp_lb = parallel_config.data_parallel_external_lb
+    # external_dp_lb = parallel_config.data_parallel_external_lb
+    rank_0_local_only = (not parallel_config.data_parallel_rank_0_manage_all)
 
     # In offline mode there is an LLM instance per DP rank and
     # one core engine per LLM, see
@@ -553,8 +554,8 @@ def launch_core_engines(
 
     # client_local_only = True for cases where this front-end
     # sends requests only to colocated engines.
-    client_local_only = offline_mode or external_dp_lb or (local_engine_count
-                                                           == dp_size)
+    client_local_only = (offline_mode or rank_0_local_only or
+                         (local_engine_count == dp_size))
 
     # Set up input and output addresses.
     addresses = EngineZmqAddresses(
@@ -610,7 +611,7 @@ def launch_core_engines(
         ]
     else:
         # Rank > 0 handshakes with just the local cores it is managing.
-        assert vllm_config.parallel_config.data_parallel_external_lb, (
+        assert rank_0_local_only, (
             "Attempting to launch core_engines from dp_rank > 0, but "
             "found internal DPLB, which is incompatible.")
         engines_to_handshake = [
@@ -627,7 +628,7 @@ def launch_core_engines(
     handshake_address = get_engine_client_zmq_addr(
         handshake_local_only, host, parallel_config.data_parallel_rpc_port)
 
-    if external_dp_lb and dp_rank > 0:
+    if rank_0_local_only and dp_rank > 0:
         assert not handshake_local_only
         local_handshake_address = get_open_zmq_ipc_path()
         client_handshake_address = local_handshake_address

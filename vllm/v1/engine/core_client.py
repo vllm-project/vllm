@@ -90,8 +90,7 @@ class EngineCoreClient(ABC):
         client_args = (vllm_config, executor_class, log_stats,
                        client_addresses, client_index)
         if parallel_config.data_parallel_size > 1:
-            # if parallel_config.data_parallel_external_lb:
-            if False:
+            if parallel_config.data_parallel_external_lb:
                 # External load balancer - client per DP rank.
                 return DPAsyncMPClient(*client_args)
             # Internal load balancer - client balances to all DP ranks.
@@ -432,12 +431,11 @@ class MPClient(EngineCoreClient):
             dp_rank = parallel_config.data_parallel_rank
             dp_local_size = parallel_config.data_parallel_size_local
             offline_mode = parallel_config.data_parallel_rank_local is not None
+            manage_only_local = not (parallel_config.data_parallel_rank_0_manage_all)
 
             # If External DPLB, Client manages local EngineCores.
             # If Internal DPLB, Client manages local+remote EngineCores.
-            num_ranks = (dp_local_size
-                         if parallel_config.data_parallel_external_lb else
-                         dp_size)
+            num_ranks = dp_local_size if manage_only_local else dp_size
             self.engine_ranks_managed = ([dp_rank] if offline_mode else range(
                 dp_rank, dp_rank + num_ranks))
             assert parallel_config.data_parallel_size_local <= len(

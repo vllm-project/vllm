@@ -1893,6 +1893,8 @@ class ParallelConfig:
     """Whether to use "external" DP LB mode. Applies only to online serving
     and when data_parallel_size > 0. Set implicitly when
     data_parallel_rank is provided explicitly to vllm serve."""
+    data_parallel_rank_0_manage_all: bool = False
+    """XXX"""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False
