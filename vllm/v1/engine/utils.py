@@ -659,7 +659,6 @@ def launch_core_engines(
         yield local_engine_manager, coordinator, addresses
 
         # Now wait for engines to start.
-        print(f"{engines_to_handshake=}")
         wait_for_engine_startup(
             handshake_socket,
             addresses,
