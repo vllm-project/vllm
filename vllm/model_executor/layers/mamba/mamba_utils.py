@@ -4,7 +4,7 @@ from vllm.distributed import divide
 
 
 class MambaStateShapeCalculator:
-    @classmethod # type: ignore
+    @classmethod
     def mamba1_state_shape(
         cls,
         tp_world_size: int,
