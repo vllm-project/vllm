@@ -555,8 +555,6 @@ def launch_core_engines(
     # sends requests only to colocated engines.
     client_local_only = offline_mode or external_dp_lb or (local_engine_count
                                                            == dp_size)
-    # HACK: handle case with one pod per node.
-    client_local_only = True
 
     # Set up input and output addresses.
     addresses = EngineZmqAddresses(
