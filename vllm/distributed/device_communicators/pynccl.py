@@ -30,8 +30,8 @@ class PyNcclCommunicator:
         Args:
             group: the process group to work on. If None, it will use the
                 default process group.
-            device: the device to bind the PyNcclCommunicator to. Can be
-                an integer, string or `torch.device` object.
+            device: the device to bind the PyNcclCommunicator to.
+                Must be an integer, string, or `torch.device` object.
             library_path: the path to the NCCL library. If None, it will
                 use the default library path.
         It is the caller's responsibility to make sure each communicator
