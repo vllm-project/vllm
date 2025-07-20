@@ -562,6 +562,10 @@ class ModelConfig:
 
             self.task = "embed"
 
+        model_info, arch = self.registry.inspect_model_cls(self.architectures)
+        self._model_info = model_info
+        self._architecture = arch
+
         all_supported_tasks = self._get_supported_tasks(self.task)
         logger.debug("Tasks supported by runner type: %s", all_supported_tasks)
         supported_runner_types = self._get_supported_runner_types(
@@ -586,10 +590,6 @@ class ModelConfig:
             self.truncation_side = "left"
         else:
             self.truncation_side = "right"
-
-        model_info, arch = self.registry.inspect_model_cls(self.architectures)
-        self._model_info = model_info
-        self._architecture = arch
 
         self.pooler_config = self._init_pooler_config()
 
@@ -674,6 +674,16 @@ class ModelConfig:
                 "max_model_len must be an integer after __post_init__.")
         return self
 
+    def _get_transformers_backend_cls(self) -> str:
+        """Determine which Transformers backend class will be used if
+        `model_impl` is set to `transformers` or `auto`."""
+        if self.hf_config != self.hf_text_config:
+            # If 'hf_text_config' is the same as 'hf_config'. If not, it is
+            # probably a composite config, i.e. multimodal
+            return "TransformersForMultimodalLM"
+        else:
+            return "TransformersForCausalLM"
+
     @property
     def registry(self):
         return me_models.ModelRegistry
@@ -681,7 +691,19 @@ class ModelConfig:
     @property
     def architectures(self) -> list[str]:
         # architectures in the model config.
-        return getattr(self.hf_config, "architectures", [])
+        architectures = getattr(self.hf_config, "architectures", [])
+        # The registry assumes that it can always inspect the vLLM model class
+        # for a given architecture. This assumption breaks down for the
+        # Transformers backend, which may use a different class depending on
+        # the model type. To work around this, we add the correct Transformers
+        # backend class to the architectures list. We must do this here because
+        # we need access to the `hf_config` to determine the backend class.
+        transformers_backend_cls = self._get_transformers_backend_cls()
+        if (self.model_impl != ModelImpl.VLLM.value
+                and all(arch != transformers_backend_cls
+                        for arch in architectures)):
+            architectures.append(transformers_backend_cls)
+        return architectures
 
     @property
     def architecture(self) -> str:
@@ -827,10 +849,9 @@ class ModelConfig:
             ("EmbeddingModel", "embed"),
             ("RewardModel", "reward"),
         ]
-        _, arch = self.registry.inspect_model_cls(architectures)
 
         for suffix, pref_task in suffix_to_preferred_task:
-            if arch.endswith(suffix):
+            if self.architecture.endswith(suffix):
                 return pref_task
 
         return "embed"
@@ -944,10 +965,10 @@ class ModelConfig:
             ("EmbeddingModel", "pooling"),
             ("RewardModel", "pooling"),
         ]
-        _, arch = self.registry.inspect_model_cls(self.architectures)
 
         for suffix, pref_runner in suffix_to_preferred_runner:
-            if arch.endswith(suffix) and pref_runner in supported_runner_types:
+            if self.architecture.endswith(
+                    suffix) and pref_runner in supported_runner_types:
                 return pref_runner
 
         if "generate" in supported_runner_types:
@@ -1333,7 +1354,8 @@ class ModelConfig:
             self, parallel_config: "ParallelConfig") -> tuple[int, int]:
         from vllm.distributed.utils import get_pp_indices
         if (self.hf_text_config.model_type == "deepseek_mtp"
-                or self.hf_config.model_type == "mimo_mtp"):
+                or self.hf_config.model_type == "mimo_mtp"
+                or self.hf_config.model_type == "glm4_moe_mtp"):
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_nextn_predict_layers", 0)
         else:
@@ -2663,7 +2685,15 @@ class SpeculativeConfig:
                 "n_predict": n_predict,
                 "architectures": ["MiMoMTPModel"]
             })
-            return hf_config
+
+        if hf_config.architectures[0] == "Glm4MoeForCausalLM":
+            hf_config.model_type = "glm4_moe_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update({
+                "num_hidden_layers": 0,
+                "n_predict": n_predict,
+                "architectures": ["Glm4MoeMTPModel"]
+            })
 
         return hf_config
 
@@ -2774,7 +2804,7 @@ class SpeculativeConfig:
                       "mlp_speculator"):
                     self.method = "mlp_speculator"
                 elif (self.draft_model_config.hf_config.model_type
-                      in ("deepseek_mtp", "mimo_mtp")):
+                      in ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp")):
                     self.method = "deepseek_mtp"
                     if self.num_speculative_tokens > 1:
                         logger.warning(
@@ -4312,6 +4342,7 @@ class CompilationConfig:
             self.splitting_ops = [] if self.full_cuda_graph else [
                 "vllm.unified_attention",
                 "vllm.unified_attention_with_output",
+                "vllm.mamba_mixer2",
             ]
 
 
