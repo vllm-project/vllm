@@ -36,7 +36,7 @@ from vllm.v1.engine.output_processor import (OutputProcessor,
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import StatLoggerFactory, setup_default_loggers
+from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
 
@@ -102,12 +102,11 @@ class AsyncLLM(EngineClient):
         engine_idxs = [
             idx for idx in range(start_idx, start_idx + local_engines)
         ]
-        self.logger_manager = setup_default_loggers(
+        self.logger_manager = StatLoggerManager(
             vllm_config=vllm_config,
-            log_stats=self.log_stats,
             engine_idxs=engine_idxs,
             custom_stat_loggers=stat_loggers,
-        )
+        ) if self.log_stats else None
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(

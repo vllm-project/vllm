@@ -600,17 +600,6 @@ def build_1_2_5_buckets(max_value: int) -> list[int]:
     return build_buckets([1, 2, 5], max_value)
 
 
-def setup_default_loggers(
-    vllm_config: VllmConfig,
-    log_stats: bool,
-    engine_idxs: list[int],
-    custom_stat_loggers: Optional[list[StatLoggerFactory]] = None,
-) -> Optional["StatLoggerManager"]:
-    """Setup logging and prometheus metrics."""
-    return (None if not log_stats else StatLoggerManager(
-        vllm_config, engine_idxs, custom_stat_loggers))
-
-
 class StatLoggerManager:
     """
     StatLoggerManager:
