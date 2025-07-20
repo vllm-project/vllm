@@ -419,7 +419,6 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 
         if batch_update:
             # Process added requests.
-            needs_update |= bool(batch_update.added)
             for index, params, output_tok_ids in batch_update.added:
                 if (isinstance(params, SamplingParams)
                         and (min_tokens := params.min_tokens)
@@ -427,9 +426,10 @@ class MinTokensLogitsProcessor(LogitsProcessor):
                     # Replace request metadata at batch index
                     self.min_toks[index] = (min_tokens, output_tok_ids,
                                             params.all_stop_token_ids)
-                else:
+                    needs_update = True
+                elif self.min_toks.pop(index, None) is not None:
                     # Drop request metadata at batch index
-                    self.min_toks.pop(index, None)
+                    needs_update = True
 
             if self.min_toks:
                 # Process removed requests.
