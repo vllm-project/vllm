@@ -3,7 +3,8 @@
 
 import inspect
 import torch
-from typing import get_type_hints, get_args, get_origin, Optional, Union, Annotated
+from typing import (get_type_hints, get_args, get_origin, Optional, Union,
+                    Annotated)
 
 
 class TensorShape:
@@ -30,7 +31,8 @@ class TensorSchema:
 
         for field_name, field_type in type_hints.items():
             # Check if the field was provided
-            if not hasattr(self, field_name) or getattr(self, field_name) is None:
+            if (not hasattr(self, field_name) or 
+                getattr(self, field_name) is None):
                 # Field is missing - check if it's optional
                 # Handle Annotated types by extracting the actual type
                 actual_type = field_type
@@ -57,21 +59,24 @@ class TensorSchema:
                         expected_shape = arg.dims
                         if isinstance(value, (list, tuple)):
                             if not value:
-                                raise ValueError(f"{field_name} is an empty list")
+                                raise ValueError(
+                                    f"{field_name} is an empty list")
 
                             # Ensure all tensors in the list have the same shape
                             first = value[0]
                             for i, v in enumerate(value):
                                 if not isinstance(v, torch.Tensor):
-                                    raise ValueError(f"{field_name}[{i}] is not a torch.Tensor")
+                                    raise ValueError(
+                                        f"{field_name}[{i}] is not a "
+                                        f"torch.Tensor")
                                 if v.shape != first.shape:
                                     raise ValueError(
                                         f"{field_name} contains inconsistent "
                                         f"shapes: {first.shape} vs {v.shape} "
-                                        f"at index {i}"
-                                    )
+                                        f"at index {i}")
 
-                            # Treat the list as a stacked tensor: shape = (len(list), *tensor.shape)
+                            # Treat the list as a stacked tensor: 
+                            # shape = (len(list), *tensor.shape)
                             actual_shape = (len(value),) + first.shape
 
                         elif isinstance(value, torch.Tensor):
@@ -86,30 +91,34 @@ class TensorSchema:
                                     type_names.append(str(arg))
                                     
                             expected_types = ", ".join(type_names)
-                            raise ValueError(f"{field_name} is not one of the expected types: {expected_types}")
+                            raise ValueError(
+                                f"{field_name} is not one of the expected "
+                                f"types: {expected_types}")
                             
                         if len(actual_shape) != len(expected_shape):
-                            raise ValueError(f"{field_name} has rank {len(actual_shape)} but expected {len(expected_shape)}")
+                            raise ValueError(
+                                f"{field_name} has rank {len(actual_shape)} "
+                                f"but expected {len(expected_shape)}")
 
                         for i, dim in enumerate(expected_shape):
                             if isinstance(dim, int):
                                 if actual_shape[i] != dim:
                                     raise ValueError(
                                         f"{field_name} dim[{i}] expected "
-                                        f"{dim}, got {actual_shape[i]}"
-                                    )
+                                        f"{dim}, got {actual_shape[i]}")
                             elif isinstance(dim, str):
                                 if dim in shape_env:
                                     if actual_shape[i] != shape_env[dim]:
                                         raise ValueError(
                                             f"{field_name} dim[{i}] expected "
                                             f"'{dim}'={shape_env[dim]}, got "
-                                            f"{actual_shape[i]}"
-                                        )
+                                            f"{actual_shape[i]}")
                                 else:
                                     shape_env[dim] = actual_shape[i]
                             else:
-                                raise TypeError(f"{field_name} dim[{i}] has unsupported type: {type(dim)}")
+                                raise TypeError(
+                                    f"{field_name} dim[{i}] has unsupported "
+                                    f"type: {type(dim)}")
 
     
     def print_shapes(self):
