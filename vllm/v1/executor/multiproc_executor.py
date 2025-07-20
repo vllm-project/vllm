@@ -367,8 +367,8 @@ class WorkerProc:
         self.worker = wrapper
 
         pid = os.getpid()
-        _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)
-        _add_prefix(sys.stderr, f"VllmWorker rank={rank}", pid)
+        _add_prefix(sys.stdout, f"VllmWorker TP rank={rank}", pid)
+        _add_prefix(sys.stderr, f"VllmWorker TP rank={rank}", pid)
 
         # Initialize MessageQueue for receiving SchedulerOutput
         self.rpc_broadcast_mq = MessageQueue.create_from_handle(
