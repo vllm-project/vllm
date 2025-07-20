@@ -472,7 +472,7 @@ class PrometheusStatLogger(StatLoggerBase):
             documentation = "Information of the LLMEngine CacheConfig"
         assert name is not None, f"Unknown metrics info type {type}"
 
-        # Info type metrics are syntactic sugar for a gauge permanently set to 1 # noqa: E501
+        # Info type metrics are syntactic sugar for a gauge permanently set to 1
         # Since prometheus multiprocessing mode does not support Info, emulate
         # info here with a gauge.
         info_gauge = self._gauge_cls(
