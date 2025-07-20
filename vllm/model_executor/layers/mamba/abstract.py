@@ -5,6 +5,8 @@ from collections.abc import Iterable
 
 import torch
 
+from vllm.v1.kv_cache_interface import MambaType
+
 
 class MambaBase(ABC):
     """
