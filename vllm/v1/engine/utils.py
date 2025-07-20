@@ -638,8 +638,6 @@ def launch_core_engines(
                         bind=True) as handshake_socket:
 
         from vllm.v1.engine.core import EngineCoreProc
-        print(f"{client_handshake_address=}")
-        print(f"{handshake_address=}")
 
         # Start local engines.
         if local_engine_count:
