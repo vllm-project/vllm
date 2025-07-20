@@ -168,8 +168,17 @@ class PrometheusStatLogger(StatLoggerBase):
         model_name = vllm_config.model_config.served_model_name
         max_model_len = vllm_config.model_config.max_model_len
 
-        # self.spec_decoding_prom = self._spec_decoding_cls(
-        #     vllm_config.speculative_config, labelnames, labelvalues)
+        if len(self.engine_indexes) > 1:
+            raise NotImplementedError("Prometheus metrics with Spec Decoding "
+                                      "with >1 EngineCore per AsyncLLM is not "
+                                      "supported yet.")
+        spec_decode_labelvalues = [
+            vllm_config.model_config.served_model_name,
+            str(self.engine_indexes[0])
+        ]
+        self.spec_decoding_prom = self._spec_decoding_cls(
+            vllm_config.speculative_config, labelnames,
+            spec_decode_labelvalues)
 
         #
         # Scheduler state
