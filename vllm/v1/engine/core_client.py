@@ -90,8 +90,8 @@ class EngineCoreClient(ABC):
         client_args = (vllm_config, executor_class, log_stats,
                        client_addresses, client_index)
         if parallel_config.data_parallel_size > 1:
-            # if parallel_config.data_parallel_external_lb:
-            if False:
+            if parallel_config.data_parallel_external_lb:
+                # if False:
                 # External load balancer - client per DP rank.
                 return DPAsyncMPClient(*client_args)
             # Internal load balancer - client balances to all DP ranks.
