@@ -45,11 +45,11 @@ class ServeSubcommand(CLISubcommand):
         if args.headless or args.api_server_count < 1:
             run_headless(args)
         else:
-            # if args.data_parallel_start_rank:
-            #     raise ValueError(
-            #         "data_parallel_start_rank is only applicable "
-            #         "in headless mode. "
-            #         "Add --headless flag to enable headless mode.")
+            if args.data_parallel_start_rank:
+                raise ValueError(
+                    "data_parallel_start_rank is only applicable "
+                    "in headless mode. "
+                    "Add --headless flag to enable headless mode.")
             if args.api_server_count > 1:
                 run_multi_api_server(args)
             else:
