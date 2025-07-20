@@ -709,12 +709,8 @@ class AsyncMPClient(MPClient):
         assert output_socket is not None
 
         async def process_outputs_socket():
-            i = 0
             try:
                 while True:
-                    if i % 100 == 0:
-                        logger.info(f"{i=}")
-                    i += 1
                     frames = await output_socket.recv_multipart(copy=False)
                     resources.validate_alive(frames)
                     outputs: EngineCoreOutputs = decoder.decode(frames)
