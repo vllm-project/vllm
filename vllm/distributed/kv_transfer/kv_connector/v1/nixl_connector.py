@@ -874,8 +874,6 @@ class NixlConnectorWorker:
         Returns:
             set of req_ids that have all done xfers
         """
-        current_time = time.perf_counter()
-
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
             in_progress = False
@@ -883,8 +881,6 @@ class NixlConnectorWorker:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
                     self.nixl_wrapper.release_xfer_handle(handle)
-                    logger.debug("[nixl] req_id: %s transfer time: %s",
-                                 req_id, current_time - _xfer_stime)
                 elif xfer_state == "PROC":
                     in_progress = True
                     continue
