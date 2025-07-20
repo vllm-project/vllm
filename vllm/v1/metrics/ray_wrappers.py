@@ -51,7 +51,13 @@ class RayGaugeWrapper(RayPrometheusMetric):
     def __init__(self,
                  name: str,
                  documentation: Optional[str] = "",
-                 labelnames: Optional[list[str]] = None):
+                 labelnames: Optional[list[str]] = None,
+                 multiprocess_mode: Optional[str] = ""):
+
+        # All Ray metrics are keyed by WorkerId, so multiprocess modes like
+        # "mostrecent", "all", "sum" do not apply. This logic can be manually
+        # implemented at the observability layer (Prometheus/Grafana).
+        del multiprocess_mode
         labelnames_tuple = tuple(labelnames) if labelnames else None
         self.metric = ray_metrics.Gauge(name=name,
                                         description=documentation,
