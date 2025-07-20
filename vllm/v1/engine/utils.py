@@ -633,7 +633,6 @@ def launch_core_engines(
         local_handshake_address = handshake_address
         client_handshake_address = None
 
-    print(f"{local_handshake_address=}")
     with zmq_socket_ctx(local_handshake_address, zmq.ROUTER,
                         bind=True) as handshake_socket:
 
