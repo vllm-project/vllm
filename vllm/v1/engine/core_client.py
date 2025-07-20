@@ -90,7 +90,8 @@ class EngineCoreClient(ABC):
         client_args = (vllm_config, executor_class, log_stats,
                        client_addresses, client_index)
         if parallel_config.data_parallel_size > 1:
-            if parallel_config.data_parallel_external_lb:
+            # if parallel_config.data_parallel_external_lb:
+            if False:
                 # External load balancer - client per DP rank.
                 return DPAsyncMPClient(*client_args)
             # Internal load balancer - client balances to all DP ranks.
@@ -1023,6 +1024,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
         if (eng_index := request.data_parallel_rank) is None:
+            # logger.info(f"{self.lb_engines=} | {self.core_engines=}")
             if not self.lb_engines:
                 return self.core_engine
             # TODO use P2C alg for larger DP sizes
