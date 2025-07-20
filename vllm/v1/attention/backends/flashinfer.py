@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Optional
+from typing import TYPE_CHECKING, ClassVar, Optional
 
 import torch
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
@@ -608,16 +608,11 @@ class FlashInferImpl(AttentionImpl):
         alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[int] = None,
         use_irope: bool = False,
     ) -> None:
-        if use_irope:
-            logger.warning_once(
-                "Using irope in FlashInfer is not supported yet, it will fall"
-                " back to global attention for long context.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -632,6 +627,7 @@ class FlashInferImpl(AttentionImpl):
         self.kv_cache_dtype = kv_cache_dtype
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        self.use_irope = use_irope
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
