@@ -434,6 +434,12 @@ class EmbeddingMixin(OpenAIServing):
 
             pooling_params = ctx.request.to_pooling_params()
 
+            # Verify and set the task for pooling params
+            try:
+                pooling_params.verify("embed", self.model_config)
+            except ValueError as e:
+                return self.create_error_response(str(e))
+
             if ctx.engine_prompts is None:
                 return self.create_error_response(
                     "Engine prompts not available")
