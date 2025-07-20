@@ -600,32 +600,69 @@ def build_1_2_5_buckets(max_value: int) -> list[int]:
     return build_buckets([1, 2, 5], max_value)
 
 
-def setup_default_loggers(
-    vllm_config: VllmConfig,
-    log_stats: bool,
-    engine_idxs: list[int],
-    custom_stat_loggers: Optional[list[StatLoggerFactory]] = None,
-) -> Optional[tuple[dict[int, list[StatLoggerBase]], PrometheusStatLogger]]:
-    """Setup logging and prometheus metrics."""
-    if not log_stats:
-        return None
+class StatLoggerManager:
+    """
+    StatLoggerManager:
+        Logging happens at the level of the EngineCore (per scheduler).
+         * DP: >1 EngineCore per AsyncLLM - loggers for each EngineCore.
+         * With Local Logger, just make N copies for N EngineCores.
+         * With Prometheus, we need a single logger with N "labels"
 
-    factories: list[StatLoggerFactory]
-    if custom_stat_loggers is not None:
-        factories = custom_stat_loggers
-    else:
-        factories = []
-        if logger.isEnabledFor(logging.INFO):
-            factories.append(LoggingStatLogger)
+        This class abstracts away this implementation detail from
+        the AsyncLLM, allowing the AsyncLLM to just call .record()
+        and .log() to a simple interface.
+    """
 
-    # engine_idx: Logger
-    stat_loggers: dict[int, list[StatLoggerBase]] = {}
-    for engine_idx in engine_idxs:
-        per_engine_stat_loggers: list[StatLoggerBase] = []
-        for logger_factory in factories:
-            per_engine_stat_loggers.append(
-                logger_factory(vllm_config, engine_idx))
-        stat_loggers[engine_idx] = per_engine_stat_loggers
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        engine_idxs: Optional[list[int]] = None,
+        custom_stat_loggers: Optional[list[StatLoggerFactory]] = None,
+    ):
+        self.engine_idxs = engine_idxs if engine_idxs else [0]
 
-    prom_stat_logger = PrometheusStatLogger(vllm_config, engine_idxs)
-    return stat_loggers, prom_stat_logger
+        factories: list[StatLoggerFactory]
+        if custom_stat_loggers is not None:
+            factories = custom_stat_loggers
+        else:
+            factories = []
+            if logger.isEnabledFor(logging.INFO):
+                factories.append(LoggingStatLogger)
+
+        # engine_idx: StatLogger
+        self.per_engine_logger_dict: dict[int, list[StatLoggerBase]] = {}
+        for engine_idx in self.engine_idxs:
+            loggers: list[StatLoggerBase] = []
+            for logger_factory in factories:
+                loggers.append(logger_factory(vllm_config, engine_idx))
+            self.per_engine_logger_dict[engine_idx] = loggers
+
+        # For Prometheus, need to share the metrics between EngineCores.
+        # Each EngineCore's metrics are expressed as a unique label.
+        self.prometheus_logger = PrometheusStatLogger(vllm_config, engine_idxs)
+
+    def record(
+        self,
+        scheduler_stats: Optional[SchedulerStats],
+        iteration_stats: Optional[IterationStats],
+        engine_idx: Optional[int] = None,
+    ):
+        if engine_idx is None:
+            engine_idx = 0
+
+        per_engine_loggers = self.per_engine_logger_dict[engine_idx]
+        for logger in per_engine_loggers:
+            logger.record(scheduler_stats, iteration_stats, engine_idx)
+
+        self.prometheus_logger.record(scheduler_stats, iteration_stats,
+                                      engine_idx)
+
+    def log(self):
+        for per_engine_loggers in self.per_engine_logger_dict.values():
+            for logger in per_engine_loggers:
+                logger.log()
+
+    def log_engine_initialized(self):
+        for per_engine_loggers in self.per_engine_logger_dict.values():
+            for logger in per_engine_loggers:
+                logger.log_engine_initialized()
