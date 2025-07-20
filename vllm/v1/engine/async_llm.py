@@ -94,20 +94,6 @@ class AsyncLLM(EngineClient):
         self.log_requests = log_requests
         self.log_stats = log_stats
 
-        # Set up stat loggers; independent set for each DP rank.
-        # HACK: asyncllm should not be aware of how many engines is it
-        # managing.
-        start_idx = vllm_config.parallel_config.data_parallel_rank
-        local_engines = vllm_config.parallel_config.data_parallel_size_local
-        engine_idxs = [
-            idx for idx in range(start_idx, start_idx + local_engines)
-        ]
-        self.logger_manager = StatLoggerManager(
-            vllm_config=vllm_config,
-            engine_idxs=engine_idxs,
-            custom_stat_loggers=stat_loggers,
-        ) if self.log_stats else None
-
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
@@ -126,7 +112,6 @@ class AsyncLLM(EngineClient):
                                                 log_stats=self.log_stats)
 
         # EngineCore (starts the engine in background process).
-
         self.engine_core = EngineCoreClient.make_async_mp_client(
             vllm_config=vllm_config,
             executor_class=executor_class,
@@ -134,8 +119,17 @@ class AsyncLLM(EngineClient):
             client_addresses=client_addresses,
             client_index=client_index,
         )
-        if self.logger_manager:
+
+        # Loggers.
+        self.logger_manager: Optional[StatLoggerManager] = None
+        if self.log_stats:
+            self.logger_manager = StatLoggerManager(
+                vllm_config=vllm_config,
+                engine_idxs=self.engine_core.engine_ranks,
+                custom_stat_loggers=stat_loggers,
+            )
             self.logger_manager.log_engine_initialized()
+
         self.output_handler: Optional[asyncio.Task] = None
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
