@@ -44,26 +44,79 @@ class TensorSchema:
                 return False
         return True
 
+    def _validate_nested_tensors(self, value, field_name, expected_shape,
+                                 dynamic_dims):
+        """Validate a list/tuple of tensors and return the actual shape."""
+        if not value:
+            raise ValueError(f"{field_name} is an empty list")
+
+        # Ensure all tensors in the list have the same
+        # shape, besides dynamic dimensions
+        first = value[0]
+        for i, v in enumerate(value):
+            if not isinstance(v, torch.Tensor):
+                raise ValueError(f"{field_name}[{i}] is not a "
+                                 f"torch.Tensor")
+            if not self._match_shape_with_dynamic(
+                    v.shape,
+                    first.shape,
+                    expected_shape,
+                    dynamic_dims,
+            ):
+                raise ValueError(f"{field_name} contains inconsistent "
+                                 f"shapes: {first.shape} vs {v.shape} "
+                                 f"at index {i}")
+
+        # Treat the list as a stacked tensor:
+        # shape = (len(list), *tensor.shape)
+        return (len(value), ) + first.shape
+
+    def _validate_tensor_shape_expected(self, actual_shape, expected_shape,
+                                        field_name, shape_env, dynamic_dims):
+        """Validate that the actual tensor shape matches the expected shape."""
+        if len(actual_shape) != len(expected_shape):
+            raise ValueError(f"{field_name} has rank {len(actual_shape)} "
+                             f"but expected {len(expected_shape)}")
+
+        for i, dim in enumerate(expected_shape):
+            if dim in dynamic_dims:
+                continue
+            elif isinstance(dim, int):
+                if actual_shape[i] != dim:
+                    raise ValueError(f"{field_name} dim[{i}] expected "
+                                     f"{dim}, got {actual_shape[i]}")
+            elif isinstance(dim, str):
+                if dim in shape_env:
+                    if actual_shape[i] != shape_env[dim]:
+                        raise ValueError(f"{field_name} dim[{i}] expected "
+                                         f"'{dim}'={shape_env[dim]}, got "
+                                         f"{actual_shape[i]}")
+                else:
+                    shape_env[dim] = actual_shape[i]
+            else:
+                raise TypeError(f"{field_name} dim[{i}] has unsupported "
+                                f"type: {type(dim)}")
+
     def validate(self) -> None:
         type_hints = get_type_hints(self.__class__, include_extras=True)
         shape_env = {}
 
         for field_name, field_type in type_hints.items():
-            # Check if the field was provided
+            # Check if field is missing
             if (not hasattr(self, field_name)
                     or getattr(self, field_name) is None):
-                # Field is missing - check if it's optional
-                # Handle Annotated types by extracting the actual type
+                # Check if field is marked as optional
                 actual_type = field_type
                 if get_origin(field_type) is Annotated:
                     args = get_args(field_type)
-                    actual_type = args[0]  # First argument is the actual type
+                    actual_type = args[0]
 
-                # Check if the actual type is Optional (Union with None)
+                # Check arg was provided as Union
                 if get_origin(actual_type) is Union:
                     args = get_args(actual_type)
-                    if type(None) in args:  # Optional field
-                        continue  # Skip validation for missing optional fields
+                    # Skip validation for missing optional fields when Union contains None
+                    if type(None) in args:
+                        continue
                 # If not optional, raise error
                 raise ValueError(f"Required field '{field_name}' is missing")
 
@@ -77,32 +130,9 @@ class TensorSchema:
                     if isinstance(arg, TensorShape):
                         expected_shape = arg.dims
                         if isinstance(value, (list, tuple)):
-                            if not value:
-                                raise ValueError(
-                                    f"{field_name} is an empty list")
-
-                            # Ensure all tensors in the list have the same
-                            # shape, besides dynamic dimensions
-                            first = value[0]
-                            for i, v in enumerate(value):
-                                if not isinstance(v, torch.Tensor):
-                                    raise ValueError(
-                                        f"{field_name}[{i}] is not a "
-                                        f"torch.Tensor")
-                                if not self._match_shape_with_dynamic(
-                                        v.shape,
-                                        first.shape,
-                                        expected_shape,
-                                        arg.dynamic_dims,
-                                ):
-                                    raise ValueError(
-                                        f"{field_name} contains inconsistent "
-                                        f"shapes: {first.shape} vs {v.shape} "
-                                        f"at index {i}")
-
-                            # Treat the list as a stacked tensor:
-                            # shape = (len(list), *tensor.shape)
-                            actual_shape = (len(value), ) + first.shape
+                            actual_shape = self._validate_nested_tensors(
+                                value, field_name, expected_shape,
+                                arg.dynamic_dims)
 
                         elif isinstance(value, torch.Tensor):
                             actual_shape = value.shape
@@ -120,32 +150,9 @@ class TensorSchema:
                                 f"{field_name} is not one of the expected "
                                 f"types: {expected_types}")
 
-                        if len(actual_shape) != len(expected_shape):
-                            raise ValueError(
-                                f"{field_name} has rank {len(actual_shape)} "
-                                f"but expected {len(expected_shape)}")
-
-                        for i, dim in enumerate(expected_shape):
-                            if dim in arg.dynamic_dims:
-                                continue
-                            elif isinstance(dim, int):
-                                if actual_shape[i] != dim:
-                                    raise ValueError(
-                                        f"{field_name} dim[{i}] expected "
-                                        f"{dim}, got {actual_shape[i]}")
-                            elif isinstance(dim, str):
-                                if dim in shape_env:
-                                    if actual_shape[i] != shape_env[dim]:
-                                        raise ValueError(
-                                            f"{field_name} dim[{i}] expected "
-                                            f"'{dim}'={shape_env[dim]}, got "
-                                            f"{actual_shape[i]}")
-                                else:
-                                    shape_env[dim] = actual_shape[i]
-                            else:
-                                raise TypeError(
-                                    f"{field_name} dim[{i}] has unsupported "
-                                    f"type: {type(dim)}")
+                        self._validate_tensor_shape_expected(
+                            actual_shape, expected_shape, field_name,
+                            shape_env, arg.dynamic_dims)
 
     def print_shapes(self) -> None:
         """Print TensorShape annotations for debugging."""
