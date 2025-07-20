@@ -647,15 +647,24 @@ class StatLoggerManager:
 
         # engine_idx: StatLogger
         self.per_engine_logger_dict: dict[int, list[StatLoggerBase]] = {}
+        prometheus_factory = PrometheusStatLogger
         for engine_idx in self.engine_idxs:
             loggers: list[StatLoggerBase] = []
             for logger_factory in factories:
-                loggers.append(logger_factory(vllm_config, engine_idx))
+                # If we get a custom prometheus logger, use that
+                # instead. This is typically used for the ray case.
+                if (isinstance(logger_factory, type)
+                        and issubclass(logger_factory, PrometheusStatLogger)):
+                    prometheus_factory = logger_factory
+                    continue
+                loggers.append(logger_factory(vllm_config,
+                                              engine_idx))  # type: ignore
             self.per_engine_logger_dict[engine_idx] = loggers
 
         # For Prometheus, need to share the metrics between EngineCores.
         # Each EngineCore's metrics are expressed as a unique label.
-        self.prometheus_logger = PrometheusStatLogger(vllm_config, engine_idxs)
+        print(f"{prometheus_factory=}")
+        self.prometheus_logger = prometheus_factory(vllm_config, engine_idxs)
 
     def record(
         self,

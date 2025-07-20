@@ -41,6 +41,7 @@ def test_engine_log_metrics_ray(
                 model=model,
                 dtype=dtype,
                 disable_log_stats=False,
+                enforce_eager=True,
             )
 
             engine = AsyncLLM.from_engine_args(
