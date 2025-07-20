@@ -25,6 +25,7 @@
 """Rotary Positional Embeddings."""
 import itertools
 import math
+from functools import cache
 from typing import Any, Optional, Union
 
 import numpy as np
@@ -32,11 +33,25 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+import vllm.envs as envs
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 
 if current_platform.is_cuda():
     from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+
+
+@cache
+def is_rocm_aiter_rope_enabled() -> bool:
+    from vllm.platforms.rocm import on_mi3xx
+    return current_platform.is_rocm() \
+        and on_mi3xx() \
+        and envs.VLLM_ROCM_USE_AITER \
+        and envs.VLLM_ROCM_USE_AITER_ROPE
+
+
+if is_rocm_aiter_rope_enabled():
+    from aiter.rotary_embedding import get_rope as aiter_get_rope
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -1809,6 +1824,12 @@ def get_rope(
     partial_rotary_factor: float = 1.0,
     dual_chunk_attention_config: Optional[dict[str, Any]] = None,
 ) -> RotaryEmbedding:
+    if is_rocm_aiter_rope_enabled():
+        assert dual_chunk_attention_config is None, (
+            "dual_chunk_attention_config is not supported for aiter rope")
+        return aiter_get_rope(head_size, rotary_dim, max_position, base,
+                              is_neox_style, rope_scaling, dtype,
+                              partial_rotary_factor)
     if dtype is None:
         dtype = torch.get_default_dtype()
     if rope_scaling is not None:
