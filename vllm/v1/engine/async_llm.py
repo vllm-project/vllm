@@ -568,6 +568,7 @@ class AsyncLLM(EngineClient):
     ) -> None:
         if self.stat_loggers is None:
             return
+        # loggers, prom_logger
         per_engine_loggers, _ = self.stat_loggers
         for loggers in per_engine_loggers.values():
             for stat_logger in loggers:
