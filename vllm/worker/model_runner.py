@@ -549,6 +549,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.runner.model_config.is_encoder_decoder:
             context_len = seq_len - 1
         else:
+            #TODO: Modify the get_num_computed_tokens for embeds (our case)
             context_len = seq_data.get_num_computed_tokens()
 
         # Compute tokens.

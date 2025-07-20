@@ -325,25 +325,25 @@ class SequenceData(msgspec.Struct,
         self._mrope_position_delta = new_mrope_position_delta
 
     def append_input_embeds(self,
-                            input_embeds: torch.Tensor,
-                            # token_embed: Optional[torch.Tensor] = None
+                            # input_embeds: torch.Tensor,
+                            token_embed: Optional[torch.Tensor] = None
                             ) -> None:
-        self.prompt_embeds = input_embeds
-        self._prompt_embeds = input_embeds
-        # if token_embed is not None:
-        #     # Do not pass in with batch or sequence dimensions
-        #     assert token_embed.ndim == 1
-        #     token_embed = token_embed.detach().cpu().unsqueeze(0)
-        #     if self._output_embeds is None:
-        #         self._output_embeds = token_embed
-        #     else:
-        #         self._output_embeds = torch.cat(
-        #             (self._output_embeds, token_embed), dim=0)
-        #     assert self._cached_all_token_embeds is not None
-        #     self._cached_all_token_embeds = torch.cat(
-        #         (self._cached_all_token_embeds,
-        #          token_embed.to(device=self._cached_all_token_embeds.device)),
-        #         dim=0)
+        # self.prompt_embeds = token_embed
+        # self._prompt_embeds = token_embed
+        if token_embed is not None:
+            # Do not pass in with batch or sequence dimensions
+            assert token_embed.ndim == 1
+            token_embed = token_embed.detach().cpu().unsqueeze(0)
+            if self._output_embeds is None:
+                self._output_embeds = token_embed
+            else:
+                self._output_embeds = torch.cat(
+                    (self._output_embeds, token_embed), dim=0)
+            assert self._cached_all_token_embeds is not None
+            self._cached_all_token_embeds = torch.cat(
+                (self._cached_all_token_embeds,
+                 token_embed.to(device=self._cached_all_token_embeds.device)),
+                dim=0)
 
     def append_token_id(self,
                         token_id: int,

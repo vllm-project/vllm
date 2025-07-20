@@ -46,10 +46,10 @@ from vllm.outputs import (PoolingRequestOutput, RequestOutput,
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.sequence import (ExecuteModelRequest, IntermediateTensors, ParallelSampleSequenceGroup,
+from vllm.sequence import (ExecuteModelRequest, IntermediateTensors, Logprob, ParallelSampleSequenceGroup,
                            PoolingSequenceGroupOutput, Sequence, SequenceGroup,
                            SequenceGroupBase, SequenceGroupMetadata,
-                           SequenceGroupOutput, SequenceStatus, PoolerOutput)
+                           SequenceGroupOutput, SequenceStage, SequenceStatus, PoolerOutput)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.detokenizer import Detokenizer
@@ -1064,7 +1064,8 @@ class LLMEngine:
                 if seq_group_meta.do_sample:
                     self.output_processor.process_outputs(
                         seq_group, output, is_async)
-
+            else:
+                seq_group.pooled_data = output[0].data
             if seq_group.is_finished():
                 finished_now.append(i)
 
@@ -1240,7 +1241,38 @@ class LLMEngine:
 
             # Update prompt embeds using the data
             seq = seq_group.seqs[0]
-            seq.append_input_embeds(data)
+            # seq.append_input_embeds(data)
+            # seq.data._stage = SequenceStage.DECODE
+            
+            if seq_group.is_finished():
+                continue
+
+            if self.scheduler_config.is_multi_step:
+                # Updates happen only if the sequence is prefill
+                self._update_num_computed_tokens_for_multi_step_prefill(
+                    seq_group, seq_group_metadata,
+                    seq_group.state.num_steps == 1)
+            else:
+                token_chunk_size = (seq_group_metadata.token_chunk_size
+                                    if seq_group_metadata.token_chunk_size
+                                    is not None else 0)
+                seq_group.update_num_computed_tokens(token_chunk_size)
+            seq.append_token_id(0, {0: Logprob(0.0)},
+                                        data)
+            
+    def finish_sequence_group(
+        self,
+        scheduled_seq_groups: List[ScheduledSequenceGroup],
+        # seq_group_metadata: SequenceGroupMetadata,
+    ) -> None:
+        """Finish the sequence group and update the scheduler."""
+        for scheduled_seq_group in scheduled_seq_groups:
+            seq_group = scheduled_seq_group.seq_group
+            if seq_group.is_finished():
+                return
+
+            for seq in seq_group.get_seqs():
+                seq.status = SequenceStatus.FINISHED_STOPPED
 
     def step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
@@ -1442,9 +1474,16 @@ class LLMEngine:
                     "Async postprocessor expects only a single output set")
                 print(f"Seq group metadata list: {seq_group_metadata_list}")
                 print(f"Scheduler outputs: {scheduler_outputs}")
-                self._advance_to_next_step(
-                    outputs[0], seq_group_metadata_list,
-                    scheduler_outputs.scheduled_seq_groups)
+                if not self.model_config.is_middle_blocks:
+                    self._advance_to_next_step(
+                        outputs[0], seq_group_metadata_list,
+                        scheduler_outputs.scheduled_seq_groups)
+                else:
+                    # For middle blocks, we need to advance the sequences
+                    # to the next step with the given data.
+                    self.advance_to_next_step_middle_block(
+                        torch.randn(5120, device="cuda:0"), seq_group_metadata_list,
+                        scheduler_outputs.scheduled_seq_groups)
 
             # Check if need to run the usual non-async path
             if not allow_async_output_proc:
