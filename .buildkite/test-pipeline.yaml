@@ -264,6 +264,7 @@ steps:
     - pytest -v -s v1/structured_output
     - pytest -v -s v1/spec_decode
     - pytest -v -s v1/kv_connector/unit
+    - pytest -v -s v1/metrics
     - pytest -v -s v1/test_serial_utils.py
     - pytest -v -s v1/test_utils.py
     - pytest -v -s v1/test_oracle.py
