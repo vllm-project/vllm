@@ -560,9 +560,6 @@ class PrometheusStatLogger(StatLoggerBase):
                 self.histogram_max_tokens_request[engine_idx].observe(
                     finished_request.max_tokens_param)
 
-        # TODO: investigate whether LoRA works with DP and ensure
-        # that the metrics we are logging are consistent with
-
         if self.gauge_lora_info is not None:
             running_lora_adapters = \
                 ",".join(iteration_stats.running_lora_adapters.keys())
