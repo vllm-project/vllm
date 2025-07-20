@@ -970,9 +970,6 @@ class DPAsyncMPClient(AsyncMPClient):
                     self.engines_running = running
                     # NOTE: counts include all global Cores. Slice
                     # to get get the Core's managed by this client.
-                    # TODO(rob): update this so we only pull in
-                    # the counts that we are load balancing across.
-                    # logger.info(f"{counts=}")
                     self.lb_engines = counts[start_idx:end_idx]
 
         resources.stats_update_task = asyncio.create_task(
