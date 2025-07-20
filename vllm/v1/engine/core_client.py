@@ -951,7 +951,6 @@ class DPAsyncMPClient(AsyncMPClient):
                         self.engines_running = True
                         msg = msgspec.msgpack.encode(
                             (target_eng_index, self.current_wave))
-                        logger.info("FIRST_REQ")
                         await socket.send(msg)
 
                     buf = None
