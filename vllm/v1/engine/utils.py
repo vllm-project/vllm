@@ -649,7 +649,6 @@ def launch_core_engines(
                 local_client=True,
                 local_engine_count=local_engine_count,
                 start_index=dp_rank,
-                # In server, this is 0.
                 local_start_index=local_start_index or 0)
         else:
             local_engine_manager = None
