@@ -977,7 +977,6 @@ class DPAsyncMPClient(AsyncMPClient):
         chosen_engine = self.get_core_engine_for_request(request)
         to_await = self._send_input(EngineCoreRequestType.ADD, request,
                                     chosen_engine)
-
         if not self.engines_running:
             # Notify coordinator that we're sending a request
             req_msg = msgspec.msgpack.encode(("FIRST_REQ", chosen_engine))
