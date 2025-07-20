@@ -1011,9 +1011,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     def get_core_engine_for_request(
             self, request: EngineCoreRequest) -> EngineIdentity:
-        logger.info(f"{self.lb_engines=} | {request.data_parallel_rank=}")
-        logger.info(f"{self.core_engine=}")
-        logger.info(f"{self.client_index=}")
         # Engines are in rank order.
         if (eng_index := request.data_parallel_rank) is None:
             if not self.lb_engines:
