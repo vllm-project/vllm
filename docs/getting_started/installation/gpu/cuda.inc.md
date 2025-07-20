@@ -39,9 +39,9 @@ As of now, vLLM's binaries are compiled with CUDA 12.8 and public PyTorch releas
 
 ```bash
 # Install vLLM with CUDA 11.8.
-export VLLM_VERSION=0.6.1.post1
-export PYTHON_VERSION=312
-uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu118-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux1_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cu118
+export VLLM_VERSION=0.10.0
+export CUDA_VERSION=118 # or 126
+uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux1_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cu${CUDA_VERSION}
 ```
 
 [](){ #install-the-latest-code }
