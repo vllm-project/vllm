@@ -9,8 +9,6 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
-from vllm.model_executor.layers.quantization.utils.rocm_aiter_w8a8_utils import (  # noqa: E501
-    is_rocm_aiter_gemm_enabled)
 from vllm.platforms import current_platform
 
 # Using the default value (240.0) from pytorch will cause accuracy
@@ -47,8 +45,6 @@ class QuantFP8(CustomOp):
         self.static = static
         self.group_shape = group_shape
         self.use_per_token_if_dynamic = group_shape == GroupShape.PER_TOKEN
-        self.is_rocm_aiter_enabled = (is_rocm_aiter_gemm_enabled()
-                                      and current_platform.supports_fp8())
 
     def forward_cuda(
         self,
@@ -61,22 +57,12 @@ class QuantFP8(CustomOp):
                                     == GroupShape.PER_TOKEN
                                     and scale_ub.numel() == 1)
 
-        if not self.is_rocm_aiter_enabled:
-            return ops.scaled_fp8_quant(
-                x,
-                scale,
-                num_token_padding=self.num_token_padding,
-                scale_ub=scale_ub,
-                use_per_token_if_dynamic=self.use_per_token_if_dynamic)
-        else:
-            assert scale_ub is None, (
-                "scale_ub is not supported for rocm_aiter quant fp8")
-            if self.use_per_token_if_dynamic:
-                return (torch.ops.vllm.rocm_aiter_per_token_quant_fp8(
-                    x, scale=scale))
-            else:
-                return (torch.ops.vllm.rocm_aiter_per_tensor_quant_fp8(
-                    x, scale=scale))
+        return ops.scaled_fp8_quant(
+            x,
+            scale,
+            num_token_padding=self.num_token_padding,
+            scale_ub=scale_ub,
+            use_per_token_if_dynamic=self.use_per_token_if_dynamic)
 
     def forward_native(
         self,
