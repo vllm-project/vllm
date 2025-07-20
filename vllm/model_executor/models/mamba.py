@@ -11,11 +11,8 @@ from transformers import MambaConfig
 from vllm import envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.mamba1_metadata import (
-    Mamba1Metadata, prepare_mamba1_metadata)
 from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator)
@@ -73,7 +70,6 @@ class MambaDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
         mamba_cache_params: MambaCacheParams,
-        mamba1_metadata: Mamba1Metadata,
         **kwargs,
     ):
         if residual is None:
@@ -82,7 +78,7 @@ class MambaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.norm(hidden_states, residual)
 
-        hidden_states = self.mixer(hidden_states, mamba_cache_params, mamba1_metadata)
+        hidden_states = self.mixer(hidden_states, mamba_cache_params)
         return hidden_states, residual
 
 
@@ -135,13 +131,6 @@ class MambaModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        mamba1_metadata = None
-        
-        if not envs.VLLM_USE_V1:
-            attn_metadata = get_forward_context().attn_metadata
-            mamba1_metadata = prepare_mamba1_metadata(attn_metadata)
-        
-            
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -164,7 +153,6 @@ class MambaModel(nn.Module):
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
-                mamba1_metadata=mamba1_metadata,
                 mamba_cache_params=layer_cache_params)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({

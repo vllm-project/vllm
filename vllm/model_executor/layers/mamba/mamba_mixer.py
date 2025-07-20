@@ -18,7 +18,6 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.mamba.mamba1_metadata import Mamba1Metadata
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
@@ -156,8 +155,7 @@ class MambaMixer(CustomOp):
         pass
 
     def forward_cuda(self, hidden_states: torch.Tensor,
-                     mamba_cache_params: Optional[MambaCacheParams] = None,
-                     mamba1_metadata: Optional[Mamba1Metadata] = None):
+                     mamba_cache_params: Optional[MambaCacheParams] = None):
 
         attn_metadata: AttentionMetadata | Mamba1AttentionMetadata = get_forward_context().attn_metadata
 
