@@ -239,9 +239,9 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
         mamba_cache_params = None
         if not envs.VLLM_USE_V1:
             if self.mamba_cache is None:
-                num_mamba_layers = self.model_config.get_num_layers_by_block_type(
+                num_layers = self.model_config.get_num_layers_by_block_type(
                     self.vllm_config.parallel_config, LayerBlockType.mamba)
-                mamba_state_shape = MambaStateShapeCalculator.mamba1_state_shape(
+                state_shape = MambaStateShapeCalculator.mamba1_state_shape(
                     tp_world_size=self.vllm_config.parallel_config.
                     tensor_parallel_size,
                     intermediate_size=self.config.intermediate_size,
@@ -250,8 +250,7 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
                     use_v1=False)
                 self.mamba_cache = MambaCacheManager(self.vllm_config,
                                                      self.lm_head.weight.dtype,
-                                                     num_mamba_layers,
-                                                     *mamba_state_shape)
+                                                     num_layers, *state_shape)
 
             mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 

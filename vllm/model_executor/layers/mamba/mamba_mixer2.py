@@ -279,8 +279,9 @@ class MambaMixer2(MambaBase, CustomOp):
             # - for TP we shard conv_dim by sharding on n_groups,
             # - but if n_groups cannot divide tp_size, we need to
             #   extend some extra groups
-            self.n_groups = n_groups + MambaStateShapeCalculator.extra_groups_for_head_shards(
+            groups = MambaStateShapeCalculator.extra_groups_for_head_shards(
                 n_groups, self.tp_size)
+            self.n_groups = n_groups + groups
 
         self.conv_dim = intermediate_size + 2 * self.n_groups * ssm_state_size
         self.conv1d = ColumnParallelLinear(
