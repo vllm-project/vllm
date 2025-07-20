@@ -422,6 +422,7 @@ class PrometheusStatLogger(StatLoggerBase):
 
     def record(self, scheduler_stats: Optional[SchedulerStats],
                iteration_stats: Optional[IterationStats]):
+        logger.info(f"PROM STAT LOGGER: {self.engine_index=}")
         """Log to prometheus."""
         if scheduler_stats is not None:
             self.gauge_scheduler_running.set(scheduler_stats.num_running_reqs)

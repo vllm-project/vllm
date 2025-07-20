@@ -410,6 +410,8 @@ class AsyncLLM(EngineClient):
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in
                     # background thread once Prometheus overhead is non-trivial.
+                    logger.info(f"{outputs.engine_index=}")
+                    logger.info(f"{stat_loggers[outputs.engine_index]=}")
                     if stat_loggers:
                         AsyncLLM._record_stats(
                             stat_loggers[outputs.engine_index],
