@@ -24,6 +24,19 @@ logger = init_logger(__name__)
 # TPU requires the head size to be a multiple of 128.
 TPU_HEAD_SIZE_ALIGNMENT = 128
 
+# Note: TPU can fp8 as storage dtype but doesn't support converting from uint8
+# from to fp32 directly. That's why it has a dtype mapping different from GPU
+TPU_STR_DTYPE_TO_TORCH_DTYPE = {
+    "half": torch.half,
+    "bfloat16": torch.bfloat16,
+    "float": torch.float,
+    "fp8": torch.float8_e4m3fn,
+    "fp8_e4m3": torch.float8_e4m3fn,
+    "fp8_e5m2": torch.float8_e5m2,
+    "int8": torch.int8,
+    "uint8": torch.uint8,
+}
+
 
 class PallasAttentionBackend(AttentionBackend):
 
@@ -152,14 +165,17 @@ class PallasAttentionBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         if alibi_slopes is not None:
             raise NotImplementedError("Alibi slopes is not supported.")
-        if kv_cache_dtype != "auto":
-            raise NotImplementedError("FP8 KV cache dtype is not supported.")
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "PallasAttentionBackendImpl")
+
+        self.kv_cache_quantized_dtype = None
+        if kv_cache_dtype != "auto":
+            self.kv_cache_quantized_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE.get(
+                kv_cache_dtype.lower().strip())
 
     def forward(
         self,
@@ -194,7 +210,6 @@ class PallasAttentionBackendImpl(AttentionImpl):
                 output = torch.ones_like(query)
             return output
 
-        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         num_tokens, hidden_size = query.shape
         query = query.view(num_tokens, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
@@ -215,10 +230,21 @@ class PallasAttentionBackendImpl(AttentionImpl):
             # Skip this if sharing KV cache with an earlier attention layer.
             slot_mapping = attn_metadata.slot_mapping
             write_to_kv_cache(
-                key, value, kv_cache, slot_mapping,
+                key,
+                value,
+                kv_cache,
+                slot_mapping,
                 attn_metadata.num_slices_per_kv_cache_update_block,
-                attn_metadata.num_kv_update_slices)
+                attn_metadata.num_kv_update_slices,
+                self.kv_cache_quantized_dtype,
+                layer._k_scale_float,
+                layer._v_scale_float,
+            )
 
+        if self.kv_cache_quantized_dtype is not None and (
+                layer._k_scale_float == 0.0 or layer._v_scale_float == 0.0):
+            raise ValueError(
+                "k_scale_float and v_scale_float must be non-zero")
         output = torch.ops.xla.ragged_paged_attention(
             query,
             kv_cache,
@@ -236,6 +262,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
             sm_scale=self.scale,
             sliding_window=self.sliding_window,
             soft_cap=self.logits_soft_cap,
+            k_scale=layer._k_scale_float,
+            v_scale=layer._v_scale_float,
         )
 
         if self.head_size % TPU_HEAD_SIZE_ALIGNMENT != 0:
@@ -251,18 +279,32 @@ def write_to_kv_cache(
     slot_mapping: torch.Tensor,
     num_slices_per_kv_cache_update_block: int,
     num_kv_update_slices: torch.Tensor,
+    kv_cache_quantized_dtype: Optional[torch.dtype] = None,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
 ) -> None:
     """ Write the key and values to the KV cache.
 
     Args:
-        key: shape = [num_tokens, num_kv_heads * head_size]
-        value: shape = [num_tokens, num_kv_heads *  head_size]
+        key: shape = [num_tokens, num_kv_heads, head_size]
+        value: shape = [num_tokens, num_kv_heads, head_size]
         kv_cache = [num_blocks, block_size, num_kv_heads * 2, head_size]
         num_slices_per_kv_cache_update_block: int
     """
     _, page_size, num_combined_kv_heads, head_size = kv_cache.shape
     head_size = cdiv(head_size,
                      TPU_HEAD_SIZE_ALIGNMENT) * TPU_HEAD_SIZE_ALIGNMENT
+
+    if kv_cache_quantized_dtype is not None:
+        dtype_info = torch.finfo(kv_cache_quantized_dtype)
+        key = key.to(torch.float32) / k_scale
+        # NOTE: clamp is added here to avoid out of range of quantized dtype
+        key = torch.clamp(key, dtype_info.min, dtype_info.max)
+        key = key.to(kv_cache_quantized_dtype)
+        value = value.to(torch.float32) / v_scale
+        value = torch.clamp(value, dtype_info.min, dtype_info.max)
+        value = value.to(kv_cache_quantized_dtype)
+
     kv = torch.cat([key, value], axis=-1).reshape(-1, num_combined_kv_heads,
                                                   head_size)
 
