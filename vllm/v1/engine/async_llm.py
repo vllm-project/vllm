@@ -36,10 +36,9 @@ from vllm.v1.engine.output_processor import (OutputProcessor,
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import (PrometheusStatLogger, StatLoggerBase,
-                                     StatLoggerFactory, setup_default_loggers)
+from vllm.v1.metrics.loggers import StatLoggerFactory, setup_default_loggers
 from vllm.v1.metrics.prometheus import shutdown_prometheus
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.metrics.stats import IterationStats
 
 logger = init_logger(__name__)
 
@@ -103,7 +102,7 @@ class AsyncLLM(EngineClient):
         engine_idxs = [
             idx for idx in range(start_idx, start_idx + local_engines)
         ]
-        self.stat_loggers = setup_default_loggers(
+        self.logger_manager = setup_default_loggers(
             vllm_config=vllm_config,
             log_stats=self.log_stats,
             engine_idxs=engine_idxs,
@@ -136,12 +135,8 @@ class AsyncLLM(EngineClient):
             client_addresses=client_addresses,
             client_index=client_index,
         )
-        if self.stat_loggers:
-            # loggers, prom_logger
-            loggers, _ = self.stat_loggers
-            for per_engine_loggers in loggers.values():
-                for logger in per_engine_loggers:
-                    logger.log_engine_initialized()
+        if self.logger_manager:
+            self.logger_manager.log_engine_initialized()
         self.output_handler: Optional[asyncio.Task] = None
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
@@ -380,7 +375,7 @@ class AsyncLLM(EngineClient):
         engine_core = self.engine_core
         output_processor = self.output_processor
         log_stats = self.log_stats
-        stat_loggers = self.stat_loggers if log_stats else None
+        logger_manager = self.logger_manager
 
         async def output_handler():
             try:
@@ -420,13 +415,14 @@ class AsyncLLM(EngineClient):
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in
                     # background thread once Prometheus overhead is non-trivial.
-                    if stat_loggers:
-                        AsyncLLM._record_stats(
-                            stat_loggers,
-                            outputs.engine_index,
+                    # NOTE: we do not use self.log
+                    if logger_manager:
+                        logger_manager.record(
                             scheduler_stats=outputs.scheduler_stats,
                             iteration_stats=iteration_stats,
+                            engine_idx=outputs.engine_index,
                         )
+
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
@@ -441,26 +437,6 @@ class AsyncLLM(EngineClient):
 
         if self.log_requests:
             logger.info("Aborted request %s.", request_id)
-
-    @staticmethod
-    def _record_stats(
-        stat_loggers: tuple[dict[int, list[StatLoggerBase]],
-                            PrometheusStatLogger],
-        engine_idx: int,
-        scheduler_stats: Optional[SchedulerStats],
-        iteration_stats: Optional[IterationStats],
-    ):
-        """static so that it can be used from the output_handler task
-        without a circular ref to AsyncLLM."""
-
-        per_engine_loggers, prom_logger = stat_loggers
-        for stat_logger in per_engine_loggers[engine_idx]:
-            stat_logger.record(engine_idx=engine_idx,
-                               scheduler_stats=scheduler_stats,
-                               iteration_stats=iteration_stats)
-        prom_logger.record(engine_idx=engine_idx,
-                           scheduler_stats=scheduler_stats,
-                           iteration_stats=iteration_stats)
 
     async def encode(
         self,
