@@ -13,6 +13,7 @@ from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
+from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
@@ -151,7 +152,7 @@ class PrometheusStatLogger(StatLoggerBase):
 
     def __init__(self, vllm_config: VllmConfig, engine_num: int = 1):
 
-        # unregister_vllm_metrics()
+        unregister_vllm_metrics()
         self.vllm_config = vllm_config
         # Use this flag to hide metrics that were deprecated in
         # a previous release and which will be removed future
