@@ -1108,7 +1108,6 @@ class EngineArgs:
 
         # Validate External LB.
         data_parallel_hybrid_lb = True
-        
 
         if data_parallel_hybrid_lb:
             if self.data_parallel_size_local is None:
@@ -1178,7 +1177,7 @@ class EngineArgs:
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
-            data_parallel_rank_0_manage_all=False,
+            data_parallel_hybrid_lb=False,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.num_redundant_experts,
