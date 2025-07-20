@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import itertools
 from collections import defaultdict
 from collections.abc import Iterable
 from typing import Callable, Optional
@@ -280,12 +279,12 @@ class BlockPool:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
         """
-        # Create 2 iterators to allow iterateing over ordered_blocks twice.
-        blocks_iter1, blocks_iter2 = itertools.tee(ordered_blocks)
-        for block in blocks_iter1:
+        # Materialize the iterable to allow multiple passes.
+        blocks_list = list(ordered_blocks)
+        for block in blocks_list:
             block.ref_cnt -= 1
         self.free_block_queue.append_n([
-            block for block in blocks_iter2
+            block for block in blocks_list
             if block.ref_cnt == 0 and not block.is_null
         ])
 
