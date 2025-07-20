@@ -961,6 +961,8 @@ class DPAsyncMPClient(AsyncMPClient):
                     counts, wave, running = msgspec.msgpack.decode(buf)
                     self.current_wave = wave
                     self.engines_running = running
+                    # NOTE: counts includes num running for all global
+                    # EngineCores, so need to slide for the local ones.
                     self.lb_engines = counts[dp_start_rank:dp_end_rank]
 
         resources.stats_update_task = asyncio.create_task(
