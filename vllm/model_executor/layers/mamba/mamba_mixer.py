@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Optional
+
 import torch
 from torch import nn
 from torch.nn.parameter import Parameter
 
+from vllm import envs
 from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.forward_context import get_forward_context
@@ -14,12 +18,14 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.mamba.mamba1_metadata import Mamba1Metadata
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
     selective_scan_fn, selective_state_update)
 from vllm.model_executor.models.mamba_cache import MambaCacheParams
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadata
 
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
@@ -47,7 +53,8 @@ class MambaMixer(CustomOp):
                  rms_norm_has_weight: bool = True,
                  rms_norm_eps: float = 1e-5,
                  activation="silu",
-                 is_lora_enabled: bool = False):
+                 is_lora_enabled: bool = False,
+                 prefix: str = ""):
         super().__init__()
         self.time_step_rank = time_step_rank
         self.ssm_state_size = ssm_state_size
@@ -131,14 +138,56 @@ class MambaMixer(CustomOp):
             has_weight=rms_norm_has_weight,
         ) if use_rms_norm else None
 
+        if envs.VLLM_USE_V1:
+            compilation_config = get_current_vllm_config().compilation_config
+            if prefix in compilation_config.static_forward_context:
+                raise ValueError(f"Duplicate layer name: {prefix}")
+            compilation_config.static_forward_context[prefix] = self
+            # The outer list is for v0 PP virtual engine
+            # Initialize with empty tensors in the correct format
+            # conv_state should be in (batch, width-1, dim) format
+            # so when transposed it becomes (batch, dim, width-1)
+            self.kv_cache = [(torch.tensor([]), torch.tensor([]))]
+
+        self.prefix = prefix
+
     def forward_native(self, hidden_states: torch.Tensor,
                        conv_state: torch.Tensor, ssm_state: torch.Tensor):
         pass
 
     def forward_cuda(self, hidden_states: torch.Tensor,
-                     mamba_cache_params: MambaCacheParams):
+                     mamba_cache_params: Optional[MambaCacheParams] = None,
+                     mamba1_metadata: Optional[Mamba1Metadata] = None):
 
-        attn_metadata: AttentionMetadata = get_forward_context().attn_metadata
+        attn_metadata: AttentionMetadata | Mamba1AttentionMetadata = get_forward_context().attn_metadata
+
+        if envs.VLLM_USE_V1:
+            if attn_metadata is not None:
+                if isinstance(attn_metadata, dict):
+                    attn_metadata = attn_metadata[self.prefix]
+
+                mamba1_metadata = attn_metadata
+                assert isinstance(mamba1_metadata, Mamba1AttentionMetadata)
+                query_start_loc = mamba1_metadata.query_start_loc
+                state_indices_tensor = mamba1_metadata.state_indices_tensor
+                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+                # conv_state_raw : (batch, width-1, dim)
+                # ssm_state_raw  : (batch, d_state, dim)
+                conv_state = self_kv_cache[0].transpose(-1, -2)
+                ssm_state = self_kv_cache[1].transpose(-1, -2).contiguous()
+                has_initial_state = mamba1_metadata.has_initial_states
+                context_lens_tensor = mamba1_metadata.context_lens_tensor
+        else:
+            # For V0, we'll use the cache params and prepare metadata
+            assert mamba_cache_params is not None
+            conv_state = mamba_cache_params.conv_state
+            ssm_state = mamba_cache_params.ssm_state
+            state_indices_tensor = mamba_cache_params.state_indices_tensor
+            query_start_loc = attn_metadata.query_start_loc
+            context_lens_tensor = attn_metadata.context_lens_tensor
+            # context_lens_tensor = attn_metadata.seq_lens_tensor
+            if context_lens_tensor is not None:
+                has_initial_state = context_lens_tensor > 0
 
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states)[0].transpose(-2, -1)
@@ -148,8 +197,7 @@ class MambaMixer(CustomOp):
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
                                                self.conv1d.weight.size(2))
 
-        if attn_metadata.query_start_loc is not None \
-            and attn_metadata.context_lens_tensor is not None:
+        if query_start_loc is not None and context_lens_tensor is not None:
             # |---------- N-1 iteration --------|
             # |---------------- N iteration ---------------------|
             # |- tokenA -|......................|-- newTokens ---|
@@ -161,18 +209,18 @@ class MambaMixer(CustomOp):
                 conv_weights,
                 bias=self.conv1d.bias,
                 activation=self.activation,
-                conv_states=mamba_cache_params.conv_state,
-                has_initial_state=attn_metadata.context_lens_tensor > 0,
-                cache_indices=mamba_cache_params.state_indices_tensor,
-                query_start_loc=attn_metadata.query_start_loc)
+                conv_states=conv_state,
+                has_initial_state=has_initial_state,
+                cache_indices=state_indices_tensor,
+                query_start_loc=query_start_loc)
         else:
             hidden_states = causal_conv1d_update(
                 hidden_states.transpose(0, 1),
-                mamba_cache_params.conv_state,
+                conv_state,
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=mamba_cache_params.state_indices_tensor)
+                conv_state_indices=state_indices_tensor)
             hidden_states = hidden_states.transpose(0, 1)
 
         # 3. State Space Model sequence transformation
@@ -203,11 +251,10 @@ class MambaMixer(CustomOp):
         time_proj_bias = (self.dt_proj.bias.float() if hasattr(
             self.dt_proj, "bias") else None)
 
-        if attn_metadata.query_start_loc is not None \
-            and attn_metadata.context_lens_tensor is not None:
+        if query_start_loc is not None and context_lens_tensor is not None:
             scan_outputs = selective_scan_fn(
                 hidden_states,
-                mamba_cache_params.ssm_state,
+                ssm_state,
                 discrete_time_step,
                 self.A,
                 B.transpose(-2, -1),
@@ -216,13 +263,13 @@ class MambaMixer(CustomOp):
                 gate,
                 time_proj_bias,
                 delta_softplus=True,
-                cache_indices=mamba_cache_params.state_indices_tensor,
-                has_initial_state=attn_metadata.context_lens_tensor > 0,
-                query_start_loc=attn_metadata.query_start_loc)
+                cache_indices=state_indices_tensor,
+                has_initial_state=has_initial_state,
+                query_start_loc=query_start_loc)
         else:
             scan_outputs = torch.empty_like(hidden_states.transpose(0, 1))
             selective_state_update(
-                mamba_cache_params.ssm_state,
+                ssm_state,
                 hidden_states.transpose(0, 1),
                 discrete_time_step.transpose(0, 1),
                 self.A,
@@ -232,7 +279,7 @@ class MambaMixer(CustomOp):
                 gate.transpose(0, 1),
                 time_proj_bias,
                 dt_softplus=True,
-                state_batch_indices=mamba_cache_params.state_indices_tensor,
+                state_batch_indices=state_indices_tensor,
                 out=scan_outputs)
             scan_outputs = scan_outputs.transpose(0, 1)
 
