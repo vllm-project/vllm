@@ -386,9 +386,7 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 self.unpadded_vocab_size,
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE
-                # Consider padding_size for efficiency
-                if lora_config and lora_config.lora_extra_vocab_size > 0 else 0,
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE if lora_config and lora_config.lora_extra_vocab_size > 0 else 0
                 quant_config=vllm_config.quant_config,
                 bias=getattr(config, "lm_head_bias", False),
                 prefix=f"{prefix}lm_head",
