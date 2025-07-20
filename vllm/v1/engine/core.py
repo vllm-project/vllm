@@ -950,11 +950,11 @@ class DPEngineCoreProc(EngineCoreProc):
             self.output_queue.put_nowait(output)
 
         if outputs and not model_executed:
-            # NOTE(woosuk): This branch is taken when the step is used to
-            # update the scheduler & worker states without executing the model.
-            # Especially, with async scheduling, this happens every other step.
-            # In this case, instead of dummy run, we check again if there are
-            # any requests to execute.
+            # NOTE(woosuk): This branch is taken when the previous step_fn call
+            # updated the scheduler or worker states without actually executing
+            # the model. With asynchronous scheduling, this typically occurs
+            # every other step. To avoid unnecessary dummy runs, we give
+            # step_fn a second chance to execute the model if possible.
             outputs, model_executed = self.step_fn()
             for output in (outputs.items() if outputs else ()):
                 self.output_queue.put_nowait(output)
