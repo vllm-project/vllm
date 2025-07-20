@@ -602,9 +602,8 @@ def launch_core_engines(
         assert local_engine_count == 1
         engines_to_handshake = [CoreEngine(index=dp_rank, local=True)]
     elif dp_rank == 0:
-        # Rank 0 holds Coordinator, so it handshakes will all Cores,
-        # including in external DPLB mode where it is not managing
-        # the remote EngineCore.
+        # Rank 0 holds Coordinator, so it handshakes with all Cores
+        # in both external dplb and internal dplb mode.
         engines_to_handshake = [
             CoreEngine(index=i, local=(i < local_engine_count))
             for i in range(dp_size)
