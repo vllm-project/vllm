@@ -45,11 +45,6 @@ class ServeSubcommand(CLISubcommand):
         if args.headless or args.api_server_count < 1:
             run_headless(args)
         else:
-            if args.data_parallel_start_rank:
-                raise ValueError(
-                    "data_parallel_start_rank is only applicable "
-                    "in headless mode. "
-                    "Add --headless flag to enable headless mode.")
             if args.api_server_count > 1:
                 run_multi_api_server(args)
             else:
@@ -122,7 +117,7 @@ def run_headless(args: argparse.Namespace):
     engine_manager = CoreEngineProcManager(
         target_fn=EngineCoreProc.run_engine_core,
         local_engine_count=local_engine_count,
-        start_index=args.data_parallel_start_rank,
+        start_index=vllm_config.parallel_config.data_parallel_rank,
         local_start_index=0,
         vllm_config=vllm_config,
         local_client=False,
