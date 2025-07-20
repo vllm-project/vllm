@@ -173,21 +173,18 @@ class MambaMixer(CustomOp):
                 query_start_loc = mamba1_metadata.query_start_loc
                 state_indices_tensor = mamba1_metadata.state_indices_tensor
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                # conv_state_raw : (batch, width-1, dim)
-                # ssm_state_raw  : (batch, d_state, dim)
                 conv_state = self_kv_cache[0].transpose(-1, -2)
-                ssm_state = self_kv_cache[1].transpose(-1, -2).contiguous()
+                ssm_state = self_kv_cache[1].contiguous()
                 has_initial_state = mamba1_metadata.has_initial_states
                 context_lens_tensor = mamba1_metadata.seq_lens
         else:
-            # For V0, we'll use the cache params and prepare metadata
             assert mamba_cache_params is not None
             conv_state = mamba_cache_params.conv_state
             ssm_state = mamba_cache_params.ssm_state
             state_indices_tensor = mamba_cache_params.state_indices_tensor
             query_start_loc = attn_metadata.query_start_loc
             context_lens_tensor = attn_metadata.context_lens_tensor
-            # context_lens_tensor = attn_metadata.seq_lens_tensor
+            
             if context_lens_tensor is not None:
                 has_initial_state = context_lens_tensor > 0
 
@@ -198,6 +195,11 @@ class MambaMixer(CustomOp):
         # 2. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
                                                self.conv1d.weight.size(2))
+
+        if envs.VLLM_USE_V1 and attn_metadata is None:
+            # V1 profile run
+            hidden_states = hidden_states.contiguous()
+            return self.out_proj(hidden_states.transpose(-2, -1))[0]
 
         if query_start_loc is not None and context_lens_tensor is not None:
             # |---------- N-1 iteration --------|
