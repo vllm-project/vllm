@@ -598,16 +598,21 @@ def launch_core_engines(
         yield engine_actor_manager, coordinator, addresses
         return
 
-    if offline_mode or (external_dp_lb and dp_rank > 0):
+    if offline_mode:
         assert local_engine_count == 1
         engines_to_handshake = [CoreEngine(index=dp_rank, local=True)]
     elif dp_rank == 0:
+        # Rank 0 holds Coordinator, so it handshakes will all Cores,
+        # in addition to those that it is managing.
         engines_to_handshake = [
             CoreEngine(index=i, local=(i < local_engine_count))
             for i in range(dp_size)
         ]
     else:
-        # Just handshake with local engines.
+        # All other ranks just handshake with those that it is managing.
+        assert vllm_config.parallel_config.data_parallel_external_lb, (
+            "Attempting to launch core_engines from dp_rank > 0, but "
+            "found internal DPLB, which is incompatible.")
         engines_to_handshake = [
             CoreEngine(index=i, local=True)
             for i in range(dp_rank, dp_rank + local_engine_count)
