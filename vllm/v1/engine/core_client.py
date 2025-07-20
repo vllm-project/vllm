@@ -405,15 +405,12 @@ class MPClient(EngineCoreClient):
                     "stats_update_address")
             else:
                 # Engines are managed by this client.
-                print(f"{vllm_config.parallel_config=}")
                 with launch_core_engines(vllm_config, executor_class,
                                          log_stats) as (engine_manager,
                                                         coordinator,
                                                         addresses):
                     self.resources.coordinator = coordinator
                     self.resources.engine_manager = engine_manager
-                print("========================================")
-                print(f"{vllm_config.parallel_config=}")
 
                 (input_address, ) = addresses.inputs
                 (output_address, ) = addresses.outputs

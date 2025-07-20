@@ -492,7 +492,6 @@ class EngineCoreProc(EngineCore):
             local_handshake = self._perform_handshake(
                 input_ctx, client_handshake_address, identity, local_client,
                 vllm_config)
-            
             with handshake as addresses, local_handshake as client_addresses:
                 addresses.inputs = client_addresses.inputs
                 addresses.outputs = client_addresses.outputs
