@@ -253,6 +253,7 @@ _SPECULATIVE_DECODING_MODELS = {
 }
 
 _TRANSFORMERS_MODELS = {
+    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"), # noqa: E501
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
 }
 # yapf: enable
@@ -504,9 +505,14 @@ class _ModelRegistry:
             if causal_lm_arch in self.models:
                 normalized_arch.append(arch)
 
-        # make sure Transformers backend is put at the last as a fallback
-        if len(normalized_arch) != len(architectures):
-            normalized_arch.append("TransformersForCausalLM")
+        # NOTE(Isotr0py): Be careful of architectures' order!
+        # Make sure Transformers backend architecture is at the end of the
+        # list, otherwise pooling models automatic conversion will fail!
+        for arch in normalized_arch:
+            if arch.startswith("TransformersFor"):
+                normalized_arch.remove(arch)
+                normalized_arch.append(arch)
+
         return normalized_arch
 
     def inspect_model_cls(
