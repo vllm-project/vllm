@@ -155,6 +155,7 @@ class PrometheusStatLogger(StatLoggerBase):
                  engine_indexes: Optional[list[int]] = None):
         if engine_indexes is None:
             engine_indexes = [0]
+        self.engine_indexes = engine_indexes
 
         unregister_vllm_metrics()
         self.vllm_config = vllm_config
@@ -449,26 +450,28 @@ class PrometheusStatLogger(StatLoggerBase):
         #         )
 
     def log_metrics_info(self, type: str, config_obj: SupportsMetricsInfo):
-        pass
-        # metrics_info = config_obj.metrics_info()
-        # metrics_info["engine"] = self.engine_index
+        metrics_info = config_obj.metrics_info()
+        metrics_info["engine"] = ""
 
-        # name, documentation = None, None
-        # if type == "cache_config":
-        #     name = "vllm:cache_config_info"
-        #     documentation = "Information of the LLMEngine CacheConfig"
-        # assert name is not None, f"Unknown metrics info type {type}"
+        name, documentation = None, None
+        if type == "cache_config":
+            name = "vllm:cache_config_info"
+            documentation = "Information of the LLMEngine CacheConfig"
+        assert name is not None, f"Unknown metrics info type {type}"
 
-        # # Info type metrics are syntactic sugar for a gauge permanently set to 1 # noqa: E501
-        # # Since prometheus multiprocessing mode does not support Info, emulate
-        # # info here with a gauge.
-        # info_gauge = self._gauge_cls(
-        #     name=name,
-        #     documentation=documentation,
-        #     multiprocess_mode="mostrecent",
-        #     labelnames=metrics_info.keys(),
-        # ).labels(**metrics_info)
-        # info_gauge.set(1)
+        # Info type metrics are syntactic sugar for a gauge permanently set to 1 # noqa: E501
+        # Since prometheus multiprocessing mode does not support Info, emulate
+        # info here with a gauge.
+        info_gauge = self._gauge_cls(
+            name=name,
+            documentation=documentation,
+            multiprocess_mode="mostrecent",
+            labelnames=metrics_info.keys(),
+        )
+        for engine_index in self.engine_indexes:
+            metrics_info = config_obj.metrics_info()
+            metrics_info["engine"] = str(engine_index)
+            info_gauge.labels(*metrics_info.set(1))
 
     def record(self,
                scheduler_stats: Optional[SchedulerStats],
