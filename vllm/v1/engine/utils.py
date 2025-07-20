@@ -555,6 +555,8 @@ def launch_core_engines(
     # sends requests only to colocated engines.
     client_local_only = offline_mode or external_dp_lb or (local_engine_count
                                                            == dp_size)
+    # HACK: handle case with one pod per node.
+    client_local_only = True
 
     # Set up input and output addresses.
     addresses = EngineZmqAddresses(
@@ -601,10 +603,16 @@ def launch_core_engines(
     if offline_mode or (external_dp_lb and dp_rank > 0):
         assert local_engine_count == 1
         engines_to_handshake = [CoreEngine(index=dp_rank, local=True)]
-    else:
+    elif dp_rank == 0:
         engines_to_handshake = [
             CoreEngine(index=i, local=(i < local_engine_count))
             for i in range(dp_size)
+        ]
+    else:
+        # Just handshake with local engines.
+        engines_to_handshake = [
+            CoreEngine(index=i, local=True) for i in
+            range(dp_rank, dp_rank + local_engine_count)
         ]
 
     # Whether the started engines will handshake only with co-located
@@ -616,7 +624,8 @@ def launch_core_engines(
     handshake_address = get_engine_client_zmq_addr(
         handshake_local_only, host, parallel_config.data_parallel_rpc_port)
 
-    if external_dp_lb and dp_rank > 0:
+    # if external_dp_lb and dp_rank > 0:
+    if dp_rank > 0:
         assert not handshake_local_only
         local_handshake_address = get_open_zmq_ipc_path()
         client_handshake_address = local_handshake_address
@@ -624,15 +633,18 @@ def launch_core_engines(
         local_handshake_address = handshake_address
         client_handshake_address = None
 
+    print(f"{local_handshake_address=}")
     with zmq_socket_ctx(local_handshake_address, zmq.ROUTER,
                         bind=True) as handshake_socket:
 
         from vllm.v1.engine.core import EngineCoreProc
+        print(f"{client_handshake_address=}")
+        print(f"{handshake_address=}")
 
         # Start local engines.
         if local_engine_count:
             # In server mode, start_index and local_start_index will
-            # both be 0.
+            # both be 0. << todo: update
             local_engine_manager = CoreEngineProcManager(
                 EngineCoreProc.run_engine_core,
                 vllm_config=vllm_config,
@@ -650,6 +662,7 @@ def launch_core_engines(
         yield local_engine_manager, coordinator, addresses
 
         # Now wait for engines to start.
+        print(f"{engines_to_handshake=}")
         wait_for_engine_startup(
             handshake_socket,
             addresses,

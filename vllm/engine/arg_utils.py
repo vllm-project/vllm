@@ -1091,13 +1091,15 @@ class EngineArgs:
             # but we should not do this here.
             placement_group = ray.util.get_current_placement_group()
 
-        data_parallel_external_lb = self.data_parallel_rank is not None
-        if data_parallel_external_lb:
-            assert self.data_parallel_size_local in (1, None), (
-                "data_parallel_size_local must be 1 when data_parallel_rank "
-                "is set")
-            data_parallel_size_local = 1
-        elif self.data_parallel_size_local is not None:
+        # data_parallel_external_lb = self.data_parallel_rank is not None
+        # if data_parallel_external_lb:
+        #     assert self.data_parallel_size_local in (1, None), (
+        #         "data_parallel_size_local must be 1 when data_parallel_rank "
+        #         "is set")
+        #     data_parallel_size_local = 1
+        # elif self.data_parallel_size_local is not None:
+        data_parallel_external_lb = False
+        if self.data_parallel_size_local is not None:
             data_parallel_size_local = self.data_parallel_size_local
         else:
             # Local DP size defaults to global DP size if not set.

@@ -411,10 +411,12 @@ class EngineCoreProc(EngineCore):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
 
+        logger.info("======= HANDSHAKING:")
         with self._perform_handshakes(handshake_address, identity,
                                       local_client, vllm_config,
                                       client_handshake_address) as addresses:
             self.client_count = len(addresses.outputs)
+            logger.info(f"{addresses.outputs=}")
 
             # Set up data parallel environment.
             self.has_coordinator = addresses.coordinator_output is not None
@@ -482,16 +484,21 @@ class EngineCoreProc(EngineCore):
         """
         input_ctx = zmq.Context()
         is_local = local_client and client_handshake_address is None
+        logger.info(f"HS: {handshake_address=}, {is_local=}")
         handshake = self._perform_handshake(input_ctx, handshake_address,
                                             identity, is_local, vllm_config,
                                             vllm_config.parallel_config)
+        logger.info(f"DONE HS: {handshake=}")
         if client_handshake_address is None:
             with handshake as addresses:
                 yield addresses
         else:
+            logger.info(f"HS: {client_handshake_address=}, {local_client=}")
             local_handshake = self._perform_handshake(
                 input_ctx, client_handshake_address, identity, local_client,
                 vllm_config)
+            logger.info(f"DONE HS: {local_handshake=}")
+            
             with handshake as addresses, local_handshake as client_addresses:
                 addresses.inputs = client_addresses.inputs
                 addresses.outputs = client_addresses.outputs
@@ -517,6 +524,8 @@ class EngineCoreProc(EngineCore):
                              linger=5000,
                              bind=False) as handshake_socket:
             # Register engine with front-end.
+            logger.info(f"calling startup_handshake: {handshake_address=}")
+            logger.info(f"calling startup_handshake: {local_client=}")
             addresses = self.startup_handshake(handshake_socket, local_client,
                                                parallel_config_to_update)
             yield addresses
