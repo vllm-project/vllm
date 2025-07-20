@@ -308,9 +308,10 @@ class EngineCore:
             future, scheduler_output = self.batch_queue.get_nowait()
             # Blocking until the first result is available.
             model_output = future.result()
+            assert model_output is not None
             self.batch_queue.task_done()
-            engine_core_outputs = (self.scheduler.update_from_output(
-                scheduler_output, model_output))
+            engine_core_outputs = self.scheduler.update_from_output(
+                scheduler_output, model_output)
 
         return engine_core_outputs, scheduled_batch
 
