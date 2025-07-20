@@ -122,8 +122,10 @@ class RayPrometheusStatLogger(PrometheusStatLogger):
     _histogram_cls = RayHistogramWrapper
     _spec_decoding_cls = RaySpecDecodingProm
 
-    def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
-        super().__init__(vllm_config, engine_index)
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 engine_indexes: Optional[list[int]] = None):
+        super().__init__(vllm_config, engine_indexes)
 
     @staticmethod
     def _unregister_vllm_metrics():

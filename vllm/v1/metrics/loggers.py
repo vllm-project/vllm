@@ -150,7 +150,11 @@ class PrometheusStatLogger(StatLoggerBase):
     _histogram_cls = prometheus_client.Histogram
     _spec_decoding_cls = SpecDecodingProm
 
-    def __init__(self, vllm_config: VllmConfig, engine_num: int = 1):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 engine_indexes: Optional[list[int]] = None):
+        if engine_indexes is None:
+            engine_indexes = [0]
 
         unregister_vllm_metrics()
         self.vllm_config = vllm_config
@@ -162,7 +166,6 @@ class PrometheusStatLogger(StatLoggerBase):
         labelnames = ["model_name", "engine"]
         model_name = vllm_config.model_config.served_model_name
         max_model_len = vllm_config.model_config.max_model_len
-        engine_indexes = list(range(engine_num))
 
         # self.spec_decoding_prom = self._spec_decoding_cls(
         #     vllm_config.speculative_config, labelnames, labelvalues)
@@ -600,9 +603,9 @@ def build_1_2_5_buckets(max_value: int) -> list[int]:
 def setup_default_loggers(
     vllm_config: VllmConfig,
     log_stats: bool,
-    engine_num: int,
+    engine_idxs: list[int],
     custom_stat_loggers: Optional[list[StatLoggerFactory]] = None,
-) -> Optional[tuple[list[list[StatLoggerBase]], PrometheusStatLogger]]:
+) -> Optional[tuple[dict[int, list[StatLoggerBase]], PrometheusStatLogger]]:
     """Setup logging and prometheus metrics."""
     if not log_stats:
         return None
@@ -615,13 +618,14 @@ def setup_default_loggers(
         if logger.isEnabledFor(logging.INFO):
             factories.append(LoggingStatLogger)
 
-    stat_loggers: list[list[StatLoggerBase]] = []
-    for engine_idx in range(engine_num):
+    # engine_idx: Logger
+    stat_loggers: dict[int, list[StatLoggerBase]] = {}
+    for engine_idx in engine_idxs:
         per_engine_stat_loggers: list[StatLoggerBase] = []
         for logger_factory in factories:
             per_engine_stat_loggers.append(
                 logger_factory(vllm_config, engine_idx))
-        stat_loggers.append(per_engine_stat_loggers)
+        stat_loggers[engine_idx] = per_engine_stat_loggers
 
-    prom_stat_logger = PrometheusStatLogger(vllm_config, engine_num)
+    prom_stat_logger = PrometheusStatLogger(vllm_config, engine_idxs)
     return stat_loggers, prom_stat_logger

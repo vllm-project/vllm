@@ -96,10 +96,17 @@ class AsyncLLM(EngineClient):
         self.log_stats = log_stats
 
         # Set up stat loggers; independent set for each DP rank.
+        # HACK: asyncllm should not be aware of how many engines is it
+        # managing.
+        start_idx = vllm_config.parallel_config.data_parallel_rank
+        local_engines = vllm_config.parallel_config.data_parallel_size_local
+        engine_idxs = [
+            idx for idx in range(start_idx, start_idx + local_engines)
+        ]
         self.stat_loggers = setup_default_loggers(
             vllm_config=vllm_config,
             log_stats=self.log_stats,
-            engine_num=vllm_config.parallel_config.data_parallel_size,
+            engine_idxs=engine_idxs,
             custom_stat_loggers=stat_loggers,
         )
 
@@ -130,9 +137,11 @@ class AsyncLLM(EngineClient):
             client_index=client_index,
         )
         if self.stat_loggers:
-            per_engine_loggers, _ = self.stat_loggers
-            for stat_logger in per_engine_loggers[0]:
-                stat_logger.log_engine_initialized()
+            # loggers, prom_logger
+            loggers, _ = self.stat_loggers
+            for per_engine_loggers in loggers.values():
+                for logger in per_engine_loggers:
+                    logger.log_engine_initialized()
         self.output_handler: Optional[asyncio.Task] = None
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
@@ -435,7 +444,8 @@ class AsyncLLM(EngineClient):
 
     @staticmethod
     def _record_stats(
-        stat_loggers: tuple[list[list[StatLoggerBase]], PrometheusStatLogger],
+        stat_loggers: tuple[dict[int, list[StatLoggerBase]],
+                            PrometheusStatLogger],
         engine_idx: int,
         scheduler_stats: Optional[SchedulerStats],
         iteration_stats: Optional[IterationStats],
@@ -559,7 +569,7 @@ class AsyncLLM(EngineClient):
         if self.stat_loggers is None:
             return
         per_engine_loggers, _ = self.stat_loggers
-        for loggers in per_engine_loggers:
+        for loggers in per_engine_loggers.values():
             for stat_logger in loggers:
                 stat_logger.log()
 
