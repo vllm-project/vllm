@@ -617,7 +617,6 @@ def launch_core_engines(
             CoreEngine(index=i, local=True)
             for i in range(dp_rank, dp_rank + local_engine_count)
         ]
-    logger.info(f"{engines_to_handshake=}")
 
     # Whether the started engines will handshake only with co-located
     # front-end processes. In external_dp_lb mode, ranks > 0 handshake with
