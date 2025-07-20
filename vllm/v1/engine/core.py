@@ -941,6 +941,25 @@ class DPEngineCoreProc(EngineCoreProc):
         else:
             super()._handle_client_request(request_type, request)
 
+    def _process_engine_step(self) -> bool:
+        # Step the engine core.
+        outputs, model_executed = self.step_fn()
+        # Put EngineCoreOutputs into the output queue.
+        for output in (outputs.items() if outputs else ()):
+            self.output_queue.put_nowait(output)
+
+        if outputs and not model_executed:
+            # NOTE(woosuk): This branch is taken when the step is used to
+            # update the scheduler & worker states without executing the model.
+            # Especially, with async scheduling, this happens every other step.
+            # In this case, instead of dummy run, we check again if there are
+            # any requests to execute.
+            outputs, model_executed = self.step_fn()
+            for output in (outputs.items() if outputs else ()):
+                self.output_queue.put_nowait(output)
+
+        return model_executed
+
     def _maybe_publish_request_counts(self):
         if not self.publish_dp_lb_stats:
             return
