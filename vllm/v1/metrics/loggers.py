@@ -168,7 +168,8 @@ class PrometheusStatLogger(StatLoggerBase):
         model_name = vllm_config.model_config.served_model_name
         max_model_len = vllm_config.model_config.max_model_len
 
-        if len(self.engine_indexes) > 1:
+        if (len(self.engine_indexes) > 1
+                and vllm_config.speculative_config is not None):
             raise NotImplementedError("Prometheus metrics with Spec Decoding "
                                       "with >1 EngineCore per AsyncLLM is not "
                                       "supported yet.")
@@ -511,9 +512,9 @@ class PrometheusStatLogger(StatLoggerBase):
             self.counter_prefix_cache_hits[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.hits)
 
-            # if scheduler_stats.spec_decoding_stats is not None:
-            #     self.spec_decoding_prom.observe(
-            #         scheduler_stats.spec_decoding_stats)
+            if scheduler_stats.spec_decoding_stats is not None:
+                self.spec_decoding_prom.observe(
+                    scheduler_stats.spec_decoding_stats)
 
         if iteration_stats is None:
             return
