@@ -411,12 +411,10 @@ class EngineCoreProc(EngineCore):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
 
-        logger.info("======= HANDSHAKING:")
         with self._perform_handshakes(handshake_address, identity,
                                       local_client, vllm_config,
                                       client_handshake_address) as addresses:
             self.client_count = len(addresses.outputs)
-            logger.info(f"{addresses.outputs=}")
 
             # Set up data parallel environment.
             self.has_coordinator = addresses.coordinator_output is not None
