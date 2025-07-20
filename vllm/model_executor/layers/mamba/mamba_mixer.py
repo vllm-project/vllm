@@ -8,11 +8,10 @@ from torch import nn
 from torch.nn.parameter import Parameter
 
 from vllm import envs
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -164,8 +163,8 @@ class MambaMixer(MambaBase, CustomOp):
                      hidden_states: torch.Tensor,
                      mamba_cache_params: Optional[MambaCacheParams] = None):
 
-        attn_metadata: AttentionMetadata | Mamba1AttentionMetadata = 
-        get_forward_context().attn_metadata
+        forward_context: ForwardContext = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
 
         if envs.VLLM_USE_V1:
             if attn_metadata is not None:
