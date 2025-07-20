@@ -904,6 +904,7 @@ class DPAsyncMPClient(AsyncMPClient):
         assert len(self.engine_ranks_managed) > 1
         start_idx = self.engine_ranks_managed[0]
         end_idx = self.engine_ranks_managed[-1]
+        logger.info(f"=============== {start_idx=}, {end_idx=}")
 
         async def run_engine_stats_update_task():
             with make_zmq_socket(self.ctx, self.stats_update_address,
@@ -970,6 +971,9 @@ class DPAsyncMPClient(AsyncMPClient):
                     self.engines_running = running
                     # NOTE: counts include all global Cores. Slice
                     # to get get the Core's managed by this client.
+                    # TODO(rob): update this so we only pull in
+                    # the counts that we are load balancing across.
+                    logger.info(f"{counts=}")
                     self.lb_engines = counts[start_idx:end_idx]
 
         resources.stats_update_task = asyncio.create_task(
