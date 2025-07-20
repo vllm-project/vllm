@@ -422,9 +422,8 @@ class EngineCoreProc(EngineCore):
                 addresses.frontend_stats_publish_address)
             # Only publish request queue stats to coordinator for "internal"
             # LB mode.
-            self.publish_dp_lb_stats = (
-                self.has_coordinator
-                and not vllm_config.parallel_config.data_parallel_external_lb)
+            self.publish_dp_lb_stats = (self.has_coordinator and True)
+            # and not vllm_config.parallel_config.data_parallel_external_lb)
 
             self._init_data_parallel(vllm_config)
 
