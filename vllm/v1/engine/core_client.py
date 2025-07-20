@@ -429,11 +429,12 @@ class MPClient(EngineCoreClient):
             parallel_config = vllm_config.parallel_config
             dp_size = parallel_config.data_parallel_size
             dp_rank = parallel_config.data_parallel_rank
+            dp_local_size = parallel_config.data_parallel_size_local
             external_dp_lb = parallel_config.data_parallel_external_lb
 
             offline_mode = parallel_config.data_parallel_rank_local is not None
-            engine_ranks = [dp_rank] if (offline_mode
-                                         or external_dp_lb) else range(dp_size)
+            engine_ranks = ([dp_rank] if (offline_mode or external_dp_lb)
+                            else range(dp_rank, dp_rank + dp_local_size))
             assert parallel_config.data_parallel_size_local <= len(
                 engine_ranks)
 
