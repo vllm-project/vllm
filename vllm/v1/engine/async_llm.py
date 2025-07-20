@@ -408,12 +408,11 @@ class AsyncLLM(EngineClient):
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in
                     # background thread once Prometheus overhead is non-trivial.
-                    # NOTE: we do not use self.log
                     if logger_manager:
                         logger_manager.record(
+                            engine_idx=outputs.engine_index,
                             scheduler_stats=outputs.scheduler_stats,
                             iteration_stats=iteration_stats,
-                            engine_idx=outputs.engine_index,
                         )
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
