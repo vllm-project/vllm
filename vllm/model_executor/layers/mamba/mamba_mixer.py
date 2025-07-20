@@ -18,6 +18,8 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateShapeCalculator)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
@@ -60,6 +62,8 @@ class MambaMixer(CustomOp):
         self.use_rms_norm = use_rms_norm
         self.activation = activation
         self.is_lora_enabled = is_lora_enabled
+        self.conv_kernel_size = conv_kernel_size
+        self.intermediate_size = intermediate_size
 
         self.conv1d = ColumnParallelLinear(
             input_size=conv_kernel_size,
@@ -174,7 +178,7 @@ class MambaMixer(CustomOp):
                 conv_state = self_kv_cache[0].transpose(-1, -2)
                 ssm_state = self_kv_cache[1].transpose(-1, -2).contiguous()
                 has_initial_state = mamba1_metadata.has_initial_states
-                context_lens_tensor = mamba1_metadata.context_lens_tensor
+                context_lens_tensor = mamba1_metadata.seq_lens
         else:
             # For V0, we'll use the cache params and prepare metadata
             assert mamba_cache_params is not None
@@ -290,3 +294,12 @@ class MambaMixer(CustomOp):
             contextualized_states = self.out_proj(
                 scan_outputs.transpose(-2, -1))[0]
         return contextualized_states
+
+    def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        return MambaStateShapeCalculator.mamba1_state_shape(
+            tp_world_size=get_tensor_model_parallel_world_size(),
+            intermediate_size=self.intermediate_size,
+            state_size=self.ssm_state_size,
+            conv_kernel=self.conv_kernel_size,
+            use_v1=envs.VLLM_USE_V1,
+        )
