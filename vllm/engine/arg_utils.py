@@ -1117,11 +1117,6 @@ class EngineArgs:
                 raise ValueError(
                     "With external LB, --data-parallel-size-local must be less "
                     "than --data-parallel-size.")
-            if (self.data_parallel_rank is not None
-                    and self.data_parallel_size_local > 1):
-                raise ValueError(
-                    "With --data-parallel-size-local > 1, use --data-parall"
-                    "--data-parallel-rank")
             data_parallel_size_local = self.data_parallel_size_local
 
         # Local DP size defaults to global DP size if not set.
