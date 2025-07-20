@@ -16,7 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, Optional, TypedDict, Union
+from typing import Annotated, Any, Literal, Optional, TypedDict, Union
 
 import regex as re
 import torch
@@ -45,6 +45,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
@@ -52,36 +53,37 @@ from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from typing import TypedDict, Literal, Union, Annotated, Optional, List
 
 logger = init_logger(__name__)
 
 # Cannot find the following 2 numbers from hf config.
 _IMAGE_TOKEN_ID = 32044
 
-CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(dropout=0.0,
-                                                     hidden_act="quick_gelu",
-                                                     hidden_size=1024,
-                                                     image_size=336,
-                                                     intermediate_size=4096,
-                                                     num_attention_heads=16,
-                                                     num_channels=3,
-                                                     num_hidden_layers=24,
-                                                     patch_size=14,
-                                                     projection_dim=768)
+CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(
+    dropout=0.0,
+    hidden_act="quick_gelu",
+    hidden_size=1024,
+    image_size=336,
+    intermediate_size=4096,
+    num_attention_heads=16,
+    num_channels=3,
+    num_hidden_layers=24,
+    patch_size=14,
+    projection_dim=768,
+)
 
 
-def _init_img_processor(hf_config: PretrainedConfig,
-                        quant_config: Optional[QuantizationConfig],
-                        prefix: str = "") -> CLIPVisionModel:
+def _init_img_processor(
+    hf_config: PretrainedConfig,
+    quant_config: Optional[QuantizationConfig],
+    prefix: str = "",
+) -> CLIPVisionModel:
     clip_config = CLIP_VIT_LARGE_PATCH14_336_CONFIG
-    layer_idx = hf_config.img_processor.get('layer_idx', -2)
+    layer_idx = hf_config.img_processor.get("layer_idx", -2)
 
     # Initialize the CLIP only up to the required feature layer
     if layer_idx < 0:
-        num_hidden_layers = clip_config.num_hidden_layers + \
-            layer_idx + 1
+        num_hidden_layers = clip_config.num_hidden_layers + layer_idx + 1
     else:
         num_hidden_layers = layer_idx + 1
 
@@ -110,14 +112,12 @@ class Phi3VImagePixelInputs(TensorSchema):
     # Supports either a stacked tensor or a list of (p, 3, h, w) tensors
     data: Annotated[
         Union[torch.Tensor, list[torch.Tensor]],
-        TensorShape("bn", "p", 3, "h", "w")
+        TensorShape("bn", "p", 3, "h", "w", dynamic_dims={"p"}
+                    ),  # 'p' may vary across items
     ]
 
     # Stacked tensor with height and width for each image
-    image_sizes: Annotated[
-        Union[torch.Tensor, None],
-        TensorShape("bn", 2)
-    ]
+    image_sizes: Annotated[Union[torch.Tensor, None], TensorShape("bn", 2)]
 
 
 class Phi3VImageEmbeddingInputs(TypedDict):
@@ -162,31 +162,33 @@ class Phi3ImageEmbeddingBase(nn.Module):
 class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
     """Phi3 Image embedding with HD transform."""
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 quant_config: Optional[QuantizationConfig],
-                 prefix: str = "") -> None:
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig],
+        prefix: str = "",
+    ) -> None:
         super().__init__()
 
         # n_embed or hidden_size
-        hidden_size = config.n_embd if hasattr(
-            config, 'n_embd') else config.hidden_size
+        hidden_size = (config.n_embd
+                       if hasattr(config, "n_embd") else config.hidden_size)
 
         self.img_processor = _init_img_processor(
             config, quant_config, prefix=f"{prefix}.img_processor")
 
-        image_dim_out = config.img_processor['image_dim_out']
-        self.num_img_tokens = config.img_processor['num_img_tokens']
+        image_dim_out = config.img_processor["image_dim_out"]
+        self.num_img_tokens = config.img_processor["num_img_tokens"]
 
         self.image_dim_out = image_dim_out
 
         # global_gn and sub_gn for hd transform, serves as line separator
-        self.use_hd_transform = config.embd_layer.get('use_hd_transform',
+        self.use_hd_transform = config.embd_layer.get("use_hd_transform",
                                                       False)
         self.with_learnable_separator = config.embd_layer.get(
-            'with_learnable_separator', False)
+            "with_learnable_separator", False)
         self.hd_transform_order = config.embd_layer.get(
-            'hd_transform_order', 'glb_sub')
+            "hd_transform_order", "glb_sub")
         # with_hd_transform and with_learnable_separator should have same value
         assert self.use_hd_transform and self.with_learnable_separator
 
@@ -204,7 +206,7 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
                  nn.Linear(dim_projection, dim_projection)])
         self.img_projection = nn.Sequential(*layers)
 
-        self.type_feature = config.img_processor.get('type_feature', 'patch')
+        self.type_feature = config.img_processor.get("type_feature", "patch")
 
     def forward(self, pixel_values: torch.FloatTensor,
                 image_sizes: torch.Tensor) -> torch.FloatTensor:
@@ -227,9 +229,8 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         """
         image_features: (num_images, num_crops+1, 24*24, 1024)
         """
-        assert (
-            self.hd_transform_order == 'sub_glb'
-        ), f'hd_transform_order `{self.hd_transform_order}` not implemented'
+        assert self.hd_transform_order == "sub_glb", (
+            f"hd_transform_order `{self.hd_transform_order}` not implemented")
         if isinstance(self.img_projection, nn.Sequential):
             target_device = self.img_projection[0].bias.device
             target_dtype = self.img_projection[0].bias.dtype
@@ -366,8 +367,8 @@ class Phi3VDummyInputsBuilder(BaseDummyInputsBuilder[Phi3VProcessingInfo]):
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
-        target_width, target_height = \
-            self.info.get_image_size_with_most_features()
+        target_width, target_height = (
+            self.info.get_image_size_with_most_features())
 
         return {
             "image":
@@ -515,9 +516,11 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         return token_ids, text, placeholders
 
 
-@MULTIMODAL_REGISTRY.register_processor(Phi3VMultiModalProcessor,
-                                        info=Phi3VProcessingInfo,
-                                        dummy_inputs=Phi3VDummyInputsBuilder)
+@MULTIMODAL_REGISTRY.register_processor(
+    Phi3VMultiModalProcessor,
+    info=Phi3VProcessingInfo,
+    dummy_inputs=Phi3VDummyInputsBuilder,
+)
 class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
                        SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(
@@ -555,7 +558,8 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         self.vision_embed_tokens = Phi3HDImageEmbedding(
             config,
             self.quant_config,
-            prefix=maybe_prefix(prefix, "model.vision_embed_tokens"))
+            prefix=maybe_prefix(prefix, "model.vision_embed_tokens"),
+        )
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
@@ -584,7 +588,8 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
             return Phi3VImagePixelInputs(
                 type="pixel_values",
                 data=flatten_bn(pixel_values),
-                image_sizes=flatten_bn(image_sizes, concat=True))
+                image_sizes=flatten_bn(image_sizes, concat=True),
+            )
 
         if image_embeds is not None:
             return Phi3VImageEmbeddingInputs(
@@ -598,7 +603,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         self,
         image_input: Phi3VImageInputs,
     ) -> torch.Tensor:
-
         if image_input["type"] == "image_embeds":
             image_data = image_input["data"]
             if is_list_of(image_data, torch.Tensor):
@@ -635,20 +639,24 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.embed_tokens(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
+        if (multimodal_embeddings is not None
+                and len(multimodal_embeddings) != 0):
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, multimodal_embeddings,
-                self.image_token_id)
+                input_ids,
+                inputs_embeds,
+                multimodal_embeddings,
+                self.image_token_id,
+            )
         return inputs_embeds
 
-    def forward(self,
-                input_ids: torch.Tensor,
-                positions: torch.Tensor,
-                intermediate_tensors: Optional[IntermediateTensors] = None,
-                inputs_embeds: Optional[torch.Tensor] = None,
-                **kwargs: object):
-
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        **kwargs: object,
+    ):
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -660,10 +668,12 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
                                                       vision_embeddings)
             input_ids = None
 
-        hidden_states = self.language_model.model(input_ids,
-                                                  positions,
-                                                  intermediate_tensors,
-                                                  inputs_embeds=inputs_embeds)
+        hidden_states = self.language_model.model(
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+        )
 
         return hidden_states
 
@@ -677,7 +687,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-
         loader = AutoWeightsLoader(self)
         autoloaded_weights = loader.load_weights(weights,
                                                  mapper=self.hf_to_vllm_mapper)
