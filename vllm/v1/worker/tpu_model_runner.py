@@ -32,9 +32,10 @@ from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.pooling_params import PoolingTask
 from vllm.sequence import IntermediateTensors
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
-                        is_pin_memory_available, prev_power_of_2)
-from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
+from vllm.utils import (LayerBlockType, cdiv, is_pin_memory_available,
+                        prev_power_of_2)
+from vllm.v1.attention.backends.pallas import (TPU_STR_DTYPE_TO_TORCH_DTYPE,
+                                               PallasAttentionBackend,
                                                PallasMetadata,
                                                get_page_size_bytes)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
@@ -142,11 +143,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         if cache_config.cache_dtype == "auto":
             model_dtype = self.dtype
             if isinstance(model_dtype, str):
-                self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[model_dtype]
+                self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[model_dtype]
             else:
                 self.kv_cache_dtype = model_dtype
         else:
-            self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
+            self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
         self._hidden_states_dtype = self.dtype
 
