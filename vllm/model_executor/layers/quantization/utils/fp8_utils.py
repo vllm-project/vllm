@@ -24,6 +24,12 @@ from vllm.utils.deep_gemm import is_blackwell_deep_gemm_used
 
 logger = init_logger(__name__)
 
+if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR:
+    import aiter as rocm_aiter
+    from aiter import get_hip_quant
+
+    aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
+
 
 def is_fp8(x: Union[torch.dtype, torch.Tensor]) -> bool:
     if isinstance(x, torch.Tensor):
@@ -178,8 +184,12 @@ def apply_w8a8_block_fp8_linear(
                                       block_size, input.dtype)
 
     else:
-        q_input, x_scale = per_token_group_quant_fp8(
-            input_2d, block_size[1], column_major_scales=use_cutlass)
+        if use_aiter_and_is_supported:
+            q_input, x_scale = aiter_per1x128_quant(
+                input_2d.contiguous(), quant_dtype=rocm_aiter.dtypes.fp8)
+        else:
+            q_input, x_scale = per_token_group_quant_fp8(
+                input_2d, block_size[1], column_major_scales=use_cutlass)
 
         output = w8a8_blockscale_func(q_input, weight, x_scale, weight_scale,
                                       block_size, input.dtype)
