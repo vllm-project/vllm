@@ -504,6 +504,14 @@ class _ModelRegistry:
             if causal_lm_arch in self.models:
                 normalized_arch.append(arch)
 
+        # NOTE(Isotr0py): Be careful of architectures' order!
+        # Make sure Transformers backend architecture is at the end of the
+        # list, otherwise pooling models automatic conversion will fail!
+        for arch in normalized_arch:
+            if arch.startswith("TransformersFor"):
+                normalized_arch.remove(arch)
+                normalized_arch.append(arch)
+
         return normalized_arch
 
     def inspect_model_cls(

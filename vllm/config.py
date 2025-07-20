@@ -698,8 +698,11 @@ class ModelConfig:
         # the model type. To work around this, we add the correct Transformers
         # backend class to the architectures list. We must do this here because
         # we need access to the `hf_config` to determine the backend class.
-        if self.model_impl != ModelImpl.VLLM.value:
-            architectures.append(self._get_transformers_backend_cls())
+        transformers_backend_cls = self._get_transformers_backend_cls()
+        if (self.model_impl != ModelImpl.VLLM.value
+                and all(arch != transformers_backend_cls
+                        for arch in architectures)):
+            architectures.append(transformers_backend_cls)
         return architectures
 
     @property
