@@ -630,7 +630,7 @@ class StatLoggerManager:
         engine_idxs: Optional[list[int]] = None,
         custom_stat_loggers: Optional[list[StatLoggerFactory]] = None,
     ):
-        self.engine_idxs = set([0]) if not engine_idxs else set(engine_idxs)
+        self.engine_idxs = engine_idxs if engine_idxs else [0]
 
         factories: list[StatLoggerFactory]
         if custom_stat_loggers is not None:
