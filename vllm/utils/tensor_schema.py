@@ -8,22 +8,29 @@ import torch
 
 class TensorShape:
 
-    def __init__(self,
-                 *dims: Union[int, str],
-                 dynamic_dims: set[str] = None) -> None:
-        if dynamic_dims is None:
-            dynamic_dims = set()
+    def __init__(self, *dims, dynamic_dims: set[str] = None) -> None:
         self.dims = dims
-        self.dynamic_dims = dynamic_dims
+        self.dynamic_dims = dynamic_dims if dynamic_dims else set()
 
-    def __repr__(self):
-        return f"TensorShape{self.dims}"
+    def resolve(self, **bindings: int) -> tuple[int]:
+        resolved = []
+        for dim in self.dims:
+            if isinstance(dim, str) and dim in bindings:
+                resolved.append(bindings[dim])
+            else:
+                resolved.append(dim)
+        return tuple(resolved)
 
 
 class TensorSchema:
 
-    def __init__(self, validate: bool = True, **kwargs) -> None:
-        """Initialize the schema with keyword arguments."""
+    def __init__(self,
+                 *,
+                 validate: bool = True,
+                 resolve_bindings: dict[str, int] = None,
+                 **kwargs):
+        self._resolve_bindings = resolve_bindings if resolve_bindings else {}
+
         for key, value in kwargs.items():
             setattr(self, key, value)
 
@@ -45,7 +52,7 @@ class TensorSchema:
         return True
 
     def _validate_nested_tensors(self, value, field_name, expected_shape,
-                                 dynamic_dims):
+                                 dynamic_dims) -> tuple[int]:
         """Validate a list/tuple of tensors and return the actual shape."""
         if not value:
             raise ValueError(f"{field_name} is an empty list")
@@ -72,7 +79,8 @@ class TensorSchema:
         return (len(value), ) + first.shape
 
     def _validate_tensor_shape_expected(self, actual_shape, expected_shape,
-                                        field_name, shape_env, dynamic_dims):
+                                        field_name, shape_env,
+                                        dynamic_dims) -> None:
         """Validate that the actual tensor shape matches the expected shape."""
         if len(actual_shape) != len(expected_shape):
             raise ValueError(f"{field_name} has rank {len(actual_shape)} "
@@ -114,7 +122,7 @@ class TensorSchema:
                 # Check arg was provided as Union
                 if get_origin(actual_type) is Union:
                     args = get_args(actual_type)
-                    # Skip validation for missing optional fields when Union contains None
+                    # Skip validation when Union contains None
                     if type(None) in args:
                         continue
                 # If not optional, raise error
@@ -128,7 +136,7 @@ class TensorSchema:
 
                 for arg in args:
                     if isinstance(arg, TensorShape):
-                        expected_shape = arg.dims
+                        expected_shape = arg.resolve(**self._resolve_bindings)
                         if isinstance(value, (list, tuple)):
                             actual_shape = self._validate_nested_tensors(
                                 value, field_name, expected_shape,

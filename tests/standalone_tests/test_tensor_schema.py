@@ -94,3 +94,33 @@ def test_tensor_schema_validation_disabled_skips_shape_check():
         image_sizes=torch.randint(0, 256, (16, 2)),
         validate=False,
     )
+
+
+def test_tensor_schema_with_valid_resolve_binding_dims():
+    data = torch.randn(16, 64, 3, 336, 336)  # h=336, w=336
+    image_sizes = torch.randint(0, 256, (16, 2))
+
+    Phi3VImagePixelInputs(
+        data=data,
+        image_sizes=image_sizes,
+        resolve_bindings={
+            "h": 336,
+            "w": 336
+        },
+    )
+
+
+def test_tensor_schema_with_invalid_resolve_binding_dims():
+    data = torch.randn(16, 64, 3, 36, 36)  # h=36, w=36
+    image_sizes = torch.randint(0, 256, (16, 2))
+
+    # Should raise because 'h' and 'w' don't match resolve bindings
+    with pytest.raises(ValueError, match="dim\\[3\\] expected 336, got 36"):
+        Phi3VImagePixelInputs(
+            data=data,
+            image_sizes=image_sizes,
+            resolve_bindings={
+                "h": 336,
+                "w": 336
+            },
+        )

@@ -589,7 +589,10 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP,
                 type="pixel_values",
                 data=flatten_bn(pixel_values),
                 image_sizes=flatten_bn(image_sizes, concat=True),
-            )
+                resolve_bindings={
+                    "h": CLIP_VIT_LARGE_PATCH14_336_CONFIG.image_size,
+                    "w": CLIP_VIT_LARGE_PATCH14_336_CONFIG.image_size
+                })
 
         if image_embeds is not None:
             return Phi3VImageEmbeddingInputs(
