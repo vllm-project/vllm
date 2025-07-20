@@ -48,7 +48,8 @@ class Mamba1AttentionMetadata:
     batch_ptr: Optional[torch.Tensor] = None
 
 
-class Mamba1AttentionMetadataBuilder(AttentionMetadataBuilder[Mamba1AttentionMetadata]):
+class Mamba1AttentionMetadataBuilder(
+        AttentionMetadataBuilder[Mamba1AttentionMetadata]):
 
     def __init__(
         self,
@@ -80,11 +81,8 @@ class Mamba1AttentionMetadataBuilder(AttentionMetadataBuilder[Mamba1AttentionMet
     ) -> Mamba1AttentionMetadata:
         query_start_loc = common_attn_metadata.query_start_loc
 
-        seq_lens = (
-            common_attn_metadata.seq_lens
-            .to(query_start_loc.device)
-            .to(torch.int32)
-        )
+        seq_lens = (common_attn_metadata.seq_lens.to(
+            query_start_loc.device).to(torch.int32))
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
             split_decodes_and_prefills(

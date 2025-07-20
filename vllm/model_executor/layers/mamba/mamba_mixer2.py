@@ -748,6 +748,7 @@ class MambaMixer2(MambaBase, CustomOp):
         return "mamba2"
 
 
+
 def mamba_mixer2(
     hidden_states: torch.Tensor,
     output: torch.Tensor,

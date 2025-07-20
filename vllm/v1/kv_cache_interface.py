@@ -178,6 +178,7 @@ class SlidingWindowSpec(AttentionSpec):
         # window [CDEF] of 6 tokens.
         return (cdiv(num_tokens, self.block_size) + 1) * self.page_size_bytes
 
+
 class MambaType(str, Enum):
     MAMBA1 = "mamba1"
     MAMBA2 = "mamba2"

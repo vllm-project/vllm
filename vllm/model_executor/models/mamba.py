@@ -111,7 +111,7 @@ class MambaModel(nn.Module):
                                              cache_config=cache_config,
                                              quant_config=quant_config,
                                              is_lora_enabled=is_lora_enabled,
-                                            prefix=prefix),
+                                             prefix=prefix),
             prefix=f"{prefix}.layers")
 
         self.norm_f = RMSNorm(config.hidden_size,
@@ -147,7 +147,8 @@ class MambaModel(nn.Module):
 
             layer_cache_params = None
             if mamba_cache_params is not None:
-                layer_cache_params = mamba_cache_params.at_layer_idx(i - self.start_layer)
+                layer_cache_params = mamba_cache_params.at_layer_idx(
+                    i - self.start_layer)
 
             hidden_states, residual = layer(
                 positions=positions,
@@ -234,21 +235,23 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
-        
+
         mamba_cache_params = None
         if not envs.VLLM_USE_V1:
             if self.mamba_cache is None:
                 num_mamba_layers = self.model_config.get_num_layers_by_block_type(
                     self.vllm_config.parallel_config, LayerBlockType.mamba)
                 mamba_state_shape = MambaStateShapeCalculator.mamba1_state_shape(
-                    tp_world_size=self.vllm_config.parallel_config.tensor_parallel_size,
+                    tp_world_size=self.vllm_config.parallel_config.
+                    tensor_parallel_size,
                     intermediate_size=self.config.intermediate_size,
                     state_size=self.config.state_size,
                     conv_kernel=self.config.conv_kernel,
                     use_v1=False)
-                self.mamba_cache = MambaCacheManager(
-                    self.vllm_config, self.lm_head.weight.dtype,
-                    num_mamba_layers, *mamba_state_shape)
+                self.mamba_cache = MambaCacheManager(self.vllm_config,
+                                                     self.lm_head.weight.dtype,
+                                                     num_mamba_layers,
+                                                     *mamba_state_shape)
 
             mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 
@@ -263,7 +266,6 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
-    
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:

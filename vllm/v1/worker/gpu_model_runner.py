@@ -2592,7 +2592,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     "Non-Attention backend is not supported by V1 "
                     "GPUModelRunner.")
         elif isinstance(kv_cache_spec, MambaSpec):
-            attn_backend_i = get_mamba_attn_backend(kv_cache_spec.mamba_type)
+            attn_backend_i = get_mamba_attn_backend(
+                    kv_cache_spec.mamba_type)
         else:
             raise ValueError(
                 f"Unknown KV cache spec type: {type(kv_cache_spec)}")
@@ -2676,7 +2677,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.attn_metadata_builders.append(attn_metadata_builder)
             self.is_encoder_only_model = True
 
-    def calculate_reorder_batch_threshold(self) -> None:
+    def calculate_reorder_batch_threshold(
+            self) -> None:
         """
         Check that if any backends reorder batches; that the reordering
         is compatible (e.g., decode threshold is the same)

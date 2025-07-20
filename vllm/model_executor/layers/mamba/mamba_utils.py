@@ -4,6 +4,7 @@ from vllm.distributed import divide
 
 
 class MambaStateShapeCalculator:
+
     @classmethod
     def mamba1_state_shape(
         cls,
@@ -13,12 +14,15 @@ class MambaStateShapeCalculator:
         conv_kernel: int,
         use_v1: bool = True,
     ) -> tuple[tuple[int, int], tuple[int, int]]:
-        conv_state_shape = (conv_kernel - 1, divide(intermediate_size, tp_world_size))
-        
+        conv_state_shape = (conv_kernel - 1,
+                            divide(intermediate_size, tp_world_size))
+
         if not use_v1:
-            conv_state_shape = (divide(intermediate_size, tp_world_size), conv_kernel - 1)
-            
-        temporal_state_shape = (divide(intermediate_size, tp_world_size), state_size)
+            conv_state_shape = (divide(intermediate_size,
+                                       tp_world_size), conv_kernel - 1)
+
+        temporal_state_shape = (divide(intermediate_size,
+                                       tp_world_size), state_size)
         return conv_state_shape, temporal_state_shape
 
     @classmethod
@@ -43,12 +47,14 @@ class MambaStateShapeCalculator:
         # contiguous along 'dim' axis
         conv_state_shape = (conv_kernel - 1, divide(conv_dim, tp_world_size))
         if not use_v1:
-            conv_state_shape = (divide(conv_dim, tp_world_size), conv_kernel - 1)
+            conv_state_shape = (divide(conv_dim,
+                                       tp_world_size), conv_kernel - 1)
 
         # These are not TP-ed as they depend on A, dt_bias, D
         # - they are typically small
         #   e.g., (h_heads, head_dim, state_size) = (128, 64, 128)
-        temporal_state_shape = (divide(num_heads, tp_world_size), head_dim, state_size)
+        temporal_state_shape = (divide(num_heads,
+                                       tp_world_size), head_dim, state_size)
         return conv_state_shape, temporal_state_shape
 
     @classmethod
