@@ -1091,15 +1091,13 @@ class EngineArgs:
             # but we should not do this here.
             placement_group = ray.util.get_current_placement_group()
 
-        # data_parallel_external_lb = self.data_parallel_rank is not None
-        # if data_parallel_external_lb:
-        #     assert self.data_parallel_size_local in (1, None), (
-        #         "data_parallel_size_local must be 1 when data_parallel_rank "
-        #         "is set")
-        #     data_parallel_size_local = 1
-        # elif self.data_parallel_size_local is not None:
-        data_parallel_external_lb = False
-        if self.data_parallel_size_local is not None:
+        data_parallel_external_lb = self.data_parallel_rank is not None
+        if data_parallel_external_lb:
+            assert self.data_parallel_size_local in (1, None), (
+                "data_parallel_size_local must be 1 when data_parallel_rank "
+                "is set")
+            data_parallel_size_local = 1
+        elif self.data_parallel_size_local is not None:
             data_parallel_size_local = self.data_parallel_size_local
         else:
             # Local DP size defaults to global DP size if not set.
@@ -1360,10 +1358,10 @@ class EngineArgs:
                 and not envs.is_set("VLLM_ATTENTION_BACKEND")
             ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
             supported = False
-            if current_platform.is_rocm() or (
-                    current_platform.is_cuda()
-                    and current_platform.is_device_capability(100)
-            ):  # handle hpu also for OOT platform
+            if (current_platform.is_rocm()
+                    or (current_platform.is_cuda()
+                        and current_platform.is_device_capability(100))
+                    or current_platform.is_tpu()):
                 supported = True
             elif fp8_attention and will_use_fa:
                 from vllm.attention.utils.fa_utils import (
