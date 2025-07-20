@@ -3,7 +3,7 @@
 
 import inspect
 import torch
-from typing import get_type_hints, get_args, get_origin, Optional, Union
+from typing import get_type_hints, get_args, get_origin, Optional, Union, Annotated
 
 
 class TensorShape:
@@ -30,10 +30,17 @@ class TensorSchema:
 
         for field_name, field_type in type_hints.items():
             # Check if the field was provided
-            if not hasattr(self, field_name):
+            if not hasattr(self, field_name) or getattr(self, field_name) is None:
                 # Field is missing - check if it's optional
-                if get_origin(field_type) is Union:
+                # Handle Annotated types by extracting the actual type
+                actual_type = field_type
+                if get_origin(field_type) is Annotated:
                     args = get_args(field_type)
+                    actual_type = args[0]  # First argument is the actual type
+                
+                # Check if the actual type is Optional (Union with None)
+                if get_origin(actual_type) is Union:
+                    args = get_args(actual_type)
                     if type(None) in args:  # Optional field
                         continue  # Skip validation for missing optional fields
                 # If not optional, raise error
@@ -71,7 +78,15 @@ class TensorSchema:
                             actual_shape = value.shape
 
                         else:
-                            raise ValueError(f"{field_name} is neither a Tensor, List[Tensor] or Tuple[Tensor]")
+                            type_names = []
+                            for arg in args:
+                                if hasattr(arg, '__name__'):
+                                    type_names.append(str(arg.__name__))
+                                else:
+                                    type_names.append(str(arg))
+                                    
+                            expected_types = ", ".join(type_names)
+                            raise ValueError(f"{field_name} is not one of the expected types: {expected_types}")
                             
                         if len(actual_shape) != len(expected_shape):
                             raise ValueError(f"{field_name} has rank {len(actual_shape)} but expected {len(expected_shape)}")

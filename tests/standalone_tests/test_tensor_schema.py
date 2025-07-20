@@ -12,6 +12,15 @@ def test_tensor_schema_valid_tensor():
         image_sizes=torch.randint(0, 256, (16, 2)),
     )
 
+def test_tensor_schema_optional_fields():
+    Phi3VImagePixelInputs(
+        data=torch.randn(16, 64, 3, 32, 32),
+        image_sizes=None,
+    )
+    
+    Phi3VImagePixelInputs(
+        data=torch.randn(16, 64, 3, 32, 32),
+    )
 
 def test_tensor_schema_constant_dim_failure():
     with pytest.raises(ValueError, match="dim\\[2\\] expected 3, got 4"):

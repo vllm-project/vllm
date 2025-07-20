@@ -115,7 +115,7 @@ class Phi3VImagePixelInputs(TensorSchema):
 
     # Stacked tensor with height and width for each image
     image_sizes: Annotated[
-        torch.Tensor,
+        Union[torch.Tensor, None],
         TensorShape("bn", 2)
     ]
 
