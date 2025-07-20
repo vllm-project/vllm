@@ -422,7 +422,6 @@ class AsyncLLM(EngineClient):
                             iteration_stats=iteration_stats,
                             engine_idx=outputs.engine_index,
                         )
-
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
