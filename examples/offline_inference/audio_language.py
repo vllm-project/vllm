@@ -97,16 +97,16 @@ def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
 # Gemma3N
 def run_gemma3n(question: str, audio_count: int) -> ModelRequestData:
     model_name = "google/gemma-3n-E2B-it"
-
     engine_args = EngineArgs(
         model=model_name,
         max_model_len=2048,
+        max_num_batched_tokens=2048,
         max_num_seqs=2,
         limit_mm_per_prompt={"audio": audio_count},
         enforce_eager=True,
     )
-
-    prompt = f"<audio_soft_token>{question}"
+    prompt = f"<start_of_turn>user\n<audio_soft_token>{question}"
+    "<end_of_turn>\n<start_of_turn>model\n"
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,

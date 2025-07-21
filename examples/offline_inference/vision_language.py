@@ -217,6 +217,7 @@ def run_gemma3(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Gemma3N
 def run_gemma3n(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
     model_name = "google/gemma-3n-E2B-it"
@@ -229,7 +230,14 @@ def run_gemma3n(questions: list[str], modality: str) -> ModelRequestData:
         enforce_eager=True,
     )
 
-    prompts = [(f"<image_soft_token>{question}") for question in questions]
+    prompts = [
+        (
+            "<start_of_turn>user\n"
+            f"<image_soft_token>{question}<end_of_turn>\n"
+            "<start_of_turn>model\n"
+        )
+        for question in questions
+    ]
     return ModelRequestData(
         engine_args=engine_args,
         prompts=prompts,
