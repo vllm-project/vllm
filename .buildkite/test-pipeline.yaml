@@ -579,6 +579,7 @@ steps:
     - pytest -v -s models/multimodal/processing
     - pytest -v -s --ignore models/multimodal/generation/test_whisper.py models/multimodal -m core_model
     - cd .. && pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
+    - pytest -v -s tests/models/multimodal/generation/test_maverick.py
 
 - label: Multi-Modal Models Test (Extended) 1
   mirror_hardwares: [amdexperimental]
