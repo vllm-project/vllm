@@ -9,8 +9,10 @@ on:
     # branches-ignore:
     #   - <branches to ignore bc-linter>
     paths:
-      - vllm/core/**
       - vllm/attetion/**
+      - vllm/core/**
+      - vllm/v1/attetion/**
+      - vllm/v1/core/**
 
 jobs:
   bc_lint:
