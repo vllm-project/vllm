@@ -7,14 +7,13 @@
 #
 # Inference-only Arcee (AFM) model – adds support for ReLU^2 feed-forward
 # activation.
-# ruff: noqa: E501
+
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
 import torch
 from torch import nn
-from transformers import (
-    LlamaConfig)  # Reusing HuggingFace LLaMA config for Arcee
+from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.distributed import get_pp_group
@@ -24,10 +23,12 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
-from vllm.model_executor.models.utils import PPMissingLayer, make_layers
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.sequence import IntermediateTensors
+
+from .interfaces import SupportsLoRA, SupportsPP
+from .utils import (AutoWeightsLoader, PPMissingLayer,
+                    make_empty_intermediate_tensors_factory, make_layers)
 
 
 class ArceeMLP(nn.Module):
@@ -173,13 +174,8 @@ class ArceeModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.quant_config = quant_config
-        lora_config = vllm_config.lora_config
-
         self.config = config
-        # Calculate vocab size (include LoRA additional vocab if any)
-        lora_vocab_extra = (lora_config.lora_extra_vocab_size *
-                            (lora_config.max_loras or 1)) if lora_config else 0
-        self.vocab_size = config.vocab_size + lora_vocab_extra
+        self.vocab_size = config.vocab_size
         self.org_vocab_size = config.vocab_size
 
         # Word embeddings (parallelized if using pipeline parallel)
@@ -216,8 +212,6 @@ class ArceeModel(nn.Module):
 
         # Prepare factory for empty intermediate tensors
         # (for pipeline scheduling)
-        from vllm.model_executor.models.utils import (
-            make_empty_intermediate_tensors_factory)
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
@@ -275,19 +269,11 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
     }
-    # (No MLP prefix since there's no gate_proj)
-    embedding_modules = {
-        "embed_tokens": "input_embeddings",
-        "lm_head": "output_embeddings",
-    }
-    embedding_padding_modules = ["lm_head"]
 
     def __init__(self, *, vllm_config, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        lora_config = vllm_config.lora_config
         self.config = config
-        self.lora_config = lora_config
 
         # Initialize the inner Transformer model (ArceeModel)
         self.model = ArceeModel(vllm_config=vllm_config,
@@ -297,12 +283,6 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             # Determine vocabulary size (including any LoRA extra tokens
             # for padded LM head)
             self.unpadded_vocab_size = config.vocab_size
-            if lora_config:
-                self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-
-            # Import DEFAULT_VOCAB_PADDING_SIZE
-            from vllm.model_executor.layers.vocab_parallel_embedding import (
-                DEFAULT_VOCAB_PADDING_SIZE)
 
             self.lm_head = ParallelLMHead(
                 self.unpadded_vocab_size,
@@ -357,8 +337,6 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                                    torch.Tensor]]) -> set[str]:
         """Load weights into the model (delegates to inner model and handles
         tied embeddings)."""
-        # Use AutoWeightsLoader for consistency with vLLM's loading mechanism
-        from vllm.model_executor.models.utils import AutoWeightsLoader
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]
