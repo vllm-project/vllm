@@ -1102,6 +1102,7 @@ class EngineArgs:
             placement_group = ray.util.get_current_placement_group()
 
         data_parallel_external_lb = self.data_parallel_rank is not None
+        # Local DP rank = 1, use pure-external LB.
         if data_parallel_external_lb:
             assert self.data_parallel_size_local in (1, None), (
                 "data_parallel_size_local must be 1 when data_parallel_rank "
@@ -1109,6 +1110,7 @@ class EngineArgs:
             data_parallel_size_local = 1
             # Use full external lb if we have local_size of 1.
             self.data_parallel_hybrid_lb = False
+        # Local DP rank > 1, use hybrid LB.
         elif self.data_parallel_hybrid_lb:
             assert self.data_parallel_start_rank is not None, (
                 "data_parallel_start_rank must be set to use "
