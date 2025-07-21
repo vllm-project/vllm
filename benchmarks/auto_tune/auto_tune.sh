@@ -41,7 +41,7 @@ echo "current_hash: $current_hash"
 TOTAL_LEN=$((INPUT_LEN + OUTPUT_LEN))
 RED='\033[0;31m'
 if (( TOTAL_LEN > MAX_MODEL_LEN )); then
-    echo -e "${RED}FAILED: INPUT_LEN($INPUT_LEN) + OUTPUT_LEN($OUTPUT_LEN) = $TOTAL_LEN, which is > MAX_MODEL_LEN = $MAX_MODEL_LEN."
+    echo -e "${RED}FAILED: INPUT_LEN($INPUT_LEN) + OUTPUT_LEN($OUTPUT_LEN) = $TOTAL_LEN, which is > MAX_MODEL_LEN = $MAX_MODEL_LEN.\033[0m" >&2
     exit 1
 fi
 
