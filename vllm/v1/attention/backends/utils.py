@@ -111,10 +111,10 @@ def _make_metadata_with_slice(
     num_requests = request_slice.stop - request_slice.start
     num_actual_tokens = token_slice.stop - token_slice.start
     max_query_len = int(
-        torch.max(torch.abs(query_start_loc[1:] -
-                            query_start_loc[:-1])).item())
+        torch.max(torch.abs(query_start_loc_cpu[1:] -
+                            query_start_loc_cpu[:-1])).item())
 
-    block_table_tensor = attn_metadata.block_table_tensor[token_slice]
+    block_table_tensor = attn_metadata.block_table_tensor[request_slice]
     slot_mapping = attn_metadata.slot_mapping[token_slice]
 
     return CommonAttentionMetadata(
