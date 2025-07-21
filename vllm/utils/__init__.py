@@ -1384,12 +1384,11 @@ def find_nccl_library() -> str:
 
 prev_set_stream = torch.cuda.set_stream
 
-_current_stream = None
+_current_stream_tls = threading.local()
 
 
 def _patched_set_stream(stream: torch.cuda.Stream) -> None:
-    global _current_stream
-    _current_stream = stream
+    _current_stream_tls.value = stream
     prev_set_stream(stream)
 
 
@@ -1408,16 +1407,16 @@ def current_stream() -> torch.cuda.Stream:
     from C/C++ code.
     """
     from vllm.platforms import current_platform
-    global _current_stream
-    if _current_stream is None:
+    if not hasattr(_current_stream_tls,
+                   "value") or _current_stream_tls.value is None:
         # when this function is called before any stream is set,
         # we return the default stream.
         # On ROCm using the default 0 stream in combination with RCCL
         # is hurting performance. Therefore creating a dedicated stream
         # per process
-        _current_stream = torch.cuda.Stream() if current_platform.is_rocm(
-        ) else torch.cuda.current_stream()
-    return _current_stream
+        _current_stream_tls.value = torch.cuda.Stream(
+        ) if current_platform.is_rocm() else torch.cuda.current_stream()
+    return _current_stream_tls.value
 
 
 def enable_trace_function_call_for_thread(vllm_config: VllmConfig) -> None:
