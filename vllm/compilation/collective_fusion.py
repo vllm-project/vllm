@@ -475,10 +475,10 @@ class AllReduceRMSNORMFP8Pattern(BasePattern):
                         scale: torch.Tensor, rms_fp8_result: torch.Tensor):
             residual = torch.zeros_like(input)
 
-            # the allocation of rms_fp8_result is appears after the all_reduce.
+            # the allocation of rms_fp8_result appears after the all_reduce.
             # however, we are replacing the all_reduce call,
             # so our whole fused op appears before the allocation the result.
-            # this makes the graph topologically unsorted and causes errors.
+            # this makes the graph topologically unsorted and causes errors,
             # since our fused op references a tensor that is not yet allocated.
             # therefore we need to allocate a result tensor as a work-around.
             empty = torch.empty_like(input, dtype=current_platform.fp8_dtype())
@@ -700,6 +700,11 @@ class AllReduceFusionPass(VllmInductorPass):
         self.dump_graph(graph, "before_all_reduce_fusion_pass")
         count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", count)
+
+        if count > 0:
+            # AR+RMS+QUANT fusion leaves unused allocations
+            graph.eliminate_dead_code()
+
         self.dump_graph(graph, "after_all_reduce_fusion_pass")
         self.end_and_log()
 
