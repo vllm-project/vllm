@@ -376,10 +376,6 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
     }
-    # Supported LoRA modules (same as LLaMA, minus gate_proj)
-    supported_lora_modules = [
-        "qkv_proj", "o_proj", "up_proj", "down_proj", "embed_tokens", "lm_head"
-    ]
     # (No MLP prefix since there's no gate_proj)
     embedding_modules = {
         "embed_tokens": "input_embeddings",
@@ -468,6 +464,6 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self,
             skip_prefixes=(["lm_head."]
                            if self.config.tie_word_embeddings else None))
-        # No special weight name remapping needed (AFM uses standard LLaMA
-        # naming except no gate_proj)
+        # AutoWeightLoader handles weight name remapping, including fusing
+        # separate q_proj, k_proj, v_proj into qkv_proj
         return loader.load_weights(weights)
