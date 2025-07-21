@@ -30,10 +30,10 @@ def main(args: Namespace):
 
     # Create an LLM.
     # You should pass task="embed" for embedding models
-    model = LLM(**vars(args))
+    llm = LLM(**vars(args))
 
     # Generate embedding. The output is a list of EmbeddingRequestOutputs.
-    outputs = model.embed(prompts, pooling_params=PoolingParams(dimensions=32))
+    outputs = llm.embed(prompts, pooling_params=PoolingParams(dimensions=32))
 
     # Print the outputs.
     print("\nGenerated Outputs:")

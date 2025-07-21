@@ -784,7 +784,7 @@ class VllmRunner:
         enforce_eager: Optional[bool] = False,
         **kwargs,
     ) -> None:
-        self.model = LLM(
+        self.llm = LLM(
             model=model_name,
             task=task,
             tokenizer=tokenizer_name,
@@ -854,9 +854,9 @@ class VllmRunner:
                                  videos=videos,
                                  audios=audios)
 
-        req_outputs = self.model.generate(inputs,
-                                          sampling_params=sampling_params,
-                                          **kwargs)
+        req_outputs = self.llm.generate(inputs,
+                                        sampling_params=sampling_params,
+                                        **kwargs)
 
         outputs: list[tuple[list[list[int]], list[str]]] = []
         for req_output in req_outputs:
@@ -902,9 +902,9 @@ class VllmRunner:
                                  videos=videos,
                                  audios=audios)
 
-        req_outputs = self.model.generate(inputs,
-                                          sampling_params=sampling_params,
-                                          **kwargs)
+        req_outputs = self.llm.generate(inputs,
+                                        sampling_params=sampling_params,
+                                        **kwargs)
 
         toks_str_logsprobs_prompt_logprobs = (
             self._final_steps_generate_w_logprobs(req_outputs))
@@ -924,8 +924,8 @@ class VllmRunner:
         '''
 
         assert sampling_params.logprobs is not None
-        req_outputs = self.model.generate(encoder_decoder_prompts,
-                                          sampling_params=sampling_params)
+        req_outputs = self.llm.generate(encoder_decoder_prompts,
+                                        sampling_params=sampling_params)
         toks_str_logsprobs_prompt_logprobs = (
             self._final_steps_generate_w_logprobs(req_outputs))
         # Omit prompt logprobs if not required by sampling params
@@ -1018,7 +1018,7 @@ class VllmRunner:
                                  videos=videos,
                                  audios=audios)
 
-        outputs = self.model.beam_search(
+        outputs = self.llm.beam_search(
             inputs,
             BeamSearchParams(beam_width=beam_width, max_tokens=max_tokens))
         returned_outputs = []
@@ -1029,7 +1029,7 @@ class VllmRunner:
         return returned_outputs
 
     def classify(self, prompts: list[str]) -> list[list[float]]:
-        req_outputs = self.model.classify(prompts)
+        req_outputs = self.llm.classify(prompts)
         return [req_output.outputs.probs for req_output in req_outputs]
 
     def embed(self,
@@ -1044,11 +1044,11 @@ class VllmRunner:
                                  videos=videos,
                                  audios=audios)
 
-        req_outputs = self.model.embed(inputs, *args, **kwargs)
+        req_outputs = self.llm.embed(inputs, *args, **kwargs)
         return [req_output.outputs.embedding for req_output in req_outputs]
 
     def encode(self, prompts: list[str]) -> list[list[float]]:
-        req_outputs = self.model.encode(prompts)
+        req_outputs = self.llm.encode(prompts)
         return [req_output.outputs.data for req_output in req_outputs]
 
     def score(
@@ -1058,18 +1058,18 @@ class VllmRunner:
         *args,
         **kwargs,
     ) -> list[float]:
-        req_outputs = self.model.score(text_1, text_2, *args, **kwargs)
+        req_outputs = self.llm.score(text_1, text_2, *args, **kwargs)
         return [req_output.outputs.score for req_output in req_outputs]
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
-        executor = self.model.llm_engine.model_executor
+        executor = self.llm.llm_engine.model_executor
         return executor.apply_model(func)
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        del self.model
+        del self.llm
         cleanup_dist_env_and_memory()
 
 

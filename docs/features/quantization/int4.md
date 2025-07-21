@@ -108,7 +108,8 @@ After quantization, you can load and run the model in vLLM:
 
 ```python
 from vllm import LLM
-model = LLM("./Meta-Llama-3-8B-Instruct-W4A16-G128")
+
+llm = LLM("./Meta-Llama-3-8B-Instruct-W4A16-G128")
 ```
 
 To evaluate accuracy, you can use `lm_eval`:
