@@ -213,8 +213,6 @@ class CpuPlatform(Platform):
                 False,
                 "nan_asserts":
                 False,
-                "memory_planning":
-                True,
                 "epilogue_fusion":
                 True,
             })
