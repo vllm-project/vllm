@@ -174,11 +174,11 @@ You can change the output dimensions of embedding models that support Matryoshka
 ```python
 from vllm import LLM, PoolingParams
 
-model = LLM(model="jinaai/jina-embeddings-v3", 
-            task="embed", 
-            trust_remote_code=True)
-outputs = model.embed(["Follow the white rabbit."], 
-                      pooling_params=PoolingParams(dimensions=32))
+llm = LLM(model="jinaai/jina-embeddings-v3",
+          task="embed",
+          trust_remote_code=True)
+outputs = llm.embed(["Follow the white rabbit."],
+                    pooling_params=PoolingParams(dimensions=32))
 print(outputs[0].outputs)
 ```
 
