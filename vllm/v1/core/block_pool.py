@@ -216,14 +216,16 @@ class BlockPool:
 
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
 
+        # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
             for block in ret:
                 self._maybe_evict_cached_block(block)
-
-        for block in ret:
-            assert block.ref_cnt == 0
-            block.ref_cnt += 1
-
+                assert block.ref_cnt == 0
+                block.ref_cnt += 1
+        else:
+            for block in ret:
+                assert block.ref_cnt == 0
+                block.ref_cnt += 1
         return ret
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:

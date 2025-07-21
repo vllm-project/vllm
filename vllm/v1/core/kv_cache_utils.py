@@ -361,14 +361,15 @@ class FreeKVCacheBlockQueue:
         last_block = self.fake_free_list_tail.prev_free_block
         assert last_block is not None, (
             "prev_free_block of fake_free_list_tail should always exist")
-        # Connect the last block of <blocks> to the fake tail
-        blocks[-1].next_free_block = self.fake_free_list_tail
-        self.fake_free_list_tail.prev_free_block = blocks[-1]
         # Add inter-connections between consecutive blocks
         for block in blocks:
             block.prev_free_block = last_block
             last_block.next_free_block = block
             last_block = block
+
+        # Connect the last block of <blocks> to the fake tail
+        last_block.next_free_block = self.fake_free_list_tail
+        self.fake_free_list_tail.prev_free_block = last_block
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
