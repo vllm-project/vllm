@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import inspect
 import os
 import tempfile
@@ -30,6 +31,10 @@ class FakeNixlWrapper:
 
     We don't inherit from nixl._api.nixl_agent because nixl may not be
     installed.
+    
+    Note: The complete source of this class is also used in the
+    `_make_fake_nixl_pkg` function to create a fake nixl package
+    for Ray workers.
     """
 
     AGENT_METADATA = b"fake_agent_metadata"
@@ -96,18 +101,22 @@ class FakeNixlWrapper:
         self._cycles_before_xfer_done = cycles
 
 
-def _make_stub_pkg() -> str:
-    """Return a directory that makes
-       `from nixl._api import nixl_agent` resolve to our FakeNixlWrapper."""
-    td = tempfile.mkdtemp()
-    pkg_root = os.path.join(td, "nixl", "_api")
-    os.makedirs(pkg_root, exist_ok=True)
+@contextlib.contextmanager
+def _make_fake_nixl_pkg():
+    """Context manager that creates a temporary package making
+       `from nixl._api import nixl_agent` resolve to our FakeNixlWrapper.
+       
+    Automatically cleans up the temporary directory when done.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        pkg_root = os.path.join(td, "nixl", "_api")
+        os.makedirs(pkg_root, exist_ok=True)
 
-    # Get the source code of FakeNixlWrapper class and dedent it
-    fake_nixl_source = inspect.getsource(FakeNixlWrapper)
-    fake_nixl_source = textwrap.dedent(fake_nixl_source)
+        # Get the source code of FakeNixlWrapper class and dedent it
+        fake_nixl_source = inspect.getsource(FakeNixlWrapper)
+        fake_nixl_source = textwrap.dedent(fake_nixl_source)
 
-    stub = f"""\
+        stub = f"""\
 # Copy of FakeNixlWrapper implementation for Ray workers
 import uuid
 from collections import defaultdict
@@ -118,12 +127,12 @@ from typing import Optional
 # Export as nixl_agent
 nixl_agent = FakeNixlWrapper
 """
-    with open(os.path.join(pkg_root, "__init__.py"), "w") as f:
-        f.write(stub)
+        with open(os.path.join(pkg_root, "__init__.py"), "w") as f:
+            f.write(stub)
 
-    # touch parent package
-    open(os.path.join(td, "nixl", "__init__.py"), "w").close()
-    return td
+        # touch parent package
+        open(os.path.join(td, "nixl", "__init__.py"), "w").close()
+        yield td
 
 
 def test_basic_interface():
@@ -439,23 +448,40 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", str(timeout))
 
-    # Build runtime_env only if we’re using Ray
+    # Build runtime_env only if we're using Ray
     if distributed_executor_backend == "ray":
-        runtime_env = {
-            "working_dir": _make_stub_pkg(),  # ship stub package
-            "env_vars": {
-                "VLLM_NIXL_ABORT_REQUEST_TIMEOUT": str(timeout),
-            },
-        }
-        ray.init(runtime_env=runtime_env)
+        with _make_fake_nixl_pkg() as working_dir:
+            runtime_env = {
+                "working_dir": working_dir,  # ship fake nixl package
+                "env_vars": {
+                    "VLLM_NIXL_ABORT_REQUEST_TIMEOUT": str(timeout),
+                },
+            }
+            ray.init(runtime_env=runtime_env)
 
-    llm = LLM(
-        model=model_name,
-        enforce_eager=True,
-        gpu_memory_utilization=0.5,
-        kv_transfer_config=kv_transfer_config,
-        distributed_executor_backend=distributed_executor_backend,
-    )
+            llm = LLM(
+                model=model_name,
+                enforce_eager=True,
+                gpu_memory_utilization=0.5,
+                kv_transfer_config=kv_transfer_config,
+                distributed_executor_backend=distributed_executor_backend,
+            )
+
+            _run_abort_timeout_test(llm, timeout)
+    else:
+        llm = LLM(
+            model=model_name,
+            enforce_eager=True,
+            gpu_memory_utilization=0.5,
+            kv_transfer_config=kv_transfer_config,
+            distributed_executor_backend=distributed_executor_backend,
+        )
+
+        _run_abort_timeout_test(llm, timeout)
+
+
+def _run_abort_timeout_test(llm: LLM, timeout: int):
+    """Helper function to run the abort timeout test logic."""
     remote_prefill_opts = {
         "do_remote_decode": True,
         "do_remote_prefill": False,
