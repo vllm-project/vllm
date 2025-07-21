@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+from collections.abc import Set
 from typing import Optional, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
-from typing_extensions import assert_never
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import (Pooler, PoolerHead,
-                                               PoolerNormalize,
+from vllm.model_executor.layers.pooler import (DispatchPooler, Pooler,
+                                               PoolerHead, PoolerNormalize,
                                                PoolingParamsUpdate,
                                                build_output, get_prompt_lens,
                                                get_prompt_token_ids)
@@ -135,18 +134,11 @@ class GritLMMeanPool(nn.Module):
 
         return instruction_len
 
-    def get_pooling_updates(
-        self,
-        task: PoolingTask,
-    ) -> Optional[PoolingParamsUpdate]:
-        # The equalities are split up to keep mypy happy
-        if task == "encode" or task == "embed":
-            return PoolingParamsUpdate(requires_token_ids=True)
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return {"encode", "embed"}
 
-        if task == "classify" or task == "score":
-            return None
-
-        assert_never(task)
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return PoolingParamsUpdate(requires_token_ids=True)
 
     def forward_one(
         self,
@@ -207,10 +199,10 @@ class GritLMPooler(Pooler):
         self.pooling = GritLMMeanPool(model_config)
         self.head = PoolerHead(PoolerNormalize())
 
-    def get_pooling_updates(
-        self,
-        task: PoolingTask,
-    ) -> Optional[PoolingParamsUpdate]:
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return self.pooling.get_supported_tasks()
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return self.pooling.get_pooling_updates(task)
 
     def forward(
@@ -262,4 +254,11 @@ class GritLM(LlamaForCausalLM, SupportsV0Only):
 
         super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
-        self.pooler = GritLMPooler(vllm_config.model_config)
+        pooler_config = vllm_config.model_config.pooler_config
+        if pooler_config is not None:
+            self.pooler = DispatchPooler({
+                "encode":
+                Pooler.for_encode(pooler_config),
+                "embed":
+                GritLMPooler(vllm_config.model_config),
+            })
