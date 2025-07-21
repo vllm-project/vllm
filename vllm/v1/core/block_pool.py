@@ -244,7 +244,7 @@ class BlockPool:
         """
         block_hash = block.block_hash
         if block_hash is None:
-            # The block doesn't have hash, # eviction is not needed
+            # The block doesn't have hash, eviction is not needed
             return False
         blocks_by_id = self.cached_block_hash_to_block.get(block_hash)
         if blocks_by_id is None:
