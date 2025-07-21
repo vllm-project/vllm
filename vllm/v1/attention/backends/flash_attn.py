@@ -536,6 +536,7 @@ def use_cascade_attention(
     use_sliding_window: bool,
     use_local_attention: bool,
     num_sms: int,
+    new_parms: bool,
 ) -> bool:
     """Decide whether to use cascade attention.
 
