@@ -317,6 +317,7 @@ def _test_processing_correctness_one(
     "openai/whisper-large-v3",
     "omni-research/Tarsier-7b",
     "omni-research/Tarsier2-Recap-7b",
+    "HuggingFaceM4/siglip-so400m-14-980-flash-attn2-navit"
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
