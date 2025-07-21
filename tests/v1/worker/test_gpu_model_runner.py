@@ -825,7 +825,12 @@ def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
             vllm_ctx[layer].kv_cache[0][1][
                 blocks1, :] = ssm_blocks_constant.detach().clone()
 
-        # verify attention contents is unchanged
+        # verify attention and mamba contents are correct
         for layer in [layer_0, layer_1]:
             assert torch.equal(vllm_ctx[layer].kv_cache[0][blocks0, :],
                                attn_blocks_constant)
+        for layer in [layer_2, layer_3, layer_4, layer_5]:
+            assert torch.equal(vllm_ctx[layer].kv_cache[0][0][blocks1, :],
+                               conv_blocks_constant)
+            assert torch.equal(vllm_ctx[layer].kv_cache[0][1][blocks1, :],
+                               ssm_blocks_constant)
