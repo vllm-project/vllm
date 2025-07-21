@@ -67,6 +67,7 @@ _TEXT_GENERATION_MODELS = {
     "Gemma3nForConditionalGeneration": ("gemma3n", "Gemma3nForConditionalGeneration"),    # noqa: E501
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "Glm4ForCausalLM": ("glm4", "Glm4ForCausalLM"),
+    "Glm4MoeForCausalLM": ("glm4_moe", "Glm4MoeForCausalLM"),
     "GPT2LMHeadModel": ("gpt2", "GPT2LMHeadModel"),
     "GPTBigCodeForCausalLM": ("gpt_bigcode", "GPTBigCodeForCausalLM"),
     "GPTJForCausalLM": ("gpt_j", "GPTJForCausalLM"),
@@ -110,7 +111,6 @@ _TEXT_GENERATION_MODELS = {
     "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
-    "Phi3SmallForCausalLM": ("phi3_small", "Phi3SmallForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
     "Phi4FlashForCausalLM": ("phi4flash", "Phi4FlashForCausalLM"),
     "Plamo2ForCausalLM": ("plamo2", "Plamo2ForCausalLM"),
@@ -245,6 +245,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
+    "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),
     "MedusaModel": ("medusa", "Medusa"),
     # Temporarily disabled.
     # # TODO(woosuk): Re-enable this once the MLP Speculator is supported in V1.
@@ -252,6 +253,7 @@ _SPECULATIVE_DECODING_MODELS = {
 }
 
 _TRANSFORMERS_MODELS = {
+    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"), # noqa: E501
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
 }
 # yapf: enable
@@ -503,9 +505,14 @@ class _ModelRegistry:
             if causal_lm_arch in self.models:
                 normalized_arch.append(arch)
 
-        # make sure Transformers backend is put at the last as a fallback
-        if len(normalized_arch) != len(architectures):
-            normalized_arch.append("TransformersForCausalLM")
+        # NOTE(Isotr0py): Be careful of architectures' order!
+        # Make sure Transformers backend architecture is at the end of the
+        # list, otherwise pooling models automatic conversion will fail!
+        for arch in normalized_arch:
+            if arch.startswith("TransformersFor"):
+                normalized_arch.remove(arch)
+                normalized_arch.append(arch)
+
         return normalized_arch
 
     def inspect_model_cls(

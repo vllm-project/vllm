@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import gc
 import time
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Optional, Union, cast, get_args
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 import numpy as np
 import torch
@@ -414,15 +415,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 generator = None
 
             if pooling_params:
-                assert pooling_params.task is not None, (
+                assert (task := pooling_params.task) is not None, (
                     "You did not set `task` in the API")
 
                 model = cast(VllmModelForPooling, self.model)
-                to_update = (model.pooler.get_pooling_updates(
-                    pooling_params.task))
-                assert to_update is not None, (
-                    f"{pooling_params.task=} is not supported by the model")
-
+                to_update = model.pooler.get_pooling_updates(task)
                 to_update.apply(pooling_params)
 
             self.requests[req_id] = CachedRequestState(
@@ -1121,10 +1118,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not is_pooling_model(model):
             return []
 
-        return [
-            task for task in get_args(PoolingTask)
-            if model.pooler.get_pooling_updates(task)
-        ]
+        return list(model.pooler.get_supported_tasks())
 
     def apply_grammar_bitmask(
         self,
@@ -1270,6 +1264,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states: torch.Tensor,
         num_scheduled_tokens: int,
         num_scheduled_tokens_np: np.ndarray,
+        finished_sending: Optional[set[str]],
+        finished_recving: Optional[set[str]],
     ) -> ModelRunnerOutput:
         assert self.input_batch.num_reqs ==\
             len(self.input_batch.pooling_params), \
@@ -1304,6 +1300,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
         )
 
     @torch.inference_mode()
@@ -1314,12 +1312,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
-            if has_kv_transfer_group():
-                with set_forward_context(None, self.vllm_config):
-                    self.maybe_setup_kv_connector(scheduler_output)
+            if not has_kv_transfer_group():
+                # Return empty ModelRunnerOutput if there's no work to do.
+                return EMPTY_MODEL_RUNNER_OUTPUT
 
-            # Return empty ModelRunnerOutput if there's no work to do.
-            return EMPTY_MODEL_RUNNER_OUTPUT
+            return self.kv_connector_no_forward(scheduler_output)
 
         # Prepare the decoder inputs.
         (attn_metadata, attention_cuda_graphs, logits_indices,
@@ -1412,6 +1409,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
             self.maybe_wait_for_kv_save()
+            finished_sending, finished_recving = (
+                self.get_finished_kv_transfers(scheduler_output))
 
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output
@@ -1429,6 +1428,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
             if not broadcast_pp_output:
+                if finished_sending or finished_recving:
+                    hidden_states.finished_sending = finished_sending
+                    hidden_states.finished_recving = finished_recving
                 return hidden_states
             assert isinstance(hidden_states, IntermediateTensors)
             get_pp_group().send_tensor_dict(hidden_states.tensors,
@@ -1437,7 +1439,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             if self.input_batch.pooling_params:
                 return self._pool(hidden_states, num_scheduled_tokens,
-                                  num_scheduled_tokens_np)
+                                  num_scheduled_tokens_np, finished_sending,
+                                  finished_recving)
 
             sample_hidden_states = hidden_states[logits_indices]
             logits = self.model.compute_logits(sample_hidden_states, None)
@@ -1587,6 +1590,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
             num_nans_in_logits=num_nans_in_logits,
         )
 
@@ -1710,6 +1715,31 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def maybe_wait_for_kv_save() -> None:
         if has_kv_transfer_group():
             get_kv_transfer_group().wait_for_save()
+
+    @staticmethod
+    def get_finished_kv_transfers(
+        scheduler_output: "SchedulerOutput",
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        if has_kv_transfer_group():
+            return get_kv_transfer_group().get_finished(
+                scheduler_output.finished_req_ids)
+        return None, None
+
+    def kv_connector_no_forward(
+            self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
+        # KV send/recv even if no work to do.
+        with set_forward_context(None, self.vllm_config):
+            self.maybe_setup_kv_connector(scheduler_output)
+            finished_sending, finished_recving = (
+                self.get_finished_kv_transfers(scheduler_output))
+
+        if not finished_sending and not finished_recving:
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
+        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output.finished_sending = finished_sending
+        output.finished_recving = finished_recving
+        return output
 
     def propose_ngram_draft_token_ids(
         self,
@@ -2042,7 +2072,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     block_table_tensor=self.input_batch.block_table[
                         kv_cache_group_id].get_device_tensor()[:num_reqs],
                     slot_mapping=self.input_batch.
-                    block_table[kv_cache_group_id].slot_mapping[:num_reqs])
+                    block_table[kv_cache_group_id].slot_mapping[:num_tokens])
 
                 attn_metadata_i = self.attn_metadata_builders[
                     kv_cache_group_id].build_for_cudagraph_capture(
@@ -2210,7 +2240,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dummy_pooling_params = PoolingParams(task=dummy_task)
 
         to_update = model.pooler.get_pooling_updates(dummy_task)
-        assert to_update is not None
         to_update.apply(dummy_pooling_params)
 
         dummy_metadata = PoolingMetadata(
@@ -2673,8 +2702,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # TODO: Support other attention modules, e.g., cross-attention
             if attn_module.attn_type == AttentionType.DECODER:
                 use_local_attention = (self.attention_chunk_size is not None
-                                       and getattr(attn_module.impl,
-                                                   "use_irope", False))
+                                       and attn_module.use_irope)
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
@@ -2687,13 +2715,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         "attention module can not be with ",
                         "both local attention and sliding window")
                 elif use_local_attention:
-                    kv_cache_spec[layer_name] = (ChunkedLocalAttentionSpec(
+                    kv_cache_spec[layer_name] = ChunkedLocalAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
                         attention_chunk_size=self.attention_chunk_size,
-                        use_mla=use_mla))
+                        use_mla=use_mla)
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
                         block_size=block_size,
@@ -2716,9 +2744,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.vllm_config.speculative_config is not None:
                 raise NotImplementedError(
                     "Mamba with speculative decoding is not supported yet.")
-            if not self.vllm_config.model_config.enforce_eager:
-                raise NotImplementedError(
-                    "Mamba with cuda graph is not supported yet.")
             if self.vllm_config.cache_config.enable_prefix_caching:
                 raise NotImplementedError(
                     "Prefix caching is not supported for Mamba yet.")
