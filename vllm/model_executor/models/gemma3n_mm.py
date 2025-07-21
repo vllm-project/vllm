@@ -516,7 +516,9 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        # TODO this breaks the interface, we need tokens but the runner will only give us embeddings
+        # TODO (NickLucche) Each forward pass needs tokens for PLE so we cache
+        # them here on first pass. This breaks the interface, because it
+        # introduces a dependency in the steps (ie it will break it chunkedP).
         if input_ids is not None:
             per_layer_inputs = self.language_model.model.get_per_layer_input_embeddings(
                 input_ids)
@@ -543,94 +545,15 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            mm_embeddings = self.get_multimodal_embeddings(**kwargs)
-
-            inputs_embeds = self.get_input_embeddings(input_ids, mm_embeddings)
-            # TODO check whether this is needed at all
-            if mm_embeddings is not None:
-                kwargs = self.prepare_attn_masks(
-                    input_ids,
-                    positions,
-                    mask_dtype=self.dtype,
-                    **kwargs,
-                )
-            input_ids = None
-
         hidden_states = self.language_model.model(
             input_ids,
             positions,
             per_layer_inputs=self.per_layer_inputs,
-            # TODO
-            #   intermediate_tensors
+            intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
             **kwargs)
 
         return hidden_states
-
-    def prepare_attn_masks(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        mask_dtype: torch.dtype,
-        **kwargs,
-    ):
-        kwargs["has_images"] = True
-        # NOTE(woosuk): Here, we distinguish the sequences by the position id 0.
-        # This is a HACK. Fix this.
-        start_indices = (positions == 0).cpu().nonzero()
-        num_seqs = len(start_indices)
-        seq_lens = []
-        for i in range(num_seqs):
-            start_idx = start_indices[i].item()
-            if i < num_seqs - 1:
-                end_idx = start_indices[i + 1].item()
-            else:
-                end_idx = len(input_ids)
-            seq_lens.append(end_idx - start_idx)
-        kwargs["seq_lens"] = seq_lens
-
-        global_attn_masks = []
-        local_attn_masks = []
-        start_idx = 0
-        for seq_len in seq_lens:
-            end_idx = start_idx + seq_len
-            input_token_ids = input_ids[start_idx:end_idx]
-            start_idx = end_idx
-            # Create a global causal mask.
-            global_attn_mask = torch.empty(
-                1,
-                1,
-                seq_len,
-                seq_len,
-                dtype=mask_dtype,
-                device=input_ids.device,
-            )
-            global_attn_mask.fill_(float("-inf"))
-            # Fill the lower triangle with 0.
-            global_attn_mask = global_attn_mask.triu(diagonal=1)
-
-            # Consider the bidirectional attention between image tokens.
-            img_mask = torch.zeros_like(global_attn_mask)
-            img_pos = (input_token_ids == self.config.image_token_id)
-            img_mask[:, :, :, img_pos] += 1
-            img_mask[:, :, img_pos, :] += 1
-            global_attn_mask = torch.where(img_mask == 2, 0, global_attn_mask)
-            global_attn_masks.append(global_attn_mask)
-
-            if self.sliding_window is not None:
-                # Create a local causal mask with sliding window (1024).
-                local_attn_mask = torch.ones_like(global_attn_mask)
-                local_attn_mask = torch.tril(local_attn_mask,
-                                             diagonal=-self.sliding_window)
-                local_attn_mask = torch.where(local_attn_mask == 0,
-                                              global_attn_mask, float("-inf"))
-                local_attn_masks.append(local_attn_mask)
-        kwargs["global_attn_masks"] = global_attn_masks
-        kwargs["local_attn_masks"] = local_attn_masks
-        return kwargs
 
     def compute_logits(
         self,
