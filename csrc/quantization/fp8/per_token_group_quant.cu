@@ -196,9 +196,7 @@ void per_token_group_quant_8bit(const torch::Tensor& input,
 
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "per_token_group_quant_8bit", ([&] {
-        if (dst_type == at::ScalarType::Char) {
-          LAUNCH_KERNEL(scalar_t, int8_t);
-        } else if (dst_type == at::ScalarType::Float8_e4m3fn) {
+        if (dst_type == at::ScalarType::Float8_e4m3fn) {
           LAUNCH_KERNEL(scalar_t, c10::Float8_e4m3fn);
         }
       }));
