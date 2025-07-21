@@ -69,7 +69,7 @@ start_server() {
         --enable-prefix-caching \
         --load-format dummy \
         --download-dir "$DOWNLOAD_DIR" \
-        --max-model-len $(( MAX_MODEL_LEN )) > "$vllm_log" 2>&1 &
+        --max-model-len $MAX_MODEL_LEN > "$vllm_log" 2>&1 &
 
     # wait for 10 minutes...
     server_started=0
