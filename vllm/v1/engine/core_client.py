@@ -431,11 +431,11 @@ class MPClient(EngineCoreClient):
             dp_rank = parallel_config.data_parallel_rank
             dp_local_size = parallel_config.data_parallel_size_local
             offline_mode = parallel_config.data_parallel_rank_local is not None
+            # If Internal DPLB, the Client manages local+remote EngineCores.
+            # Otherwise, the Client just manages the local EngineCores.
             local_engines_only = (parallel_config.data_parallel_hybrid_lb
                                   or parallel_config.data_parallel_external_lb)
 
-            # If External DPLB, Client manages local EngineCores.
-            # If Internal DPLB, Client manages local+remote EngineCores.
             num_ranks = dp_local_size if local_engines_only else dp_size
             self.engine_ranks_managed = ([dp_rank] if offline_mode else range(
                 dp_rank, dp_rank + num_ranks))
@@ -1020,7 +1020,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
         if (eng_index := request.data_parallel_rank) is None:
-            # logger.info(f"{self.lb_engines=} | {self.core_engines=}")
             if not self.lb_engines:
                 return self.core_engine
             # TODO use P2C alg for larger DP sizes
