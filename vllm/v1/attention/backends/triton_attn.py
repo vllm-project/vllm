@@ -72,9 +72,6 @@ class TritonAttentionMetadataBuilder(
             vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
 
-        self.attention_chunk_size = getattr(vllm_config.scheduler_config,
-                                            'attention_chunk_size', None)
-
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> TritonAttentionMetadata:
@@ -208,7 +205,6 @@ class TritonAttentionImpl(AttentionImpl):
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[int] = None,
-        use_irope: bool = False,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -227,8 +223,6 @@ class TritonAttentionImpl(AttentionImpl):
             logits_soft_cap = 0
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
-
-        self.use_irope = use_irope
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
