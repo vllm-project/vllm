@@ -28,10 +28,10 @@ class MLPSpeculatorProposer:
         self.vllm_config = vllm_config
         self.device = device
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-        self.hidden_size = (vllm_config.speculative_config.
-            draft_model_config.get_hidden_size())
-        self.num_speculative_tokens = (vllm_config.speculative_config.
-            num_speculative_tokens)
+        self.hidden_size = (vllm_config.speculative_config.draft_model_config.
+                            get_hidden_size())
+        self.num_speculative_tokens = (
+            vllm_config.speculative_config.num_speculative_tokens)
         self.dtype = vllm_config.model_config.dtype
 
     def propose(
@@ -42,8 +42,13 @@ class MLPSpeculatorProposer:
         sampling_metadata: SamplingMetadata,
     ) -> list[list[int]]:
         # Generate blocks and compute logits
-        draft_tokens = self.model.generate_proposals(input_ids, previous_hidden_states, num_predict_tokens, sampling_metadata)
-        return list(map(lambda x: x[0], zip(*[i.sampled_token_ids.tolist() for i in draft_tokens])))
+        draft_tokens = self.model.generate_proposals(input_ids,
+                                                     previous_hidden_states,
+                                                     num_predict_tokens,
+                                                     sampling_metadata)
+        return list(
+            map(lambda x: x[0],
+                zip(*[i.sampled_token_ids.tolist() for i in draft_tokens])))
 
     def load_model(self, target_model: nn.Module) -> None:
         self.model = get_model(vllm_config=self.vllm_config,
@@ -54,9 +59,10 @@ class MLPSpeculatorProposer:
     def dummy_run(self, num_tokens: int) -> None:
         input_ids = torch.zeros((self.max_num_seqs, 1), device=self.device)
         hidden_states = torch.zeros((self.max_num_seqs, self.hidden_size),
-                            dtype=self.dtype,
-                            device=self.device)
+                                    dtype=self.dtype,
+                                    device=self.device)
         num_predict_tokens = self.num_speculative_tokens
         with set_forward_context(None, self.vllm_config,
                                  num_tokens=num_tokens):
-            self.model.generate_proposals(input_ids, hidden_states, num_predict_tokens, None)
+            self.model.generate_proposals(input_ids, hidden_states,
+                                          num_predict_tokens, None)
