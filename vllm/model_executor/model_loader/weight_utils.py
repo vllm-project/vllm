@@ -475,6 +475,7 @@ def safetensors_weights_iterator(
                 param = f.get_tensor(name)
                 yield name, param
 
+
 def runai_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
@@ -495,6 +496,7 @@ def runai_safetensors_weights_iterator(
         )
 
         yield from tensor_iter
+
 
 def fastsafetensors_weights_iterator(
     hf_weights_files: list[str],
