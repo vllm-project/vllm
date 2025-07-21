@@ -215,7 +215,7 @@ class EngineCore:
                 request.mm_inputs, request.mm_hashes)
             assert isinstance(updated_mm_inputs, list)
             assert is_list_of(updated_mm_inputs, MultiModalKwargs), (
-                "mm_inputs was not updated in EngineCore.add_request")
+                "Invalid updated mm_inputs in EngineCore.add_request")
             request.mm_inputs = updated_mm_inputs
 
         if request.use_structured_output:
