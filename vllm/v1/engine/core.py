@@ -23,9 +23,10 @@ from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import make_zmq_socket, resolve_obj_by_qualname
+from vllm.utils import is_list_of, make_zmq_socket, resolve_obj_by_qualname
 from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
                                          unify_kv_cache_configs)
 from vllm.v1.core.sched.interface import SchedulerInterface
@@ -202,6 +203,20 @@ class EngineCore:
             if pooling_params.task not in supported_pooling_tasks:
                 raise ValueError(f"Unsupported task: {pooling_params.task!r} "
                                  f"Supported tasks: {supported_pooling_tasks}")
+
+        if request.mm_hashes is not None:
+            # Here, if hash exists for a multimodal input, then it will be
+            # fetched from the cache, else it will be added to the cache.
+            # Note that the cache here is mirrored with the client cache, so
+            # anything that has a hash must have a HIT cache entry here
+            # as well.
+            assert request.mm_inputs is not None
+            updated_mm_inputs = self.mm_input_cache_server.get_and_update_p1(
+                request.mm_inputs, request.mm_hashes)
+            assert isinstance(updated_mm_inputs, list)
+            assert is_list_of(updated_mm_inputs, MultiModalKwargs), (
+                "mm_inputs was not updated in EngineCore.add_request")
+            request.mm_inputs = updated_mm_inputs
 
         if request.use_structured_output:
             # Start grammar compilation asynchronously
@@ -830,16 +845,6 @@ class EngineCoreProc(EngineCore):
         
         This call would be executed in parallel with Model forward which
         relaxes request preparation works out from critical path."""
-        if request.mm_hashes is not None:
-            # Here, if hash exists for a multimodal input, then it will be
-            # fetched from the cache, else it will be added to the cache.
-            # Note that the cache here is mirrored with the client cache, so
-            # anything that has a hash must have a HIT cache entry here
-            # as well.
-            assert request.mm_inputs is not None
-            request.mm_inputs = self.mm_input_cache_server.get_and_update_p1(
-                request.mm_inputs, request.mm_hashes)
-
         return Request.from_engine_core_request(request)
 
 
