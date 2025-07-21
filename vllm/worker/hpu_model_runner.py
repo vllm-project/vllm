@@ -417,34 +417,6 @@ class HpuModelAdapter(torch.nn.Module):
         if hasattr(self._rotary_embed_module, "sin"):
             delattr(self._rotary_embed_module, "sin")
 
-    # copying from PR 1163
-    # needs cleanup/unified approach later
-    def compute_input_embeddings_for_gemma(self, **kwargs):
-
-        if 'inputs_embeds' in kwargs:
-            print('do nothing')
-            return kwargs
-
-        input_ids = kwargs['input_ids']
-
-        vision_embeddings = self.model.get_multimodal_embeddings(**kwargs)
-        inputs_embeds = self.model.get_input_embeddings(
-            input_ids, vision_embeddings)
-
-        if vision_embeddings is not None:
-            input_ids = kwargs['input_ids']
-            positions = kwargs['positions']
-            kwargs = self.model.prepare_attn_masks(
-                mask_dtype=self.dtype,
-                **kwargs,
-            )
-            kwargs['input_ids'] = input_ids
-            kwargs['positions'] = positions
-
-        kwargs.update({'inputs_embeds': inputs_embeds})
-        kwargs.pop('pixel_values', None)
-        return kwargs
-
     def _set_attn_bias(self, attn_metadata, batch_size, seq_len, device,
                        dtype):
         if (attn_metadata is None
@@ -3930,7 +3902,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         if 'pixel_values' in execute_model_kwargs and \
                                 self.is_mm_optimized:
                             if warmup_mode:
-                                bypass_model_exec = False
+                                bypass_model_exec = True
                             execute_model_kwargs[
                                     'graphed_multimodal_buckets'] = \
                                 list(self.graphed_multimodal_buckets)
