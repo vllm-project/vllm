@@ -4310,6 +4310,8 @@ class CompilationConfig:
             ]
 
 
+@config
+@dataclass
 class ReasoningConfig:
     """Configuration for reasoning models."""
 
@@ -4321,11 +4323,11 @@ class ReasoningConfig:
     """Token ID that indicates the start of reasoning."""
     think_end_token_ids: Optional[int] = None
     """Token ID that indicates the end of reasoning."""
-    low_effort_token_budget: Optional[int] = 1024
+    low_effort_token_budget: int = 1024
     """Token budget for low effort reasoning."""
-    medium_effort_token_budget: Optional[int] = 2048
+    medium_effort_token_budget: int = 2048
     """Token budget for medium effort reasoning."""
-    high_effort_token_budget: Optional[int] = 8192
+    high_effort_token_budget: int = 8192
     """Token budget for high effort reasoning."""
 
     def __init__(self,
@@ -4399,7 +4401,7 @@ class VllmConfig:
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
-    reasoning_config: Optional[ReasoningConfig] = None
+    reasoning_config: ReasoningConfig = field(default_factory=ReasoningConfig)
     """The configurations for reasoning model."""
     additional_config: Union[dict, SupportsHash] = field(default_factory=dict)
     """Additional config for specified platform. Different platforms may
