@@ -432,14 +432,15 @@ class MPClient(EngineCoreClient):
             external_dp_lb = parallel_config.data_parallel_external_lb
 
             offline_mode = parallel_config.data_parallel_rank_local is not None
-            engine_ranks = [dp_rank] if (offline_mode
-                                         or external_dp_lb) else range(dp_size)
+            self.engine_ranks = ([dp_rank] if
+                                 (offline_mode or external_dp_lb) else list(
+                                     range(dp_size)))
             assert parallel_config.data_parallel_size_local <= len(
-                engine_ranks)
+                self.engine_ranks)
 
             # ZMQ identity of each engine that this client will talk to.
             self.core_engines: list[EngineIdentity] = [
-                index.to_bytes(2, "little") for index in engine_ranks
+                index.to_bytes(2, "little") for index in self.engine_ranks
             ]
 
             # Wait for ready messages from each engine on the input socket.
