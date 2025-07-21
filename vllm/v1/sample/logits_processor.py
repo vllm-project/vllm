@@ -560,7 +560,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
 
     def _resolve_thinking_token_budget(
             self, reasoning_effort: Optional[str],
-            thinking_token_budget: Optional[int]) -> int:
+            thinking_token_budget: Optional[int]) -> Optional[int]:
         """
         Determines the final thinking token budget.
         Priority:
