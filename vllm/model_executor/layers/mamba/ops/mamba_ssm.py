@@ -205,7 +205,8 @@ def selective_state_update(state,
                            dt_bias=None,
                            dt_softplus=False,
                            state_batch_indices=None,
-                           pad_slot_id=PAD_SLOT_ID):
+                           pad_slot_id=PAD_SLOT_ID,
+                           preallocated_ssm_out=None):
     """
     Argument:
         state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
@@ -223,6 +224,7 @@ def selective_state_update(state,
             for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id] 
             in this case, the kernel will not process entries at 
             indices 0 and 3
+        preallocated_ssm_out: Preallocated ssm output tensor
     Return:
         out: (batch, dim) or (batch, nheads, dim)
     """
@@ -264,7 +266,11 @@ def selective_state_update(state,
         assert dt_bias.shape == (nheads, dim)
     if state_batch_indices is not None:
         assert state_batch_indices.shape == (batch, )
-    out = torch.empty_like(x)
+    if preallocated_ssm_out is None:
+        out = torch.empty_like(x)
+    else:
+        out = preallocated_ssm_out
+        assert out.shape == x.shape
     grid = lambda META: (triton.cdiv(dim, META['BLOCK_SIZE_M']), batch, nheads)
     z_strides = ((z.stride(0), z.stride(1), z.stride(2)) if z is not None else
                  (0, 0, 0))
