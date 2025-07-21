@@ -4,7 +4,7 @@
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import accumulate
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Type
 
 import torch
 
@@ -615,7 +615,6 @@ class FlashAttentionImpl(AttentionImpl):
         alibi_slopes: Optional[List[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
@@ -624,9 +623,6 @@ class FlashAttentionImpl(AttentionImpl):
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported in V0 "
                                       "FLASH_ATTN backend.")
-        if blocksparse_params is not None:
-            raise ValueError(
-                "FlashAttention does not support block-sparse attention.")
         if use_irope:
             logger.warning(
                 "Using irope in V0 is not supported yet, it will fall back "

@@ -19,17 +19,16 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
-from vllm.model_executor.layers.pooler import (ClassifierPooler, PoolingType,
-                                               SimplePooler)
+from vllm.model_executor.layers.pooler import (DispatchPooler, Pooler,
+                                               PoolingType)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
-from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType
 
 from .interfaces import (HasInnerState, IsHybrid, SupportsLoRA, SupportsPP,
@@ -563,6 +562,8 @@ def _is_moe_layer(name: str):
 
 class JambaForSequenceClassification(JambaForCausalLM):
 
+    is_pooling_model = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -583,23 +584,15 @@ class JambaForSequenceClassification(JambaForCausalLM):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        pooler = SimplePooler.from_config_with_defaults(
-            pooler_config,
-            pooling_type=PoolingType.LAST,
-            normalize=False,
-            softmax=False,
-        )
-
-        self._pooler = ClassifierPooler(
-            vllm_config.model_config,
-            pooling=pooler.pooling,
-            classifier=self.score,
-            act_fn=pooler.head.activation,
-        )
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)
+        self.pooler = DispatchPooler({
+            "encode":
+            Pooler.for_encode(pooler_config),
+            "classify":
+            Pooler.for_classify(
+                pooler_config,
+                classifier=self.score,
+                default_pooling_type=PoolingType.LAST,
+                default_normalize=False,
+                default_softmax=False,
+            ),
+        })
