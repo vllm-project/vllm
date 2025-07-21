@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Optional, Union, cast
@@ -11,6 +12,7 @@ import torch
 from vllm.outputs import (CompletionOutput, PoolingOutput,
                           PoolingRequestOutput, RequestOutput)
 from vllm.sampling_params import RequestOutputKind
+from vllm.sequence import RequestMetrics
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
@@ -410,6 +412,14 @@ class OutputProcessor:
             if request_output := req_state.make_request_output(
                     new_token_ids, pooling_output, finish_reason, stop_reason,
                     kv_transfer_params, num_cached_tokens):
+                if req_state.stats is not None:
+                    request_output.metrics = RequestMetrics(
+                        arrival_time=req_state.stats.arrival_time,
+                        last_token_time=req_state.stats.last_token_ts,
+                        first_scheduled_time=req_state.stats.scheduled_ts,
+                        first_token_time=req_state.stats.first_token_ts,
+                        time_in_queue=req_state.stats.scheduled_ts - req_state.stats.arrival_time,
+                        finished_time=time.monotonic())
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
                     req_state.queue.put(request_output)
