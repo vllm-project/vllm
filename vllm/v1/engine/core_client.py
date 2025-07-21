@@ -431,8 +431,8 @@ class MPClient(EngineCoreClient):
             dp_rank = parallel_config.data_parallel_rank
             dp_local_size = parallel_config.data_parallel_size_local
             offline_mode = parallel_config.data_parallel_rank_local is not None
-            # If Internal DPLB, the Client manages local+remote EngineCores.
-            # Otherwise, the Client just manages the local EngineCores.
+            # Client manages local+remote EngineCores in pure internal LB case.
+            # Client manages local EngineCores in hybrid and external LB case.
             local_engines_only = (parallel_config.data_parallel_hybrid_lb
                                   or parallel_config.data_parallel_external_lb)
 
