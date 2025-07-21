@@ -28,6 +28,7 @@ from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
 from vllm.v1.core.sched.utils import check_stop
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
+from vllm.v1.engine.exceptions import SchedulerWaitingQueueFullError
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
@@ -957,6 +958,14 @@ class Scheduler(SchedulerInterface):
         return len(self.running), len(self.waiting)
 
     def add_request(self, request: Request) -> None:
+        # Check if the waiting queue has reached its maximum capacity
+        if (self.scheduler_config.max_waiting_queue_length is not None
+                and len(self.waiting)
+                >= self.scheduler_config.max_waiting_queue_length):
+            raise SchedulerWaitingQueueFullError(
+                f"Scheduler waiting queue is full. Cannot add request "
+                f"{request.request_id}.")
+
         self.waiting.add_request(request)
         self.requests[request.request_id] = request
         if self.log_stats:

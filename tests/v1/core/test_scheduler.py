@@ -12,6 +12,7 @@ from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.engine.exceptions import SchedulerWaitingQueueFullError
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
 from vllm.v1.outputs import ModelRunnerOutput
@@ -1832,3 +1833,109 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
     assert len(output.scheduled_new_reqs) == 0
     assert len(scheduler.running) == 0
     assert len(scheduler.waiting) == 1
+
+
+def test_scheduler_max_waiting_queue_length():
+    """Test that V1 scheduler respects max_waiting_queue_length setting."""
+    max_waiting_queue_length = 2
+    scheduler = create_scheduler(
+        max_num_seqs=64,
+        max_num_batched_tokens=100,
+        max_waiting_queue_length=max_waiting_queue_length,
+    )
+    requests = create_requests(num_requests=max_waiting_queue_length)
+
+    # Add requests up to the limit
+    for i, request in enumerate(requests):
+        scheduler.add_request(request)
+        assert len(scheduler.waiting) == i + 1
+
+    assert len(scheduler.waiting) == max_waiting_queue_length
+    # Try to add one more request - should raise exception
+    overflow_request = create_requests(num_requests=1)[0]
+    overflow_request.request_id = "overflow"
+
+    with pytest.raises(SchedulerWaitingQueueFullError,
+                       match="Scheduler waiting queue is full"):
+        scheduler.add_request(overflow_request)
+
+    # Verify that the queue size hasn't changed
+    assert len(scheduler.waiting) == max_waiting_queue_length
+
+
+def test_scheduler_max_waiting_queue_length_disabled():
+    """Test that V1 scheduler allows unlimited queue when 
+    max_waiting_queue_length is None."""
+    scheduler = create_scheduler(
+        max_num_seqs=64,
+        max_num_batched_tokens=100,
+        max_waiting_queue_length=None,  # No limit
+    )
+
+    # Add many requests - should not raise an exception
+    num_requests = 10
+    requests = create_requests(num_requests=num_requests)
+    for i, request in enumerate(requests):
+        scheduler.add_request(request)
+        assert len(scheduler.waiting) == i + 1
+
+
+def test_scheduler_max_waiting_queue_length_with_scheduling():
+    """Test max_waiting_queue_length behavior when requests are being 
+    scheduled."""
+
+    max_waiting_queue_length = 2
+    scheduler = create_scheduler(
+        max_num_seqs=1,  # Only 1 can run at once, forcing others to wait
+        max_num_batched_tokens=100,
+        max_waiting_queue_length=max_waiting_queue_length,
+    )
+
+    # Add requests up to the waiting queue limit
+    requests = create_requests(num_requests=max_waiting_queue_length)
+
+    # Add requests up to the limit
+    for request in requests:
+        scheduler.add_request(request)
+
+    # All requests should be in waiting queue initially
+    assert len(scheduler.waiting) == max_waiting_queue_length
+    assert len(scheduler.running) == 0
+
+    # Schedule one request (should move 1 from waiting to running)
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 1  # max_num_seqs = 1
+    assert len(scheduler.running) == 1
+    assert len(
+        scheduler.waiting) == max_waiting_queue_length - 1  # 1 left in waiting
+
+    # Now add one more request to fill the waiting queue back to its limit
+    additional_request = create_requests(num_requests=1)[0]
+    additional_request.request_id = "additional"
+    scheduler.add_request(additional_request)
+
+    assert len(
+        scheduler.waiting) == max_waiting_queue_length  # back to full capacity
+
+    # Try to add one more request - should raise exception
+    overflow_request = create_requests(num_requests=1)[0]
+    overflow_request.request_id = "overflow"
+
+    with pytest.raises(SchedulerWaitingQueueFullError,
+                       match="Scheduler waiting queue is full"):
+        scheduler.add_request(overflow_request)
+
+    # Verify queue sizes are unchanged
+    assert len(scheduler.waiting) == max_waiting_queue_length
+    assert len(scheduler.running) == 1
+
+
+def test_scheduler_max_waiting_queue_length_zero():
+    """Test that max_waiting_queue_length=0 raises ValueError."""
+    with pytest.raises(ValueError,
+                       match="max_waiting_queue_length cannot be 0"):
+        create_scheduler(
+            max_num_seqs=1,  # Only 1 can run at once
+            max_num_batched_tokens=100,
+            max_waiting_queue_length=0,  # Should raise ValueError
+        )

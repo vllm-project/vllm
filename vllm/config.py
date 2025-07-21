@@ -2460,6 +2460,19 @@ class SchedulerConfig:
     def is_multi_step(self) -> bool:
         return self.num_scheduler_steps > 1
 
+    @field_validator("max_waiting_queue_length")
+    @classmethod
+    def validate_max_waiting_queue_length(
+            cls, value: Optional[int]) -> Optional[int]:
+        if value == 0:
+            raise ValueError(
+                "max_waiting_queue_length cannot be 0. Use None for unlimited "
+                "queue or a positive integer for a limited queue.")
+        if value is not None and value < 0:
+            raise ValueError(
+                "max_waiting_queue_length must be None or a positive integer")
+        return value
+
 
 Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu"]
 

@@ -25,7 +25,6 @@ else:
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
-from vllm.core.scheduler import SchedulerWaitingQueueFullError
 from vllm.engine.protocol import EngineClient
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -77,6 +76,7 @@ from vllm.tracing import (contains_trace_headers, extract_trace_headers,
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import (AsyncMicrobatchTokenizer, is_list_of,
                         merge_async_iterators, random_uuid)
+from vllm.v1.engine.exceptions import SchedulerWaitingQueueFullError
 
 logger = init_logger(__name__)
 
@@ -366,7 +366,7 @@ class OpenAIServing:
 
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(e)
+            return self.create_error_response(str(e))
 
     async def _collect_batch(
         self,
@@ -401,18 +401,20 @@ class OpenAIServing:
             return None
 
         except Exception as e:
-            return self.create_error_response(e)
+            return self.create_error_response(str(e))
 
     def create_error_response(
             self,
             message: Union[str, Exception],
             err_type: str = "BadRequestError",
             status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> ErrorResponse:
-        # Handle SchedulerWaitingQueueFullError automatically
+
         if isinstance(message, SchedulerWaitingQueueFullError):
-            return ErrorResponse(message=str(message),
-                                 type="ServiceUnavailableError",
-                                 code=HTTPStatus.SERVICE_UNAVAILABLE.value)
+            return ErrorResponse(
+                message=str(message),
+                type="ServiceUnavailableError",
+                code=HTTPStatus.SERVICE_UNAVAILABLE.value,
+            )
         elif isinstance(message, Exception):
             message_str = str(message)
         else:

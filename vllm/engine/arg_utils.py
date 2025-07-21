@@ -441,9 +441,6 @@ class EngineArgs:
 
     async_scheduling: bool = SchedulerConfig.async_scheduling
 
-    max_waiting_queue_length: Optional[
-        int] = SchedulerConfig.max_waiting_queue_length
-
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -846,9 +843,6 @@ class EngineArgs:
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
         scheduler_group.add_argument("--async-scheduling",
                                      **scheduler_kwargs["async_scheduling"])
-        scheduler_group.add_argument(
-            "--max-waiting-queue-length",
-            **scheduler_kwargs["max_waiting_queue_length"])
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1237,7 +1231,6 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.
             disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
-            max_waiting_queue_length=self.max_waiting_queue_length,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
