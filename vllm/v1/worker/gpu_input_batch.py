@@ -203,6 +203,8 @@ class InputBatch:
         # NOTE(rob): num_prompt_logprobs only includes reqs
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: dict[str, int] = {}
+        # Return raw logits in logprobs.
+        self.use_raw_logits: set[str] = {}
 
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
@@ -341,6 +343,9 @@ class InputBatch:
             if sampling_params.prompt_logprobs is not None:
                 self.num_prompt_logprobs[
                     req_id] = sampling_params.prompt_logprobs
+            if sampling_params.extra_args and "use_raw_logits" in sampling_params.extra_args:
+                if sampling_params.extra_args["use_raw_logits"]:
+                    self.use_raw_logits.add(req_id)
 
             if sampling_params.allowed_token_ids:
                 self.has_allowed_token_ids.add(req_id)
@@ -389,7 +394,7 @@ class InputBatch:
 
     def remove_request(self, req_id: str) -> Optional[int]:
         """This method must always be followed by a call to condense().
-        
+
         Args:
           req_id: request to remove
 
@@ -415,6 +420,7 @@ class InputBatch:
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.num_prompt_logprobs.pop(req_id, None)
+        self.use_raw_logits.pop(req_id, None)
         self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
 
         # LoRA
@@ -590,7 +596,7 @@ class InputBatch:
 
     def refresh_metadata(self):
         """Apply batch updates, reset input batch at end of step
-        
+
         * Apply batch add/remove/permute to logits procs' states
         * If batch state is modified, update sampling metadata
         """
@@ -650,6 +656,7 @@ class InputBatch:
             top_k=None if self.no_top_k else self.top_k[:num_reqs],
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
+            use_raw_logits=len(self.use_raw_logits) > 0,
             prompt_token_ids=prompt_token_ids,
             frequency_penalties=self.frequency_penalties[:num_reqs],
             presence_penalties=self.presence_penalties[:num_reqs],
