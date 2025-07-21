@@ -15,7 +15,7 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
 
-class Llama_Nemotron_Nano_VL_Config(PretrainedConfig):
+class Nemotron_Nano_VL_Config(PretrainedConfig):
     model_type = 'Llama_Nemotron_Nano_VL'
     is_composition = True
 
@@ -42,9 +42,9 @@ class Llama_Nemotron_Nano_VL_Config(PretrainedConfig):
             self.vision_config = PretrainedConfig()
 
         if llm_config is None:
-            self.llm_config = LlamaConfig()
+            self.text_config = LlamaConfig()
         else:
-            self.llm_config = LlamaConfig(**llm_config)
+            self.text_config = LlamaConfig(**llm_config)
 
         # Assign configuration values
         self.force_image_size = force_image_size
