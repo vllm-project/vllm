@@ -287,24 +287,23 @@ class FreeKVCacheBlockQueue:
             return []
         self.num_free_blocks -= n
 
-        first_block = self.fake_free_list_head.next_free_block
-        assert first_block is not None, (
-            "next_free_block of fake_free_list_head should always exist")
-        # Pop n blocks from the head of the list.
-        curr_block: KVCacheBlock = first_block
+        curr_block = self.fake_free_list_head.next_free_block
+        # Pop n blocks from the head of the list
         ret = []
         for _ in range(n):
+            assert curr_block is not None
             ret.append(curr_block)
-            assert curr_block.next_free_block is not None
+            last_block = curr_block
             curr_block = curr_block.next_free_block
-        # Connect the fake head to the new first block.
-        self.fake_free_list_head.next_free_block = ret[-1].next_free_block
-        assert ret[-1].next_free_block is not None, (
-            "next_free_block of real block should always exist")
-        ret[-1].next_free_block.prev_free_block = self.fake_free_list_head
-        # Reset prev_free_block and next_free_block of all poped blocks.
-        for block in ret:
-            block.prev_free_block = block.next_free_block = None
+            # Reset prev_free_block and next_free_block of all popped blocks
+            last_block.prev_free_block = None
+            last_block.next_free_block = None
+
+        if curr_block is not None:
+            # The queue is not empty, connect the fake head to
+            # the new first block.
+            self.fake_free_list_head.next_free_block = curr_block
+            curr_block.prev_free_block = self.fake_free_list_head
         return ret
 
     def remove(self, block: KVCacheBlock) -> None:
@@ -362,16 +361,14 @@ class FreeKVCacheBlockQueue:
         last_block = self.fake_free_list_tail.prev_free_block
         assert last_block is not None, (
             "prev_free_block of fake_free_list_tail should always exist")
-        # Connect the original last block to the first block of <blocks>
-        last_block.next_free_block = blocks[0]
-        blocks[0].prev_free_block = last_block
         # Connect the last block of <blocks> to the fake tail
         blocks[-1].next_free_block = self.fake_free_list_tail
         self.fake_free_list_tail.prev_free_block = blocks[-1]
         # Add inter-connections between consecutive blocks
-        for curr_block, next_block in zip(blocks[:-1], blocks[1:]):
-            curr_block.next_free_block = next_block
-            next_block.prev_free_block = curr_block
+        for block in blocks:
+            block.prev_free_block = last_block
+            last_block.next_free_block = block
+            last_block = block
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
