@@ -593,6 +593,14 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP,
                 logical_replica_count=logical_replica_count,
             )
 
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        # TODO: Support Qwen3 MoE elastic expert parallel
+        ...
+   
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
