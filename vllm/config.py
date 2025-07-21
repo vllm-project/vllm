@@ -94,7 +94,7 @@ ConfigT = TypeVar("ConfigT", bound=ConfigType)
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
                      "score", "reward", "transcription", "draft"]
 
-_ResolvedTask = Literal["generate", "transcription", "pooling", "embed",
+_ResolvedTask = Literal["generate", "transcription", "encode", "embed",
                         "classify", "reward", "draft"]
 
 RunnerOption = Literal["auto", "generate", "pooling", "draft"]
@@ -103,7 +103,7 @@ RunnerType = Literal["generate", "pooling", "draft"]
 
 _RUNNER_TASKS: dict[RunnerType, list[_ResolvedTask]] = {
     "generate": ["generate", "transcription"],
-    "pooling": ["pooling", "embed", "classify", "reward"],
+    "pooling": ["encode", "embed", "classify", "reward"],
     "draft": [],
 }
 
@@ -579,7 +579,7 @@ class ModelConfig:
         # user-selected task
         if runner_type == "pooling" and self.task == "auto":
             selected_task = all_supported_tasks[runner_type][-1]
-            assert selected_task != "pooling"
+            assert selected_task != "encode"
             self.task = selected_task
         self.supported_runner_types = supported_runner_types
         self.runner_type = runner_type
@@ -884,7 +884,7 @@ class ModelConfig:
 
         supported_tasks = list[_ResolvedTask]()
         if registry.is_pooling_model(architectures):
-            supported_tasks.append("pooling")
+            supported_tasks.append("encode")
 
             # For now, users must specify the task (other than "pooling")
             # to use for pooling models

@@ -19,8 +19,8 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
-from vllm.model_executor.layers.pooler import (ClassifierPooler, PoolingType,
-                                               SimplePooler)
+from vllm.model_executor.layers.pooler import (DispatchPooler, Pooler,
+                                               PoolingType)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
@@ -584,16 +584,15 @@ class JambaForSequenceClassification(JambaForCausalLM):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        pooler = SimplePooler.from_config_with_defaults(
-            pooler_config,
-            pooling_type=PoolingType.LAST,
-            normalize=False,
-            softmax=False,
-        )
-
-        self.pooler = ClassifierPooler(
-            vllm_config.model_config,
-            pooling=pooler.pooling,
-            classifier=self.score,
-            act_fn=pooler.head.activation,
-        )
+        self.pooler = DispatchPooler({
+            "encode":
+            Pooler.for_encode(pooler_config),
+            "classify":
+            Pooler.for_classify(
+                pooler_config,
+                classifier=self.score,
+                default_pooling_type=PoolingType.LAST,
+                default_normalize=False,
+                default_softmax=False,
+            ),
+        })
