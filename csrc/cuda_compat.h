@@ -4,9 +4,9 @@
   #include <hip/hip_runtime.h>
 #endif
 
+#ifdef USE_ROCM
 struct Utils {
   static __host__ int get_warp_size() {
-#if defined(USE_ROCM)
     static bool is_cached = false;
     static int result;
 
@@ -21,21 +21,17 @@ struct Utils {
     }
 
     return result;
-#else
-    return 32;
-#endif
   }
 
   static __device__ constexpr int get_warp_size() {
-#if defined(USE_ROCM) && defined(__GFX9__)
+  #ifdef __GFX9__
     return 64;
-#else
+  #else
     return 32;
-#endif
+  #endif
   }
 };
 
-#if defined(USE_ROCM)
   #define WARP_SIZE Utils::get_warp_size()
 #else
   #define WARP_SIZE 32
