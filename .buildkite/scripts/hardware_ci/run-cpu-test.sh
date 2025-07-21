@@ -81,8 +81,8 @@ function cpu_tests() {
   # online serving
   docker exec cpu-test-"$NUMA_NODE" bash -c '
     set -e
-    VLLM_CPU_OMP_THREADS_BIND=$E2E_OMP_THREADS VLLM_CPU_SGL_KERNEL=1 vllm serve meta-llama/Llama-3.1-8B-Instruct -tp=2 -pp=2&
-    timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
+    VLLM_CPU_OMP_THREADS_BIND=$E2E_OMP_THREADS VLLM_CPU_SGL_KERNEL=1 vllm serve meta-llama/Llama-3.1-8B-Instruct -tp=2 -pp=2 &
+    timeout 600 bash -c "until curl localhost:8000/v1/models; do sleep 1; done" || exit 1
     VLLM_CPU_CI_ENV=0 python3 benchmarks/benchmark_serving.py \
       --backend vllm \
       --dataset-name random \
