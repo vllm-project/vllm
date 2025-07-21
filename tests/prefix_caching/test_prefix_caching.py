@@ -93,8 +93,8 @@ def test_mixed_requests(
             # Run all the promopts
             greedy_params = SamplingParams(temperature=0.0,
                                            max_tokens=max_tokens)
-            req_outputs = vllm_model.model.generate(example_prompts,
-                                                    greedy_params)
+            req_outputs = vllm_model.llm.generate(example_prompts,
+                                                  greedy_params)
 
             # Verify number of cached tokens
             for i in range(len(req_outputs)):
@@ -161,7 +161,7 @@ def test_fully_cached_prefill_needs_uncached_token(model):
         max_num_batched_tokens=max_num_batched_tokens,
         max_num_seqs=max_num_batched_tokens,
     )
-    engine: LLMEngine = runner.model.llm_engine
+    engine: LLMEngine = runner.llm.llm_engine
 
     scheduler: Scheduler = SchedulerProxy(engine.scheduler[0])  # type: ignore
     engine.scheduler[0] = scheduler

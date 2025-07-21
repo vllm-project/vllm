@@ -238,8 +238,8 @@ def test_mistral_symbolic_languages(vllm_runner, model: str,
                      load_format="mistral") as vllm_model:
         for prompt in SYMBOLIC_LANG_PROMPTS:
             msg = {"role": "user", "content": prompt}
-            outputs = vllm_model.model.chat([msg],
-                                            sampling_params=SAMPLING_PARAMS)
+            outputs = vllm_model.llm.chat([msg],
+                                          sampling_params=SAMPLING_PARAMS)
             assert "�" not in outputs[0].outputs[0].text.strip()
 
 
@@ -253,11 +253,11 @@ def test_mistral_function_calling(vllm_runner, model: str, dtype: str) -> None:
                      load_format="mistral") as vllm_model:
 
         msgs = copy.deepcopy(MSGS)
-        outputs = vllm_model.model.chat(msgs,
-                                        tools=TOOLS,
-                                        sampling_params=SAMPLING_PARAMS)
+        outputs = vllm_model.llm.chat(msgs,
+                                      tools=TOOLS,
+                                      sampling_params=SAMPLING_PARAMS)
 
-        tokenizer = vllm_model.model.get_tokenizer()
+        tokenizer = vllm_model.llm.get_tokenizer()
         tool_parser = MistralToolParser(tokenizer)
 
         model_output = outputs[0].outputs[0].text.strip()
@@ -308,7 +308,7 @@ def test_mistral_guided_decoding(
                 f"Give an example JSON for an employee profile that "
                 f"fits this schema: {SAMPLE_JSON_SCHEMA}"
             }]
-            outputs = vllm_model.model.chat(messages, sampling_params=params)
+            outputs = vllm_model.llm.chat(messages, sampling_params=params)
 
         generated_text = outputs[0].outputs[0].text
         json_response = json.loads(generated_text)

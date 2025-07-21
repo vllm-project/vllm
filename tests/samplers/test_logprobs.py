@@ -64,7 +64,7 @@ def test_get_prompt_logprobs(
                                               prompt_logprobs=num_top_logprobs,
                                               temperature=0.0,
                                               detokenize=detokenize)
-        vllm_results = vllm_model.model.generate(
+        vllm_results = vllm_model.llm.generate(
             example_prompts, sampling_params=vllm_sampling_params)
 
     # Test whether logprobs are included in the results.
@@ -174,7 +174,7 @@ def test_none_logprobs(vllm_runner, model, chunked_prefill_token_size: int,
                                                        logprobs=None,
                                                        temperature=0.0,
                                                        detokenize=detokenize)
-        results_logprobs_none = vllm_model.model.generate(
+        results_logprobs_none = vllm_model.llm.generate(
             example_prompts, sampling_params=sampling_params_logprobs_none)
 
     for i in range(len(results_logprobs_none)):

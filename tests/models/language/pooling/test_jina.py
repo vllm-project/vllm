@@ -87,10 +87,10 @@ def test_matryoshka(
                      task="embed",
                      dtype=dtype,
                      max_model_len=None) as vllm_model:
-        assert vllm_model.model.llm_engine.model_config.is_matryoshka
+        assert vllm_model.llm.llm_engine.model_config.is_matryoshka
 
         matryoshka_dimensions = (
-            vllm_model.model.llm_engine.model_config.matryoshka_dimensions)
+            vllm_model.llm.llm_engine.model_config.matryoshka_dimensions)
         assert matryoshka_dimensions is not None
 
         if dimensions not in matryoshka_dimensions:
