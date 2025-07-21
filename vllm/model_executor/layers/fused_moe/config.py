@@ -191,7 +191,7 @@ class FusedMoEParallelConfig:
 
     @property
     def use_flashinfer_cutlass_kernels(self):
-        return (envs.VLLM_USE_FLASHINFER_MOE
+        return (envs.VLLM_USE_FLASHINFER_MOE_FP4
                 and has_flashinfer_cutlass_fused_moe())
 
     @staticmethod
