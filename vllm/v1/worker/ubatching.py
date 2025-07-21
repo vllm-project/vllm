@@ -13,6 +13,9 @@ from vllm.utils import current_stream
 class UBatchContext:
     """
     Context manager for micro-batching synchronization using threading events.
+    Should only be instantiated in make_ubatch_contexts.
+
+    There will be one UBatchContext per micro-batch.
     """
 
     def __init__(self, id_: int, comm_stream: torch.cuda.Stream,
@@ -134,10 +137,11 @@ def make_ubatch_contexts(
     comm_stream: torch.cuda.Stream,
     forward_context: Optional[ForwardContext],
 ) -> list[UBatchContext]:
+    """
+    Creates a list of context managers for micro-batch synchronization. 
+    """
+
     assert num_micro_batches == 2, "only been tested with 2 micro-batches"
-    """
-    Create a context manager for micro-batching synchronization.
-    """
 
     # initialize cpu events to synchronize the two threads
     cpu_events = [threading.Event() for _ in range(num_micro_batches)]
