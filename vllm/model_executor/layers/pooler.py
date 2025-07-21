@@ -302,7 +302,7 @@ class PoolingMethod(nn.Module, ABC):
 class CLSPool(PoolingMethod):
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"encode", "embed", "classify"}
+        return {"encode", "embed", "classify", "score"}
 
     def forward_one(
         self,
@@ -327,7 +327,7 @@ class CLSPool(PoolingMethod):
 class LastPool(PoolingMethod):
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"encode", "embed", "classify"}
+        return {"encode", "embed", "classify", "score"}
 
     def forward_one(
         self,
@@ -371,7 +371,7 @@ class AllPool(PoolingMethod):
 class MeanPool(PoolingMethod):
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"encode", "embed", "classify"}
+        return {"encode", "embed", "classify", "score"}
 
     def forward_one(
         self,
