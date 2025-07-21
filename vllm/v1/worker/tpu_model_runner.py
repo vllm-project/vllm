@@ -519,6 +519,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 continue
 
             if attn_module.attn_type == AttentionType.DECODER:
+                if attn_module.use_irope:
+                    logger.warning_once(
+                        "Using irope in Pallas is not supported yet, it "
+                        "will fall back to global attention for long context.")
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
