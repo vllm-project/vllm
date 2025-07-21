@@ -574,6 +574,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
                      "numeric values, used by custom extensions."),
     )
 
+    include_thinking: Optional[bool] = Field(
+        default=False,
+        description=(
+        "If true, include the reasoning_content from assistant messages to"
+        "parsed_content. This is model-dependent and may not be supported"
+        " by all models."),
+        )
+
     # --8<-- [end:chat-completion-extra-params]
 
     # Default sampling parameters for chat completion requests

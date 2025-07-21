@@ -863,11 +863,15 @@ class OpenAIServing:
             tokenizer,
             model_config=model_config,
         )
+        # Check if include_thinking is present in the request
+        include_thinking = getattr(request, 'include_thinking', False)
+
         conversation, mm_data_future = parse_chat_messages_futures(
             messages,
             model_config,
             tokenizer,
             content_format=resolved_content_format,
+            include_thinking=include_thinking,
         )
 
         _chat_template_kwargs: dict[str, Any] = dict(

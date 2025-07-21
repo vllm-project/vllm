@@ -1357,6 +1357,188 @@ def test_resolve_content_format_examples(template_path, expected_format):
     assert resolved_format == expected_format
 
 
+def test_parse_chat_messages_include_thinking(phi3v_model_config,
+                                               phi3v_tokenizer):
+    """Test that reasoning_content is included when include_thinking=True."""
+    # Test with include_thinking=True
+    messages = [{
+        "role": "user",
+        "content": "What is 2+2?"
+    }, {
+        "role": "assistant",
+        "content": "The answer is 4.",
+        "reasoning_content": "Let me think: 2+2 = 4"
+    }]
+
+    conversation_with_thinking, _ = parse_chat_messages(
+        messages,
+        phi3v_model_config,
+        phi3v_tokenizer,
+        content_format="openai",
+        include_thinking=True,
+    )
+
+    # Should include reasoning_content
+    assert len(conversation_with_thinking) == 2
+    assert conversation_with_thinking[1]["role"] == "assistant"
+    assert conversation_with_thinking[1]["content"] == [{
+        "type": "text",
+        "text": "The answer is 4."
+    }]
+    assert conversation_with_thinking[1]["reasoning_content"] == "Let me think: 2+2 = 4"  # noqa: E501
+
+    # Test with include_thinking=False (default)
+    conversation_without_thinking, _ = parse_chat_messages(
+        messages,
+        phi3v_model_config,
+        phi3v_tokenizer,
+        content_format="openai",
+        include_thinking=False,
+    )
+
+    # Should NOT include reasoning_content
+    assert len(conversation_without_thinking) == 2
+    assert conversation_without_thinking[1]["role"] == "assistant"
+    assert conversation_without_thinking[1]["content"] == [{
+        "type": "text",
+        "text": "The answer is 4."
+    }]
+    assert "reasoning_content" not in conversation_without_thinking[1]
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_include_thinking_async(phi3v_model_config,
+                                                          phi3v_tokenizer):
+    """Test async version of parse_chat_messages with include_thinking."""
+    messages = [{
+        "role": "user",
+        "content": "Explain quantum physics"
+    }, {
+        "role": "assistant",
+        "content": "Quantum physics is the study of matter at atomic scales.",
+        "reasoning_content": "This is a complex topic that requires simplification"  # noqa: E501
+    }]
+
+    conversation, mm_data_future = parse_chat_messages_futures(
+        messages,
+        phi3v_model_config,
+        phi3v_tokenizer,
+        content_format="openai",
+        include_thinking=True,
+    )
+
+    await mm_data_future  # Await the future
+
+    assert len(conversation) == 2
+    assert conversation[1]["role"] == "assistant"
+    assert conversation[1]["reasoning_content"] == "This is a complex topic that requires simplification"  # noqa: E501
+
+
+def test_parse_chat_messages_include_thinking_multimodal(phi3v_model_config,
+                                                         phi3v_tokenizer,
+                                                         image_url):
+    """Test include_thinking with multimodal messages."""
+    messages = [{
+        "role": "user",
+        "content": [{
+            "type": "text",
+            "text": "What's in this image?"
+        }, {
+            "type": "image_url",
+            "image_url": {"url": image_url}
+        }]
+    }, {
+        "role": "assistant",
+        "content": "I can see a cat in the image.",
+        "reasoning_content": "Looking at the image, I notice feline features..."
+    }]
+
+    conversation, mm_data = parse_chat_messages(
+        messages,
+        phi3v_model_config,
+        phi3v_tokenizer,
+        content_format="openai",
+        include_thinking=True,
+    )
+
+    # Check multimodal data is preserved
+    assert mm_data is not None
+
+    # Check reasoning_content is included
+    assert len(conversation) == 2
+    assert conversation[1]["role"] == "assistant"
+    assert conversation[1]["content"] == [{
+        "type": "text",
+        "text": "I can see a cat in the image."
+    }]
+    assert conversation[1]["reasoning_content"] == "Looking at the image, I notice feline features..."  # noqa: E501
+
+
+def test_parse_chat_messages_include_thinking_tool_calls(phi3v_model_config,
+                                                         phi3v_tokenizer):
+    """Test include_thinking with tool calls in assistant messages."""
+    messages = [{
+        "role": "user",
+        "content": "What's the weather in NYC?"
+    }, {
+        "role": "assistant",
+        "content": "Let me check the weather for you.",
+        "tool_calls": [{
+            "id": "call_123",
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "arguments": '{"location": "NYC"}'
+            }
+        }],
+        "reasoning_content": "User wants weather info, I'll use the weather tool"  # noqa: E501
+    }]
+
+    conversation, _ = parse_chat_messages(
+        messages,
+        phi3v_model_config,
+        phi3v_tokenizer,
+        content_format="openai",
+        include_thinking=True,
+    )
+
+    assert len(conversation) == 2
+    assert conversation[1]["role"] == "assistant"
+    assert conversation[1]["content"] == [{
+        "type": "text",
+        "text": "Let me check the weather for you."
+    }]
+    assert "tool_calls" in conversation[1]
+    assert conversation[1]["reasoning_content"] == "User wants weather info, I'll use the weather tool"  # noqa: E501
+
+
+def test_parse_chat_messages_include_thinking_string_format(phi3v_model_config,
+                                                            phi3v_tokenizer):
+    """Test include_thinking with string content format."""
+    messages = [{
+        "role": "user",
+        "content": "What is the capital of France?"
+    }, {
+        "role": "assistant",
+        "content": "The capital of France is Paris.",
+        "reasoning_content": "France is a country in Europe, its capital is Paris"  # noqa: E501
+    }]
+
+    conversation, _ = parse_chat_messages(
+        messages,
+        phi3v_model_config,
+        phi3v_tokenizer,
+        content_format="string",
+        include_thinking=True,
+    )
+
+    assert len(conversation) == 2
+    assert conversation[1]["role"] == "assistant"
+    assert conversation[1]["content"] == "The capital of France is Paris."
+    assert conversation[1]["reasoning_content"] == "France is a country in Europe, its capital is Paris"  # noqa: E501
+
+
+
 def test_parse_chat_messages_include_thinking_chunk(mistral_model_config,
                                                     mistral_tokenizer):
     messages = [{
