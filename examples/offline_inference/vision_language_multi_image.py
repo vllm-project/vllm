@@ -1188,6 +1188,8 @@ def load_glm4_5v_fp8(question: str, image_urls: list[str]) -> ModelRequestData:
     prompt = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
+
+    prompt = f"{'<image>' * len(image_urls)}\n{question}\n"
     image_data = [fetch_image(url) for url in image_urls]
 
     return ModelRequestData(

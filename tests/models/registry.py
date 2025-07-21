@@ -351,6 +351,10 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1", v0_only=True),  # noqa: E501
     "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-small", v0_only=True),  # noqa: E501
     # [Multimodal]
+        "SiglipModel": _HfExamplesInfo(
+        "HuggingFaceM4/siglip-so400m-14-980-flash-attn2-navit",
+        hf_overrides={"architectures": ["SiglipModel"]},
+    ),  # noqa: E501
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),
     "Phi3VForCausalLM": _HfExamplesInfo("TIGER-Lab/VLM2Vec-Full",
                                          trust_remote_code=True),
