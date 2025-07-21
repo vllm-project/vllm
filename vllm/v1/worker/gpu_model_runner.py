@@ -190,7 +190,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     vllm_config=self.vllm_config,
                     device=self.device)  # type: ignore
             elif self.speculative_config.method == "mlp_speculator":
-                self.drafter = MLPSpeculatorProposer(self.vllm_config,
+                self.drafter = MLPSpeculatorProposer(self.vllm_config, # type: ignore
                                                      self.device)
             else:
                 raise ValueError("Unknown speculative decoding method: "

@@ -188,8 +188,9 @@ class MLPSpeculator(nn.Module):
             states = states.flatten(0, 1)
 
             if self.logits_processor:
-                logits = self.logits_processor(self.head[head_index], states,
-                                               sampling_metadata)
+                logits = self.logits_processor(
+                    self.head[head_index], states, sampling_metadata
+                    if self.sampling_metadata_is_required else None)
             else:
                 logits = self.head[head_index](states)
 

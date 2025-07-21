@@ -42,7 +42,7 @@ class MLPSpeculatorProposer:
         sampling_metadata: SamplingMetadata,
     ) -> list[list[int]]:
         # Generate blocks and compute logits
-        draft_tokens = self.model.generate_proposals(input_ids, previous_hidden_states, num_predict_tokens,sampling_metadata)
+        draft_tokens = self.model.generate_proposals(input_ids, previous_hidden_states, num_predict_tokens, sampling_metadata)
         return list(map(lambda x: x[0], zip(*[i.sampled_token_ids.tolist() for i in draft_tokens])))
 
     def load_model(self, target_model: nn.Module) -> None:
