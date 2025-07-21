@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import argparse
+import dataclasses
 import math
 from statistics import mean, median, stdev
 
@@ -10,12 +10,13 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
+from vllm.engine.arg_utils import EngineArgs
+from vllm.utils import FlexibleArgumentParser
 
 PROMPTS = [
     "One of the most important things in life is to",
     "The answer to 1 + 1 is",
 ]
-DTYPE = torch.bfloat16
 vllm_logits_processor_outputs = []
 
 
@@ -32,8 +33,8 @@ def print_error_stats(header: str, errs: list[float]):
                                 for stat_type in name_to_func))
 
 
-def get_vllm_outputs(model, temperature, **kwargs):
-    llm = LLM(model=model, dtype=DTYPE, **kwargs)
+def get_vllm_outputs(args: EngineArgs, temperature: float):
+    llm = LLM(**dataclasses.asdict(args))
     model = llm.llm_engine.model_executor.driver_worker.model_runner.model
 
     def logits_processor_hook(module, input, output):
@@ -62,10 +63,10 @@ def get_vllm_outputs(model, temperature, **kwargs):
     return final_outputs
 
 
-def compare_with_hf(model_name, temperature, vllm_outputs):
-    model = AutoModelForCausalLM.from_pretrained(model_name,
-                                                 torch_dtype=DTYPE,
-                                                 device_map="cuda")
+def compare_with_hf(vllm_outputs, args: EngineArgs, temperature: float):
+    model_config = args.create_model_config()
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model, torch_dtype=model_config.dtype, device_map="cuda")
 
     vllm_errs = []
     hook_errs = []
@@ -124,19 +125,18 @@ def compare_with_hf(model_name, temperature, vllm_outputs):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument("--model", type=str, required=True)
+    parser = FlexibleArgumentParser(description="Benchmark logprobs.")
     parser.add_argument("--temperature",
                         type=float,
                         required=False,
                         default=0.7)
-    parser.add_argument("--enforce_eager", type=bool, default=True)
+    parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
-    vllm_outputs = get_vllm_outputs(args.model,
-                                    args.temperature,
-                                    enforce_eager=args.enforce_eager)
-    compare_with_hf(args.model, args.temperature, vllm_outputs)
+    temperature = args.temperature
+    del args.temperature
+    engine_args = EngineArgs.from_cli_args(args)
+    vllm_outputs = get_vllm_outputs(engine_args, temperature)
+    compare_with_hf(vllm_outputs, engine_args, temperature)
 
 
 if __name__ == "__main__":
