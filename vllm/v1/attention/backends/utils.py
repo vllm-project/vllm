@@ -178,7 +178,9 @@ def get_per_layer_parameters(
 
         # Infer hyperparameters from the attention layer
         window_size = getattr(impl, "sliding_window", None)
-        window_left = window_size[0] if window_size is not None else -1
+        # NOTE(woosuk): In flash-attn and FlashInfer, the window_left is
+        # sliding_window_size - 1 (or -1 if sliding_window_size is None).
+        window_left = window_size[0] - 1 if window_size is not None else -1
         logits_soft_cap = getattr(impl, "logits_soft_cap", None)
         sm_scale = impl.scale
 
