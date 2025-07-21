@@ -538,10 +538,6 @@ class CudaPlatformBase(Platform):
     def memory_reserved(cls):
         return torch.cuda.memory_reserved()
 
-    @classmethod
-    def synchronize(cls):
-        torch.cuda.synchronize()
-
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
