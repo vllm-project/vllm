@@ -278,9 +278,10 @@ if flashinfer_comm is not None:
         use_flashinfer = allreduce_in.shape[0] * allreduce_in.shape[
             1] * allreduce_in.element_size() <= min(
                 _FI_MAX_SIZES[world_size],
-                max_token_num * allreduce_in.shape[0] *
+                max_token_num * allreduce_in.shape[1] *
                 allreduce_in.element_size(),
             )
+
         if use_flashinfer:
             assert (_FI_WORKSPACE_TENSOR is not None
                     ), "Flashinfer must be enabled when using flashinfer"
@@ -294,6 +295,7 @@ if flashinfer_comm is not None:
                 allreduce_in=allreduce_in,
                 token_num=allreduce_in.shape[0],
                 residual_in=residual,
+                residual_out=residual,
                 rms_gamma=rms_gamma,
                 rms_eps=rms_eps,
                 world_rank=world_rank,
@@ -307,17 +309,13 @@ if flashinfer_comm is not None:
                 pattern_code=fusion_pattern,
                 allreduce_out=allreduce_in,
                 quant_out=quant_out,
+                norm_out=None,
                 scale_out=None,
                 layout_code=None,
                 scale_factor=scale,
             )
         else:
             allreduce_out = tensor_model_parallel_all_reduce(allreduce_in)
-            print(f"{quant_out.dtype=}")
-            print(f"{allreduce_out.dtype=}")
-            print(f"{residual.dtype=}")
-            print(f"{rms_gamma.dtype=}")
-            print(f"{scale.dtype=}")
             torch.ops._C.fused_add_rms_norm_static_fp8_quant(
                 quant_out, allreduce_out, residual, rms_gamma, scale, rms_eps)
             allreduce_in.copy_(allreduce_out)
@@ -491,8 +489,6 @@ class AllReduceRMSNORMFP8Pattern(BasePattern):
                 scale=scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
-
-            print(allreduce)
 
             return allreduce[3], allreduce[1]
 
@@ -697,10 +693,7 @@ class AllReduceFusionPass(VllmInductorPass):
             return
         self.begin()
         self.dump_graph(graph, "before_all_reduce_fusion_pass")
-        graph.print_tabular()
         count = self.patterns.apply(graph)
-        print(f"{count=}")
-        graph.print_tabular()
         logger.debug("Replaced %s patterns", count)
         self.dump_graph(graph, "after_all_reduce_fusion_pass")
         self.end_and_log()
