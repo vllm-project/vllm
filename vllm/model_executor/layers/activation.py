@@ -18,45 +18,76 @@ from vllm.utils import LazyDict
 @CustomOp.register("xielu")
 class XIELU(nn.Module):
     """
-    xIELU activation function for vLLM (adapted from https://arxiv.org/abs/2411.13010)
+    Applies the xIELU activation function introduced in https://arxiv.org/abs/2411.13010
+    If the user has installed the nickjbrowning/XIELU wheel, we import xIELU CUDA
+    Otherwise, we emit a single warning and use xIELU Python
     """
-    
-    def __init__(self, alpha_p_init: float = 0.8, alpha_n_init: float = 0.8,
-                 beta: float = 0.5, eps: float = -1e-6, 
-                 with_vector_loads: bool = True) -> None:
+    def __init__(
+        self,
+        alpha_p_init: float = 0.8,
+        alpha_n_init: float = 0.8,
+        beta: float = 0.5,
+        eps: float = -1e-6,
+        with_vector_loads: bool = True,
+    ) -> None:
         super().__init__()
-        # Initialize parameters with proper device placement
+        # Initialize parameters
         self.alpha_p = nn.Parameter(
             torch.log(torch.exp(torch.tensor(alpha_p_init)) - 1).unsqueeze(0))
         self.alpha_n = nn.Parameter(
             torch.log(torch.exp(torch.tensor(alpha_n_init - beta)) - 1).unsqueeze(0))
-        self.register_buffer("beta", torch.tensor(beta))
-        self.register_buffer("eps", torch.tensor(eps))
         
-        self.cuda_obj = None
+        # Register beta and eps as buffers (fixed tensors)
+        self.register_buffer('beta', torch.tensor(beta), persistent=False)
+        self.register_buffer('eps', torch.tensor(eps), persistent=False)
+        self.with_vector_loads = with_vector_loads
+
+        self._xielu_cuda_obj = None
+        self._xielu_cuda_fn = None  # Will be set if CUDA available
         try:
-            import xielu.ops
-            self.cuda_obj = torch.classes.xielu.XIELU()
+            import xielu.ops  # noqa: F401
+
+            self._xielu_cuda_obj = torch.classes.xielu.XIELU()
+            try:
+                from torch._dynamo import allow_in_graph
+                self._xielu_cuda_fn = allow_in_graph(self._xielu_cuda)
+            except Exception as err:
+                print(f"Could not enable torch._dynamo for xIELU ({err}) - this may result in slower performance.")
         except Exception as err:
             print(f"CUDA-fused xIELU not available ({err}) - using Python implementation. "
                   "Install with: pip install git+https://github.com/nickjbrowning/XIELU")
 
-    def _xielu_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        return self.cuda_obj.forward(x, self.alpha_p, self.alpha_n, self.beta, self.eps)
-
     def _xielu_python(self, x: torch.Tensor) -> torch.Tensor:
-        alpha_p = nn.functional.softplus(self.alpha_p)
-        alpha_n = self.beta + nn.functional.softplus(self.alpha_n)
+        alpha_p = F.softplus(self.alpha_p)
+        alpha_n = self.beta + F.softplus(self.alpha_n)
         return torch.where(
             x > 0,
-            self.beta * x + alpha_p * x * x,
-            alpha_n * torch.expm1(torch.min(x, self.eps)) + self.beta * x - alpha_n * x
+            alpha_p * x * x + self.beta * x,
+            (torch.expm1(torch.min(x, self.eps)) - x) * alpha_n + self.beta * x,
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.cuda_obj is not None and input.is_cuda and not torch.compiler.is_compiling():
-            return self._xielu_cuda(x)
-        return self._xielu_python(x)
+    def _xielu_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        """Firewall function to prevent torch.compile from seeing .item() calls"""
+        original_shape = x.shape
+        # CUDA kernel expects 3D tensors, reshape if needed
+        while x.dim() < 3:
+            x = x.unsqueeze(0)
+        if x.dim() > 3:
+            x = x.view(-1, 1, x.size(-1))
+        result = self._xielu_cuda_obj.forward(
+            x,
+            self.alpha_p,
+            self.alpha_n,
+            self.beta.item(),
+            self.eps.item(),
+            self.with_vector_loads,
+        )
+        return result.view(original_shape)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if self._xielu_cuda_obj is not None and input.is_cuda and not torch._dynamo.is_compiling():
+            return self._xielu_cuda_fn(input)
+        return self._xielu_python(input)
 
 
 @CustomOp.register("fatrelu_and_mul")
