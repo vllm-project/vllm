@@ -1434,6 +1434,7 @@ class EngineArgs:
             collect_detailed_traces=self.collect_detailed_traces,
         )
 
+        reasoning_config = None
         if self.reasoning_config is not None:
             reasoning_config_dict = json.loads(self.reasoning_config)
             reasoning_config = ReasoningConfig(**reasoning_config_dict)
