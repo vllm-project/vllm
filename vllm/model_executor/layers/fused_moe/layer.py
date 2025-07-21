@@ -373,13 +373,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     ) -> torch.Tensor:
         if enable_eplb:
             if expert_load_view is None:
-                raise ValueError("expert_load_view must be provided when enable_eplb is True")
+                raise ValueError(
+                    "expert_load_view must be provided when enable_eplb is True")
             if logical_to_physical_map is None:
-                raise ValueError("logical_to_physical_map must be provided when enable_eplb is True")
+                raise ValueError(
+                    "logical_to_physical_map must be provided when enable_eplb is True")
             if logical_replica_count is None:
-                raise ValueError("logical_replica_count must be provided when enable_eplb is True")
+                raise ValueError(
+                    "logical_replica_count must be provided when enable_eplb is True")
             if not isinstance(layer, FusedMoE):
-                raise TypeError(f"Expected layer to be FusedMoE, but got {type(layer)}")
+                raise TypeError(
+                    f"Expected layer to be FusedMoE, but got {type(layer)}")
 
         return self.forward(
             x=x,
@@ -427,13 +431,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     ) -> torch.Tensor:
         if enable_eplb:
             if expert_load_view is None:
-                raise ValueError("expert_load_view must be provided when enable_eplb is True")
+                raise ValueError(
+                    "expert_load_view must be provided when enable_eplb is True")
             if logical_to_physical_map is None:
-                raise ValueError("logical_to_physical_map must be provided when enable_eplb is True")
+                raise ValueError(
+                    "logical_to_physical_map must be provided when enable_eplb is True")
             if logical_replica_count is None:
-                raise ValueError("logical_replica_count must be provided when enable_eplb is True")
+                raise ValueError(
+                    "logical_replica_count must be provided when enable_eplb is True")
             if not isinstance(layer, FusedMoE):
-                raise TypeError(f"Expected layer to be FusedMoE, but got {type(layer)}")
+                raise TypeError(
+                    f"Expected layer to be FusedMoE, but got {type(layer)}")
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -1424,10 +1432,10 @@ class FusedMoE(torch.nn.Module):
                     >= chunk_size)
             assert (self.batched_router_logits.size(0)  # type: ignore
                     >= chunk_size)
-            staged_hidden_states = self.batched_hidden_states[:
-                                                              chunk_size, :]  # type: ignore
-            staged_router_logits = self.batched_router_logits[:
-                                                              chunk_size, :]  # type: ignore
+            staged_hidden_states = self.batched_hidden_states[
+                :chunk_size, :]  # type: ignore
+            staged_router_logits = self.batched_router_logits[
+                :chunk_size, :]  # type: ignore
             staged_hidden_states.copy_(hidden_states, non_blocking=True)
             staged_router_logits.copy_(router_logits, non_blocking=True)
 
