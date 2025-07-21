@@ -456,7 +456,8 @@ class EngineArgs:
     kv_transfer_config: Optional[KVTransferConfig] = None
     kv_events_config: Optional[KVEventsConfig] = None
 
-    reasoning_config: Optional[ReasoningConfig] = None
+    reasoning_config: ReasoningConfig = get_field(VllmConfig,
+                                                  "reasoning_config")
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
