@@ -229,7 +229,6 @@ class SchedulerRunningOutputs:
 
     # Optimization for fast-access to seq_group lists
     decode_seq_groups_list: List[SequenceGroup]
-    prefill_seq_groups_list: List[SequenceGroup]
 
     @classmethod
     def create_empty(cls) -> "SchedulerRunningOutputs":
@@ -242,7 +241,6 @@ class SchedulerRunningOutputs:
             blocks_to_copy=[],
             num_lookahead_slots=0,
             decode_seq_groups_list=[],
-            prefill_seq_groups_list=[],
         )
 
 
