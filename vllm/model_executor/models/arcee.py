@@ -277,7 +277,7 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         # Initialize the inner Transformer model (ArceeModel)
         self.model = ArceeModel(vllm_config=vllm_config,
-                                prefix=f"{prefix}model")
+                                prefix=f"{prefix}.model")
         # On the last pipeline stage, set up the LM head and logits processor
         if get_pp_group().is_last_rank:
             # Determine vocabulary size (including any LoRA extra tokens
@@ -291,7 +291,7 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 padding_size=DEFAULT_VOCAB_PADDING_SIZE,
                 quant_config=vllm_config.quant_config,
                 bias=getattr(config, "lm_head_bias", False),
-                prefix=f"{prefix}lm_head",
+                prefix=f"{prefix}.lm_head",
             )
             if config.tie_word_embeddings:
                 # Tie output weights with input embedding matrix
