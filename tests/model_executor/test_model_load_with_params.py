@@ -32,8 +32,8 @@ def test_model_loading_with_params(vllm_runner):
         output = vllm_model.embed("Write a short story about a robot that"
                                   " dreams for the first time.\n")
 
-        model_config = vllm_model.model.llm_engine.model_config
-        model_tokenizer = vllm_model.model.llm_engine.tokenizer
+        model_config = vllm_model.llm.llm_engine.model_config
+        model_tokenizer = vllm_model.llm.llm_engine.tokenizer
 
         # asserts on the bert model config file
         assert model_config.encoder_config["max_seq_length"] == 512
@@ -49,7 +49,7 @@ def test_model_loading_with_params(vllm_runner):
 
         def check_model(model):
             assert isinstance(model, BertEmbeddingModel)
-            assert isinstance(model._pooler, CLSPool)
+            assert isinstance(model.pooler.pooling, CLSPool)
 
         vllm_model.apply_model(check_model)
 
@@ -70,8 +70,8 @@ def test_roberta_model_loading_with_params(vllm_runner):
         output = vllm_model.embed("Write a short story about a robot that"
                                   " dreams for the first time.\n")
 
-        model_config = vllm_model.model.llm_engine.model_config
-        model_tokenizer = vllm_model.model.llm_engine.tokenizer
+        model_config = vllm_model.llm.llm_engine.model_config
+        model_tokenizer = vllm_model.llm.llm_engine.tokenizer
 
         # asserts on the bert model config file
         assert model_config.encoder_config["max_seq_length"] == 512
@@ -87,7 +87,7 @@ def test_roberta_model_loading_with_params(vllm_runner):
 
         def check_model(model):
             assert isinstance(model, RobertaEmbeddingModel)
-            assert isinstance(model._pooler, MeanPool)
+            assert isinstance(model.pooler.pooling, MeanPool)
 
         vllm_model.apply_model(check_model)
 
@@ -108,13 +108,13 @@ def test_facebook_roberta_model_loading_with_params(vllm_runner):
         output = vllm_model.embed("Write a short story about a robot that"
                                   " dreams for the first time.\n")
 
-        model_tokenizer = vllm_model.model.llm_engine.tokenizer
+        model_tokenizer = vllm_model.llm.llm_engine.tokenizer
         assert model_tokenizer.tokenizer_id == model_name
 
         def check_model(model):
             assert isinstance(model, RobertaEmbeddingModel)
             assert not hasattr(model, "lm_head")
-            assert isinstance(model._pooler, CLSPool)
+            assert isinstance(model.pooler.pooling, CLSPool)
 
         vllm_model.apply_model(check_model)
 

@@ -55,14 +55,13 @@ class ServingScores(OpenAIServing):
         texts_1: list[str],
         texts_2: list[str],
         request: Union[RerankRequest, ScoreRequest],
-        request_id=str,
+        request_id: str,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[Union[LoRARequest, None]] = None,
         prompt_adapter_request: Optional[Union[PromptAdapterRequest,
                                                None]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-    ) -> list[PoolingRequestOutput]:
-
+    ) -> Union[list[PoolingRequestOutput], ErrorResponse]:
         input_texts = texts_1 + texts_2
 
         engine_prompts: list[TokensPrompt] = []
@@ -88,6 +87,11 @@ class ServingScores(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         pooling_params = request.to_pooling_params()
+
+        try:
+            pooling_params.verify("embed", self.model_config)
+        except ValueError as e:
+            return self.create_error_response(str(e))
 
         for i, engine_prompt in enumerate(engine_prompts):
 
@@ -169,14 +173,13 @@ class ServingScores(OpenAIServing):
         data_1: Union[list[str], list[ScoreContentPartParam]],
         data_2: Union[list[str], list[ScoreContentPartParam]],
         request: Union[RerankRequest, ScoreRequest],
-        request_id=str,
+        request_id: str,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[Union[LoRARequest, None]] = None,
         prompt_adapter_request: Optional[Union[PromptAdapterRequest,
                                                None]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-    ) -> list[PoolingRequestOutput]:
-
+    ) -> Union[list[PoolingRequestOutput], ErrorResponse]:
         request_prompts: list[str] = []
         engine_prompts: list[TokensPrompt] = []
 
@@ -245,7 +248,12 @@ class ServingScores(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        pooling_params = request.to_pooling_params(use_cross_encoder=True)
+        pooling_params = request.to_pooling_params()
+
+        try:
+            pooling_params.verify("score", self.model_config)
+        except ValueError as e:
+            return self.create_error_response(str(e))
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
@@ -286,8 +294,7 @@ class ServingScores(OpenAIServing):
         request_id: str,
         raw_request: Optional[Request] = None,
         truncate_prompt_tokens: Optional[int] = None,
-    ) -> list[PoolingRequestOutput]:
-
+    ) -> Union[list[PoolingRequestOutput], ErrorResponse]:
         (
             lora_request,
             prompt_adapter_request,
@@ -374,6 +381,8 @@ class ServingScores(OpenAIServing):
                 raw_request,
                 request.truncate_prompt_tokens,
             )
+            if isinstance(final_res_batch, ErrorResponse):
+                return final_res_batch
 
             return self.request_output_to_score_response(
                 final_res_batch,
@@ -420,6 +429,9 @@ class ServingScores(OpenAIServing):
                 raw_request,
                 request.truncate_prompt_tokens,
             )
+            if isinstance(final_res_batch, ErrorResponse):
+                return final_res_batch
+
             return self.request_output_to_rerank_response(
                 final_res_batch,
                 request_id,
