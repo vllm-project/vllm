@@ -172,11 +172,11 @@ First of all, please make sure the thread-binding and KV cache space are properl
 
 Inference batch size is a important parameter for the performance. Larger batch usually provides higher throughput, smaller batch provides lower latency. Tuning max batch size starts from default value to balance throughput and latency is an effective way to improve vLLM CPU performance on specific platforms. There are two important related parameters in vLLM:
 - `--max-num-batched-tokens`, defines the limit of token numbers in a single batch, has more impacts on the first token performance. The default value is set as:
-  - Offline Inference: `4096 * world_size`
-  - Online Serving: `2048 * world_size`
+    - Offline Inference: `4096 * world_size`
+    - Online Serving: `2048 * world_size`
 - `--max-num-seqs`, defines the limit of sequence numbers in a single batch, has more impacts on the output token performance.
-  - Offline Inference: `256 * world_size`
-  - Online Serving: `128 * world_size`
+    - Offline Inference: `256 * world_size`
+    - Online Serving: `128 * world_size`
 
 vLLM CPU supports tensor parallel (TP) and pipeline parallel (PP) to leverage multiple CPU sockets and memory nodes. For more detials of tuning TP and PP, please refer to [Optimization and Tuning](../../configuration/optimization.md). For vLLM CPU, it is recommend to use TP and PP togther if there are enough CPU sockets and memory nodes.
 
