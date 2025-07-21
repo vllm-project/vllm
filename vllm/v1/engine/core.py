@@ -195,7 +195,9 @@ class EngineCore:
                      "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
-    def add_request(self, request: Request):
+    def add_request(self, request: Union[EngineCoreRequest, Request]):
+        if type(request) is EngineCoreRequest:
+            request = self._preprocess_add_request(request)
         """Add request to the scheduler."""
         if pooling_params := request.pooling_params:
             supported_pooling_tasks = (
@@ -204,13 +206,13 @@ class EngineCore:
                 raise ValueError(f"Unsupported task: {pooling_params.task!r} "
                                  f"Supported tasks: {supported_pooling_tasks}")
 
-        if request.mm_hashes is not None:
+        if request.mm_hashes:
             # Here, if hash exists for a multimodal input, then it will be
             # fetched from the cache, else it will be added to the cache.
             # Note that the cache here is mirrored with the client cache, so
             # anything that has a hash must have a HIT cache entry here
             # as well.
-            assert request.mm_inputs is not None
+            assert request.mm_inputs
             updated_mm_inputs = self.mm_input_cache_server.get_and_update_p1(
                 request.mm_inputs, request.mm_hashes)
             assert isinstance(updated_mm_inputs, list)
@@ -388,6 +390,13 @@ class EngineCore:
     ) -> None:
         self.model_executor.save_tensorized_model(
             tensorizer_config=tensorizer_config, )
+
+    def _preprocess_add_request(self, request: EngineCoreRequest) -> Request:
+        """Preprocess the request.
+        
+        This function could be directly used in input processing thread to allow
+        request initialization running in parallel with Model forward"""
+        return Request.from_engine_core_request(request)
 
 
 class EngineCoreProc(EngineCore):
@@ -772,7 +781,7 @@ class EngineCoreProc(EngineCore):
                     # Deserialize the request data.
                     if request_type == EngineCoreRequestType.ADD:
                         request = add_request_decoder.decode(data_frames)
-                        request = self._post_process_add_request(request)
+                        request = self._preprocess_add_request(request)
                     else:
                         request = generic_decoder.decode(data_frames)
 
@@ -839,13 +848,6 @@ class EngineCoreProc(EngineCore):
                 elif len(reuse_buffers) < max_reuse_bufs:
                     # Limit the number of buffers to reuse.
                     reuse_buffers.append(buffer)
-
-    def _post_process_add_request(self, request: EngineCoreRequest) -> Request:
-        """Post-processes the request before reaching to EngineCore.
-        
-        This call would be executed in parallel with Model forward which
-        relaxes request preparation works out from critical path."""
-        return Request.from_engine_core_request(request)
 
 
 class DPEngineCoreProc(EngineCoreProc):
@@ -927,7 +929,7 @@ class DPEngineCoreProc(EngineCoreProc):
         if dp_group := getattr(self, "dp_group", None):
             stateless_destroy_torch_distributed_process_group(dp_group)
 
-    def add_request(self, request: Request):
+    def add_request(self, request: Union[EngineCoreRequest, Request]):
         if self.has_coordinator and request.current_wave != self.current_wave:
             if request.current_wave > self.current_wave:
                 self.current_wave = request.current_wave
