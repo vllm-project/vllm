@@ -475,22 +475,6 @@ def safetensors_weights_iterator(
                 param = f.get_tensor(name)
                 yield name, param
 
-
-def runai_safetensors_weights_iterator(
-    hf_weights_files: list[str],
-    use_tqdm_on_load: bool,
-) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Iterate over the weights in the model safetensor files."""
-    with SafetensorsStreamer() as streamer:
-        for st_file in tqdm(
-                hf_weights_files,
-                desc="Loading safetensors using Runai Model Streamer",
-                disable=not enable_tqdm(use_tqdm_on_load),
-                bar_format=_BAR_FORMAT,
-        ):
-            streamer.stream_file(st_file)
-            yield from streamer.get_tensors()
-
 def runai_safetensors_weights_iterator(
     hf_weights_files: List[str],
     use_tqdm_on_load: bool,
