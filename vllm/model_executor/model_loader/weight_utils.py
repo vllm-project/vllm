@@ -484,8 +484,8 @@ def runai_safetensors_weights_iterator(
         streamer.stream_files(hf_weights_files)
         total_tensors = sum(
             len(tensors_meta)
-            for tensors_meta in streamer.files_to_tensors_metadata.values()
-        )
+            for tensors_meta in streamer.files_to_tensors_metadata.values())
+
         tensor_iter = tqdm(
             streamer.get_tensors(),
             total=total_tensors,
