@@ -497,7 +497,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                     speculative_model="XiaomiMiMo/MiMo-7B-RL")
 }
 
-_TRANSFORMERS_MODELS = {
+_TRANSFORMERS_BACKEND_MODELS = {
     "TransformersForCausalLM": _HfExamplesInfo("ArthurZ/Ilama-3.2-1B", trust_remote_code=True),  # noqa: E501
     "TransformersForMultimodalLM": _HfExamplesInfo("OpenGVLab/InternVL3-1B-hf"),
 }
@@ -508,7 +508,7 @@ _EXAMPLE_MODELS = {
     **_SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS,
     **_MULTIMODAL_EXAMPLE_MODELS,
     **_SPECULATIVE_DECODING_EXAMPLE_MODELS,
-    **_TRANSFORMERS_MODELS,
+    **_TRANSFORMERS_BACKEND_MODELS,
 }
 
 
