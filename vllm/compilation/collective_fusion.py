@@ -635,6 +635,11 @@ class AllReduceFusionPass(VllmInductorPass):
                 "Flashinfer is not installed or comm module not found, "
                 "skipping allreduce fusion pass")
             return
+        if not current_platform.has_capability(90):
+            logger.warning(
+                "Flashinfer fusions are only available for sm90 and above, "
+                "skipping allreduce fusion pass")
+            return
         # Check if the world size is supported
         if self.tp_size not in _FI_MAX_SIZES:
             logger.warning(
