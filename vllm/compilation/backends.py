@@ -15,8 +15,7 @@ import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
-from vllm.config import (CompilationConfig, CUDAGraphMode,
-                         CUDAGraphRuntimeStyle, VllmConfig)
+from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
@@ -352,20 +351,19 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 static_graph_wrapper_class = resolve_obj_by_qualname(
                     current_platform.get_static_graph_wrapper_cls())
 
-                # Always assign PIECEWISE runtime style to the
+                # Always assign PIECEWISE runtime mode to the
                 # CUDAGraphWrapper for piecewise_backend, to distinguish
-                # it from the FULL cudagraph runtime style, no matter it
+                # it from the FULL cudagraph runtime mode, no matter it
                 # is wrapped on a full or piecewise fx graph.
                 self.module.__dict__[target] = static_graph_wrapper_class(
                     runnable=piecewise_backend,
                     vllm_config=self.vllm_config,
-                    runtime_style=CUDAGraphRuntimeStyle.PIECEWISE,
+                    runtime_mode=CUDAGraphMode.PIECEWISE,
                     graph_pool=self.graph_pool,
                     cudagraph_options=CUDAGraphOptions(
                         debug_log_enable=piecewise_backend.is_first_graph,
                         gc_disable=not piecewise_backend.is_first_graph,
-                        weak_ref_output=piecewise_backend.is_last_graph,
-                        usage_str="piecewise"))
+                        weak_ref_output=piecewise_backend.is_last_graph))
             else:
                 self.module.__dict__[target] = piecewise_backend
 

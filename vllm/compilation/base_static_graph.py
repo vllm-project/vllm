@@ -3,7 +3,7 @@
 
 from typing import Any, Callable, Protocol
 
-from vllm.config import CUDAGraphRuntimeStyle, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 
 
 class AbstractStaticGraphWrapper(Protocol):
@@ -13,7 +13,7 @@ class AbstractStaticGraphWrapper(Protocol):
     """
 
     def __init__(self, runnable: Callable, vllm_config: VllmConfig,
-                 runtime_style: CUDAGraphRuntimeStyle, graph_pool: Any,
+                 runtime_mode: CUDAGraphMode, graph_pool: Any,
                  **kwargs):
         """
         Initializes the StaticGraphWrapper class with graph capturing and
@@ -22,8 +22,10 @@ class AbstractStaticGraphWrapper(Protocol):
         Args:
             runnable (Callable): The callable to be wrapped and captured.
             vllm_config (VllmConfig): Global configuration for vLLM.
-            runtime_style (CUDAGraphRuntimeStyle): The style of the static
-                graph runtime. See CUDAGraphRuntimeStyle in vllm/config.py.
+            runtime_mode (CUDAGraphMode): The style of the static
+                graph runtime. See CUDAGraphMode in vllm/config.py.
+                Note that only the subset enum `NONE`, `PIECEWISE` and `FULL`
+                are used as concrete runtime mode for cudagraph dispatching.
             graph_pool (Any):
                 Graph memory pool handle, e.g.,
                     `torch.cuda.graph_pool_handle()`.
@@ -37,10 +39,10 @@ class AbstractStaticGraphWrapper(Protocol):
         """
         Executes the wrapped callable.
 
-        If the current CUDAGraphRuntimeStyle in the ForwardContext 
-        matches the runtime style of this instance, it replays the CUDAGraph 
-        or captures it using the callable if it hasn't been captured yet.  
-        Otherwise, it calls the original callable directly. 
+        If the current runtime mode in the ForwardContext matches the runtime
+        mode of this instance, it replays the CUDAGraph or captures it using
+        the callable if it hasn't been captured yet. Otherwise, it calls the
+        original callable directly.
 
         Args:
             *args: Variable length input arguments to be passed into the

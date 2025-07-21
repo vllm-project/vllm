@@ -10,8 +10,9 @@ import torch
 
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
-from vllm.config import CUDAGraphRuntimeStyle, VllmConfig
-from vllm.forward_context import get_forward_context
+from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
+from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.forward_context import get_forward_context, BatchDescriptor
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import weak_ref_tensors
@@ -21,7 +22,7 @@ logger = init_logger(__name__)
 
 @dataclasses.dataclass
 class CUDAGraphEntry:
-    runtime_shape: int
+    batch_descriptor: BatchDescriptor
     cudagraph: Optional[torch.cuda.CUDAGraph] = None
     output: Optional[Any] = None
 
@@ -35,7 +36,6 @@ class CUDAGraphOptions:
     debug_log_enable: bool = True
     gc_disable: bool = False
     weak_ref_output: bool = True
-    usage_str: Optional[str] = None  # For debug logging only
 
 
 class CUDAGraphWrapper:
@@ -47,59 +47,60 @@ class CUDAGraphWrapper:
     def __init__(self,
                  runnable: Callable,
                  vllm_config: VllmConfig,
-                 runtime_style: CUDAGraphRuntimeStyle,
+                 runtime_mode: CUDAGraphMode,
                  graph_pool: Any = None,
                  cudagraph_options: Optional[CUDAGraphOptions] = None):
         self.runnable = runnable
         self.vllm_config = vllm_config
         self.graph_pool = graph_pool
-        self.runtime_style = runtime_style
+        self.runtime_mode = runtime_mode
         self.compilation_config = vllm_config.compilation_config
 
         self.first_run_finished = False
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
 
-        # assert runtime_style is not NONE(no cudagraph), otherwise, we don't
+        # assert runtime_mode is not NONE(no cudagraph), otherwise, we don't
         # need to initialize a CUDAGraphWrapper.
-        assert self.runtime_style != CUDAGraphRuntimeStyle.NONE
+        assert self.runtime_mode != CUDAGraphMode.NONE
         if self.graph_pool is None:
             self.graph_pool = current_platform.get_global_graph_pool()
 
         if cudagraph_options is None:
             cudagraph_options = CUDAGraphOptions()
         self.cudagraph_options = cudagraph_options
-
-        self.cudagraph_capture_sizes: set[int] = set(
-            self.compilation_config.cudagraph_capture_sizes)
-        # the entries for different shapes that we need to capture cudagraph
-        self.concrete_cudagraph_entries: dict[int, CUDAGraphEntry] = {}
-
-        for shape in self.cudagraph_capture_sizes:
-            self.concrete_cudagraph_entries[shape] = CUDAGraphEntry(
-                runtime_shape=shape)
+        # the entries for different batch descriptors that we need to capture
+        # cudagraphs for.
+        self.concrete_cudagraph_entries: dict[BatchDescriptor, CUDAGraphEntry]\
+                                                                        = {}
+    
+    def __getattr__(self, key: str):
+        # allow accessing the attributes of the runnable.
+        if hasattr(self.runnable, key):
+            return getattr(self.runnable, key)
+        raise AttributeError(f"Attribute {key} not exists in the runnable of "
+                             f"cudagraph wrapper: {self.runnable}")
 
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
-        runtime_shape = forward_context.num_tokens
-        cudagraph_runtime_style = forward_context.cudagraph_runtime_style
+        batch_descriptor = forward_context.batch_descriptor
+        cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
 
-        if cudagraph_runtime_style == CUDAGraphRuntimeStyle.NONE or\
-                                                    runtime_shape is None:
-            # This could mean the profile run, a warmup run, or running
-            # without cudagraphs.
-            return self.runnable(*args, **kwargs)
-        if cudagraph_runtime_style != self.runtime_style:
-            # Only triggers capture/replay if the runtime style matches,
-            # otherwise, we fallback to the original runnable.
-            # This enables properly dispatching to the correct CUDAGraphWrapper
-            # when nesting multiple instances with different runtime styles.
+        if cudagraph_runtime_mode == CUDAGraphMode.NONE or \
+                            cudagraph_runtime_mode != self.runtime_mode:
+            # CUDAGraphMode.NONE could mean the profile run, a warmup run, or 
+            # running without cudagraphs.
+            # We do not trigger capture/replay if the runtime mode is not
+            # matches. This enables properly dispatching to the correct
+            # CUDAGraphWrapper when nesting multiple instances with different
+            # runtime modes.
             return self.runnable(*args, **kwargs)
 
-        if runtime_shape not in self.concrete_cudagraph_entries:
-            # we don't need to do anything for this shape.
-            return self.runnable(*args, **kwargs)
+        if batch_descriptor not in self.concrete_cudagraph_entries:
+            # create a new entry for this batch descriptor
+            self.concrete_cudagraph_entries[batch_descriptor] = \
+                CUDAGraphEntry(batch_descriptor=batch_descriptor)
 
-        entry = self.concrete_cudagraph_entries[runtime_shape]
+        entry = self.concrete_cudagraph_entries[batch_descriptor]
 
         if entry.cudagraph is None:
             if self.cudagraph_options.debug_log_enable:
@@ -107,9 +108,10 @@ class CUDAGraphWrapper:
                 # capturing is fast, we don't need to log it for every
                 # shape. E.g. we only log it for the first subgraph in
                 # piecewise mode.
-                logger.debug("Capturing a cudagraph of %s usage for shape %s",
-                             self.cudagraph_options.usage_str,
-                             entry.runtime_shape)
+                logger.debug("Capturing a cudagraph on %s",
+                             entry.batch_descriptor)
+            # validate that cudagraph capturing is legal at this point.
+            validate_cudagraph_capturing_enabled()
 
             input_addresses = [
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)

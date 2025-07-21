@@ -3929,18 +3929,16 @@ class CompilationLevel:
 
 
 class CUDAGraphMode(enum.Enum):
-    # constants for the config of the cudagraph mode.
+    """ Constants for the cudagraph mode in CompilationConfig.
+    Meanwhile, the subset enum `NONE`, `PIECEWISE` and `FULL` are also
+    treated as concrete runtime mode for cudagraph runtime dispatching.
+    """
     NONE = 0
     PIECEWISE = 1
     FULL = 2
 
 
-class CUDAGraphRuntimeStyle(enum.Enum):
-    # constants for concrete cudagraph runtime style, used for
-    # runtime dispatching.
-    NONE = 0
-    PIECEWISE = 1
-    FULL = 2
+
 
 
 @config

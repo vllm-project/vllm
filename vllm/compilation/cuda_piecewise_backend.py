@@ -10,7 +10,6 @@ import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.compilation.monitor import end_monitoring_torch_compile
 from vllm.config import VllmConfig
-from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -90,8 +89,6 @@ class PiecewiseBackend:
             return self.compiled_graph_for_general_shape(*args)
 
         runtime_shape = args[self.sym_shape_indices[0]]
-        if self.is_debugging_mode:
-            assert runtime_shape == get_forward_context().num_tokens
 
         if runtime_shape not in self.concrete_size_entries:
             # we don't need to do anything for this shape

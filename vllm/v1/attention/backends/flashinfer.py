@@ -230,6 +230,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
                  device: torch.device):
         self.device = device
+        self.vllm_config = vllm_config
+        self.cache_config = vllm_config.cache_config
+        self.kv_cache_spec = kv_cache_spec
         self._workspace_buffer = None
         self._prefill_wrapper = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
@@ -253,10 +256,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         # Global hyperparameters shared by all attention layers
         self.global_hyperparameters: Optional[PerLayerParameters] = None
-
-        self.vllm_config = vllm_config
-        self.cache_config = vllm_config.cache_config
-        self.kv_cache_spec = kv_cache_spec
 
         # Preparing persistent buffers
         self.paged_kv_indptr = torch.zeros(max_num_reqs + 1,
@@ -410,15 +409,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
 
             if num_decodes > 0:
-                pure_decode = self._num_prefills == 0
+                pure_decode = num_prefills == 0
                 # possible required padding for cudagraph replay
                 use_cudagraph = (self.enable_cuda_graph and pure_decode and \
-                        self._num_decodes <= self._decode_cudagraph_max_bs)
+                        num_decodes <= self._decode_cudagraph_max_bs)
                 if use_cudagraph:
                     num_input_tokens_decode = (
-                        self.vllm_config.pad_for_cudagraph(self._num_decodes))
+                        self.vllm_config.pad_for_cudagraph(num_decodes))
                 else:
-                    num_input_tokens_decode = self._num_decodes
+                    num_input_tokens_decode = num_decodes
 
                 attn_metadata.decode_wrapper = self._get_decode_wrapper(
                     num_input_tokens_decode, use_cudagraph)
@@ -578,11 +577,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         assert m.max_query_len == 1  # decode-only
 
-        # Update state usually set in reorder_batch.
-        self._num_decodes = m.num_reqs
-        self._num_decode_tokens = m.num_actual_tokens
-        self._num_prefills = 0
-        self._num_prefill_tokens = 0
         return self.build(0, m)
 
     def can_run_in_cudagraph(

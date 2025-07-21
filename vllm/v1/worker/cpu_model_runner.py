@@ -58,7 +58,6 @@ class CPUModelRunner(GPUModelRunner):
             self.model = self.load_lora_model(self.model, self.model_config,
                                               self.scheduler_config,
                                               self.lora_config, self.device)
-        self.cudagraph_dispatcher.after_load_model(self.model)
 
     def warming_up_model(self) -> None:
         logger.info("Warming up model for the compilation...")
