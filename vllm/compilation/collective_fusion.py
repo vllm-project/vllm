@@ -176,7 +176,7 @@ if flashinfer_comm is not None:
         use_flashinfer = allreduce_in.shape[0] * allreduce_in.shape[
             1] * allreduce_in.element_size() <= min(
                 _FI_MAX_SIZES[world_size],
-                max_token_num * allreduce_in.shape[0] *
+                max_token_num * allreduce_in.shape[1] *
                 allreduce_in.element_size(),
             )
         if use_flashinfer:
