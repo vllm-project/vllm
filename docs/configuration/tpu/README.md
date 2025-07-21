@@ -87,8 +87,9 @@ Although we try to have great default configs, we strongly recommend you check o
 
 #### **Profiling**
 
-The above auto tuner will produce a profile of the most optimized configs as a last step, however, we acknoledge interpreting the profile can be challenging for new users.We will expand on this section in the future, but feel free to read up on [how to collect a TPU profile](https://docs.vllm.ai/en/latest/examples/offline_inference/profiling_tpu.html) in the meantime natively in vLLM.
+The auto-tuner provides a profile of optimized configurations as its final step. However, interpreting this profile can be challenging for new users. We plan to expand this section in the future with more detailed guidance. In the meantime, you can learn how to collect a TPU profile using vLLM's native profiling tools [here](https://docs.vllm.ai/en/latest/examples/offline_inference/profiling_tpu.html). This profile can provide valuable insights into your workload's performance.
 
 #### **SPMD**
+More details to come.
 
 #### Want us to cover something that isn't listed here? Open up an issue please and cite this doc. We'd love to hear your questions or tips. 
