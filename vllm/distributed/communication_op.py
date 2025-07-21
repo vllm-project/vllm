@@ -11,9 +11,11 @@ from vllm.distributed.device_communicators.pynccl_allocator import (
 from .parallel_state import get_tp_group
 
 
-def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
+def tensor_model_parallel_all_reduce(
+    input_: torch.Tensor, output_: Optional[torch.Tensor] = None
+) -> torch.Tensor:
     """All-reduce the input tensor across model parallel group."""
-    return get_tp_group().all_reduce(input_)
+    return get_tp_group().all_reduce(input_, output_)
 
 
 def tensor_model_parallel_all_gather(input_: torch.Tensor,
@@ -54,3 +56,8 @@ def tensor_model_parallel_register_window(tensor: torch.Tensor):
 def tensor_model_parallel_deregister_window(window):
     get_tp_group().pynccl_comm.deregister_comm_window(window)
 
+
+def tensor_model_parallel_maybe_get_symm_buffer(shape, dtype):
+    # in case symm memory is available for this process group, we return a
+    # tensor in symm memory, otherwise we return a regular torch tensor.
+    return get_tp_group().maybe_get_symm_buffer(shape, dtype)

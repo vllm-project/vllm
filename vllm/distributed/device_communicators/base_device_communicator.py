@@ -108,7 +108,10 @@ class DeviceCommunicatorBase:
         self.use_all2all = "ep" in unique_name and use_ep
         self.all2all_manager: Optional[All2AllManagerBase] = None
 
-    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+    def all_reduce(
+        self, input_: torch.Tensor, output_: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        assert output_ is None, "output_ is not supported in the base class"
         dist.all_reduce(input_, group=self.device_group)
         return input_
 

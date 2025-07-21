@@ -92,7 +92,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             else:
                 raise ValueError(f"Unknown all2all backend: {all2all_backend}")
 
-    def all_reduce(self, input_):
+    def all_reduce(self, input_, output_=None):
+        print(f"all_reduce: {input_.shape}")
         # always try quick reduce first, then custom allreduce,
         # and then pynccl. (quick reduce just for ROCM MI3*)
         qr_comm = self.qr_comm
@@ -109,7 +110,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             return out
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
-        out = pynccl_comm.all_reduce(input_)
+        out = pynccl_comm.all_reduce(input_, output_)
         if out is None:
             # fall back to the default all-reduce using PyTorch.
             # this usually happens during testing.
@@ -275,3 +276,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
         assert self.all2all_manager is not None
         hidden_states = self.all2all_manager.combine(hidden_states)
         return hidden_states
+
+    def get_symm_buffer(self, shape, dtype):
+        with torch.cuda.use_mem_pool(get_nccl_mem_pool()):
+            new_buffer = torch.empty(shape, dtype=dtype, device=self.device)
+        return new_buffer
