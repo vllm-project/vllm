@@ -29,6 +29,7 @@ class NewRequestData:
     mm_positions: list[PlaceholderRange]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
+    block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
 
@@ -36,6 +37,7 @@ class NewRequestData:
     def from_request(
         cls,
         request: Request,
+        block_ids: tuple[list[int], ...],
     ) -> NewRequestData:
         return cls(
             req_id=request.request_id,
@@ -45,6 +47,7 @@ class NewRequestData:
             mm_positions=request.mm_positions,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
+            block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
         )
@@ -112,7 +115,7 @@ class SchedulerOutput:
     # list of the requests that are scheduled for the first time.
     # We cache the request's data in each worker process, so that we don't
     # need to re-send it every scheduling step.
-    new_name_scheduled_new_reqs: list[NewRequestData]
+    scheduled_new_reqs: list[NewRequestData]
     # list of the requests that have been scheduled before.
     # Since the request's data is already cached in the worker processes,
     # we only send the diff to minimize the communication cost.
@@ -134,7 +137,7 @@ class SchedulerOutput:
     scheduled_encoder_inputs: dict[str, list[int]]
     # Number of common prefix blocks for all requests in each KV cache group.
     # This can be used for cascade attention.
-    num_common_prefix_blocks: dict[int]
+    num_common_prefix_blocks: list[int]
 
     # Request IDs that are finished in between the previous and the current
     # steps. This is used to notify the workers about the finished requests
@@ -152,5 +155,3 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
-
-    new_fields: dict[str, object] = {}
