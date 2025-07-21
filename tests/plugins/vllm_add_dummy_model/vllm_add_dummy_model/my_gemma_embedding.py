@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.pooler import Pooler, PoolingType
+from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
 from vllm.model_executor.models.gemma2 import Gemma2Model
 from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.sequence import IntermediateTensors
@@ -26,12 +26,13 @@ class MyGemma2Embedding(nn.Module):
         self.model = Gemma2Model(vllm_config=vllm_config,
                                  prefix=maybe_prefix(prefix, "model"))
 
-        self.pooler = Pooler.from_config_with_defaults(
-            vllm_config.model_config.pooler_config,
-            pooling_type=PoolingType.LAST,
-            normalize=True,
-            softmax=False,
-        )
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+
+        self.pooler = DispatchPooler({
+            "encode": Pooler.for_encode(pooler_config),
+            "embed": Pooler.for_embed(pooler_config),
+        })
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
