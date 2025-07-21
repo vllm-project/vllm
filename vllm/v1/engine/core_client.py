@@ -900,10 +900,12 @@ class DPAsyncMPClient(AsyncMPClient):
             return
 
         assert self.stats_update_address is not None
-
-        assert len(self.engine_ranks_managed) > 1
-        start_idx = self.engine_ranks_managed[0]
-        end_idx = self.engine_ranks_managed[-1] + 1
+        assert len(self.engine_ranks_managed) > 0
+        # NOTE: running and waiting counts are all global from
+        # the Coordinator include all global EngineCores. This
+        # slice includes just the cores managed by this client.
+        count_slice = slice(self.engine_ranks_managed[0],
+                            self.engine_ranks_managed[-1] + 1)
 
         async def run_engine_stats_update_task():
             with make_zmq_socket(self.ctx, self.stats_update_address,
@@ -968,9 +970,7 @@ class DPAsyncMPClient(AsyncMPClient):
                     counts, wave, running = msgspec.msgpack.decode(buf)
                     self.current_wave = wave
                     self.engines_running = running
-                    # NOTE: counts include all global Cores. Slice
-                    # to get get the Core's managed by this client.
-                    self.lb_engines = counts[start_idx:end_idx]
+                    self.lb_engines = counts[count_slice]
 
         resources.stats_update_task = asyncio.create_task(
             run_engine_stats_update_task())
