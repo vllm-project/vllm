@@ -663,7 +663,6 @@ class StatLoggerManager:
 
         # For Prometheus, need to share the metrics between EngineCores.
         # Each EngineCore's metrics are expressed as a unique label.
-        print(f"{prometheus_factory=}")
         self.prometheus_logger = prometheus_factory(vllm_config, engine_idxs)
 
     def record(
