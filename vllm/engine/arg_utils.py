@@ -1434,11 +1434,6 @@ class EngineArgs:
             collect_detailed_traces=self.collect_detailed_traces,
         )
 
-        reasoning_config = None
-        if self.reasoning_config is not None:
-            reasoning_config_dict = json.loads(self.reasoning_config)
-            reasoning_config = ReasoningConfig(**reasoning_config_dict)
-
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1453,7 +1448,7 @@ class EngineArgs:
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
-            reasoning_config=reasoning_config,
+            reasoning_config=self.reasoning_config,
             additional_config=self.additional_config,
         )
 
