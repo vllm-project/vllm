@@ -482,5 +482,3 @@ class RocmPlatform(Platform):
     @classmethod
     def synchronize(cls):
         torch.cuda.synchronize()
-
-
