@@ -9,6 +9,7 @@ from vllm.utils import is_pin_memory_available
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words
+from vllm.v1.sample.ops.logprobs import batched_count_greater_than
 from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 
@@ -174,7 +175,7 @@ class Sampler(nn.Module):
         token_logprobs = logprobs.gather(-1, token_ids)
 
         # Compute the ranks of the actual token.
-        token_ranks = (logprobs >= token_logprobs).sum(-1)
+        token_ranks = batched_count_greater_than(logprobs, token_logprobs)
 
         # Concatenate together with the topk.
         indices = torch.cat((token_ids, topk_indices), dim=1)
