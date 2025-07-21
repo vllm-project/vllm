@@ -128,13 +128,14 @@ def torch_moe_align_block_size(
             expert_padded_counts[expert_id] = (
                 (original_count + block_size - 1) // block_size) * block_size
 
-    sorted_token_ids = torch.empty(
+    sorted_token_ids = torch.full(
         (max_num_tokens_padded, ),
+        topk_ids.numel(),
         dtype=torch.int32,
         device=topk_ids.device,
     )
     max_num_blocks = (max_num_tokens_padded + block_size - 1) // block_size
-    expert_ids = torch.empty(max_num_blocks,
+    expert_ids = torch.zeros(max_num_blocks,
                              dtype=torch.int32,
                              device=topk_ids.device)
 
