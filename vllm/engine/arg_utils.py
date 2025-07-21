@@ -1124,6 +1124,7 @@ class EngineArgs:
             self.data_parallel_rank = self.data_parallel_start_rank
         elif self.data_parallel_size_local is not None:
             data_parallel_size_local = self.data_parallel_size_local
+            self.data_parallel_rank = self.data_parallel_start_rank
         else:
             # Local DP size defaults to global DP size if not set.
             data_parallel_size_local = self.data_parallel_size
