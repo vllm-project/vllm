@@ -13,7 +13,8 @@ from threading import Thread
 from typing import Any, Optional, Union
 from uuid import uuid4
 
-import cpuinfo
+import cpuinfo.cpuinfo as _ci
+
 import psutil
 import requests
 import torch
@@ -192,7 +193,15 @@ class UsageMessage:
         self.platform = platform.platform()
         self.total_memory = psutil.virtual_memory().total
 
-        info = cpuinfo.get_cpu_info()
+        # avoids memprotect executable issues cpuid jit path
+        # (e.g. in docker, seccomp/AppArmor...)
+        _ci.CAN_CALL_CPUID_IN_SUBPROCESS = False
+        _ci.DataSource.can_cpuid = False
+
+        # don't call real cpu info to prevent sub-process from being spawned,
+        # which would loose our monkey patch
+        info = _ci._get_cpu_info_internal()
+        
         self.num_cpu = info.get("count", None)
         self.cpu_type = info.get("brand_raw", "")
         self.cpu_family_model_stepping = ",".join([
