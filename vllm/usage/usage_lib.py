@@ -14,6 +14,7 @@ from typing import Any, Optional, Union
 from uuid import uuid4
 
 import cpuinfo.cpuinfo as _ci
+.cpuinfo as _ci
 
 import psutil
 import requests
