@@ -171,6 +171,8 @@ _EMBEDDING_MODELS = {
     # input and output. I am adding it here because it piggy-backs on embedding
     # models for the time being.
     "PrithviGeoSpatialMAE": ("prithvi_geospatial_mae", "PrithviGeoSpatialMAE"),
+    # Multimodal embedding model with token-type-aware pooling
+    "JinaVLForEmbedding": ("jina_embeddings_v4", "JinaVLForEmbedding"),
 }
 
 _CROSS_ENCODER_MODELS = {

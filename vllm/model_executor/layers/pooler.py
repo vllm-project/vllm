@@ -17,6 +17,7 @@ from vllm.model_executor.pooling_metadata import (  # noqa: E501
 from vllm.model_executor.pooling_metadata import PoolingTensors
 from vllm.pooling_params import PoolingParams, PoolingTask
 from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils import resolve_obj_by_qualname
 from vllm.v1.pool.metadata import PoolingMetadata as V1PoolingMetadata
 
@@ -30,6 +31,7 @@ class PoolingType(IntEnum):
     CLS = 2
     STEP = 3
     MEAN = 4
+    VISION = 5
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,8 @@ class Pooler(nn.Module, ABC):
 
         if pooling_type == PoolingType.STEP:
             return StepPooler.from_config(resolved_config)
+        if pooling_type == PoolingType.VISION:
+            return VisionPooler.from_config(resolved_config)
 
         return SimplePooler.from_config(resolved_config)
 
@@ -656,6 +660,35 @@ PoolingFn = Callable[
 ClassifierFn = Callable[[torch.Tensor], torch.Tensor]
 
 
+if HAS_TRITON:
+
+    @triton.jit
+    def mean_pool_with_position_kernel(
+        hidden_states_ptr,
+        output_ptr,
+        seq_start,
+        seq_len,
+        hidden_size,
+        pool_start,
+        pool_end,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+
+        if pid >= hidden_size:
+            return
+
+        accumulator = 0.0
+        for i in range(pool_start, pool_end):
+            hidden_val = tl.load(hidden_states_ptr +
+                                 (seq_start + i) * hidden_size + pid)
+            accumulator += hidden_val
+
+        # Store mean pooled result
+        result = accumulator / (pool_end - pool_start)
+        tl.store(output_ptr + pid, result)
+
+
 class ClassifierPooler(nn.Module):
     """A pooling layer for classification tasks.
 
@@ -747,3 +780,62 @@ class ClassifierPooler(nn.Module):
             ])
 
         return build_output(scores)
+
+
+class VisionPooler(Pooler):
+
+    @classmethod
+    def from_config(cls, model_config: ModelConfig) -> "VisionPooler":
+        return cls(model_config)
+
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        self.config = config
+
+    def get_pooling_params(self, task: PoolingTask) -> Optional[PoolingParams]:
+        if task == "embed":
+            return PoolingParams(pooling_type="vision",
+                                 logits_processing_needs_token_ids=True)
+        return None
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> PoolerOutput:
+        assert isinstance(pooling_metadata, V1PoolingMetadata)
+
+        pooled_outputs = []
+        for i in range(len(pooling_metadata.prompt_lens)):
+            start_pos = (pooling_metadata.prompt_token_ids[i] ==
+                         self.config.hf_config.vision_start_token_id).
+                nonzero()[-1].item()
+            end_pos = (pooling_metadata.prompt_token_ids[i] ==
+                       self.config.hf_config.vision_end_token_id).
+                nonzero()[-1].item()
+
+            seq_start = torch.cumsum(
+                torch.tensor([0] + pooling_metadata.prompt_lens.tolist()),
+                dim=0)[i]
+            seq_len = pooling_metadata.prompt_lens[i]
+
+            output = torch.empty(self.config.hidden_size,
+                                 device=hidden_states.device,
+                                 dtype=hidden_states.dtype)
+
+            grid = lambda meta: (self.config.hidden_size, )
+            if HAS_TRITON:
+                mean_pool_with_position_kernel[grid](hidden_states, output,
+                                                     seq_start, seq_len,
+                                                     self.config.hidden_size,
+                                                     start_pos, end_pos + 1)
+            else:
+                # Fallback to PyTorch implementation if Triton is not available
+                vision_tokens_range = hidden_states[seq_start + start_pos : seq_start + end_pos + 1]
+                output = vision_tokens_range.mean(dim=0)
+
+            pooled_outputs.append(output)
+
+        return build_output(torch.stack(pooled_outputs))
+
+
