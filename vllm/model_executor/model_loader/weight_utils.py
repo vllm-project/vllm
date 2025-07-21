@@ -482,9 +482,13 @@ def runai_safetensors_weights_iterator(
     """Iterate over the weights in the model safetensor files."""
     with SafetensorsStreamer() as streamer:
         streamer.stream_files(hf_weights_files)
-
+        total_tensors = sum(
+            len(tensors_meta)
+            for tensors_meta in streamer.files_to_tensors_metadata.values()
+        )
         tensor_iter = tqdm(
             streamer.get_tensors(),
+            total=total_tensors,
             desc="Loading safetensors using Runai Model Streamer",
             bar_format=_BAR_FORMAT,
             disable=not use_tqdm_on_load,
