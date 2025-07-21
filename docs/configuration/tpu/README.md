@@ -4,7 +4,7 @@ This doc serves as a collection of handy tips for optimizing your vLLM on TPU wo
 
 ### **Get started**
 
-Looking for setup and installation instructions? Find them [here](https://vllm--19708.org.readthedocs.build/en/19708/getting_started/installation/google_tpu.html).
+Looking for setup and installation instructions? Find them [here](https://docs.vllm.ai/en/latest/getting_started/installation/google_tpu.html).
 
 ### **TPU workload sizing**
 
