@@ -4,7 +4,7 @@
 import dataclasses
 from abc import ABC, abstractmethod
 from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Type,
-                    TypeVar, get_args)
+                    TypeVar)
 
 import torch
 import torch.nn as nn
@@ -230,10 +230,7 @@ class ModelRunnerBase(ABC, Generic[T]):
         if not is_pooling_model(model):
             return []
 
-        return [
-            task for task in get_args(PoolingTask)
-            if model.pooler.get_pooling_updates(task)
-        ]
+        return list(model.pooler.get_supported_tasks())
 
     def execute_model(
         self,

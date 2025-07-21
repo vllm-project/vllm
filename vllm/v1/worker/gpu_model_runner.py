@@ -5,7 +5,7 @@ import copy
 import gc
 import time
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Optional, Union, cast, get_args
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 import numpy as np
 import torch
@@ -415,15 +415,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 generator = None
 
             if pooling_params:
-                assert pooling_params.task is not None, (
+                assert (task := pooling_params.task) is not None, (
                     "You did not set `task` in the API")
 
                 model = cast(VllmModelForPooling, self.model)
-                to_update = (model.pooler.get_pooling_updates(
-                    pooling_params.task))
-                assert to_update is not None, (
-                    f"{pooling_params.task=} is not supported by the model")
-
+                to_update = model.pooler.get_pooling_updates(task)
                 to_update.apply(pooling_params)
 
             self.requests[req_id] = CachedRequestState(
@@ -1122,10 +1118,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not is_pooling_model(model):
             return []
 
-        return [
-            task for task in get_args(PoolingTask)
-            if model.pooler.get_pooling_updates(task)
-        ]
+        return list(model.pooler.get_supported_tasks())
 
     def apply_grammar_bitmask(
         self,
@@ -2247,7 +2240,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dummy_pooling_params = PoolingParams(task=dummy_task)
 
         to_update = model.pooler.get_pooling_updates(dummy_task)
-        assert to_update is not None
         to_update.apply(dummy_pooling_params)
 
         dummy_metadata = PoolingMetadata(
@@ -2710,8 +2702,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # TODO: Support other attention modules, e.g., cross-attention
             if attn_module.attn_type == AttentionType.DECODER:
                 use_local_attention = (self.attention_chunk_size is not None
-                                       and getattr(attn_module.impl,
-                                                   "use_irope", False))
+                                       and attn_module.use_irope)
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
@@ -2724,13 +2715,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         "attention module can not be with ",
                         "both local attention and sliding window")
                 elif use_local_attention:
-                    kv_cache_spec[layer_name] = (ChunkedLocalAttentionSpec(
+                    kv_cache_spec[layer_name] = ChunkedLocalAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
                         attention_chunk_size=self.attention_chunk_size,
-                        use_mla=use_mla))
+                        use_mla=use_mla)
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
                         block_size=block_size,
