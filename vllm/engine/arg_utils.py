@@ -1639,13 +1639,14 @@ class EngineArgs:
 
         # cpu specific default values.
         if current_platform.is_cpu():
+            world_size = self.pipeline_parallel_size * self.tensor_parallel_size
             default_max_num_batched_tokens = {
-                UsageContext.LLM_CLASS: 4096,
-                UsageContext.OPENAI_API_SERVER: 2048,
+                UsageContext.LLM_CLASS: 4096 * world_size,
+                UsageContext.OPENAI_API_SERVER: 2048 * world_size,
             }
             default_max_num_seqs = {
-                UsageContext.LLM_CLASS: 128,
-                UsageContext.OPENAI_API_SERVER: 32,
+                UsageContext.LLM_CLASS: 256 * world_size,
+                UsageContext.OPENAI_API_SERVER: 128 * world_size,
             }
 
         use_context_value = usage_context.value if usage_context else None
