@@ -13,8 +13,7 @@ class AbstractStaticGraphWrapper(Protocol):
     """
 
     def __init__(self, runnable: Callable, vllm_config: VllmConfig,
-                 runtime_mode: CUDAGraphMode, graph_pool: Any,
-                 **kwargs):
+                 runtime_mode: CUDAGraphMode, graph_pool: Any, **kwargs):
         """
         Initializes the StaticGraphWrapper class with graph capturing and
         execution-related configurations.

@@ -25,9 +25,10 @@ if is_flash_attn_varlen_func_available():
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.utils import cdiv
-from vllm.v1.attention.backends.utils import (
-  AttentionCGSupport, AttentionMetadataBuilder,
-  CommonAttentionMetadata, get_kv_cache_layout)
+from vllm.v1.attention.backends.utils import (AttentionCGSupport,
+                                              AttentionMetadataBuilder,
+                                              CommonAttentionMetadata,
+                                              get_kv_cache_layout)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)

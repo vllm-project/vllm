@@ -45,8 +45,8 @@ from vllm.pooling_params import PoolingParams, PoolingTask
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        GiB_bytes, LazyLoader, check_use_alibi, get_dtype_size,
-                        is_pin_memory_available, round_up, cdiv)
+                        GiB_bytes, LazyLoader, cdiv, check_use_alibi,
+                        get_dtype_size, is_pin_memory_available, round_up)
 from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionBackend
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
@@ -1425,13 +1425,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
-        with set_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                num_tokens=num_input_tokens,
-                num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=cudagraph_runtime_mode,
-                batch_descriptor=batch_descriptor):
+        with set_forward_context(attn_metadata,
+                                 self.vllm_config,
+                                 num_tokens=num_input_tokens,
+                                 num_tokens_across_dp=num_tokens_across_dp,
+                                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                                 batch_descriptor=batch_descriptor):
             self.maybe_setup_kv_connector(scheduler_output)
             model_output = self.model(
                 input_ids=input_ids,
@@ -1896,11 +1895,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 old_global_expert_indices,
                 rank_mapping,
             )
-        
+
         # wrap the model with full cudagraph wrapper if needed.
         if self.compilation_config.cudagraph_mode not in [
-            CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE]:
-            self.model = CUDAGraphWrapper(self.model, self.vllm_config,
+                CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE
+        ]:
+            self.model = CUDAGraphWrapper(self.model,
+                                          self.vllm_config,
                                           runtime_mode=CUDAGraphMode.FULL)
 
     def save_tensorized_model(
@@ -2177,7 +2178,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if cudagraph_runtime_mode == CUDAGraphMode.NONE:
                 batch_descriptor = None
             else:
-                # filter out the vaild batch descriptor
+                # filter out the valid batch descriptor
                 _cg_style, batch_descriptor = \
                     self.cudagraph_dispatcher.dispatch(
                         BatchDescriptor(num_tokens=num_tokens,
@@ -2186,7 +2187,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 assert cudagraph_runtime_mode == _cg_style, (
                     f"Cudagraph runtime mode mismatch at dummy_run. "
                     f"Expected {_cg_style}, but got {cudagraph_runtime_mode}.")
-            
+
             with self.maybe_randomize_inputs(input_ids), set_forward_context(
                     attn_metadata,
                     self.vllm_config,
@@ -2483,9 +2484,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_num_tokens = self.scheduler_config.max_num_seqs * \
                         self.uniform_decode_query_len
                 decode_cudagraph_batch_sizes = [
-                    x for x in self.cudagraph_batch_sizes
-                    if x <= max_num_tokens and 
-                    x >= self.uniform_decode_query_len
+                    x for x in self.cudagraph_batch_sizes if
+                    x <= max_num_tokens and x >= self.uniform_decode_query_len
                 ]
                 compilation_cases_decode = list(
                     reversed(decode_cudagraph_batch_sizes))
@@ -2523,8 +2523,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 compilation_cases,
                 disable=not self.load_config.use_tqdm_on_load,
                 desc="Capturing CUDA graphs ({})".format(
-                    "decode" if is_uniform else
-                    "mixed prefill-decode"))
+                    "decode" if is_uniform else "mixed prefill-decode"))
         # We skip EPLB here since we don't want to record dummy metrics
         for num_tokens in compilation_cases:
             for _ in range(self.compilation_config.cudagraph_num_of_warmups):
@@ -2535,12 +2534,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # attention while `PIECEWISE` implies no attention.
                 force_attention = (
                     cudagraph_runtime_mode == CUDAGraphMode.FULL)
-                self._dummy_run(
-                    num_tokens,
-                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                    force_attention=force_attention,
-                    is_uniform=is_uniform,
-                    skip_eplb=True)
+                self._dummy_run(num_tokens,
+                                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                                force_attention=force_attention,
+                                is_uniform=is_uniform,
+                                skip_eplb=True)
             self._dummy_run(num_tokens,
                             cudagraph_runtime_mode=cudagraph_runtime_mode,
                             is_uniform=is_uniform,
@@ -2673,7 +2671,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         f"{attn_backend_i.__name__}, which support "
                         "cudagraph only for pure decode. Please include "
                         "attention ops in compilation_config.splitting_ops."
-                
+
                 # check if speculative decode is compatible for full cudagraph
                 if self.uniform_decode_query_len > 1:
                     assert attn_cg in [

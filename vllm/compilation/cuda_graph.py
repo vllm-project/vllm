@@ -12,7 +12,7 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.forward_context import get_forward_context, BatchDescriptor
+from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import weak_ref_tensors
@@ -72,7 +72,7 @@ class CUDAGraphWrapper:
         # cudagraphs for.
         self.concrete_cudagraph_entries: dict[BatchDescriptor, CUDAGraphEntry]\
                                                                         = {}
-    
+
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
         if hasattr(self.runnable, key):
@@ -87,7 +87,7 @@ class CUDAGraphWrapper:
 
         if cudagraph_runtime_mode == CUDAGraphMode.NONE or \
                             cudagraph_runtime_mode != self.runtime_mode:
-            # CUDAGraphMode.NONE could mean the profile run, a warmup run, or 
+            # CUDAGraphMode.NONE could mean the profile run, a warmup run, or
             # running without cudagraphs.
             # We do not trigger capture/replay if the runtime mode is not
             # matches. This enables properly dispatching to the correct
@@ -162,8 +162,7 @@ class CUDAGraphWrapper:
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
             ]
             assert new_input_addresses == entry.input_addresses, (
-                f"Input addresses for cudagraphs of "
-                f"{self.cudagraph_options.usage_str} are different "
+                f"Input addresses for cudagraphs are different "
                 f"during replay. Expected {entry.input_addresses}, "
                 f"got {new_input_addresses}")
 
