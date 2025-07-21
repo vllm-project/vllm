@@ -173,12 +173,14 @@ if flashinfer_comm is not None:
         max_token_num: int,
         norm_out: Optional[torch.Tensor] = None,
     ) -> None:
-        use_flashinfer = allreduce_in.shape[0] * allreduce_in.shape[
-            1] * allreduce_in.element_size() <= min(
-                _FI_MAX_SIZES[world_size],
-                max_token_num * allreduce_in.shape[1] *
-                allreduce_in.element_size(),
-            )
+
+        num_tokens, hidden_size = allreduce_in.shape
+        element_size = allreduce_in.element_size()
+        current_tensor_size = num_tokens * hidden_size * element_size
+        max_fusion_size = max_token_num * hidden_size * element_size
+        use_flashinfer = current_tensor_size <= min(_FI_MAX_SIZES[world_size],
+                                                    max_fusion_size)
+
         if use_flashinfer:
             assert (_FI_WORKSPACE_TENSOR is not None
                     ), "Flashinfer must be enabled when using flashinfer"
