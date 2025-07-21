@@ -274,7 +274,7 @@ def test_models_preemption_recompute(
     Tests that outputs are identical with and w/o preemptions (recompute).
     """
     with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-        scheduler = vllm_model.model.llm_engine.scheduler[0]
+        scheduler = vllm_model.llm.llm_engine.scheduler[0]
         scheduler.ENABLE_ARTIFICIAL_PREEMPT = True
         preempt_vllm_outputs = vllm_model.generate_greedy(
             example_prompts, max_tokens)

@@ -56,7 +56,7 @@ def vllm_reranker(
             mm_processor_kwargs=mm_processor_kwargs,
             limit_mm_per_prompt=limit_mm_per_prompt,
     ) as vllm_model:
-        outputs = vllm_model.model.score(query, documents)
+        outputs = vllm_model.llm.score(query, documents)
 
     return [output.outputs.score for output in outputs]
 
