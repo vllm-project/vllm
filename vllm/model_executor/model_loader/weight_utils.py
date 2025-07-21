@@ -494,8 +494,7 @@ def runai_safetensors_weights_iterator(
             disable=not use_tqdm_on_load,
         )
 
-        for name, tensor in tensor_iter:
-            yield name, tensor
+        yield from tensor_iter
 
 def fastsafetensors_weights_iterator(
     hf_weights_files: list[str],
