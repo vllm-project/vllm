@@ -336,10 +336,10 @@ async def test_customize_loggers(monkeypatch):
 
         await engine.do_log_stats()
 
-        stat_loggers = engine.logger_manager.per_engine_logger_dict[0]
+        stat_loggers = engine.logger_manager.per_engine_logger_dict
         assert len(stat_loggers) == 1
-        assert len(stat_loggers) == 1
-        stat_loggers.log.assert_called_once()
+        assert len(stat_loggers[0]) == 1
+        stat_loggers[0][0].log.assert_called_once()
 
 
 @pytest.mark.asyncio(scope="module")
