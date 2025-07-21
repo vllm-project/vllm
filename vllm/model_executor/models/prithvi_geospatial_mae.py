@@ -16,6 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only IBM/NASA Prithvi Geospatial model."""
+
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Optional, Union
 
@@ -80,7 +81,8 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
             pixel_values=MultiModalFieldConfig.shared(batch_size=1,
                                                       modality="image"),
             location_coords=MultiModalFieldConfig.shared(batch_size=1,
-                                                         modality="image"))
+                                                         modality="image"),
+        )
 
     def _get_prompt_updates(
         self,
@@ -104,13 +106,26 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
             mm_kwargs[k] = v
         mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
+        # This model receives in input a multi-dimensional tensor representing
+        # a single image patch and therefore it is not to be split
+        # into multiple elements, but rather to be considered a single one.
+        # Hence, the decision of using a MultiModalSharedField.
+        # The expected shape is (num_channels, width, height).
+
+        # This model however allows the user to also submit multiple image
+        # patches as a batch, adding a further dimension to the above shape.
+        # At this stage we only support submitting one patch per request and
+        # batching is achieved via vLLM batching.
+        # TODO (christian-pinto): enable support for multi patch requests
+        # in tandem with vLLM batching.
         multimodal_kwargs_items = [
             MultiModalKwargsItem.from_elems([
-                MultiModalFieldElem(modality="image",
-                                    key=key,
-                                    data=data,
-                                    field=MultiModalSharedField(1))
-                for key, data in mm_kwargs.items()
+                MultiModalFieldElem(
+                    modality="image",
+                    key=key,
+                    data=data,
+                    field=MultiModalSharedField(1),
+                ) for key, data in mm_kwargs.items()
             ])
         ]
 
@@ -127,7 +142,8 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
 @MULTIMODAL_REGISTRY.register_processor(
     PrithviGeoSpatialMAEMultiModalProcessor,
     info=PrithviGeoSpatialMAEProcessingInfo,
-    dummy_inputs=PrithviGeoSpatialMAEInputBuilder)
+    dummy_inputs=PrithviGeoSpatialMAEInputBuilder,
+)
 class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree,
                            SupportsMultiModalWithRawInput):
     """Prithvi Masked Autoencoder"""
@@ -142,10 +158,10 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree,
         raise ValueError("Only image modality is supported")
 
     def _instantiate_model(self, config: dict) -> Optional[nn.Module]:
-
         # We might be able/need to support different tasks with this same model
         if config["task_args"]["task"] == "SemanticSegmentationTask":
             from terratorch.cli_tools import SemanticSegmentationTask
+
             task = SemanticSegmentationTask(
                 config["model_args"],
                 config["task_args"]["model_factory"],
@@ -158,7 +174,8 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree,
                 scheduler_hparams=config["scheduler_params"],
                 plot_on_val=config["task_args"]["plot_on_val"],
                 freeze_decoder=config["task_args"]["freeze_decoder"],
-                freeze_backbone=config["task_args"]["freeze_backbone"])
+                freeze_backbone=config["task_args"]["freeze_backbone"],
+            )
 
             return task.model
         else:
@@ -182,7 +199,6 @@ class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree,
 
     def _parse_and_validate_multimodal_data(
             self, **kwargs) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-
         pixel_values = kwargs.pop("pixel_values", None)
         if not isinstance(pixel_values, torch.Tensor):
             raise ValueError(f"Incorrect type of pixel_values. "
