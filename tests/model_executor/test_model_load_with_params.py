@@ -29,8 +29,8 @@ def test_model_loading_with_params(vllm_runner):
                      revision=REVISION,
                      dtype="float16",
                      max_model_len=MAX_MODEL_LEN) as vllm_model:
-        output = vllm_model.encode("Write a short story about a robot that"
-                                   " dreams for the first time.\n")
+        output = vllm_model.embed("Write a short story about a robot that"
+                                  " dreams for the first time.\n")
 
         model_config = vllm_model.model.llm_engine.model_config
         model_tokenizer = vllm_model.model.llm_engine.tokenizer
@@ -67,8 +67,8 @@ def test_roberta_model_loading_with_params(vllm_runner):
                      revision=REVISION_ROBERTA,
                      dtype="float16",
                      max_model_len=MAX_MODEL_LEN) as vllm_model:
-        output = vllm_model.encode("Write a short story about a robot that"
-                                   " dreams for the first time.\n")
+        output = vllm_model.embed("Write a short story about a robot that"
+                                  " dreams for the first time.\n")
 
         model_config = vllm_model.model.llm_engine.model_config
         model_tokenizer = vllm_model.model.llm_engine.tokenizer
@@ -105,8 +105,8 @@ def test_facebook_roberta_model_loading_with_params(vllm_runner):
     with vllm_runner(model_name=model_name,
                      dtype="float16",
                      max_model_len=MAX_MODEL_LEN) as vllm_model:
-        output = vllm_model.encode("Write a short story about a robot that"
-                                   " dreams for the first time.\n")
+        output = vllm_model.embed("Write a short story about a robot that"
+                                  " dreams for the first time.\n")
 
         model_tokenizer = vllm_model.model.llm_engine.tokenizer
         assert model_tokenizer.tokenizer_id == model_name

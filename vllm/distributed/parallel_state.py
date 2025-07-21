@@ -240,6 +240,8 @@ class GroupCoordinator:
 
         if current_platform.is_cuda_alike():
             self.device = torch.device(f"cuda:{local_rank}")
+        elif current_platform.is_xpu():
+            self.device = torch.device(f"xpu:{local_rank}")
         elif current_platform.is_out_of_tree():
             self.device = torch.device(
                 f"{current_platform.device_name}:{local_rank}")
@@ -381,6 +383,12 @@ class GroupCoordinator:
                               dim: int) -> torch.Tensor:
         return self.device_communicator.all_gather(input_, dim)
 
+    def all_gatherv(self,
+                    input_: Union[torch.Tensor, list[torch.Tensor]],
+                    dim: int = 0,
+                    sizes: Optional[list[int]] = None):
+        return self.device_communicator.all_gatherv(input_, dim, sizes)
+
     def reduce_scatter(self,
                        input_: torch.Tensor,
                        dim: int = -1) -> torch.Tensor:
@@ -398,6 +406,12 @@ class GroupCoordinator:
                                                  group_name=self.unique_name)
         else:
             return self._reduce_scatter_out_place(input_, dim)
+
+    def reduce_scatterv(self,
+                        input_: torch.Tensor,
+                        dim: int = -1,
+                        sizes: Optional[list[int]] = None) -> torch.Tensor:
+        return self.device_communicator.reduce_scatterv(input_, dim, sizes)
 
     def _reduce_scatter_out_place(self, input_: torch.Tensor,
                                   dim: int) -> torch.Tensor:
@@ -802,6 +816,7 @@ class GroupCoordinator:
 
 
 _WORLD: Optional[GroupCoordinator] = None
+_NODE_COUNT: Optional[int] = None
 
 
 def get_world_group() -> GroupCoordinator:
@@ -961,10 +976,13 @@ def init_distributed_environment(
             local_rank = envs.LOCAL_RANK
         else:
             local_rank = rank
-    global _WORLD
+    global _WORLD, _NODE_COUNT
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(ranks, local_rank, backend)
+        _NODE_COUNT = _node_count(_WORLD.cpu_group)
+        logger.debug("Detected %d nodes in the distributed environment",
+                     _NODE_COUNT)
     else:
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size")
@@ -1164,6 +1182,13 @@ def get_tensor_model_parallel_rank():
     return get_tp_group().rank_in_group
 
 
+def get_node_count() -> int:
+    """Return the total number of nodes in the distributed environment. """
+    assert _NODE_COUNT is not None, (
+        "distributed environment is not initialized")
+    return _NODE_COUNT
+
+
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
     global _TP
@@ -1189,10 +1214,11 @@ def destroy_model_parallel():
 
 
 def destroy_distributed_environment():
-    global _WORLD
+    global _WORLD, _NODE_COUNT
     if _WORLD:
         _WORLD.destroy()
     _WORLD = None
+    _NODE_COUNT = None
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
 
@@ -1301,3 +1327,73 @@ def in_the_same_node_as(pg: Union[ProcessGroup, StatelessProcessGroup],
             aggregated_data += rank_data
 
     return [x == 1 for x in aggregated_data.tolist()]
+
+
+def is_global_first_rank() -> bool:
+    """
+    Check if the current process is the first rank globally across all
+    parallelism strategies (PP, TP, DP, EP, etc.).
+
+    Unlike group-specific checks like `get_tensor_model_parallel_rank() == 0`
+    or `get_pp_group().is_first_rank`, this function checks the global rank
+    across all parallelism dimensions.
+
+    Returns:
+        bool: True if this is the global first rank (rank 0), False otherwise.
+              Returns True if distributed is not initialized (single process).
+    """
+    try:
+        # If world group is available, use it for the most accurate check
+        global _WORLD
+        if _WORLD is not None:
+            return _WORLD.is_first_rank
+
+        # If torch distributed is not initialized, assume single process
+        if not torch.distributed.is_initialized():
+            return True
+
+        # Fallback to torch's global rank
+        return torch.distributed.get_rank() == 0
+
+    except Exception:
+        # If anything goes wrong, assume this is the first rank
+        return True
+
+
+def _node_count(pg: Union[ProcessGroup, StatelessProcessGroup]) -> int:
+    """
+    Returns the total number of nodes in the process group.
+
+    Args:
+        pg: The process group to analyze
+
+    Returns:
+        int: The total number of nodes
+    """
+    if isinstance(pg, ProcessGroup):
+        world_size = torch.distributed.get_world_size(group=pg)
+    else:
+        world_size = pg.world_size
+
+    if world_size == 1:
+        return 1
+
+    # Build node assignment map
+    node_assignment = [0] * world_size  # rank -> node_id
+    next_node_id = 0
+
+    for current_rank in range(world_size):
+        if node_assignment[current_rank] != 0:
+            continue  # Already assigned to a node
+
+        # Assign current rank to a new node
+        next_node_id += 1
+        node_assignment[current_rank] = next_node_id
+
+        # Find all ranks on the same node as current_rank
+        same_node_flags = in_the_same_node_as(pg, current_rank)
+        for other_rank, is_same_node in enumerate(same_node_flags):
+            if is_same_node and node_assignment[other_rank] == 0:
+                node_assignment[other_rank] = next_node_id
+
+    return next_node_id

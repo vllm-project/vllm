@@ -320,6 +320,8 @@ class RandomDataset(BenchmarkDataset):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
+        random.seed(self.random_seed)
+        np.random.seed(self.random_seed)
 
     def sample(
         self,
@@ -376,10 +378,11 @@ class RandomDataset(BenchmarkDataset):
             # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
             # To avoid uncontrolled change of the prompt length,
             # the encoded sequence is truncated before being decode again.
-            re_encoded_sequence = tokenizer.encode(
-                prompt, add_special_tokens=False)[:input_lens[i]]
-            prompt = tokenizer.decode(re_encoded_sequence)
             total_input_len = prefix_len + int(input_lens[i])
+            re_encoded_sequence = tokenizer.encode(
+                prompt, add_special_tokens=False)[:total_input_len]
+            prompt = tokenizer.decode(re_encoded_sequence)
+            total_input_len = len(re_encoded_sequence)
             requests.append(
                 SampleRequest(
                     prompt=prompt,
@@ -477,6 +480,11 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         default="random",
         choices=["sharegpt", "burstgpt", "sonnet", "random", "hf", "custom"],
         help="Name of the dataset to benchmark on.",
+    )
+    parser.add_argument(
+        "--no-stream",
+        action="store_true",
+        help="Do not load the dataset in streaming mode.",
     )
     parser.add_argument(
         "--dataset-path",
@@ -646,6 +654,9 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
         elif args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS:
             dataset_class = ASRDataset
             args.hf_split = "train"
+        elif args.dataset_path in MLPerfDataset.SUPPORTED_DATASET_PATHS:
+            dataset_class = MLPerfDataset
+            args.hf_split = "train"
         else:
             supported_datasets = set([
                 dataset_name for cls in HuggingFaceDataset.__subclasses__()
@@ -671,6 +682,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             dataset_subset=args.hf_subset,
             dataset_split=args.hf_split,
             random_seed=args.seed,
+            no_stream=args.no_stream,
         ).sample(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
@@ -692,7 +704,8 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                                     dataset_path=args.dataset_path).
             sample(tokenizer=tokenizer, num_requests=args.num_prompts),
             "random":
-            lambda: RandomDataset(dataset_path=args.dataset_path).sample(
+            lambda: RandomDataset(random_seed=args.seed,
+                                  dataset_path=args.dataset_path).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
                 prefix_len=args.random_prefix_len,
@@ -967,6 +980,7 @@ class HuggingFaceDataset(BenchmarkDataset):
         self,
         dataset_path: str,
         dataset_split: str,
+        no_stream: bool = False,
         dataset_subset: Optional[str] = None,
         **kwargs,
     ) -> None:
@@ -974,6 +988,7 @@ class HuggingFaceDataset(BenchmarkDataset):
 
         self.dataset_split = dataset_split
         self.dataset_subset = dataset_subset
+        self.load_stream = not no_stream
         self.load_data()
 
     def load_data(self) -> None:
@@ -982,7 +997,7 @@ class HuggingFaceDataset(BenchmarkDataset):
             self.dataset_path,
             name=self.dataset_subset,
             split=self.dataset_split,
-            streaming=True,
+            streaming=self.load_stream,
         )
         self.data = self.data.shuffle(seed=self.random_seed)
 
@@ -1433,5 +1448,84 @@ class ASRDataset(HuggingFaceDataset):
                 " what Whisper supports.",
                 skipped,
             )
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# MLPerf Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class MLPerfDataset(HuggingFaceDataset):
+    """
+    MLPerf Inference Dataset.
+
+    Dataset on HF:
+    https://huggingface.co/datasets/mgoin/mlperf-inference-llama2-data
+    https://huggingface.co/datasets/mgoin/mlperf-inference-llama3.1-data
+
+    Each record contains:
+      - "system_prompt": system role instruction.
+      - "question": user question.
+      - "output": reference answer.
+
+    We combine the system prompt and question into a chat-formatted prompt
+    (using the tokenizer's chat template) and set the expected output length to
+    the tokenized length of the provided reference answer.
+    """
+
+    SUPPORTED_DATASET_PATHS = {
+        "mgoin/mlperf-inference-llama2-data",
+        "mgoin/mlperf-inference-llama3.1-data",
+    }
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        # Force dynamic output length based on reference completion.
+        dynamic_output = output_len is None
+        sampled_requests: list[SampleRequest] = []
+
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+
+            system_prompt = item["system_prompt"]
+            question = item["question"]
+            reference_answer = item["output"]
+
+            # Build chat-style prompt using tokenizer template, if available.
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": question},
+            ]
+            prompt_formatted = tokenizer.apply_chat_template(
+                messages, add_generation_prompt=True, tokenize=False
+            )
+            prompt_len = len(tokenizer(prompt_formatted).input_ids)
+
+            # Determine output length from reference answer tokens.
+            ref_out_len = len(
+                tokenizer(reference_answer, add_special_tokens=False).input_ids
+            )
+            expected_output_len = ref_out_len if dynamic_output else output_len
+
+            # Validate sequence lengths.
+            if not is_valid_sequence(prompt_len, expected_output_len):
+                continue
+
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt_formatted,
+                    prompt_len=prompt_len,
+                    expected_output_len=expected_output_len,
+                )
+            )
+
         self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests

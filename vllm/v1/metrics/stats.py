@@ -40,6 +40,8 @@ class SchedulerStats:
 
     spec_decoding_stats: Optional[SpecDecodingStats] = None
 
+    num_corrupted_reqs: int = 0
+
 
 @dataclass
 class LoRAStats:
@@ -106,7 +108,6 @@ class IterationStats:
 
         self.num_generation_tokens += num_new_generation_tokens
         if is_prefilling:
-            assert num_new_generation_tokens > 0
             self.num_prompt_tokens += prompt_len
 
             first_token_latency = self._time_since(req_stats.arrival_time)

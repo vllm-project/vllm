@@ -98,7 +98,7 @@ def run_blip2(questions: list[str], modality: str) -> ModelRequestData:
     # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262 #noqa
     prompts = [f"Question: {question} Answer:" for question in questions]
     engine_args = EngineArgs(
-        model="Salesforce/blip2-opt-6.7b",
+        model="Salesforce/blip2-opt-2.7b",
         limit_mm_per_prompt={modality: 1},
     )
 
@@ -248,6 +248,42 @@ def run_glm4v(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# GLM-4.1V
+def run_glm4_1v(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "THUDM/GLM-4.1V-9B-Thinking"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        mm_processor_kwargs={
+            "size": {"shortest_edge": 12544, "longest_edge": 47040000},
+            "fps": 1,
+        },
+        limit_mm_per_prompt={modality: 1},
+        enforce_eager=True,
+    )
+
+    if modality == "image":
+        placeholder = "<|begin_of_image|><|image|><|end_of_image|>"
+    elif modality == "video":
+        placeholder = "<|begin_of_video|><|video|><|end_of_video|>"
+
+    prompts = [
+        (
+            "[gMASK]<sop><|system|>\nYou are a helpful assistant.<|user|>\n"
+            f"{placeholder}"
+            f"{question}<|assistant|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # H2OVL-Mississippi
 def run_h2ovl(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -390,6 +426,37 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
         engine_args=engine_args,
         prompts=prompts,
         stop_token_ids=stop_token_ids,
+    )
+
+
+# Keye-VL
+def run_keye_vl(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "Kwai-Keye/Keye-VL-8B-Preview"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        trust_remote_code=True,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    if modality == "image":
+        placeholder = "<|image_pad|>"
+    elif modality == "video":
+        placeholder = "<|video_pad|>"
+
+    prompts = [
+        (
+            f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+            f"{question}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
     )
 
 
@@ -610,6 +677,7 @@ def run_mistral3(questions: list[str], modality: str) -> ModelRequestData:
         max_num_seqs=2,
         tensor_parallel_size=2,
         limit_mm_per_prompt={modality: 1},
+        ignore_patterns=["consolidated.safetensors"],
     )
 
     prompts = [f"<s>[INST]{question}\n[IMG][/INST]" for question in questions]
@@ -903,7 +971,7 @@ def run_pixtral_hf(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# Qwen
+# Qwen-VL
 def run_qwen_vl(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
@@ -1040,6 +1108,37 @@ def run_qwen2_5_omni(questions: list[str], modality: str):
     )
 
 
+def run_tarsier2(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "omni-research/Tarsier2-Recap-7b"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        hf_overrides={"architectures": ["Tarsier2ForConditionalGeneration"]},
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    if modality == "image":
+        placeholder = "<|image_pad|>"
+    elif modality == "video":
+        placeholder = "<|video_pad|>"
+
+    prompts = [
+        (
+            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+            f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+            f"{question}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # SkyworkR1V
 def run_skyworkr1v(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1083,9 +1182,11 @@ model_example_map = {
     "fuyu": run_fuyu,
     "gemma3": run_gemma3,
     "glm4v": run_glm4v,
+    "glm4_1v": run_glm4_1v,
     "h2ovl_chat": run_h2ovl,
     "idefics3": run_idefics3,
     "internvl_chat": run_internvl,
+    "keye_vl": run_keye_vl,
     "kimi_vl": run_kimi_vl,
     "llava": run_llava,
     "llava-next": run_llava_next,
@@ -1112,6 +1213,7 @@ model_example_map = {
     "skywork_chat": run_skyworkr1v,
     "smolvlm": run_smolvlm,
     "tarsier": run_tarsier,
+    "tarsier2": run_tarsier2,
 }
 
 
@@ -1140,10 +1242,11 @@ def get_multi_modal_input(args):
     if args.modality == "video":
         # Input video and question
         video = VideoAsset(name="baby_reading", num_frames=args.num_frames).np_ndarrays
+        metadata = VideoAsset(name="baby_reading", num_frames=args.num_frames).metadata
         vid_questions = ["Why is this video funny?"]
 
         return {
-            "data": video,
+            "data": [(video, metadata)] if args.model_type == "glm4_1v" else video,
             "questions": vid_questions,
         }
 

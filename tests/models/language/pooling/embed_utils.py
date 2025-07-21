@@ -55,7 +55,7 @@ def correctness_test_embed_models(hf_runner,
                      task="embed",
                      max_model_len=None,
                      **vllm_extra_kwargs) as vllm_model:
-        vllm_outputs = vllm_model.encode(example_prompts)
+        vllm_outputs = vllm_model.embed(example_prompts)
 
     with hf_runner(
             model_info.name,

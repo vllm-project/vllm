@@ -6,6 +6,7 @@ import pytest
 from vllm.attention.layer import Attention
 from vllm.config import (CacheConfig, ModelConfig, SchedulerConfig, VllmConfig,
                          set_current_vllm_config)
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import (estimate_max_model_len,
@@ -71,6 +72,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
                 mm_hashes=[],
                 mm_positions=[],
                 sampling_params=SamplingParams(),
+                pooling_params=PoolingParams(),
                 block_ids=([0], ),  # block_ids should be tuple[list[int]]
                 num_computed_tokens=0,
                 lora_request=None,
@@ -80,7 +82,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
 
     return SchedulerOutput(
         scheduled_new_reqs=new_reqs,
-        scheduled_cached_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
         num_scheduled_tokens=num_scheduled_tokens,
         total_num_scheduled_tokens=total_num_scheduled_tokens,
         scheduled_spec_decode_tokens={},
@@ -159,7 +161,7 @@ def test_update_states_request_finished(model_runner):
     # finish req
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
-        scheduled_cached_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
         num_scheduled_tokens={},
         total_num_scheduled_tokens=0,
         scheduled_spec_decode_tokens={},
@@ -189,7 +191,7 @@ def test_update_states_request_resumed(model_runner):
     # unschedule req
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
-        scheduled_cached_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
         num_scheduled_tokens={},
         total_num_scheduled_tokens=0,
         scheduled_spec_decode_tokens={},
@@ -207,16 +209,16 @@ def test_update_states_request_resumed(model_runner):
 
     # resume req
     cached_req_data = CachedRequestData(
-        req_id=req_id,
-        resumed_from_preemption=False,
-        new_token_ids=[],
-        new_block_ids=([], ),
-        num_computed_tokens=0,
+        req_ids=[req_id],
+        resumed_from_preemption=[False],
+        new_token_ids=[[]],
+        new_block_ids=[([], )],
+        num_computed_tokens=[0],
     )
 
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
-        scheduled_cached_reqs=[cached_req_data],
+        scheduled_cached_reqs=cached_req_data,
         num_scheduled_tokens={req_id: 1},
         total_num_scheduled_tokens=1,
         scheduled_spec_decode_tokens={},
@@ -247,7 +249,7 @@ def test_update_states_no_changes(model_runner):
     # schedule req
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
-        scheduled_cached_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
         num_scheduled_tokens={req_id: 1},
         total_num_scheduled_tokens=1,
         scheduled_spec_decode_tokens={},
@@ -282,7 +284,7 @@ def test_update_states_request_unscheduled(model_runner):
     # unschedule req_1
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
-        scheduled_cached_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
         num_scheduled_tokens={req_ids[0]: 1},
         total_num_scheduled_tokens=1,
         scheduled_spec_decode_tokens={},
@@ -585,3 +587,17 @@ def test_init_kv_cache_with_kv_sharing_valid():
     assert len(kv_cache_config.kv_cache_groups[0].layer_names) == 2
     assert kv_cache_config.kv_cache_groups[0].layer_names[0] == layer_0
     assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
+
+
+def test_most_model_len(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_TPU_MOST_MODEL_LEN", "2048")
+    vllm_config = get_vllm_config()
+    vllm_config.model_config.max_model_len = 32000
+    vllm_config.scheduler_config.max_num_seqs = 1200
+    model_runner = get_model_runner(vllm_config)
+
+    # verify model runner will adjust num_reqs to avoid SMEM OOM.
+    assert model_runner.num_reqs_most_model_len == 1200
+    # num_page_per_req = 32k // 128
+    # num_reqs = 1024 ** 2 // 2 // num_page_per_req // 4 = 524
+    assert model_runner.num_reqs_max_model_len == 524

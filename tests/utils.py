@@ -818,14 +818,15 @@ def create_new_process_for_each_test(
 
     Args:
         method: The process creation method. Can be either "spawn" or "fork". 
-               If not specified,
-               it defaults to "spawn" on ROCm platforms and "fork" otherwise.
+               If not specified, it defaults to "spawn" on ROCm and XPU
+               platforms and "fork" otherwise.
 
     Returns:
         A decorator to run test functions in separate processes.
     """
     if method is None:
-        method = "spawn" if current_platform.is_rocm() else "fork"
+        use_spawn = current_platform.is_rocm() or current_platform.is_xpu()
+        method = "spawn" if use_spawn else "fork"
 
     assert method in ["spawn",
                       "fork"], "Method must be either 'spawn' or 'fork'"

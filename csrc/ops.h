@@ -167,6 +167,19 @@ void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
                         torch::Tensor const& seq_lens,
                         torch::Tensor const& page_table, double scale);
 
+void sm100_cutlass_mla_decode(
+    torch::Tensor const& out, torch::Tensor const& q_nope,
+    torch::Tensor const& q_pe, torch::Tensor const& kv_c_and_k_pe_cache,
+    torch::Tensor const& seq_lens, torch::Tensor const& page_table,
+    torch::Tensor const& workspace, double sm_scale,
+    int64_t num_kv_splits =
+        1 /* Set to 1 to avoid cuda_graph issue by default. */);
+
+int64_t sm100_cutlass_mla_get_workspace_size(
+    int64_t max_seq_len, int64_t num_batches, int64_t sm_count = 0,
+    int64_t num_kv_splits =
+        1 /* Set to 1 to avoid cuda_graph issue by default. */);
+
 torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
 #ifndef USE_ROCM
@@ -326,22 +339,6 @@ void selective_scan_fwd(const torch::Tensor& u, const torch::Tensor& delta,
                         const std::optional<torch::Tensor>& has_initial_state,
                         const torch::Tensor& ssm_states, int64_t pad_slot_id);
 
-void causal_conv1d_update(const at::Tensor& x, const at::Tensor& conv_state,
-                          const at::Tensor& weight,
-                          const std::optional<at::Tensor>& bias_,
-                          bool silu_activation,
-                          const std::optional<at::Tensor>& cache_seqlens_,
-                          const std::optional<at::Tensor>& conv_state_indices_,
-                          int64_t pad_slot_id);
-
-void causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
-                       const std::optional<at::Tensor>& bias_,
-                       const std::optional<at::Tensor>& conv_states,
-                       const std::optional<at::Tensor>& query_start_loc,
-                       const std::optional<at::Tensor>& cache_indices,
-                       const std::optional<at::Tensor>& has_initial_state,
-                       bool silu_activation, int64_t pad_slot_id);
-
 using fptr_t = int64_t;
 fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,
                       torch::Tensor& rank_data, int64_t rank,
@@ -360,3 +357,14 @@ std::tuple<int64_t, torch::Tensor> allocate_shared_buffer_and_handle(
     int64_t size);
 int64_t open_mem_handle(torch::Tensor& mem_handle);
 void free_shared_buffer(int64_t buffer);
+
+#ifdef USE_ROCM
+fptr_t init_custom_qr(int64_t rank, int64_t world_size,
+                      std::optional<int64_t> qr_max_size = std::nullopt);
+void qr_destroy(fptr_t _fa);
+torch::Tensor qr_get_handle(fptr_t _fa);
+void qr_open_handles(fptr_t _fa, const std::vector<torch::Tensor>& handles);
+void qr_all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
+                   int64_t quant_level, bool cast_bf2half = false);
+int64_t qr_max_size();
+#endif

@@ -23,9 +23,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Rotary Positional Embeddings."""
+import itertools
 import math
 from typing import Any, Optional, Union
 
+import numpy as np
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
@@ -521,6 +523,41 @@ class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
             (self.scaling_factor * max_len / self.max_position_embeddings) -
             (self.scaling_factor - 1))**(self.rotary_dim /
                                          (self.rotary_dim - 2))
+        inv_freq = self._compute_inv_freq(base)
+        t = torch.arange(max_len, dtype=torch.float)
+
+        freqs = torch.einsum("i,j -> ij", t, inv_freq)
+        cos = freqs.cos()
+        sin = freqs.sin()
+        cache = torch.cat((cos, sin), dim=-1)
+        return cache
+
+
+class DynamicNTKAlphaRotaryEmbedding(RotaryEmbedding):
+    """RotaryEmbedding extended with Dynamic NTK alpha.
+
+    Based on the original RotaryEmbedding implementation.
+    """
+
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: float,
+        is_neox_style: bool,
+        scaling_alpha: float,
+        dtype: torch.dtype,
+    ) -> None:
+        self.scaling_alpha = scaling_alpha
+        super().__init__(head_size, rotary_dim, max_position_embeddings, base,
+                         is_neox_style, dtype)
+
+    def _compute_cos_sin_cache(self) -> torch.Tensor:
+        # For Hunyuan DynamicNTKAlphaRotaryEmbedding
+        max_len = self.max_position_embeddings
+        base = self.base * self.scaling_alpha**(self.rotary_dim /
+                                                (self.rotary_dim - 2))
         inv_freq = self._compute_inv_freq(base)
         t = torch.arange(max_len, dtype=torch.float)
 
@@ -1117,6 +1154,15 @@ class MRotaryEmbedding(RotaryEmbedding):
                 audio_feature_lengths=audio_feature_lengths,
                 use_audio_in_video=use_audio_in_video,
             )
+        elif "glm4v" in hf_config.model_type:
+            return cls._glm4v_get_input_positions_tensor(
+                input_tokens=input_tokens,
+                hf_config=hf_config,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                context_len=context_len,
+                seq_len=seq_len,
+            )
         else:
             return cls._vl_get_input_positions_tensor(
                 input_tokens=input_tokens,
@@ -1127,6 +1173,115 @@ class MRotaryEmbedding(RotaryEmbedding):
                 context_len=context_len,
                 seq_len=seq_len,
             )
+
+    @classmethod
+    def _glm4v_get_input_positions_tensor(
+        cls,
+        input_tokens: list[int],
+        hf_config: PretrainedConfig,
+        image_grid_thw: Union[list[list[int]], torch.Tensor],
+        video_grid_thw: Union[list[list[int]], torch.Tensor],
+        context_len: int = 0,
+        seq_len: Optional[int] = None,
+    ) -> tuple[torch.Tensor, int]:
+        """Get mrope input positions and delta value for GLM4V."""
+
+        image_token_id = hf_config.image_token_id
+        video_start_token_id = hf_config.video_start_token_id
+        video_end_token_id = hf_config.video_end_token_id
+        spatial_merge_size = hf_config.vision_config.spatial_merge_size
+        llm_pos_ids_list: list = []
+
+        if not (image_grid_thw is None and video_grid_thw is None):
+            if isinstance(image_grid_thw, torch.Tensor):
+                image_grid_thw = image_grid_thw.tolist()
+
+            input_token_type: list[str] = []
+            video_check_flg = False
+            for token in input_tokens:
+                if token == video_start_token_id:
+                    video_check_flg = True
+                elif token == video_end_token_id:
+                    video_check_flg = False
+
+                if (token == image_token_id) and (video_check_flg is False):
+                    input_token_type.append("image")
+                elif (token == image_token_id) and (video_check_flg is True):
+                    input_token_type.append("video")
+                else:
+                    input_token_type.append("text")
+
+            input_type_group: list[tuple[str, int, int]] = []
+            for key, group_iter in itertools.groupby(
+                    enumerate(input_token_type), lambda x: x[1]):
+                group_list = list(group_iter)
+                start_index = group_list[0][0]
+                end_index = group_list[-1][0] + 1
+                input_type_group.append((key, start_index, end_index))
+
+            video_frame_num = 1
+            mm_data_idx = 0
+            for modality_type, start_idx, end_idx in input_type_group:
+                st_idx = llm_pos_ids_list[-1].max() + 1 if len(
+                    llm_pos_ids_list) > 0 else 0
+                if modality_type == "image":
+                    t, h, w = (
+                        image_grid_thw[mm_data_idx][0],
+                        image_grid_thw[mm_data_idx][1],
+                        image_grid_thw[mm_data_idx][2],
+                    )
+                    llm_grid_t, llm_grid_h, llm_grid_w = \
+                        t, h // spatial_merge_size, w // spatial_merge_size
+
+                    t_index = torch.arange(llm_grid_t).view(-1, 1).expand(
+                        -1, llm_grid_h * llm_grid_w).flatten()
+                    h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(
+                        llm_grid_t, -1, llm_grid_w).flatten()
+                    w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(
+                        llm_grid_t, llm_grid_h, -1).flatten()
+                    llm_pos_ids_list.append(
+                        torch.stack([t_index, h_index, w_index]) + st_idx)
+                    mm_data_idx += 1
+
+                elif modality_type == "video":
+                    t, h, w = (
+                        video_frame_num,
+                        image_grid_thw[mm_data_idx][1],
+                        image_grid_thw[mm_data_idx][2],
+                    )
+                    llm_grid_t, llm_grid_h, llm_grid_w = \
+                        t, h // spatial_merge_size, w // spatial_merge_size
+
+                    for t_idx in range(llm_grid_t):
+                        t_index = torch.tensor(t_idx).view(-1, 1).expand(
+                            -1, llm_grid_h * llm_grid_w).flatten()
+                        h_index = torch.arange(llm_grid_h).view(
+                            1, -1, 1).expand(1, -1, llm_grid_w).flatten()
+                        w_index = torch.arange(llm_grid_w).view(
+                            1, 1, -1).expand(1, llm_grid_h, -1).flatten()
+                        llm_pos_ids_list.append(
+                            torch.stack([t_index, h_index, w_index]) + st_idx)
+
+                    mm_data_idx += 1
+                    video_frame_num += 1
+
+                else:
+                    text_len = end_idx - start_idx
+                    llm_pos_ids_list.append(
+                        torch.arange(text_len).view(1, -1).expand(3, -1) +
+                        st_idx)
+                    video_frame_num = 1
+
+        else:
+            text_len = len(input_tokens)
+            llm_pos_ids_list.append(
+                torch.arange(text_len).view(1, -1).expand(3, -1))
+
+        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+        llm_positions = llm_positions[:, context_len:seq_len]
+        mrope_position_delta = (llm_positions.max() + 1 -
+                                len(input_tokens)).item()
+        return llm_positions, mrope_position_delta
 
     @classmethod
     def _vl_get_input_positions_tensor(
@@ -1458,15 +1613,14 @@ class MRotaryEmbedding(RotaryEmbedding):
         ]
 
     @staticmethod
-    def get_next_input_positions_tensor(
-        mrope_position_delta: int,
-        context_len: int,
-        seq_len: int,
-    ) -> torch.Tensor:
-        return torch.arange(
-            mrope_position_delta + context_len,
-            mrope_position_delta + seq_len,
-        ).expand(3, -1)
+    def get_next_input_positions_tensor(out: np.ndarray, out_offset: int,
+                                        mrope_position_delta: int,
+                                        context_len: int, num_new_tokens: int):
+
+        values = np.arange(mrope_position_delta + context_len,
+                           mrope_position_delta + context_len + num_new_tokens,
+                           dtype=out.dtype)
+        out[:, out_offset:out_offset + num_new_tokens] = values
 
     @classmethod
     def omni_get_updates_use_audio_in_video(
@@ -1809,10 +1963,19 @@ def get_rope(
                                                    scaling_factor, dtype,
                                                    mixed_b)
         elif scaling_type == "dynamic":
-            scaling_factor = rope_scaling["factor"]
-            rotary_emb = DynamicNTKScalingRotaryEmbedding(
-                head_size, rotary_dim, max_position, base, is_neox_style,
-                scaling_factor, dtype)
+            if "alpha" in rope_scaling:
+                scaling_alpha = rope_scaling["alpha"]
+                rotary_emb = DynamicNTKAlphaRotaryEmbedding(
+                    head_size, rotary_dim, max_position, base, is_neox_style,
+                    scaling_alpha, dtype)
+            elif "factor" in rope_scaling:
+                scaling_factor = rope_scaling["factor"]
+                rotary_emb = DynamicNTKScalingRotaryEmbedding(
+                    head_size, rotary_dim, max_position, base, is_neox_style,
+                    scaling_factor, dtype)
+            else:
+                raise ValueError("Dynamic rope scaling must contain either "
+                                 "'alpha' or 'factor' field")
         elif scaling_type == "yarn":
             scaling_factor = rope_scaling["factor"]
             original_max_position = rope_scaling[

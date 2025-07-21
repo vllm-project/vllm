@@ -15,7 +15,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
 from vllm.platforms import current_platform
 
-MIN_IPEX_VERSION = "2.7.0"
+MIN_IPEX_VERSION = "2.6.0"
 
 
 class IPEXConfig(QuantizationConfig):

@@ -47,7 +47,10 @@ class MultiConnector(KVConnectorBase_V1):
         assert ktcs is not None
         for ktc in ktcs:
             temp_config = copy.copy(vllm_config)
-            temp_config.kv_transfer_config = KVTransferConfig(**ktc)
+            engine_id = ktc.get("engine_id",
+                                vllm_config.kv_transfer_config.engine_id)
+            temp_config.kv_transfer_config = KVTransferConfig(
+                **ktc, engine_id=engine_id)
             self._connectors.append(
                 KVConnectorFactory.create_connector_v1(temp_config, role))
 
@@ -187,7 +190,7 @@ class MultiConnector(KVConnectorBase_V1):
                 async_saves += 1
             if txfer_params is not None:
                 if kv_txfer_params is not None:
-                    #TODO we can probably change this to merge the dicts here,
+                    # TODO we can probably change this to merge the dicts here,
                     # checking for key clashes.
                     raise RuntimeError(
                         "Only one connector can produce KV transfer params")

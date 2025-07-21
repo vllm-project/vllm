@@ -18,7 +18,7 @@ from vllm.model_executor.model_loader.sharded_state_loader import (
     ShardedStateLoader)
 from vllm.model_executor.model_loader.tensorizer_loader import TensorizerLoader
 from vllm.model_executor.model_loader.utils import (
-    get_architecture_class_name, get_model_architecture)
+    get_architecture_class_name, get_model_architecture, get_model_cls)
 
 
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
@@ -65,6 +65,7 @@ __all__ = [
     "get_model_loader",
     "get_architecture_class_name",
     "get_model_architecture",
+    "get_model_cls",
     "BaseModelLoader",
     "BitsAndBytesModelLoader",
     "GGUFModelLoader",

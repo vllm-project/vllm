@@ -3,8 +3,9 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Optional, TypedDict, Union
+from typing import Optional, TypedDict, Union, cast
 
+import numpy as np
 import torch
 from torch import nn
 from transformers import (BatchFeature, WhisperConfig, WhisperFeatureExtractor,
@@ -12,8 +13,10 @@ from transformers import (BatchFeature, WhisperConfig, WhisperFeatureExtractor,
 from transformers.models.whisper.modeling_whisper import sinusoids
 
 from vllm.attention import Attention, AttentionType
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import (CacheConfig, ModelConfig, SpeechToTextConfig,
+                         VllmConfig)
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -33,6 +36,7 @@ from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.transformers_utils.processor import cached_get_processor
 
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
                          SupportsTranscription, SupportsV0Only)
@@ -40,6 +44,113 @@ from .utils import (AutoWeightsLoader, WeightsMapper, cast_overflow_tensors,
                     make_layers)
 
 logger = init_logger(__name__)
+
+# From https://platform.openai.com/docs/guides/speech-to-text/supported-languages
+
+ISO639_1_SUPPORTED_LANGS = {
+    "af": "Afrikaans",
+    "ar": "Arabic",
+    "hy": "Armenian",
+    "az": "Azerbaijani",
+    "be": "Belarusian",
+    "bs": "Bosnian",
+    "bg": "Bulgarian",
+    "ca": "Catalan",
+    "zh": "Chinese",
+    "hr": "Croatian",
+    "cs": "Czech",
+    "da": "Danish",
+    "nl": "Dutch",
+    "en": "English",
+    "et": "Estonian",
+    "fi": "Finnish",
+    "fr": "French",
+    "gl": "Galician",
+    "de": "German",
+    "el": "Greek",
+    "he": "Hebrew",
+    "hi": "Hindi",
+    "hu": "Hungarian",
+    "is": "Icelandic",
+    "id": "Indonesian",
+    "it": "Italian",
+    "ja": "Japanese",
+    "kn": "Kannada",
+    "kk": "Kazakh",
+    "ko": "Korean",
+    "lv": "Latvian",
+    "lt": "Lithuanian",
+    "mk": "Macedonian",
+    "ms": "Malay",
+    "mr": "Marathi",
+    "mi": "Maori",
+    "ne": "Nepali",
+    "no": "Norwegian",
+    "fa": "Persian",
+    "pl": "Polish",
+    "pt": "Portuguese",
+    "ro": "Romanian",
+    "ru": "Russian",
+    "sr": "Serbian",
+    "sk": "Slovak",
+    "sl": "Slovenian",
+    "es": "Spanish",
+    "sw": "Swahili",
+    "sv": "Swedish",
+    "tl": "Tagalog",
+    "ta": "Tamil",
+    "th": "Thai",
+    "tr": "Turkish",
+    "uk": "Ukrainian",
+    "ur": "Urdu",
+    "vi": "Vietnamese",
+    "cy": "Welsh"
+}
+ISO639_1_OTHER_LANGS = {
+    "lo": "Lao",
+    "jw": "Javanese",
+    "tk": "Turkmen",
+    "yi": "Yiddish",
+    "so": "Somali",
+    "bn": "Bengali",
+    "nn": "Norwegian Nynorsk",
+    "si": "Sinhala",
+    "yo": "Yoruba",
+    "sa": "Sanskrit",
+    "mi": "Māori",
+    "fo": "Faroese",  # codespell:ignore
+    "mt": "Maltese",
+    "tg": "Tajik",
+    "mg": "Malagasy",
+    "haw": "Hawaiian",
+    "km": "Khmer",
+    "br": "Breton",
+    "ps": "Pashto",
+    "ln": "Lingala",
+    "la": "Latin",
+    "ml": "Malayalam",
+    "sq": "Albanian",
+    "su": "Sundanese",
+    "eu": "Basque",
+    "ka": "Georgian",
+    "uz": "Uzbek",
+    "sn": "Shona",
+    "ht": "Haitian",
+    "as": "Assamese",
+    "mn": "Mongolian",
+    "te": "Telugu",
+    "pa": "Panjabi",
+    "tt": "Tatar",
+    "gu": "Gujarati",
+    "oc": "Occitan",
+    "ha": "Hausa",
+    "ba": "Bashkir",
+    "my": "Burmese",
+    "sd": "Sindhi",
+    "am": "Amharic",
+    "lb": "Luxembourgish",
+    "bo": "Tibetan"
+}
 
 
 class WhisperAudioInputs(TypedDict):
@@ -527,7 +638,14 @@ class WhisperProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self,
                          sampling_rate: Optional[int] = None
                          ) -> WhisperProcessor:
-        return self.ctx.get_hf_processor(WhisperProcessor)
+        # HACK: Transformers 4.53.0 has issue with whisper tokenizer to
+        # initialize processor. We use a monkeypatch to fix it here.
+        # See: https://github.com/vllm-project/vllm/issues/20224
+        processor_class = WhisperProcessor
+        tokenizer_class = ("WhisperTokenizer", "WhisperTokenizerFast")
+        if processor_class.tokenizer_class != tokenizer_class:
+            processor_class.tokenizer_class = tokenizer_class
+        return self.ctx.get_hf_processor(processor_class)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": 1}
@@ -593,9 +711,10 @@ class WhisperMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
-            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
+            feature_extractor = self.info.get_feature_extractor()
             mm_data = dict(audio=mm_data.pop("audios"))
             mm_kwargs = dict(
                 **mm_kwargs,
@@ -605,6 +724,7 @@ class WhisperMultiModalProcessor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
         if "labels" in processed_outputs:
             processed_outputs["input_ids"] = processed_outputs.pop("labels")
@@ -651,6 +771,76 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         ".fc1.": ".mlp.fc1.",
         ".fc2.": ".mlp.fc2."
     })
+
+    # Whisper only supports audio-conditioned generation.
+    supports_transcription_only = True
+
+    @classmethod
+    def validate_language(cls, language: str) -> bool:
+        if language in ISO639_1_SUPPORTED_LANGS:
+            return True
+        elif language in ISO639_1_OTHER_LANGS:
+            logger.warning(
+                "The selected language %s has limited accuracy with"
+                " reported WER>=0.5. Results may be less accurate "
+                "for this choice.", language)
+            return True
+        else:
+            raise ValueError(f"Unsupported language: {language}."
+                             "Language should be one of:" +
+                             f" {list(ISO639_1_SUPPORTED_LANGS.values())}" +
+                             f"or {list(ISO639_1_OTHER_LANGS.values())}")
+
+    @classmethod
+    def get_generation_prompt(cls, audio: np.ndarray,
+                              stt_config: SpeechToTextConfig, language: str,
+                              task_type: str,
+                              request_prompt: str) -> PromptType:
+        prompt = {
+            "encoder_prompt": {
+                # Whisper does not support encoder prompt.
+                "prompt": "",
+                "multi_modal_data": {
+                    "audio": (audio, stt_config.sample_rate),
+                },
+            },
+            "decoder_prompt":
+            ((f"<|prev|>{request_prompt}" if request_prompt else "") +
+             f"<|startoftranscript|><|{language}|>" +
+             f"<|{task_type}|><|notimestamps|>")
+        }
+        return cast(PromptType, prompt)
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("audio"):
+            return None
+
+        raise ValueError("Only audio modality is supported")
+
+    @classmethod
+    def get_speech_to_text_config(cls, model_config: ModelConfig,
+                                  task_type: str) -> SpeechToTextConfig:
+        processor = cached_get_processor(model_config.model)
+
+        return SpeechToTextConfig(
+            max_audio_clip_s=processor.feature_extractor.chunk_length,
+            sample_rate=processor.feature_extractor.sampling_rate,
+        )
+
+    @classmethod
+    def get_num_audio_tokens(cls, audio_duration_s: float,
+                             stt_config: SpeechToTextConfig,
+                             model_config: ModelConfig) -> Optional[int]:
+        processor = cached_get_processor(model_config.model)
+        hop_length = processor.feature_extractor.hop_length
+        assert hop_length is not None
+        # NOTE(NickLucche) user can't pass encoder
+        # prompts directly at least not to Whisper.
+        # One indicator of the encoder amount of processing
+        # is the log-mel spectogram length.
+        return math.ceil(audio_duration_s * stt_config.sample_rate /
+                         hop_length)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

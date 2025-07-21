@@ -1,19 +1,16 @@
----
-title: Open WebUI
----
-[](){ #deployment-open-webui }
+# Open WebUI
 
 1. Install the [Docker](https://docs.docker.com/engine/install/)
 
 2. Start the vLLM server with the supported chat completion model, e.g.
 
-```console
+```bash
 vllm serve qwen/Qwen1.5-0.5B-Chat
 ```
 
 1. Start the [Open WebUI](https://github.com/open-webui/open-webui) docker container (replace the vllm serve host and vllm serve port):
 
-```console
+```bash
 docker run -d -p 3000:8080 \
 --name open-webui \
 -v open-webui:/app/backend/data \

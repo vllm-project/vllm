@@ -38,12 +38,25 @@ class MediaConnector:
 
     def __init__(
         self,
+        media_io_kwargs: Optional[dict[str, dict[str, Any]]] = None,
         connection: HTTPConnection = global_http_connection,
         *,
         allowed_local_media_path: str = "",
     ) -> None:
+        """
+        Args:
+            media_io_kwargs: Additional args passed to process media 
+                             inputs, keyed by modalities. For example, 
+                             to set num_frames for video, set 
+                             `--media-io-kwargs '{"video":{"num_frames":40}}'`
+            connection: HTTP connection client to download media contents.
+            allowed_local_media_path: A local directory to load media files
+                                      from.
+        """
         super().__init__()
 
+        self.media_io_kwargs: dict[str, dict[
+            str, Any]] = media_io_kwargs if media_io_kwargs else {}
         self.connection = connection
 
         if allowed_local_media_path:
@@ -149,7 +162,7 @@ class MediaConnector:
         """
         Load audio from a URL.
         """
-        audio_io = AudioMediaIO()
+        audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
 
         return self.load_from_url(
             audio_url,
@@ -164,7 +177,7 @@ class MediaConnector:
         """
         Asynchronously fetch audio from a URL.
         """
-        audio_io = AudioMediaIO()
+        audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
 
         return await self.load_from_url_async(
             audio_url,
@@ -183,7 +196,8 @@ class MediaConnector:
 
         By default, the image is converted into RGB format.
         """
-        image_io = ImageMediaIO(image_mode=image_mode)
+        image_io = ImageMediaIO(image_mode=image_mode,
+                                **self.media_io_kwargs.get("image", {}))
 
         try:
             return self.load_from_url(
@@ -206,7 +220,8 @@ class MediaConnector:
 
         By default, the image is converted into RGB format.
         """
-        image_io = ImageMediaIO(image_mode=image_mode)
+        image_io = ImageMediaIO(image_mode=image_mode,
+                                **self.media_io_kwargs.get("image", {}))
 
         try:
             return await self.load_from_url_async(
@@ -223,13 +238,14 @@ class MediaConnector:
         video_url: str,
         *,
         image_mode: str = "RGB",
-        num_frames: int = 32,
-    ) -> npt.NDArray:
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Load video from a HTTP or base64 data URL.
         """
-        image_io = ImageMediaIO(image_mode=image_mode)
-        video_io = VideoMediaIO(image_io, num_frames=num_frames)
+        image_io = ImageMediaIO(image_mode=image_mode,
+                                **self.media_io_kwargs.get("image", {}))
+        video_io = VideoMediaIO(image_io,
+                                **self.media_io_kwargs.get("video", {}))
 
         return self.load_from_url(
             video_url,
@@ -242,15 +258,16 @@ class MediaConnector:
         video_url: str,
         *,
         image_mode: str = "RGB",
-        num_frames: int = 32,
-    ) -> npt.NDArray:
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Asynchronously load video from a HTTP or base64 data URL.
 
         By default, the image is converted into RGB format.
         """
-        image_io = ImageMediaIO(image_mode=image_mode)
-        video_io = VideoMediaIO(image_io, num_frames=num_frames)
+        image_io = ImageMediaIO(image_mode=image_mode,
+                                **self.media_io_kwargs.get("image", {}))
+        video_io = VideoMediaIO(image_io,
+                                **self.media_io_kwargs.get("video", {}))
 
         return await self.load_from_url_async(
             video_url,
@@ -268,15 +285,6 @@ class MediaConnector:
         image_embedding_io = ImageEmbeddingMediaIO()
 
         return image_embedding_io.load_base64("", data)
-
-
-global_media_connector = MediaConnector()
-"""The global [`MediaConnector`][vllm.multimodal.utils.MediaConnector]
-instance used by vLLM."""
-
-fetch_audio = global_media_connector.fetch_audio
-fetch_image = global_media_connector.fetch_image
-fetch_video = global_media_connector.fetch_video
 
 
 def encode_audio_base64(
@@ -434,3 +442,51 @@ def run_dp_sharded_vision_model(image_input: torch.Tensor,
                                                          dim=0)
     vision_embeddings = vision_embeddings[:num_chunks, ...]
     return vision_embeddings
+
+
+def fetch_audio(
+    audio_url: str,
+    audio_io_kwargs: Optional[dict[str, Any]] = None,
+) -> tuple[np.ndarray, Union[int, float]]:
+    """
+    Args:
+        audio_url: URL of the audio file to fetch.
+        audio_io_kwargs: Additional kwargs passed to handle audio IO.
+    """
+    media_io_kwargs = None if not audio_io_kwargs else {
+        "audio": audio_io_kwargs
+    }
+    media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
+    return media_connector.fetch_audio(audio_url)
+
+
+def fetch_image(
+    image_url: str,
+    image_io_kwargs: Optional[dict[str, Any]] = None,
+) -> Image.Image:
+    """
+    Args:
+        image_url: URL of the image file to fetch.
+        image_io_kwargs: Additional kwargs passed to handle image IO.
+    """
+    media_io_kwargs = None if not image_io_kwargs else {
+        "image": image_io_kwargs
+    }
+    media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
+    return media_connector.fetch_image(image_url)
+
+
+def fetch_video(
+    video_url: str,
+    video_io_kwargs: Optional[dict[str, Any]] = None,
+) -> tuple[npt.NDArray, dict[str, Any]]:
+    """
+    Args:
+        video_url: URL of the video file to fetch.
+        video_io_kwargs: Additional kwargs passed to handle video IO.
+    """
+    media_io_kwargs = None if not video_io_kwargs else {
+        "video": video_io_kwargs
+    }
+    media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
+    return media_connector.fetch_video(video_url)

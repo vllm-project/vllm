@@ -45,7 +45,6 @@ def fused_add_rms_norm(
 
 def rocm_aiter_rms_norm(x: torch.Tensor, weight: torch.Tensor,
                         variance_epsilon: float) -> torch.Tensor:
-
     import aiter as rocm_aiter
     if x.dim() > 2:
         x_original_shape = x.shape

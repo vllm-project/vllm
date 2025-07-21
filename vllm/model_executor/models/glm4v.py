@@ -481,6 +481,7 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
         prompt_text: str,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
     ) -> bool:
         return False
 
@@ -538,6 +539,13 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
             language_model="transformer.encoder",
             connector="transformer.vision.linear_proj",
             tower_model="transformer.vision.transformer")
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<|begin_of_image|><|endoftext|><|end_of_image|>"
+
+        raise ValueError("Only image modality is supported")
 
     def __init__(
         self,
@@ -609,7 +617,8 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
     ) -> torch.Tensor:
         inputs_embeds = self.transformer.get_input_embeddings(input_ids)
 
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids=input_ids,
                 inputs_embeds=inputs_embeds,

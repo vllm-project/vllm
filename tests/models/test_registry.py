@@ -9,9 +9,9 @@ import torch.cuda
 from vllm.model_executor.models import (is_pooling_model,
                                         is_text_generation_model,
                                         supports_multimodal)
-from vllm.model_executor.models.adapters import (as_classification_model,
-                                                 as_embedding_model,
-                                                 as_reward_model)
+from vllm.model_executor.models.adapters import (as_embedding_model,
+                                                 as_reward_model,
+                                                 as_seq_cls_model)
 from vllm.model_executor.models.registry import (_MULTIMODAL_MODELS,
                                                  _SPECULATIVE_DECODING_MODELS,
                                                  _TEXT_GENERATION_MODELS,
@@ -38,7 +38,7 @@ def test_registry_imports(model_arch):
         assert is_text_generation_model(model_cls)
 
     # All vLLM models should be convertible to a pooling model
-    assert is_pooling_model(as_classification_model(model_cls))
+    assert is_pooling_model(as_seq_cls_model(model_cls))
     assert is_pooling_model(as_embedding_model(model_cls))
     assert is_pooling_model(as_reward_model(model_cls))
 

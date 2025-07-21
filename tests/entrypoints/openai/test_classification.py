@@ -155,3 +155,25 @@ def test_batch_classification_empty_list(server: RemoteOpenAIServer,
     assert output.object == "list"
     assert isinstance(output.data, list)
     assert len(output.data) == 0
+
+
+@pytest.mark.asyncio
+async def test_invocations(server: RemoteOpenAIServer):
+    request_args = {
+        "model": MODEL_NAME,
+        "input": "This product was excellent and exceeded my expectations"
+    }
+
+    classification_response = requests.post(server.url_for("classify"),
+                                            json=request_args)
+    classification_response.raise_for_status()
+
+    invocation_response = requests.post(server.url_for("invocations"),
+                                        json=request_args)
+    invocation_response.raise_for_status()
+
+    classification_output = classification_response.json()
+    invocation_output = invocation_response.json()
+
+    assert classification_output.keys() == invocation_output.keys()
+    assert classification_output["data"] == invocation_output["data"]
