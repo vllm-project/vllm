@@ -201,12 +201,8 @@ if flashinfer_comm is not None:
                 residual_out = allreduce_in
             # For the sizes that are smaller than the max size,
             # we only use flashinfer one shot allreduce
-            if fp8_scale is None:
-                fusion_pattern = (
-                    flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm)
-            else:
-                fusion_pattern = (flashinfer_comm.AllReduceFusionPattern.
-                                  kARResidualRMSNormFP8Quant)
+            fusion_pattern = (
+                flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm)
 
             flashinfer_comm.trtllm_allreduce_fusion(
                 allreduce_in=allreduce_in,
@@ -229,24 +225,15 @@ if flashinfer_comm is not None:
                 quant_out=None,
                 scale_out=None,
                 layout_code=None,
-                scale_factor=fp8_scale,
             )
         else:
             allreduce_out = tensor_model_parallel_all_reduce(allreduce_in)
             if norm_out is None:
-                if fp8_scale is not None:
-                    torch.ops._C.fused_add_rms_norm_static_fp8_quant(
-                        allreduce_out, residual, rms_gamma, rms_eps, fp8_scale)
-                else:
-                    torch.ops._C.fused_add_rms_norm(allreduce_out, residual,
-                                                    rms_gamma, rms_eps)
+                torch.ops._C.fused_add_rms_norm(allreduce_out, residual,
+                                                rms_gamma, rms_eps)
             else:
-                if fp8_scale is not None:
-                    torch.ops._C.rms_norm_static_fp8_quant(
-                        norm_out, allreduce_out, rms_gamma, fp8_scale, rms_eps)
-                else:
-                    torch.ops._C.rms_norm(norm_out, allreduce_out, rms_gamma,
-                                          rms_eps)
+                torch.ops._C.rms_norm(norm_out, allreduce_out, rms_gamma,
+                                      rms_eps)
             allreduce_in.copy_(allreduce_out)
 
     def call_trtllm_fused_allreduce_norm_fake(
@@ -260,8 +247,7 @@ if flashinfer_comm is not None:
             trigger_completion_at_end: bool,
             fp32_acc: bool,
             max_token_num: int,
-            norm_out: Optional[torch.Tensor] = None,
-            fp8_scale: Optional[torch.Tensor] = None) -> None:
+            norm_out: Optional[torch.Tensor] = None) -> None:
         pass
 
     direct_register_custom_op(
@@ -277,6 +263,87 @@ if flashinfer_comm is not None:
     )
     flashinfer_trtllm_fused_allreduce_norm = (
         torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default)
+
+    def call_trtllm_fused_allreduce_norm_fp8(allreduce_in: torch.Tensor,
+                                             residual: torch.Tensor,
+                                             rms_gamma: torch.Tensor,
+                                             rms_eps: float, world_rank: int,
+                                             world_size: int,
+                                             launch_with_pdl: bool,
+                                             trigger_completion_at_end: bool,
+                                             fp32_acc: bool,
+                                             max_token_num: int,
+                                             quant_out: torch.Tensor,
+                                             scale: torch.Tensor) -> None:
+        use_flashinfer = allreduce_in.shape[0] * allreduce_in.shape[
+            1] * allreduce_in.element_size() <= min(
+                _FI_MAX_SIZES[world_size],
+                max_token_num * allreduce_in.shape[0] *
+                allreduce_in.element_size(),
+            )
+        if use_flashinfer:
+            assert (_FI_WORKSPACE_TENSOR is not None
+                    ), "Flashinfer must be enabled when using flashinfer"
+
+            # For the sizes that are smaller than the max size,
+            # we only use flashinfer one shot allreduce
+            fusion_pattern = (flashinfer_comm.AllReduceFusionPattern.
+                              kARResidualRMSNormFP8Quant)
+
+            flashinfer_comm.trtllm_allreduce_fusion(
+                allreduce_in=allreduce_in,
+                token_num=allreduce_in.shape[0],
+                residual_in=residual,
+                rms_gamma=rms_gamma,
+                rms_eps=rms_eps,
+                world_rank=world_rank,
+                world_size=world_size,
+                hidden_dim=allreduce_in.shape[-1],
+                workspace_ptrs=_FI_WORKSPACE_TENSOR,
+                launch_with_pdl=launch_with_pdl,
+                use_oneshot=True,
+                trigger_completion_at_end=trigger_completion_at_end,
+                fp32_acc=fp32_acc,
+                pattern_code=fusion_pattern,
+                allreduce_out=allreduce_in,
+                quant_out=quant_out,
+                scale_out=None,
+                layout_code=None,
+                scale_factor=scale,
+            )
+        else:
+            allreduce_out = tensor_model_parallel_all_reduce(allreduce_in)
+            print(f"{quant_out.dtype=}")
+            print(f"{allreduce_out.dtype=}")
+            print(f"{residual.dtype=}")
+            print(f"{rms_gamma.dtype=}")
+            print(f"{scale.dtype=}")
+            torch.ops._C.fused_add_rms_norm_static_fp8_quant(
+                quant_out, allreduce_out, residual, rms_gamma, scale, rms_eps)
+            allreduce_in.copy_(allreduce_out)
+
+    def call_trtllm_fused_allreduce_norm_fp8_fake(
+            allreduce_in: torch.Tensor, residual: torch.Tensor,
+            rms_gamma: torch.Tensor, rms_eps: float, world_rank: int,
+            world_size: int, launch_with_pdl: bool,
+            trigger_completion_at_end: bool, fp32_acc: bool,
+            max_token_num: int, quant_out: torch.Tensor,
+            scale: torch.Tensor) -> None:
+        pass
+
+    direct_register_custom_op(
+        op_name="flashinfer_trtllm_fused_allreduce_norm_fp8",
+        op_func=call_trtllm_fused_allreduce_norm_fp8,
+        mutates_args=[
+            "allreduce_in",
+            "residual",
+            "quant_out",
+        ],
+        fake_impl=call_trtllm_fused_allreduce_norm_fp8_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+    flashinfer_trtllm_fused_allreduce_norm_fp8 = (
+        torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm_fp8.default)
 
 
 class FlashInferFusedAllReduceParams:
@@ -414,15 +481,18 @@ class AllReduceRMSNORMFP8Pattern(BasePattern):
             empty = torch.empty_like(input, dtype=current_platform.fp8_dtype())
 
             allreduce = auto_functionalized(
-                torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default,
+                torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm_fp8.
+                default,
                 allreduce_in=input,
                 residual=residual,
-                norm_out=empty,
+                quant_out=empty,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
-                fp8_scale=scale,
+                scale=scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
+
+            print(allreduce)
 
             return allreduce[3], allreduce[1]
 
@@ -527,16 +597,17 @@ class AllReduceFusedAddRMSNormFP8Pattern(BasePattern):
                         weight: torch.Tensor, scale: torch.Tensor,
                         rms_result: torch.Tensor):
             allreduce = auto_functionalized(
-                torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default,
+                torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm_fp8.
+                default,
                 allreduce_in=input,
                 residual=residual,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
-                norm_out=None,
-                fp8_scale=scale,
+                quant_out=rms_result,
+                scale=scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
-            return allreduce[1], allreduce[2]
+            return allreduce[3], allreduce[2]
 
         pm.register_replacement(pattern, replacement, self.get_inputs(),
                                 pm.fwd_only, pm_pass)

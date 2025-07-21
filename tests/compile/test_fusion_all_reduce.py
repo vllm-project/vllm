@@ -73,7 +73,11 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
         return ops_to_replace
 
     def ops_in_model_after(self):
-        return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
+        return [
+            torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default
+            if not self.quant else
+            torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm_fp8.default
+        ]
 
 
 class TestAllReduceFusedAddRMSNormModel(torch.nn.Module):
@@ -123,7 +127,11 @@ class TestAllReduceFusedAddRMSNormModel(torch.nn.Module):
         return ops_to_replace
 
     def ops_in_model_after(self):
-        return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
+        return [
+            torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default
+            if not self.quant else
+            torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm_fp8.default
+        ]
 
 
 @multi_gpu_test(num_gpus=2)
