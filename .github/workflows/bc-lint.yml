@@ -8,6 +8,9 @@ on:
       - reopened
     # branches-ignore:
     #   - <branches to ignore bc-linter>
+    paths:
+      - vllm/core/**
+      - vllm/attetion/**
 
 jobs:
   bc_lint:
