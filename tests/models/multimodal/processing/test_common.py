@@ -268,6 +268,7 @@ def _test_processing_correctness_one(
     "microsoft/Florence-2-base",
     "adept/fuyu-8b",
     "google/gemma-3-4b-it",
+    "google/gemma-3n-E2B-it",
     "THUDM/glm-4v-9b",
     "THUDM/GLM-4.1V-9B-Thinking",
     "ibm-granite/granite-speech-3.3-2b",
@@ -311,7 +312,6 @@ def _test_processing_correctness_one(
     "openai/whisper-large-v3",
     "omni-research/Tarsier-7b",
     "omni-research/Tarsier2-Recap-7b",
-    "google/gemma-3n-E2B-it"
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
