@@ -53,11 +53,13 @@ _per_block_cast_impl: Callable[..., Any] | None = None
 
 def _lazy_init() -> None:
     """Import deep_gemm and resolve symbols on first use."""
-    global _fp8_gemm_nt_impl, _grouped_impl, _grouped_masked_impl
+    global _fp8_gemm_nt_impl, _grouped_impl, _grouped_masked_impl, \
+        _per_block_cast_impl
 
     # fast path
     if (_fp8_gemm_nt_impl is not None or _grouped_impl is not None
-            or _grouped_masked_impl is not None):
+            or _grouped_masked_impl is not None
+            or _per_block_cast_impl is not None):
         return
 
     if not has_deep_gemm():
