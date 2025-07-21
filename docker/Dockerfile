@@ -157,6 +157,8 @@ COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/cuda.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system nvidia-cudnn-cu12==9.5.1.17 --force-reinstall
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
