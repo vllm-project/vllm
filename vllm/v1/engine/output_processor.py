@@ -419,7 +419,7 @@ class OutputProcessor:
                     first_token_time=req_state.stats.first_token_ts,
                     time_in_queue=req_state.stats.scheduled_ts - req_state.stats.arrival_time,
                     finished_time=time.monotonic()
-                ) if self.log_stats else None
+                ) if (req_state.stats is not None) else None
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
                     req_state.queue.put(request_output)
