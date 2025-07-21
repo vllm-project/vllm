@@ -548,7 +548,13 @@ class Platform:
         """
         Returns if the kv_cache_dtype is supported by the current platform.
         """
-        return kv_cache_dtype == "auto"
+        import vllm.envs as envs
+        fp8_attention = kv_cache_dtype.startswith("fp8")
+        will_use_fa = envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
+        if fp8_attention and will_use_fa:
+            from vllm.attention.utils.fa_utils import flash_attn_supports_fp8
+            return flash_attn_supports_fp8()
+        return False
 
 
 class UnspecifiedPlatform(Platform):

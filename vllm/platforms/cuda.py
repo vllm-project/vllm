@@ -588,8 +588,6 @@ class NonNvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
     def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
-        if kv_cache_dtype == "auto":
-            return True
         fp8_attention = kv_cache_dtype.startswith("fp8")
         will_use_fa = (not envs.is_set("VLLM_ATTENTION_BACKEND")
                        ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"

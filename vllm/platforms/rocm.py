@@ -457,12 +457,4 @@ class RocmPlatform(Platform):
 
     @classmethod
     def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
-        if kv_cache_dtype == "auto":
-            return True
-        fp8_attention = kv_cache_dtype.startswith("fp8")
-        will_use_fa = envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
-        supported = True
-        if fp8_attention and will_use_fa:
-            from vllm.attention.utils.fa_utils import flash_attn_supports_fp8
-            supported = flash_attn_supports_fp8()
-        return supported
+        return True
