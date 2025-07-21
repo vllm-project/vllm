@@ -6,6 +6,7 @@ set -ex
 
 # allow to bind to different cores
 CORE_RANGE=${CORE_RANGE:-48-95}
+# used for TP/PP E2E test
 OMP_CORE_RANGE=${OMP_CORE_RANGE:-48-95}
 NUMA_NODE=${NUMA_NODE:-1}
 
@@ -30,6 +31,7 @@ docker run -itd --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" --entrypo
 function cpu_tests() {
   set -e
   export NUMA_NODE=$2
+  export OMP_CORE_RANGE=$3
 
   # list packages
   docker exec cpu-test-"$NUMA_NODE"-avx2 bash -c "
@@ -80,15 +82,14 @@ function cpu_tests() {
   # online serving
   docker exec cpu-test-"$NUMA_NODE" bash -c "
     set -e
-    python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m --dtype half & 
+    VLLM_CPU_OMP_THREADS_BIND=$OMP_CORE_RANGE VLLM_CPU_SGL_KERNEL=1 vllm serve meta-llama/Llama-3.1-8B-Instruct -tp=2 -pp=2&
     timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
     VLLM_CPU_CI_ENV=0 python3 benchmarks/benchmark_serving.py \
       --backend vllm \
       --dataset-name random \
-      --model facebook/opt-125m \
+      --model meta-llama/Llama-3.1-8B-Instruct \
       --num-prompts 20 \
-      --endpoint /v1/completions \
-      --tokenizer facebook/opt-125m"
+      --endpoint /v1/completions"
 
   # Run multi-lora tests
   docker exec cpu-test-"$NUMA_NODE" bash -c "
@@ -99,4 +100,4 @@ function cpu_tests() {
 
 # All of CPU tests are expected to be finished less than 40 mins.
 export -f cpu_tests
-timeout 1.5h bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"
+timeout 1.5h bash -c "cpu_tests $CORE_RANGE $NUMA_NODE $OMP_CORE_RANGE"
