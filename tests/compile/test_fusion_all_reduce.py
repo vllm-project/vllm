@@ -139,7 +139,8 @@ class TestAllReduceFusedAddRMSNormModel(torch.nn.Module):
     "test_model",
     [TestAllReduceRMSNormModel, TestAllReduceFusedAddRMSNormModel])
 @pytest.mark.parametrize("batch_size", [8])
-@pytest.mark.parametrize("seq_len", [8])
+@pytest.mark.parametrize("seq_len",
+                         [8, 64, 256])  # oneshot, twoshot, non-flashinfer
 @pytest.mark.parametrize("hidden_size", [4096])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("quant", [False, True])

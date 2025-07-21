@@ -165,6 +165,11 @@ if flashinfer_comm is not None:
     # when world size is not in _FI_MAX_SIZES
     _DEFAULT_FI_MAX_SIZE = MiB // 2
 
+    ONESHOT_MAX_TOKENS = 128
+
+    def use_oneshot(allreduce_in: torch.Tensor) -> bool:
+        return allreduce_in.size(0) <= ONESHOT_MAX_TOKENS
+
     def call_trtllm_fused_allreduce_norm(
         allreduce_in: torch.Tensor,
         residual: torch.Tensor,
@@ -217,7 +222,7 @@ if flashinfer_comm is not None:
                 hidden_dim=allreduce_in.shape[-1],
                 workspace_ptrs=_FI_WORKSPACE_TENSOR,
                 launch_with_pdl=launch_with_pdl,
-                use_oneshot=True,
+                use_oneshot=use_oneshot(allreduce_in),
                 trigger_completion_at_end=trigger_completion_at_end,
                 fp32_acc=fp32_acc,
                 pattern_code=fusion_pattern,
@@ -303,7 +308,7 @@ if flashinfer_comm is not None:
                 hidden_dim=allreduce_in.shape[-1],
                 workspace_ptrs=_FI_WORKSPACE_TENSOR,
                 launch_with_pdl=launch_with_pdl,
-                use_oneshot=True,
+                use_oneshot=use_oneshot(allreduce_in),
                 trigger_completion_at_end=trigger_completion_at_end,
                 fp32_acc=fp32_acc,
                 pattern_code=fusion_pattern,
