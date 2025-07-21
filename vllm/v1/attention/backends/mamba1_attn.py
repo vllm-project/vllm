@@ -41,6 +41,7 @@ class Mamba1AttentionMetadata:
     num_decode_tokens: int
     query_start_loc: torch.Tensor
     seq_lens: torch.Tensor
+    context_lens_tensor: torch.Tensor
     state_indices_tensor: torch.Tensor
     has_initial_states: torch.Tensor
     cu_seqlen: int
@@ -90,8 +91,10 @@ class Mamba1AttentionMetadataBuilder(
                 decode_threshold=1,
             )
 
-        has_initial_states = (seq_lens > 0)
         state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]
+        context_lens_tensor = common_attn_metadata.num_computed_tokens_cpu.to(
+            query_start_loc.device)
+        has_initial_states = (context_lens_tensor > 0)
 
         return Mamba1AttentionMetadata(
             num_prefills=num_prefills,
@@ -99,6 +102,7 @@ class Mamba1AttentionMetadataBuilder(
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             query_start_loc=query_start_loc,
+            context_lens_tensor=context_lens_tensor,
             seq_lens=seq_lens,
             has_initial_states=has_initial_states.to(query_start_loc.device),
             state_indices_tensor=state_indices_tensor,

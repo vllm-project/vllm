@@ -179,7 +179,7 @@ class MambaMixer(MambaBase, CustomOp):
                 conv_state = self_kv_cache[0].transpose(-1, -2)
                 ssm_state = self_kv_cache[1].contiguous()
                 has_initial_state = mamba1_metadata.has_initial_states
-                context_lens_tensor = mamba1_metadata.seq_lens
+                context_lens_tensor = mamba1_metadata.context_lens_tensor
         else:
             assert mamba_cache_params is not None
             conv_state = mamba_cache_params.conv_state
