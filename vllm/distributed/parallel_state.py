@@ -667,7 +667,8 @@ class GroupCoordinator:
         assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
         if self.use_cpu_custom_send_recv:
-            self.device_communicator.send_tensor_dict(tensor_dict, dst)
+            self.device_communicator.send_tensor_dict(  # type: ignore
+                tensor_dict, dst)
             return None
 
         metadata_list: list[tuple[Any, Any]] = []
@@ -726,7 +727,8 @@ class GroupCoordinator:
         assert src < self.world_size, f"Invalid src rank ({src})"
 
         if self.use_cpu_custom_send_recv:
-            return self.device_communicator.recv_tensor_dict(src)
+            return self.device_communicator.recv_tensor_dict(  # type: ignore
+                src)
 
         recv_metadata_list = self.recv_object(src=src)
         tensor_dict: dict[str, Any] = {}
