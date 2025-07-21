@@ -972,12 +972,12 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Update cached state
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
-            if has_kv_transfer_group():
-                with set_forward_context(None, self.vllm_config):
-                    self.maybe_setup_kv_connector(scheduler_output)
+            if not has_kv_transfer_group():
+                # Return empty ModelRunnerOutput if there's no work to do.
+                return EMPTY_MODEL_RUNNER_OUTPUT
 
-            # Return empty ModelRunnerOutput if there's no work to do.
-            return EMPTY_MODEL_RUNNER_OUTPUT
+            return self.kv_connector_no_forward(scheduler_output,
+                                                self.vllm_config)
 
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
@@ -1048,6 +1048,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # should be called right after each single forward pass,
         # instead of the forwards of the entire input batch.
         self.maybe_wait_for_kv_save()
+        finished_sending, finished_recving = (
+            self.get_finished_kv_transfers(scheduler_output))
 
         selected_token_ids = torch.cat(combined_selected_tokens, dim=0)
         if tpu_sampling_metadata.logprobs:
@@ -1143,6 +1145,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
         )
 
         # Check there are no new graphs compiled - all the graphs should be
