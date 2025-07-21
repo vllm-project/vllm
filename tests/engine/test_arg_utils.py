@@ -365,3 +365,30 @@ def test_human_readable_model_len():
     for invalid in ["1a", "pwd", "10.24", "1.23M"]:
         with pytest.raises(ArgumentError):
             args = parser.parse_args(["--max-model-len", invalid])
+
+
+def test_ep_config():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    # test JSON config
+    args = parser.parse_args([
+        "--eplb-config",
+        '{"enable_eplb": true, "lb_window_size": 1500, '
+        '"lb_step_interval": 4000, "lb_log_balancedness": true,'
+        '"num_redundant_experts":10}',
+    ])
+    assert args.eplb_config.enable_eplb
+    assert args.eplb_config.lb_window_size == 1500
+    assert args.eplb_config.lb_step_interval == 4000
+    assert args.eplb_config.lb_log_balancedness
+    assert args.eplb_config.num_redundant_experts == 10
+
+    args = parser.parse_args([
+        "--eplb-config",
+        '{"enable_eplb": true}',
+    ])
+    assert args.eplb_config.enable_eplb
+    assert args.eplb_config.lb_window_size == 1000
+    assert args.eplb_config.lb_step_interval == 3000
+    assert not args.eplb_config.lb_log_balancedness
+    assert args.eplb_config.num_redundant_experts == 0
