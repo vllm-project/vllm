@@ -23,11 +23,11 @@
 # limitations under the License.
 """Inference-only Qwen3MoE model compatible with HuggingFace weights."""
 import typing
-from collections.abc import Iterable, Callable
-from typing import Optional, Any, Union
+from collections.abc import Callable, Iterable
+from typing import Any, Optional, Union
 
 import torch
-from torch import nn, Tensor
+from torch import Tensor, nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention
@@ -53,8 +53,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 
-from .interfaces import SupportsLoRA, SupportsPP, MixtureOfExperts
-from .utils import (PPMissingLayer, AutoWeightsLoader, extract_layer_index,
+from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP 
+from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -519,8 +519,8 @@ class Qwen3MoeModel(nn.Module):
         return loaded_params
 
 
-class Qwen3MoeForCausalLM(nn.Module, SupportsPP, 
-                          SupportsLoRA, MixtureOfExperts):
+class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, 
+                          MixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
