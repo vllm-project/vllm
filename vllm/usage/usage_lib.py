@@ -200,7 +200,7 @@ class UsageMessage:
         # don't call real cpu info to prevent sub-process from being spawned,
         # which would loose our monkey patch
         info = _ci._get_cpu_info_internal()
-        
+
         self.num_cpu = info.get("count", None)
         self.cpu_type = info.get("brand_raw", "")
         self.cpu_family_model_stepping = ",".join([
