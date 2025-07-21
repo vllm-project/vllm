@@ -6,12 +6,15 @@ from collections.abc import Mapping
 from typing import Literal, Optional
 
 import pytest
+from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (_try_extract_ast, load_chat_template,
+from vllm.entrypoints.chat_utils import (_try_extract_ast,
+                                         apply_mistral_chat_template,
+                                         load_chat_template,
                                          parse_chat_messages,
                                          parse_chat_messages_futures,
                                          resolve_chat_template_content_format,
@@ -21,6 +24,7 @@ from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import (encode_audio_base64, encode_image_base64,
                                    encode_video_base64)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
+from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 
 from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import VLLM_PATH
@@ -1374,3 +1378,142 @@ def test_resolve_content_format_examples(template_path, expected_format):
     )
 
     assert resolved_format == expected_format
+
+
+def test_parse_chat_messages_include_thinking_chunk(mistral_model_config,
+                                                    mistral_tokenizer):
+    messages = [{
+        "role":
+        "system",
+        "content": [{
+            "type": "text",
+            "text": "You are a helpful assistant."
+        }, {
+            "type":
+            "thinking",
+            "closed":
+            True,
+            "thinking":
+            "Only return the answer when you are confident."
+        }]
+    }, {
+        "role": "user",
+        "content": "What is 2+2?"
+    }, {
+        "role":
+        "assistant",
+        "content": [{
+            "type": "text",
+            "text": "Let me think about it."
+        }, {
+            "type": "thinking",
+            "closed": True,
+            "thinking": "2+2 = 4"
+        }, {
+            "type": "text",
+            "text": "The answer is 4.",
+        }],
+    }]
+
+    conversation_with_thinking, _ = parse_chat_messages(
+        messages,
+        mistral_model_config,
+        mistral_tokenizer,
+        content_format="openai",
+    )
+
+    expected_conversation = [{
+        "role":
+        "system",
+        "content": [{
+            "type": "text",
+            "text": "You are a helpful assistant."
+        }, {
+            "type": "text",
+            "text": "Only return the answer when you are confident."
+        }],
+    }, {
+        "role":
+        "user",
+        "content": [{
+            "type": "text",
+            "text": "What is 2+2?"
+        }],
+    }, {
+        "role":
+        "assistant",
+        "content": [
+            {
+                "type": "text",
+                "text": "Let me think about it."
+            },
+            {
+                "type": "text",
+                "text": "2+2 = 4"
+            },
+            {
+                "type": "text",
+                "text": "The answer is 4."
+            },
+        ]
+    }]
+
+    assert conversation_with_thinking == expected_conversation
+
+
+def test_apply_mistral_chat_template_thinking_chunk():
+    messages = [{
+        "role":
+        "system",
+        "content": [{
+            "type": "text",
+            "text": "You are a helpful assistant."
+        }, {
+            "type":
+            "thinking",
+            "closed":
+            True,
+            "thinking":
+            "Only return the answer when you are confident."
+        }]
+    }, {
+        "role": "user",
+        "content": "What is 2+2?"
+    }, {
+        "role":
+        "assistant",
+        "content": [{
+            "type": "text",
+            "text": "Let me think about it."
+        }, {
+            "type": "thinking",
+            "closed": True,
+            "thinking": "2+2 = 4"
+        }, {
+            "type": "text",
+            "text": "The answer is 4.",
+        }],
+    }, {
+        "role": "user",
+        "content": "Thanks, what is 3+3?"
+    }]
+
+    mistral_tokenizer = MistralTokenizer.from_pretrained(
+        "mistralai/Magistral-Small-2507")
+
+    tokens_ids = apply_mistral_chat_template(mistral_tokenizer,
+                                             messages,
+                                             chat_template=None,
+                                             tools=None)
+
+    string_tokens = mistral_tokenizer.mistral.decode(
+        tokens_ids, special_token_policy=SpecialTokenPolicy.KEEP)
+
+    expected_tokens = (
+        r"<s>[SYSTEM_PROMPT]You are a helpful assistant.[THINK]Only return the"
+        r" answer when you are confident.[/THINK][/SYSTEM_PROMPT]"
+        r"[INST]What is 2+2?[/INST]"
+        r"Let me think about it.[THINK]2+2 = 4[/THINK]The answer is 4.</s>"
+        r"[INST]Thanks, what is 3+3?[/INST]")
+
+    assert string_tokens == expected_tokens

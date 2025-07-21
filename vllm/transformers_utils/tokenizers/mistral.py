@@ -164,7 +164,18 @@ def make_mistral_chat_completion_request(
         if message.get("role") in ("assistant", "tool"):
             content = message.get("content")
             if isinstance(content, list):
-                content = "\n".join(chunk.get("text") for chunk in content)
+                aggregated_content: list[dict[str, Any]] = []
+                for chunk in content:
+                    if chunk.get("type") == "text" and len(
+                            aggregated_content
+                    ) > 0 and aggregated_content[-1].get("type") == "text":
+                        aggregated_content[-1]["text"] += "\n" + chunk.get(
+                            "text")
+                    else:
+                        aggregated_content.append(chunk)
+                if len(aggregated_content) == 1 and aggregated_content[0].get(
+                        "type") == "text":
+                    content = aggregated_content[0]["text"]
                 message["content"] = content
 
     # The Mistral client, in comparison to the OpenAI client, requires the
