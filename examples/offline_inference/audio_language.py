@@ -93,6 +93,8 @@ def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
         engine_args=engine_args,
         prompt_token_ids=prompt_ids,
         multi_modal_data=multi_modal_data,
+    )
+
 
 # Gemma3N
 def run_gemma3n(question: str, audio_count: int) -> ModelRequestData:
@@ -347,11 +349,8 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
 
 
 model_example_map = {
-<<<<<<< HEAD
     "voxtral": run_voxtral,
-=======
     "gemma3n": run_gemma3n,
->>>>>>> a6b3515d3 (add audio example for testing)
     "granite_speech": run_granite_speech,
     "minicpmo": run_minicpmo,
     "phi4_mm": run_phi4mm,

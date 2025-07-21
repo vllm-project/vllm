@@ -5,6 +5,7 @@ from typing import Any, Optional, TypedDict, Union, cast
 
 import torch
 from torch import nn
+
 from transformers import AutoModel, BatchFeature
 from transformers.models.gemma3n import (Gemma3nAudioConfig,
                                          Gemma3nAudioFeatureExtractor,
@@ -12,7 +13,6 @@ from transformers.models.gemma3n import (Gemma3nAudioConfig,
                                          Gemma3nTextConfig,
                                          Gemma3nVisionConfig)
 from transformers.models.siglip import SiglipImageProcessorFast
-
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -165,6 +165,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
 
         # HF Transformers audio processor no longer accepts `audios` key.
@@ -176,6 +177,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
             prompt,
             mm_data,
             mm_kwargs,
+            tok_kwargs,
         )
         return processed_outputs
 
@@ -651,3 +653,12 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
             language_model="language_model",
             connector="multi_modal_projector",
             tower_model="vision_tower")
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality == "image":
+            return "<image_soft_token>"
+        elif modality == "audio":
+            return "<audio_soft_token>"
+        else:
+            raise ValueError(f"Unsupported modality: {modality}")
