@@ -2476,13 +2476,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Check if model is encoder-only
         block_size = self.vllm_config.cache_config.block_size
         use_mla = self.vllm_config.model_config.use_mla
-        kv_cache_specs = list[KVCacheSpec]()
+        attn_specs = list[AttentionSpec]()
         attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         for attn_module in attn_layers.values():
 
             if attn_module.attn_type == AttentionType.ENCODER_ONLY:
                 if attn_module.sliding_window is not None:
-                    kv_cache_specs.append(
+                    attn_specs.append(
                         SlidingWindowSpec(
                             block_size=block_size,
                             num_kv_heads=attn_module.num_kv_heads,
@@ -2491,7 +2491,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             sliding_window=attn_module.sliding_window,
                             use_mla=use_mla))
                 else:
-                    kv_cache_specs.append(
+                    attn_specs.append(
                         FullAttentionSpec(
                             block_size=block_size,
                             num_kv_heads=attn_module.num_kv_heads,
@@ -2501,12 +2501,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 raise ValueError("Expected only encoder-only layers")
 
-        if len(kv_cache_specs) > 0:
-            assert len(kv_cache_specs) == len(attn_layers), \
+        if len(attn_specs) > 0:
+            assert len(attn_specs) == len(attn_layers), \
                 "All or none of the layers are expected to be encoder-only"
 
             attn_backend, attn_metadata_builder = \
-                self._initialize_single_attn_backend(kv_cache_specs[0])
+                self._initialize_single_attn_backend(attn_specs[0])
             self.attn_backends.append(attn_backend)
             self.attn_metadata_builders.append(attn_metadata_builder)
             self.is_encoder_only_model = True

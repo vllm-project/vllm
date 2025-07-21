@@ -403,9 +403,7 @@ class FlashAttentionImpl(AttentionImpl):
             attention (i.e., not encoder, encoder-only, or encoder-decoder),
             otherwise returns `False`.
         """
-        return not (attn_type == AttentionType.ENCODER
-                    or attn_type == AttentionType.ENCODER_ONLY
-                    or attn_type == AttentionType.ENCODER_DECODER)
+        return attn_type == AttentionType.DECODER
 
     def forward(
         self,
@@ -601,7 +599,6 @@ class FlashAttentionImpl(AttentionImpl):
             value = value.reshape((num_kv_tokens, num_kv_heads, head_size))
 
         # Use encoder-specific metadata for sequence information
-        # TODO: handle cross-encoder metadata fields
         cu_seqlens_q = attn_metadata.query_start_loc
         cu_seqlens_k = attn_metadata.query_start_loc
         max_seqlen_q = attn_metadata.max_query_len
