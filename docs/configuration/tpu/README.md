@@ -17,7 +17,28 @@ The following colab [calculator](https://colab.sandbox.google.com/drive/1M_f3xZm
 - TPU/GPU memory allocated for the KV cache
 - Maximum \# of requests you can approximately set (--max-num-seqs)
 
-This approach serves as a general rule of thumb. As latency becomes more important, you may want to reduce --max-num-seqs and/or increase the number of chips in increments of 128.
+This approach serves as a general rule of thumb. 
+
+#### Latency-throughput tradeoff
+
+As with rightsizing the number of chips for your workload, consider adjusting `--max-num-seqs` to fine-tune the latency-throughput balance. Decreasing `--max-num-seqs` in increments of 128 and/or increasing the number of chips can help reduce latency.
+
+`--max-num-seqs` defines the number of concurrent decode slots, effectively limiting the number of requests the server can process tokens for simultaneously. Increasing this value allows the server to pre-allocate more HBM to handle a higher number of concurrent requests, which can maximize overall throughput. However, this often increases the end-to-end (e2e) latency per request.
+
+Therefore, carefully tuning `--max-num-seqs` is crucial to achieving the desired balance between latency and throughput for your specific workload.
+
+#### Compilation and Caching
+
+Coming from a GPU background, one of the key differences you'll notice with TPUs is an initial compilation step. TPUs are specialized accelerators (ASICs) that achieve maximum performance by executing pre-compiled, static computation graphs via the XLA compiler. Unlike GPUs, which can handle dynamic input shapes more flexibly, TPUs require a specific compiled graph for each tensor shape (e.g., batch size and sequence length) they process.
+
+To manage this, vLLM performs a one-time "warmup" process when you first launch the server. During this phase, it pre-compiles the model for various common input shapes and saves these compiled graphs to a cache on disk or remote storage (located at `~/.cache/vllm/xla_cache` by default). This process can range significantly, anywhere from a few minutes to an hour depending on the size of the model and context length used.
+
+Although the first compilation can take some time, for all subsequent server launches, vLLM can load these graphs directly from the cache, eliminating the compilation time for future runs. 
+
+Use `VLLM_XLA_CACHE_PATH` environment variable to write to shareable storage for future launches. 
+
+#### Reducing compilation time
+This initial compilation time ranges significantly and is impacted by many of the arguments discussed in this optimization doc. Factors that influence the length of time to compile are things like model size and `--max-model-len`. Other arguments you can tune are things like `VLLM_TPU_MOST_MODEL_LEN`. 
 
 ### **Optimize based on your data**
 
@@ -59,4 +80,15 @@ Although it’s common to do this with GPUs, don't try to fragment 2 or 8 differ
 
 ### **Tune your workloads!**
 
-Although we try to have great default configs, we strongly recommend you check out the [vLLM auto-tuner](https://github.com/vllm-project/vllm/pull/20779/files?short_path=f9b273a#diff-f9b273a10e0688ba63c38bd93a2e64ceb54d4fdd7ff7b82d347df06d0d34e39c) to optimize your workloads for your use case.
+Although we try to have great default configs, we strongly recommend you check out the [vLLM auto-tuner](https://github.com/vllm-project/vllm/tree/main/benchmarks/auto_tune) to optimize your workloads for your use case.
+
+
+### Future Topics We'll Cover 
+
+#### **Profiling**
+
+The above auto tuner will produce a profile of the most optimized configs as a last step, however, we acknoledge interpreting the profile can be challenging for new users.We will expand on this section in the future, but feel free to read up on [how to collect a TPU profile](https://docs.vllm.ai/en/latest/examples/offline_inference/profiling_tpu.html) in the meantime natively in vLLM.
+
+#### **SPMD**
+
+#### Want us to cover something that isn't listed here? Open up an issue please and cite this doc. We'd love to hear your questions or tips. 
