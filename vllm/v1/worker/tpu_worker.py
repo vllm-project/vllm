@@ -15,7 +15,8 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
-from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
+from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
+                                          has_kv_transfer_group)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -244,7 +245,9 @@ class TPUWorker:
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
         output = self.model_runner.execute_model(scheduler_output)
-        return output if self.is_driver_worker else None
+        # every worker's output is needed when kv_transfer_group is setup
+        return output if self.is_driver_worker or has_kv_transfer_group(
+        ) else None
 
     def profile(self, is_start: bool = True):
         if self.rank < 1:
