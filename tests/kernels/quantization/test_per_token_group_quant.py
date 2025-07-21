@@ -11,14 +11,13 @@ from vllm.model_executor.layers.quantization.utils import fp8_utils
 @pytest.mark.parametrize("shape", [(32, 128), (64, 256), (16, 512)])
 @pytest.mark.parametrize("column_major", [False, True])
 @pytest.mark.parametrize("scale_ue8m0", [False, True])
+@pytest.mark.parametrize("group_size", [64, 128])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_per_token_group_quant_fp8(shape, column_major: bool,
-                                   scale_ue8m0: bool):
+                                   scale_ue8m0: bool, group_size: int):
     device = "cuda"
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available", allow_module_level=True)
 
     torch.manual_seed(42)
-    group_size = 128
     num_tokens, hidden_dim = shape
 
     x = (torch.randn(
