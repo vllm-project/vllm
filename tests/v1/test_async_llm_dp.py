@@ -90,8 +90,10 @@ async def test_load(output_kind: RequestOutputKind,
         def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
             stats_loggers[engine_index] = self
 
-        def record(self, scheduler_stats: Optional[SchedulerStats],
-                   iteration_stats: Optional[IterationStats]):
+        def record(self,
+                   scheduler_stats: Optional[SchedulerStats],
+                   iteration_stats: Optional[IterationStats],
+                   engine_idx: int = 0):
             if iteration_stats:
                 self.finished_req_count += len(
                     iteration_stats.finished_requests)

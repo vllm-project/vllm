@@ -3,7 +3,6 @@
 import time
 from typing import Optional, Union
 
-from vllm.config import VllmConfig
 from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.spec_decode.metrics import SpecDecodingProm
 
@@ -127,9 +126,6 @@ class RayPrometheusStatLogger(PrometheusStatLogger):
     _counter_cls = RayCounterWrapper
     _histogram_cls = RayHistogramWrapper
     _spec_decoding_cls = RaySpecDecodingProm
-
-    def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
-        super().__init__(vllm_config, engine_index)
 
     @staticmethod
     def _unregister_vllm_metrics():
