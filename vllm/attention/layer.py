@@ -137,6 +137,13 @@ class Attention(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
 
+        # For v1 we have backend agnostic iRoPE (local chunked attention)
+        # we have to store the flag on the layer so gpu model runner can
+        # set KVSpec appropriately (and pop it so it doesnt get passed to
+        # the backends)
+        if envs.VLLM_USE_V1:
+            self.use_irope = extra_impl_args.pop("use_irope", False)
+
         quant_method = quant_config.get_quant_method(
             self, prefix=prefix) if quant_config else None
         if quant_method is not None and not isinstance(
