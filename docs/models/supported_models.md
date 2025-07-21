@@ -314,6 +314,13 @@ See [this page](generative_models.md) for more information on how to use generat
 
 Specified using `--task generate`.
 
+<style>
+th {
+  white-space: nowrap;
+  min-width: 0 !important;
+}
+</style>
+
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
 |--------------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `AquilaForCausalLM` | Aquila, Aquila2 | `BAAI/Aquila-7B`, `BAAI/AquilaChat-7B`, etc. | ✅︎ | ✅︎ | ✅︎ |
