@@ -519,7 +519,8 @@ class Qwen3MoeModel(nn.Module):
         return loaded_params
 
 
-class Qwen3MoeForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
+class Qwen3MoeForCausalLM(nn.Module, SupportsPP, 
+                          SupportsLoRA, MixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
