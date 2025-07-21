@@ -1819,7 +1819,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             old_global_expert_indices = None
             rank_mapping = None
 
-        with DeviceMemoryProfiler() as m:  # noqa: SIM117
+        with DeviceMemoryProfiler() as m:
             time_before_load = time.perf_counter()
             model_loader = get_model_loader(self.load_config)
             if not hasattr(self, "model"):
@@ -2236,33 +2236,53 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         req_num_tokens = num_tokens // num_reqs
 
         model = cast(VllmModelForPooling, self.model)
-        dummy_task = self.get_supported_pooling_tasks()[0]
-        dummy_pooling_params = PoolingParams(task=dummy_task)
+        dummy_prompt_lens = torch.tensor(
+            [h.shape[0] for h in hidden_states_list],
+            device=self.device,
+        )
+        dummy_token_ids = torch.zeros((num_reqs, req_num_tokens),
+                                      dtype=torch.int32,
+                                      device=self.device)
 
-        to_update = model.pooler.get_pooling_updates(dummy_task)
-        to_update.apply(dummy_pooling_params)
+        def _run_task(task: PoolingTask):
+            dummy_pooling_params = PoolingParams(task=task)
+            to_update = model.pooler.get_pooling_updates(task)
+            to_update.apply(dummy_pooling_params)
 
-        dummy_metadata = PoolingMetadata(
-            prompt_lens=torch.tensor([h.shape[0] for h in hidden_states_list],
-                                     device=self.device),
-            prompt_token_ids=torch.zeros((num_reqs, req_num_tokens),
-                                         dtype=torch.int32,
-                                         device=self.device),
-            pooling_params=[dummy_pooling_params] * num_reqs)
+            dummy_metadata = PoolingMetadata(
+                prompt_lens=dummy_prompt_lens,
+                prompt_token_ids=dummy_token_ids,
+                pooling_params=[dummy_pooling_params] * num_reqs,
+            )
 
-        try:
-            pooler_output = model.pooler(hidden_states=hidden_states_list,
-                                         pooling_metadata=dummy_metadata)
-        except RuntimeError as e:
-            if 'out of memory' in str(e):
-                raise RuntimeError(
-                    "CUDA out of memory occurred when warming up pooler with "
-                    f"{num_reqs} dummy requests. Please try lowering "
-                    "`max_num_seqs` or `gpu_memory_utilization` when "
-                    "initializing the engine.") from e
-            else:
-                raise e
-        return pooler_output
+            try:
+                return model.pooler(hidden_states=hidden_states_list,
+                                    pooling_metadata=dummy_metadata)
+            except RuntimeError as e:
+                if 'out of memory' in str(e):
+                    raise RuntimeError(
+                        "CUDA out of memory occurred when warming up pooler "
+                        f"({task=}) with {num_reqs} dummy requests. "
+                        "Please try lowering `max_num_seqs` or "
+                        "`gpu_memory_utilization` when initializing the "
+                        "engine.") from e
+                else:
+                    raise e
+
+        memory_usage = dict[PoolingTask, float]()
+        for dummy_task in self.get_supported_pooling_tasks():
+            with DeviceMemoryProfiler() as m:
+                # NOTE: Keep in memory until after the ctx is exited
+                output = _run_task(dummy_task)
+
+            memory_usage[dummy_task] = m.consumed_memory
+            del output
+            gc.collect()
+
+        logger.debug("Memory usage for pooler: %s", memory_usage)
+
+        max_task = max(memory_usage.items(), key=lambda x: x[1])[0]
+        return _run_task(max_task)
 
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
