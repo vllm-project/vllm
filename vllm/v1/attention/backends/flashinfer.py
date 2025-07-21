@@ -493,7 +493,6 @@ class FlashInferImpl(AttentionImpl):
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[int] = None,
-        use_irope: bool = False,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -509,7 +508,6 @@ class FlashInferImpl(AttentionImpl):
         self.kv_cache_dtype = kv_cache_dtype
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
-        self.use_irope = use_irope
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
