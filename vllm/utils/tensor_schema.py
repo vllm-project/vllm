@@ -1,18 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Annotated, Union, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Union, get_args, get_origin, get_type_hints
 
 import torch
 
 
 class TensorShape:
 
-    def __init__(self, *dims, dynamic_dims: set[str] = None) -> None:
+    def __init__(self,
+                 *dims: tuple[Union[int, str]],
+                 dynamic_dims: set[str] = None) -> None:
         self.dims = dims
         self.dynamic_dims = dynamic_dims if dynamic_dims else set()
 
-    def resolve(self, **bindings: int) -> tuple[int]:
+    def resolve(self, **bindings: dict[str, int]) -> tuple[str, int]:
         resolved = []
         for dim in self.dims:
             if isinstance(dim, str) and dim in bindings:
@@ -28,7 +30,7 @@ class TensorSchema:
                  *,
                  validate: bool = True,
                  resolve_bindings: dict[str, int] = None,
-                 **kwargs):
+                 **kwargs: Any) -> None:
         self._resolve_bindings = resolve_bindings if resolve_bindings else {}
 
         for key, value in kwargs.items():
@@ -37,12 +39,18 @@ class TensorSchema:
         if validate:
             self.validate()
 
-    def _match_shape_with_dynamic(self, actual, reference, expected_shape,
-                                  dynamic_dims):
+    def _match_shape_with_dynamic(self, actual: tuple[int, str],
+                                  reference: tuple[int, str],
+                                  expected_shape: tuple[Union[int, str]],
+                                  dynamic_dims: set[str]) -> bool:
         if len(actual) != len(reference) or len(actual) > len(expected_shape):
             return False
 
         for i, (a, r) in enumerate(zip(actual, reference)):
+            # When validating list inputs, we match shape suffixes only
+            # (e.g. "p", 3, "h", "w"), assuming the list length corresponds
+            # to the leading symbolic dim (e.g. "bn"). This allows comparing
+            # only the trailing dimensions of each element in the list.
             dim = expected_shape[-len(actual) + i]
             # Skip this dimension if it's marked dynamic
             if dim in dynamic_dims:
@@ -51,8 +59,11 @@ class TensorSchema:
                 return False
         return True
 
-    def _validate_nested_tensors(self, value, field_name, expected_shape,
-                                 dynamic_dims) -> tuple[int]:
+    def _validate_nested_tensors(self, value: Union[list[torch.Tensor],
+                                                    tuple[torch.Tensor]],
+                                 field_name: str,
+                                 expected_shape: tuple[Union[int, str]],
+                                 dynamic_dims: set[str]) -> tuple[int, str]:
         """Validate a list/tuple of tensors and return the actual shape."""
         if not value:
             raise ValueError(f"{field_name} is an empty list")
@@ -78,9 +89,11 @@ class TensorSchema:
         # shape = (len(list), *tensor.shape)
         return (len(value), ) + first.shape
 
-    def _validate_tensor_shape_expected(self, actual_shape, expected_shape,
-                                        field_name, shape_env,
-                                        dynamic_dims) -> None:
+    def _validate_tensor_shape_expected(self, actual_shape: tuple[int, str],
+                                        expected_shape: tuple[Union[int, str]],
+                                        field_name: str, shape_env: dict[str,
+                                                                         int],
+                                        dynamic_dims: set[str]) -> None:
         """Validate that the actual tensor shape matches the expected shape."""
         if len(actual_shape) != len(expected_shape):
             raise ValueError(f"{field_name} has rank {len(actual_shape)} "
