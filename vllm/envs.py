@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
     VLLM_FLASHINFER_FORCE_TENSOR_CORES: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
-    VLLM_CPU_KVCACHE_SPACE: int = 0
+    VLLM_CPU_KVCACHE_SPACE: Optional[int] = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
     VLLM_CPU_NUM_OF_RESERVED_CPU: Optional[int] = None
     VLLM_CPU_MOE_PREPACK: bool = True
@@ -430,9 +430,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
 
     # (CPU backend only) CPU key-value cache space.
-    # default is 4 GiB
+    # default is None and will be set as 4 GB
     "VLLM_CPU_KVCACHE_SPACE":
-    lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0")),
+    lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0"))
+    if "VLLM_CPU_KVCACHE_SPACE" in os.environ else None,
 
     # (CPU backend only) CPU core ids bound by OpenMP threads, e.g., "0-31",
     # "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
