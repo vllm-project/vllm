@@ -476,7 +476,7 @@ def safetensors_weights_iterator(
                 yield name, param
 
 def runai_safetensors_weights_iterator(
-    hf_weights_files: List[str],
+    hf_weights_files: list[str],
     use_tqdm_on_load: bool,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
