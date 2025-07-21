@@ -1884,6 +1884,9 @@ class ParallelConfig:
     class is dynamically inherited by the worker class. This is used to inject
     new attributes and methods to the worker class for use in collective_rpc
     calls."""
+    print_worker_ranks: bool = False
+    """Whether to print rank information in worker processes after distributed
+    initialization. Useful for debugging distributed setups."""
 
     world_size: int = field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
@@ -1895,6 +1898,12 @@ class ParallelConfig:
     """ Use data parallelism instead of tensor parallelism for vision encoder.
     Only support LLama4 for now"""
 
+    # New fields for HTTP
+    token_parallel_size: int = 1
+    """Number of token parallel groups for attention layers."""
+    enable_token_parallel: bool = False
+    """Enable token parallelism for attention layers."""
+    
     @property
     def world_size_across_dp(self) -> int:
         """world_size_across_dp is TPxPPxDP, it is the size of the world
@@ -1982,9 +1991,27 @@ class ParallelConfig:
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
-        self.world_size = self.pipeline_parallel_size * \
-            self.tensor_parallel_size
-
+        # Token parallel validation - token parallelism and data parallelism are mutually exclusive
+        if self.enable_token_parallel:
+            if self.token_parallel_size <= 1:
+                raise ValueError(
+                    "Token parallelism requires token_parallel_size > 1")
+            if self.data_parallel_size > 1:
+                raise ValueError(
+                    "Token parallelism is incompatible with data parallelism. "
+                    "Set data_parallel_size=1 when using token parallelism.")
+            logger.info(
+                f"Token parallelism enabled with token_parallel_size={self.token_parallel_size}")
+        
+        # Calculate world size considering token parallelism
+        if self.enable_token_parallel:
+            self.world_size = (self.pipeline_parallel_size * 
+                              self.tensor_parallel_size * 
+                              self.token_parallel_size)
+        else:
+            self.world_size = (self.pipeline_parallel_size * 
+                              self.tensor_parallel_size)
+        
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
                 f"data_parallel_size_local ({self.data_parallel_size_local}) "
@@ -4839,9 +4866,9 @@ class VllmConfig:
             f"seed={self.model_config.seed}, "
             f"served_model_name={self.model_config.served_model_name}, "
             f"num_scheduler_steps={self.scheduler_config.num_scheduler_steps}, "
-            f"multi_step_stream_outputs={self.scheduler_config.multi_step_stream_outputs}, "  # noqa
+            f"multi_step_stream_outputs={self.scheduler_config.multi_step_stream_outputs},  # noqa
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
-            f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
+            f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled},  # noqa
             f"use_async_output_proc={self.model_config.use_async_output_proc}, "
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}")

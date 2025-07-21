@@ -4,7 +4,7 @@
 Usage:
 Single node:
     python examples/offline_inference/data_parallel.py \
-            --model="ibm-research/PowerMoE-3b" \
+            --model="meta-llama/Llama-2-7b-chat-hf" \
             --dp-size=2 \
             --tp-size=2
 
@@ -139,7 +139,7 @@ def main(
         model=model,
         tensor_parallel_size=GPUs_per_dp_rank,
         enforce_eager=enforce_eager,
-        enable_expert_parallel=True,
+        enable_expert_parallel=False,
         trust_remote_code=trust_remote_code,
         max_num_seqs=max_num_seqs,
         gpu_memory_utilization=gpu_memory_utilization,

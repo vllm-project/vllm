@@ -536,6 +536,48 @@ def init_worker_distributed_environment(
                                       parallel_config.pipeline_parallel_size)
 
     ensure_kv_transfer_initialized(vllm_config)
+    
+    # Print rank information if requested
+    if parallel_config.print_worker_ranks:
+        _print_worker_rank_info(rank)
+
+
+def _print_worker_rank_info(rank: int) -> None:
+    """Print rank information for this worker process."""
+    import os
+    import sys
+    import time
+    from vllm.distributed.parallel_state import (
+        get_tp_group, get_pp_group, get_dp_group
+    )
+    
+    # Use stderr to avoid Ray's stdout deduplication and add timestamp for uniqueness
+    timestamp = time.time()
+    print(f"[{timestamp:.3f}] Worker Rank {rank} (PID: {os.getpid()}) - Parallel Groups:", file=sys.stderr)
+    
+    # Print tensor parallel group ranks
+    try:
+        tp_group = get_tp_group()
+        print(f"[{timestamp:.3f}] Rank {rank}: Tensor Parallel: {sorted(tp_group.ranks)}", file=sys.stderr)
+    except (AssertionError, AttributeError):
+        print(f"[{timestamp:.3f}] Rank {rank}: Tensor Parallel: Not initialized", file=sys.stderr)
+    
+    # Print pipeline parallel group ranks
+    try:
+        pp_group = get_pp_group()
+        print(f"[{timestamp:.3f}] Rank {rank}: Pipeline Parallel: {sorted(pp_group.ranks)}", file=sys.stderr)
+    except (AssertionError, AttributeError):
+        print(f"[{timestamp:.3f}] Rank {rank}: Pipeline Parallel: Not initialized", file=sys.stderr)
+    
+    # Print data parallel group ranks
+    try:
+        dp_group = get_dp_group()
+        print(f"[{timestamp:.3f}] Rank {rank}: Data Parallel: {sorted(dp_group.ranks)}", file=sys.stderr)
+    except (AssertionError, AttributeError):
+        print(f"[{timestamp:.3f}] Rank {rank}: Data Parallel: Not initialized", file=sys.stderr)
+    
+    # Flush stderr to ensure immediate output
+    sys.stderr.flush()
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):

@@ -880,6 +880,27 @@ def get_pp_group() -> GroupCoordinator:
 get_pipeline_model_parallel_group = get_pp_group
 
 
+# Token parallel group (TKNP)
+_TKNP: Optional[GroupCoordinator] = None
+
+def get_tknp_group() -> GroupCoordinator:
+    """Get the token parallel group."""
+    assert _TKNP is not None, (
+        "Token parallel group is not initialized")
+    return _TKNP
+
+def get_tknp_rank() -> int:
+    """Get rank in token parallel group."""
+    return get_tknp_group().rank_in_group
+
+def get_tknp_world_size() -> int:
+    """Get world size of token parallel group."""
+    return get_tknp_group().world_size
+
+def is_tknp_initialized() -> bool:
+    """Check if token parallel is initialized."""
+    return _TKNP is not None
+
 @contextmanager
 def graph_capture(device: torch.device):
     """
@@ -989,6 +1010,8 @@ def initialize_model_parallel(
             parallelism.
         pipeline_model_parallel_size: number of GPUs used for pipeline model
             parallelism.
+        token_model_parallel_size: number of GPUs used for token model
+            parallelism (new).
 
     Let's say we have a total of 8 GPUs denoted by g0 ... g7 and we
     use 2 GPUs to parallelize the model tensor, and 4 GPUs to parallelize
@@ -1010,11 +1033,23 @@ def initialize_model_parallel(
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
 
-    data_parallel_size = 1
+    # Get configuration
     from vllm.config import get_current_vllm_config
     config = get_current_vllm_config()
-    if config is not None:
-        data_parallel_size = config.parallel_config.data_parallel_size
+    
+    # Determine if token parallelism is enabled
+    enable_tknp = (config is not None and 
+                  config.parallel_config.enable_token_parallel and
+                  config.parallel_config.token_parallel_size > 1)
+    
+    if enable_tknp:
+        data_parallel_size = 1  # Force DP size to 1 for token parallelism
+        token_parallel_size = config.parallel_config.token_parallel_size
+        logger.info(f"Token parallelism enabled: token_parallel_size={token_parallel_size}, "
+                   f"data_parallel_size={data_parallel_size}")
+    else:
+        data_parallel_size = config.parallel_config.data_parallel_size if config else 1
+        token_parallel_size = 1
 
     # the layout order is: ExternalDP x DP x PP x TP
     # ExternalDP is the data parallel group that is not part of the model,
@@ -1025,9 +1060,15 @@ def initialize_model_parallel(
     # otherwise it will cause deadlock.
     # to get group_ranks for each dimension, transpose that dimension to the
     # last dimension, then reshape to 2D, then unbind the last dimension
-    all_ranks = torch.arange(world_size).reshape(
-        -1, data_parallel_size, pipeline_model_parallel_size,
-        tensor_model_parallel_size)  # noqa
+    # Layout: ExternalDP x (DP|TKNP) x PP x TP
+    if enable_tknp:
+        all_ranks = torch.arange(world_size).reshape(
+            -1, token_parallel_size, pipeline_model_parallel_size,
+            tensor_model_parallel_size)
+    else:
+        all_ranks = torch.arange(world_size).reshape(
+            -1, data_parallel_size, pipeline_model_parallel_size,
+            tensor_model_parallel_size)
 
     # Build the tensor model-parallel groups.
     global _TP
@@ -1054,32 +1095,75 @@ def initialize_model_parallel(
                                     backend,
                                     group_name="pp")
 
-    global _DP
-    assert _DP is None, ("data parallel group is already initialized")
-    group_ranks = all_ranks.transpose(1,
-                                      3).reshape(-1,
-                                                 data_parallel_size).unbind(0)
-    group_ranks = [x.tolist() for x in group_ranks]
-    _DP = init_model_parallel_group(group_ranks,
-                                    get_world_group().local_rank,
-                                    backend,
-                                    group_name="dp")
+    # Build token parallel groups OR data parallel groups
+    if enable_tknp:
+        # Create token parallel groups
+        global _TKNP
+        assert _TKNP is None, (
+            "Token parallel group is already initialized")
+        group_ranks = all_ranks.transpose(1, 3).reshape(
+            -1, token_parallel_size).unbind(0)
+        group_ranks = [x.tolist() for x in group_ranks]
+        _TKNP = init_model_parallel_group(
+            group_ranks,
+            get_world_group().local_rank,
+            backend,
+            group_name="tknp")
+        
+        # Still create DP groups with size 1 for compatibility
+        global _DP
+        assert _DP is None, ("data parallel group is already initialized")
+        # Each rank is its own DP group when token parallelism is enabled
+        group_ranks = [[i] for i in range(world_size)]
+        _DP = init_model_parallel_group(group_ranks,
+                                        get_world_group().local_rank,
+                                        backend,
+                                        group_name="dp")
+    else:
+        # Standard data parallel groups
+        global _DP
+        assert _DP is None, ("data parallel group is already initialized")
+        group_ranks = all_ranks.transpose(1, 3).reshape(
+            -1, data_parallel_size).unbind(0)
+        group_ranks = [x.tolist() for x in group_ranks]
+        _DP = init_model_parallel_group(group_ranks,
+                                        get_world_group().local_rank,
+                                        backend,
+                                        group_name="dp")
 
+    # Build expert parallel groups (modified for token parallelism)
+    # TODO: Revisit this for MoE and token parallelism integration.
     global _EP
     assert _EP is None, ("expert parallel group is already initialized")
-    group_ranks = all_ranks.transpose(1, 2).reshape(
-        -1, data_parallel_size * tensor_model_parallel_size).unbind(0)
+    if enable_tknp:
+        # EP groups span TP x TKNP when token parallelism is enabled
+        group_ranks = all_ranks.transpose(1, 2).reshape(
+            -1, token_parallel_size * tensor_model_parallel_size).unbind(0)
+    else:
+        # Standard EP groups span DP x TP
+        group_ranks = all_ranks.transpose(1, 2).reshape(
+            -1, data_parallel_size * tensor_model_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     _EP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
                                     group_name="ep")
 
-    logger.info(
-        "rank %s in world size %s is assigned as "
-        "DP rank %s, PP rank %s, TP rank %s, EP rank %s", rank, world_size,
-        _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group,
-        _EP.rank_in_group)
+    # Logging
+    if enable_tknp:
+        logger.info(
+            "rank %s in world size %s is assigned as "
+            "DP rank %s, PP rank %s, TP rank %s, EP rank %s, TKNP rank %s", 
+            rank, world_size,
+            _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group,
+            _EP.rank_in_group, _TKNP.rank_in_group)
+    else:
+        logger.info(
+            "rank %s in world size %s is assigned as "
+            "DP rank %s, PP rank %s, TP rank %s, EP rank %s", 
+            rank, world_size,
+            _DP.rank_in_group, _PP.rank_in_group, _TP.rank_in_group,
+            _EP.rank_in_group)
 
 
 def ensure_model_parallel_initialized(

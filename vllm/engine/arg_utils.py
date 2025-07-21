@@ -460,6 +460,7 @@ class EngineArgs:
         get_field(VllmConfig, "compilation_config")
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
+    print_worker_ranks: bool = ParallelConfig.print_worker_ranks
 
     kv_transfer_config: Optional[KVTransferConfig] = None
     kv_events_config: Optional[KVEventsConfig] = None
@@ -722,6 +723,8 @@ class EngineArgs:
                                     **parallel_kwargs["worker_cls"])
         parallel_group.add_argument("--worker-extension-cls",
                                     **parallel_kwargs["worker_extension_cls"])
+        parallel_group.add_argument("--print-worker-ranks",
+                                    **parallel_kwargs["print_worker_ranks"])
         parallel_group.add_argument(
             "--enable-multimodal-encoder-data-parallel",
             **parallel_kwargs["enable_multimodal_encoder_data_parallel"])
@@ -950,6 +953,19 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
+
+        parser.add_argument(
+            "--token-parallel-size",
+            type=int,
+            default=1,
+            help="Number of token parallel groups for HTTP attention"
+        )
+        
+        parser.add_argument(
+            "--enable-http",
+            action="store_true",
+            help="Enable Hybrid Tensor and Token Parallelism"
+        )
 
         return parser
 
@@ -1229,6 +1245,7 @@ class EngineArgs:
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
+            print_worker_ranks=self.print_worker_ranks,
             enable_multimodal_encoder_data_parallel=self.
             enable_multimodal_encoder_data_parallel,
         )

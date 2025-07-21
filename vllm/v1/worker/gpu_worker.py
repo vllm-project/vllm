@@ -38,6 +38,74 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
 
+def _print_worker_rank_info(rank: int) -> None:
+    """Print rank information for this worker process."""
+    import os
+    from vllm.distributed.parallel_state import (
+        get_tp_group, get_pp_group, get_dp_group
+    )
+    global_rank = torch.distributed.get_rank()
+    
+    print(f"Worker Rank {global_rank} (PID: {os.getpid()}) - Parallel Groups:")
+    
+    # Print tensor parallel group ranks
+    try:
+        tp_group = get_tp_group()
+        print(f"Rank {global_rank}: Tensor Parallel: {sorted(tp_group.ranks)}")
+    except (AssertionError, AttributeError):
+        print(f"Rank {global_rank}: Tensor Parallel: Not initialized")
+    
+    # Print pipeline parallel group ranks
+    try:
+        pp_group = get_pp_group()
+        print(f"Rank {global_rank}: Pipeline Parallel: {sorted(pp_group.ranks)}")
+    except (AssertionError, AttributeError):
+        print(f"Rank {global_rank}: Pipeline Parallel: Not initialized")
+    
+    # Print data parallel group ranks
+    try:
+        dp_group = get_dp_group()
+        print(f"Rank {global_rank}: Data Parallel: {sorted(dp_group.ranks)}")
+    except (AssertionError, AttributeError):
+        print(f"Rank {global_rank}: Data Parallel: Not initialized")
+
+# def _print_worker_rank_info(rank: int) -> None:
+#     """Print rank information for this worker process."""
+#     import os
+#     import sys
+#     import time
+#     from vllm.distributed.parallel_state import (
+#         get_tp_group, get_pp_group, get_dp_group
+#     )
+    
+#     # Use stderr to avoid Ray's stdout deduplication and add timestamp for uniqueness
+#     timestamp = time.time()
+#     print(f"[{timestamp:.3f}] Worker Rank {rank} (PID: {os.getpid()}) - Parallel Groups:", file=sys.stderr)
+    
+#     # Print tensor parallel group ranks
+#     try:
+#         tp_group = get_tp_group()
+#         print(f"[{timestamp:.3f}] Rank {rank}: Tensor Parallel: {sorted(tp_group.ranks)}", file=sys.stderr)
+#     except (AssertionError, AttributeError):
+#         print(f"[{timestamp:.3f}] Rank {rank}: Tensor Parallel: Not initialized", file=sys.stderr)
+    
+#     # Print pipeline parallel group ranks
+#     try:
+#         pp_group = get_pp_group()
+#         print(f"[{timestamp:.3f}] Rank {rank}: Pipeline Parallel: {sorted(pp_group.ranks)}", file=sys.stderr)
+#     except (AssertionError, AttributeError):
+#         print(f"[{timestamp:.3f}] Rank {rank}: Pipeline Parallel: Not initialized", file=sys.stderr)
+    
+#     # Print data parallel group ranks
+#     try:
+#         dp_group = get_dp_group()
+#         print(f"[{timestamp:.3f}] Rank {rank}: Data Parallel: {sorted(dp_group.ranks)}", file=sys.stderr)
+#     except (AssertionError, AttributeError):
+#         print(f"[{timestamp:.3f}] Rank {rank}: Data Parallel: Not initialized", file=sys.stderr)
+    
+#     # Flush stderr to ensure immediate output
+#     sys.stderr.flush()
+
 class Worker(WorkerBase):
 
     def __init__(
@@ -165,6 +233,8 @@ class Worker(WorkerBase):
                                             self.distributed_init_method,
                                             self.local_rank,
                                             current_platform.dist_backend)
+        
+        print("GPUWorker init")
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -412,10 +482,12 @@ def init_worker_distributed_environment(
 
     init_distributed_environment(parallel_config.world_size, rank,
                                  distributed_init_method, local_rank, backend)
+    
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 
+    _print_worker_rank_info(rank)
     ensure_kv_transfer_initialized(vllm_config)
 
 

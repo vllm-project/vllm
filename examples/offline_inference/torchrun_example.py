@@ -31,8 +31,8 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 # deterministic across ranks.
 llm = LLM(
     model="meta-llama/Llama-3.1-8B",
-    tensor_parallel_size=2,
-    pipeline_parallel_size=2,
+    tensor_parallel_size=4,
+    pipeline_parallel_size=1,
     distributed_executor_backend="external_launcher",
     max_model_len=32768,
     seed=1,
