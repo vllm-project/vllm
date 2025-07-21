@@ -332,7 +332,7 @@ template void invokeFP4Quantization(int m, int n, __nv_bfloat16 const* input,
                                     int multiProcessorCount,
                                     cudaStream_t stream);
 
-void scaled_fp4_quant_sm100a(torch::Tensor const& output,
+void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
                              torch::Tensor const& input,
                              torch::Tensor const& output_sf,
                              torch::Tensor const& input_sf) {

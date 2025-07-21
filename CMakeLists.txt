@@ -528,6 +528,25 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 
+  # The nvfp4_scaled_mm_sm120 kernels for Geforce Blackwell SM120 require
+  # CUDA 12.8 or later
+  cuda_archs_loose_intersection(FP4_ARCHS "12.0;12.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_ARCHS)
+    set(SRCS
+      "csrc/quantization/fp4/nvfp4_quant_kernels.cu"
+      "csrc/quantization/fp4/nvfp4_scaled_mm_sm120_kernels.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${FP4_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM120=1")
+    message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")
+  else()
+    message(STATUS "Not building NVFP4 as no compatible archs were found.")
+    # clear FP4_ARCHS
+    set(FP4_ARCHS)
+  endif()
+
   # FP4 Archs and flags
   cuda_archs_loose_intersection(FP4_ARCHS "10.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_ARCHS)
@@ -540,7 +559,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4=1")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM100=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
     message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")
   else()
@@ -614,7 +633,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                      "in CUDA target architectures.")
     endif()
   endif()
-  
+
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
     set(SRCS "csrc/quantization/cutlass_w8a8/moe/blockwise_scaled_group_mm_sm100.cu")
