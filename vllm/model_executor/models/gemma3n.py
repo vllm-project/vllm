@@ -638,6 +638,7 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         per_layer_inputs: Optional[torch.Tensor] = None,
         **kwargs,
