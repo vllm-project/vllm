@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Type, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import ttnn
 from transformers import TopPLogitsWarper
 
 from vllm.attention.backends.abstract import AttentionBackend
@@ -163,20 +164,36 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         # place the users on the correct devices. This requires passing seq_id
         # and finished requests to the generator.
         # TODO: Extend this to support other DP models
+
         if ("Llama" in self.model_config.model
                 and "70B" in self.model_config.model
                 and self.device_config.device.get_num_devices() == 32
                 and (self.model_config.override_tt_config.get(
                     "data_parallel", 1) == 1)):
+            self.llama_tg = True
+        else:
+            self.llama_tg = False
+
+        if self.llama_tg:
             self.dp_kv_cache = True
         else:
             self.dp_kv_cache = False
+
+        if self.llama_tg:
+            self.async_torch_proc = True
+        else:
+            self.async_torch_proc = False
 
         if self.dp_kv_cache:
             # Map request id strs to seq group ids
             self.req_id_to_seq_id: Dict[str, int] = {}
             self.empty_slots = list(range(self.scheduler_config.max_num_seqs))
             self.seq_groups_to_batch_slot: Dict[int, int] = {}
+            self.prev_seq_groups_list: Optional[List[int]] = None
+            if self.async_torch_proc:
+                self.cached_read_events: List[Any] = [
+                ]  # Only used for multi-step execution
+                self.perm_table_tensor: List[torch.Tensor] = []
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -214,6 +231,12 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         if supports_multimodal(self.model) and is_prompt:
             multi_modal_kwargs = {"images": []}
         cross_block_tables_list: List[List[int]] = []
+        if self.dp_kv_cache and finished_requests_ids is not None:
+            # Delete finished requests from req_id_to_seq_id
+            finished_requests_seq_ids = []
+            for req_id in finished_requests_ids:
+                finished_requests_seq_ids.append(self.req_id_to_seq_id[req_id])
+                del self.req_id_to_seq_id[req_id]
 
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -223,6 +246,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             seq_id = seq_ids[0]
             seq_groups_list.append(seq_id)
             if self.dp_kv_cache:
+                # Add new request id to req_id_to_seq_id
                 self.req_id_to_seq_id[seq_group_metadata.request_id] = seq_id
 
             multi_modal_data = seq_group_metadata.multi_modal_data
@@ -401,19 +425,32 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                                     device="cpu")
                     ],
                                                    dim=1)
-        if self.dp_kv_cache and finished_requests_ids is not None:
-            # Prepare finished request ids
-            finished_requests_seq_ids = [
-                self.req_id_to_seq_id[req_id]
-                for req_id in finished_requests_ids
-            ]
 
-            # Delete the finished requests from req_id_to_seq_id
-            for req_id in finished_requests_ids:
-                del self.req_id_to_seq_id[req_id]
+        if self.dp_kv_cache:
+
+            if self.prev_seq_groups_list is None:
+                self.prev_seq_groups_list = seq_groups_list
+
+            # check for pe-empted requests
+            if seq_groups_list != self.prev_seq_groups_list and not is_prompt:
+                finished_requests_seq_ids_current = [
+                    seq_id for seq_id in self.prev_seq_groups_list
+                    if seq_id not in seq_groups_list
+                ]
+                self.prev_seq_groups_list = seq_groups_list
+            else:
+                finished_requests_seq_ids_current = []
+
+            # check for any remaining finished requests
+            for seq_id in finished_requests_seq_ids:
+                if seq_id not in finished_requests_seq_ids_current:
+                    finished_requests_seq_ids_current.append(seq_id)
+                    # remove seq_id from prev_seq_groups_list
+                    if seq_id in self.prev_seq_groups_list:
+                        self.prev_seq_groups_list.remove(seq_id)
 
             # update the empty slots
-            for req in finished_requests_seq_ids:
+            for req in finished_requests_seq_ids_current:
                 empty_batch_slot = self.seq_groups_to_batch_slot[req]
                 self.empty_slots.append(empty_batch_slot)
                 del self.seq_groups_to_batch_slot[req]
@@ -443,10 +480,11 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
 
         if not is_decode:
             assert num_steps == 1, "Num steps must be 1 for prefill"
-
         # always true if not using multi-step
         if model_input.is_first_multi_step:
             self.cached_step_outputs = []
+            if is_decode:
+                self.cached_read_events = []
             for i in range(num_steps):
                 next_token_ids = self._execute_model_single_step(
                     model_input,
@@ -454,9 +492,11 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     is_decode,
                     use_async_out_proc,
                     step_idx=i)
+                if is_decode and self.async_torch_proc:
+                    next_token_ids, read_event = next_token_ids
+                    self.cached_read_events.append(read_event)
                 self.cached_step_outputs.append(next_token_ids)
-
-                if i < num_steps - 1:
+                if not self.llama_tg and i < num_steps - 1:
                     # Prepare the inputs for the next step
                     new_input_tokens = next_token_ids.unsqueeze(dim=1).int()
                     if new_input_tokens.shape[
@@ -492,9 +532,22 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         if model_input.is_last_step:  # always true if not using multi-step
             num_outputs = len(self.cached_step_outputs)
             if use_async_out_proc:
-                assert num_outputs == 1, "Last step should only have one output"
+                # the last step should have 1 output unless we have
+                # scheduled less than self.scheduler_config.num_lookahead_slots
+                # + 1 steps in which case there will be 0 outputs
+                assert num_outputs <= 1, (
+                    "Last step should have at most one output")
             for i in range(num_outputs):
                 next_token_ids = self.cached_step_outputs.pop(0)
+                if is_decode and self.async_torch_proc:
+                    read_event = self.cached_read_events.pop(0)
+                    ttnn.event_synchronize(read_event)
+                    next_token_ids = ttnn.to_torch(
+                        ttnn.get_device_tensors(next_token_ids)[0])[0, 0, 0, :]
+                    if self.dp_kv_cache:
+                        # permute the tt_out
+                        next_token_ids = next_token_ids[
+                            self.perm_table_tensor.pop(0)]
                 # TODO: sync read back from device
                 # once model can keep executing steps on device
                 sampler_output = self._make_sampler_output(
@@ -538,6 +591,15 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
     def _send_prev_step_async_out(self, model_input: TTModelInput, step_idx):
         if step_idx > 0:
             next_token_ids = self.cached_step_outputs.pop(0)
+            if self.async_torch_proc:
+                read_event = self.cached_read_events.pop(0)
+                ttnn.event_synchronize(read_event)
+                next_token_ids = ttnn.to_torch(
+                    ttnn.get_device_tensors(next_token_ids)[0])[0, 0, 0, :]
+                if self.dp_kv_cache:
+                    # permute the tt_out
+                    next_token_ids = next_token_ids[self.perm_table_tensor.pop(
+                        0)]
             # TODO: sync read back from device
             # once model can keep executing steps on device
             sampler_output = self._make_sampler_output(next_token_ids,
@@ -596,16 +658,22 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             if self.model_config.is_encoder_decoder:
                 # Save encoder-decoder data for use in subsequent decode steps
                 # (may need to be updated for future models)
-                tt_out, cross_attention_masks, \
-                full_text_row_masked_out_mask = outputs
+                tt_out, prefill_cross_attention_masks, \
+                prefill_full_text_row_masked_out_mask, \
+                decode_cross_attention_masks, \
+                 decode_full_text_row_masked_out_mask = outputs
                 if self.cached_enc_dec_data is None:
                     self.cached_enc_dec_data = {}
                 for i, seq_id in enumerate(model_input.seq_groups):
                     enc_dec_data = {
-                        "cross_attention_masks":
-                        cross_attention_masks[i],
-                        "full_text_row_masked_out_mask":
-                        full_text_row_masked_out_mask[i]
+                        "prefill_cross_attention_masks":
+                        prefill_cross_attention_masks[i],
+                        "prefill_full_text_row_masked_out_mask":
+                        prefill_full_text_row_masked_out_mask[i],
+                        "decode_cross_attention_masks":
+                        decode_cross_attention_masks[i],
+                        "decode_full_text_row_masked_out_mask":
+                        decode_full_text_row_masked_out_mask[i]
                     }
                     self.cached_enc_dec_data[seq_id] = enc_dec_data
             else:
@@ -615,19 +683,35 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 assert self.cached_enc_dec_data is not None
 
                 # Use encoder-decoder data from prefill step
-                cross_attention_masks = [
-                    self.cached_enc_dec_data[seq_id]["cross_attention_masks"]
+                prefill_cross_attention_masks = [
+                    self.cached_enc_dec_data[seq_id]
+                    ["prefill_cross_attention_masks"]
                     for seq_id in model_input.seq_groups
                 ]
-                full_text_row_masked_out_mask = [
+                prefill_full_text_row_masked_out_mask = [
                     self.cached_enc_dec_data[seq_id]
-                    ["full_text_row_masked_out_mask"]
+                    ["prefill_full_text_row_masked_out_mask"]
+                    for seq_id in model_input.seq_groups
+                ]
+                decode_cross_attention_masks = [
+                    self.cached_enc_dec_data[seq_id]
+                    ["decode_cross_attention_masks"]
+                    for seq_id in model_input.seq_groups
+                ]
+                decode_full_text_row_masked_out_mask = [
+                    self.cached_enc_dec_data[seq_id]
+                    ["decode_full_text_row_masked_out_mask"]
                     for seq_id in model_input.seq_groups
                 ]
                 enc_dec_kwargs = {
-                    "cross_attention_masks": cross_attention_masks,
-                    "full_text_row_masked_out_mask":
-                    full_text_row_masked_out_mask
+                    "prefill_cross_attention_masks":
+                    prefill_cross_attention_masks,
+                    "prefill_full_text_row_masked_out_mask":
+                    prefill_full_text_row_masked_out_mask,
+                    "decode_cross_attention_masks":
+                    decode_cross_attention_masks,
+                    "decode_full_text_row_masked_out_mask":
+                    decode_full_text_row_masked_out_mask
                 }
             else:
                 enc_dec_kwargs = {}
@@ -642,6 +726,11 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     ] + self.empty_slots,
                     dtype=torch.long,
                 )
+                if self.async_torch_proc:
+                    self.perm_table_tensor.append(perm_table_tensor)
+
+                assert perm_table_tensor.shape[
+                    0] == self.scheduler_config.max_num_seqs
                 # Calculate inverse_perm_indices:
                 # inverse_perm_indices[current_slot_idx] = new_idx
                 inverse_perm_indices = torch.empty_like(perm_table_tensor)
@@ -670,8 +759,9 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 tt_out,
                 model_input.unpadded_batch_size,
                 is_tokens=(self.sample_on_device_mode is not None))
-            if self.dp_kv_cache:
-                # permute the tt_out
+            if self.async_torch_proc:
+                tt_out, read_event = tt_out
+            if self.dp_kv_cache and not self.async_torch_proc:
                 tt_out = tt_out[perm_table_tensor]
 
         # Note: for other devices, vLLM applies
@@ -689,8 +779,10 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 next_logits, model_input.tt_sampling_params)
         else:
             next_token_ids = tt_out
-
-        return next_token_ids
+        if not is_decode or not self.async_torch_proc:
+            return next_token_ids
+        else:
+            return tt_out, read_event
 
     def _sample_tokens(self, logits, tt_sampling_params: TTSamplingParams):
         if tt_sampling_params.temperature == 0:  # greedy decoding

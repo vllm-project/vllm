@@ -105,6 +105,10 @@ def check_tt_model_supported(model):
         "meta-llama/Llama-3.3-70B-Instruct",
         "Qwen/Qwen2.5-7B",
         "Qwen/Qwen2.5-7B-Instruct",
+        "Qwen/Qwen2.5-32B",
+        "Qwen/Qwen2.5-32B-Instruct",
+        "Qwen/Qwen2.5-Coder-32B",
+        "Qwen/Qwen2.5-Coder-32B-Instruct",
         "Qwen/Qwen2.5-72B",
         "Qwen/Qwen2.5-72B-Instruct",
         "Qwen/Qwen3-0.6B",
@@ -114,6 +118,7 @@ def check_tt_model_supported(model):
         "Qwen/Qwen3-14B",
         "Qwen/Qwen3-32B",
         "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
+        "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
         "mistralai/Mistral-7B-Instruct-v0.3",
     ]
     assert model in supported_models, f"Invalid model: {model}"

@@ -118,12 +118,15 @@ class TTCacheEngine:
         the assumption that we are tensor parallel by min(number of devices, 
         number of KV heads).
         '''
-        num_devices = device_config.device.get_num_devices()
+        data_parallel = 1
+        if (model_config.override_tt_config
+                and "data_parallel" in model_config.override_tt_config):
+            data_parallel = model_config.override_tt_config["data_parallel"]
+        num_devices = device_config.device.get_num_devices() // data_parallel
         num_kv_heads = model_config.get_num_kv_heads(parallel_config)
-        num_kv_heads //= min(
-            num_devices,
-            num_kv_heads)  # TP = num_devices if num_devices < num_kv_heads
-        return num_kv_heads
+
+        # TP = num_devices if num_devices < num_kv_heads
+        return num_kv_heads // min(num_devices, num_kv_heads)
 
 
 class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
@@ -175,9 +178,6 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
     def init_device(self) -> None:
         self.mesh_device = self._open_mesh_device()
         self.device_config.device = self.mesh_device
-
-        # Enable program cache
-        self._enable_program_cache()
 
     def load_model(self):
         self.model_runner.load_model()
@@ -334,9 +334,21 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             if is_first_multi_step:
                 model_input = cast(TTModelInput, model_input)
                 self.cached_model_input = model_input
+                balance_tokens = []
+                metadata_list = execute_model_req.seq_group_metadata_list
+                for seq_group_metadata in metadata_list:
+                    seq_datas = list(seq_group_metadata.seq_data.values())
+                    assert len(seq_datas) == 1, (
+                        "Currently only supporting one sequence per "
+                        "request group")
+                    max_tokens = seq_group_metadata.sampling_params.max_tokens
+                    balance_tokens.append(max_tokens -
+                                          seq_datas[0].get_output_len())
+                balance_tokens = max(balance_tokens)
                 worker_input = dataclasses.replace(
                     worker_input,
-                    num_steps=execute_model_req.num_lookahead_slots + 1)
+                    num_steps=min(execute_model_req.num_lookahead_slots + 1,
+                                  balance_tokens))
             else:
                 assert self.cached_model_input is not None
                 model_input = self.cached_model_input
@@ -419,6 +431,7 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             fabric_config_map = {
                 "DISABLED": ttnn.FabricConfig.DISABLED,
                 "FABRIC_1D": ttnn.FabricConfig.FABRIC_1D,
+                "FABRIC_1D_RING": ttnn.FabricConfig.FABRIC_1D_RING,
                 "FABRIC_2D": ttnn.FabricConfig.FABRIC_2D,
                 "CUSTOM": ttnn.FabricConfig.CUSTOM,
             }
@@ -506,10 +519,6 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                     mesh_device.get_num_devices(), mesh_grid)
         return mesh_device
 
-    def _enable_program_cache(self):
-        assert self.mesh_device is not None, "Mesh device is not initialized"
-        self.mesh_device.enable_program_cache()
-
     ## Destructor (used to close devices)
 
     def __del__(self):
@@ -517,9 +526,6 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         del self.model_runner
 
         if self.mesh_device:
-            # Disable program cache
-            self.mesh_device.disable_and_clear_program_cache()
-
             # Dump device profiler
             ttnn.DumpDeviceProfiler(self.mesh_device)
 
