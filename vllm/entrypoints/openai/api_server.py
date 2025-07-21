@@ -522,6 +522,19 @@ async def detokenize(request: DetokenizeRequest, raw_request: Request):
     assert_never(generator)
 
 
+def maybe_register_tokenizer_info_endpoint(args):
+    """Conditionally register the tokenizer info endpoint if enabled."""
+    if getattr(args, 'enable_tokenizer_info_endpoint', False):
+
+        @router.get("/tokenizer_info")
+        async def get_tokenizer_info(raw_request: Request):
+            """Get comprehensive tokenizer information."""
+            result = await tokenization(raw_request).get_tokenizer_info()
+            return JSONResponse(content=result.model_dump(),
+                                status_code=result.code if isinstance(
+                                    result, ErrorResponse) else 200)
+
+
 @router.get("/v1/models")
 async def show_available_models(raw_request: Request):
     handler = models(raw_request)
@@ -1005,6 +1018,73 @@ if envs.VLLM_SERVER_DEV_MODE:
         return JSONResponse(content={"is_sleeping": is_sleeping})
 
 
+@router.post("/scale_elastic_ep",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.OK.value: {
+                     "model": dict
+                 },
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.REQUEST_TIMEOUT.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
+async def scale_elastic_ep(raw_request: Request):
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400,
+                            detail="Invalid JSON format") from e  # noqa: B904
+
+    new_data_parallel_size = body.get("new_data_parallel_size")
+    drain_timeout = body.get("drain_timeout", 120)  # Default 2 minutes
+
+    if new_data_parallel_size is None:
+        raise HTTPException(status_code=400,
+                            detail="new_data_parallel_size is required")
+
+    if not isinstance(new_data_parallel_size,
+                      int) or new_data_parallel_size <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="new_data_parallel_size must be a positive integer")
+
+    if not isinstance(drain_timeout, int) or drain_timeout <= 0:
+        raise HTTPException(status_code=400,
+                            detail="drain_timeout must be a positive integer")
+
+    # Set scaling flag to prevent new requests
+    global _scaling_elastic_ep
+    _scaling_elastic_ep = True
+    client = engine_client(raw_request)
+    try:
+        await client.scale_elastic_ep(new_data_parallel_size, drain_timeout)
+        return JSONResponse({
+            "message":
+            f"Scaled to {new_data_parallel_size} "
+            "data parallel engines",
+        })
+    except TimeoutError as e:
+        raise HTTPException(status_code=408,
+                            detail="Scale failed due to request drain timeout "
+                            f"after {drain_timeout} seconds") from e
+    except Exception as e:
+        logger.error("Scale failed: %s", e)
+        raise HTTPException(status_code=500, detail="Scale failed") from e
+    finally:
+        _scaling_elastic_ep = False
+
+
+@router.post("/is_scaling_elastic_ep")
+async def is_scaling_elastic_ep(raw_request: Request):
+    return JSONResponse({"is_scaling_elastic_ep": _scaling_elastic_ep})
+
+
 # TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
 # (requires typing_extensions >= 4.13)
 RequestType = Any
@@ -1203,6 +1283,41 @@ class XRequestIdMiddleware:
         return self.app(scope, receive, send_with_request_id)
 
 
+# Global variable to track scaling state
+_scaling_elastic_ep = False
+
+
+class ScalingMiddleware:
+    """
+    Middleware that checks if the model is currently scaling and
+    returns a 503 Service Unavailable response if it is.
+    
+    This middleware applies to all HTTP requests and prevents
+    processing when the model is in a scaling state.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    def __call__(self, scope: Scope, receive: Receive,
+                 send: Send) -> Awaitable[None]:
+        if scope["type"] != "http":
+            return self.app(scope, receive, send)
+
+        # Check global scaling state
+        global _scaling_elastic_ep
+        if _scaling_elastic_ep:
+            # Return 503 Service Unavailable response
+            response = JSONResponse(content={
+                "error":
+                "The model is currently scaling. Please try again later."
+            },
+                                    status_code=503)
+            return response(scope, receive, send)
+
+        return self.app(scope, receive, send)
+
+
 def _extract_content_from_chunk(chunk_data: dict) -> str:
     """Extract content from a streaming response chunk."""
     try:
@@ -1391,6 +1506,9 @@ def build_app(args: Namespace) -> FastAPI:
     if args.enable_request_id_headers:
         app.add_middleware(XRequestIdMiddleware)
 
+    # Add scaling middleware to check for scaling state
+    app.add_middleware(ScalingMiddleware)
+
     if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
         logger.warning("CAUTION: Enabling log response in the API Server. "
                        "This can include sensitive information and should be "
@@ -1514,8 +1632,6 @@ async def init_app_state(
         chat_template_content_format=args.chat_template_content_format,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
-        expand_tools_even_if_tool_choice_none=args.
-        expand_tools_even_if_tool_choice_none,
         tool_parser=args.tool_call_parser,
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
@@ -1531,8 +1647,6 @@ async def init_app_state(
         chat_template_content_format=args.chat_template_content_format,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
-        expand_tools_even_if_tool_choice_none=args.
-        expand_tools_even_if_tool_choice_none,
         tool_parser=args.tool_call_parser,
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
@@ -1544,6 +1658,7 @@ async def init_app_state(
         state.openai_serving_models,
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
     ) if "generate" in model_config.supported_tasks else None
     state.openai_serving_pooling = OpenAIServingPooling(
@@ -1553,7 +1668,7 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if "pooling" in model_config.supported_tasks else None
+    ) if "encode" in model_config.supported_tasks else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,
@@ -1695,6 +1810,7 @@ async def run_server_worker(listen_address,
         uvicorn_kwargs['log_config'] = log_config
 
     async with build_async_engine_client(args, client_config) as engine_client:
+        maybe_register_tokenizer_info_endpoint(args)
         app = build_app(args)
 
         vllm_config = await engine_client.get_vllm_config()
