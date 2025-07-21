@@ -37,7 +37,10 @@ class Sampler(nn.Module):
         # See https://vllm-dev.slack.com/archives/C07UUL8E61Z/p1735907856007919 # noqa: E501
         num_logprobs = sampling_metadata.max_num_logprobs
         if num_logprobs is not None:
-            raw_logprobs = self.compute_logprobs(logits)
+            if sampling_metadata.use_raw_logits:
+                raw_logprobs = logits.clone()
+            else:
+                raw_logprobs = self.compute_logprobs(logits)
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
