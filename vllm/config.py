@@ -1655,8 +1655,8 @@ class CacheConfig:
     - "builtin" is Python's built-in hash.\n
     - "sha256" is collision resistant but with certain overheads.
     This option uses Pickle for object serialization before hashing.\n
-    - "sha256_cbor_64bit" provides a reproducible, cross-language compatible 
-    hash. It serializes objects using canonical CBOR and hashes them with 
+    - "sha256_cbor_64bit" provides a reproducible, cross-language compatible
+    hash. It serializes objects using canonical CBOR and hashes them with
     SHA-256. The resulting hash consists of the lower 64 bits of the SHA-256
     digest."""
     cpu_offload_gb: float = 0
@@ -3957,6 +3957,10 @@ class PassConfig:
                 logger.warning_once(
                     "Fusion enabled but reshape elimination disabled. "
                     "Attention + quant (fp8) fusion might not work")
+        if not self.enable_fusion and self.enable_fi_allreduce_fusion:
+            logger.warning_once(
+                "Flashinfer allreduce fusion is enabled but fusion is disabled. "  # noqa: E501
+                "Allreduce+RMSNorm+Quant fusion might not work")
 
 
 @config
