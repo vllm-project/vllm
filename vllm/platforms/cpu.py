@@ -104,8 +104,19 @@ class CpuPlatform(Platform):
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        import psutil
-        return psutil.virtual_memory().total
+        import vllm.envs as envs
+        from vllm.utils import GiB_bytes
+
+        kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
+        if kv_cache_space is None:
+            kv_cache_space = 4 * GiB_bytes  # type: ignore
+            logger.warning_once(
+                "Environment variable VLLM_CPU_KVCACHE_SPACE (GiB) "
+                "for CPU backend is not set, using 4 by default.")
+        else:
+            kv_cache_space *= GiB_bytes
+
+        return kv_cache_space
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
@@ -124,8 +135,6 @@ class CpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        import vllm.envs as envs
-        from vllm.utils import GiB_bytes
         model_config = vllm_config.model_config
 
         if model_config is not None:
@@ -162,20 +171,8 @@ class CpuPlatform(Platform):
                            " support fp16 for now, cast to bf16.")
             model_config.dtype = torch.bfloat16
 
-        kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
-
-        if kv_cache_space >= 0:
-            if kv_cache_space == 0:
-                cache_config.cpu_kvcache_space_bytes = 4 * GiB_bytes  # type: ignore
-                logger.warning(
-                    "Environment variable VLLM_CPU_KVCACHE_SPACE (GiB) "
-                    "for CPU backend is not set, using 4 by default.")
-            else:
-                cache_config.cpu_kvcache_space_bytes = kv_cache_space * GiB_bytes  # type: ignore # noqa
-        else:
-            raise RuntimeError(
-                "Invalid environment variable VLLM_CPU_KVCACHE_SPACE"
-                f" {kv_cache_space}, expect a positive integer value.")
+        cache_config.cpu_kvcache_space_bytes = \
+            CpuPlatform.get_device_total_memory()
 
         parallel_config = vllm_config.parallel_config
         if (parallel_config.world_size > 1
@@ -216,8 +213,6 @@ class CpuPlatform(Platform):
                 False,
                 "nan_asserts":
                 False,
-                "memory_planning":
-                True,
                 "epilogue_fusion":
                 True,
             })
