@@ -253,7 +253,7 @@ _SPECULATIVE_DECODING_MODELS = {
 }
 
 _TRANSFORMERS_SUPPORTED_MODELS = {
-    "Emu3ForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "Emu3ForConditionalGeneration": ("transformers", "TransformersForMultimodalLM"),  # noqa: E501
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
