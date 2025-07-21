@@ -36,6 +36,7 @@ def swizzle_mxfp4(quant_tensor, scale):
             scale_layout = BlackwellMXScaleLayout
             constraints = {
                 "is_persistent": True,
+                "epilogue_subtile": 1,
             }
             opt_flags.update_opt_flags_constraints(constraints)
     quant_tensor = quant_tensor.transpose(-2, -1)
