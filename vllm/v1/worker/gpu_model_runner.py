@@ -5,7 +5,6 @@ import gc
 import time
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Optional, Union
-from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -1915,16 +1914,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             yield
             input_ids.fill_(0)
 
-    @contextmanager
-    def suppress_gc_collect(self):
-        """
-        Temporarily disable ``gc.collect`` to speed up CUDA graph capture.
-        This is a workaround to avoid the overhead of garbage collection
-        during the graph capture with torch.compile.
-        """
-        with patch("gc.collect", lambda: None):
-            yield
-
     @torch.inference_mode()
     def _dummy_run(
         self,
@@ -2263,10 +2252,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_time = time.perf_counter()
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
+        @contextmanager
+        def freeze_gc():
+            # Optimize garbage collection during CUDA graph capture.
+            # Clean up, then freeze all remaining objects from being included
+            # in future collections.
+            gc.collect()
+            gc.freeze()
+            try:
+                yield
+            finally:
+                gc.unfreeze()
+
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
-        with self.suppress_gc_collect(), graph_capture(device=self.device):
+        with freeze_gc(), graph_capture(device=self.device):
             full_cg = self.full_cuda_graph
             # Only rank 0 should print progress bar during capture
             compilation_cases = reversed(self.cudagraph_batch_sizes)
