@@ -22,7 +22,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.pooler import Pooler, PoolingType
+from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -429,12 +429,10 @@ class InternLM2ForRewardModel(InternLM2ForCausalLM):
         )
 
         pooler_config = vllm_config.model_config.pooler_config
-        self.pooler = Pooler.from_config_with_defaults(
-            pooler_config,
-            pooling_type=PoolingType.ALL,
-            normalize=False,
-            softmax=False,
-        )
+        assert pooler_config is not None
+
+        self.pooler = DispatchPooler(
+            {"encode": Pooler.for_encode(pooler_config)}, )
 
     def forward(
         self,

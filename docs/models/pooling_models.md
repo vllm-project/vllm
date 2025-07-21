@@ -11,26 +11,51 @@ before returning them.
     As shown in the [Compatibility Matrix](../features/compatibility_matrix.md), most vLLM features are not applicable to
     pooling models as they only work on the generation or decode stage, so performance may not improve as much.
 
-For pooling models, we support the following `--task` options.
-The selected option sets the default pooler used to extract the final hidden states:
+If the model doesn't implement this interface, you can set `--task` which tells vLLM
+to convert the model into a pooling model.
 
-| Task                            | Pooling Type   | Normalization   | Softmax   |
-|---------------------------------|----------------|-----------------|-----------|
-| Embedding (`embed`)             | `LAST`         | ✅︎              | ❌         |
-| Classification (`classify`)     | `LAST`         | ❌               | ✅︎        |
-| Sentence Pair Scoring (`score`) | \*             | \*              | \*        |
+| `--task`   | Model type           | Supported pooling tasks       |
+|------------|----------------------|-------------------------------|
+| `embed`    | Embedding model      | `encode`, `embed`             |
+| `classify` | Classification model | `encode`, `classify`, `score` |
+| `reward`   | Reward model         | `encode`                      |
 
-\*The default pooler is always defined by the model.
+## Pooling Tasks
 
-!!! note
-    If the model's implementation in vLLM defines its own pooler, the default pooler is set to that instead of the one specified in this table.
+In vLLM, we define the following pooling tasks and corresponding APIs:
+
+| Task       | APIs               |
+|------------|--------------------|
+| `encode`   | `encode`           |
+| `embed`    | `embed`, `score`\* |
+| `classify` | `classify`         |
+| `score`    | `score`            |
+
+\*The `score` API falls back to `embed` task if the model does not support `score` task.
+
+Each pooling model in vLLM supports one or more of these tasks according to [Pooler.get_supported_tasks][vllm.model_executor.layers.Pooler.get_supported_tasks].
+
+By default, the pooler assigned to each task has the following attributes:
+
+| Task       | Pooling Type   | Normalization | Softmax |
+|------------|----------------|---------------|---------|
+| `encode`   | `ALL`          | ❌            | ❌      |
+| `embed`    | `LAST`         | ✅︎            | ❌      |
+| `classify` | `LAST`         | ❌            | ✅︎      |
+
+These defaults may be overridden by the model's implementation in vLLM.
 
 When loading [Sentence Transformers](https://huggingface.co/sentence-transformers) models,
-we attempt to override the default pooler based on its Sentence Transformers configuration file (`modules.json`).
+we attempt to override the defaults based on its Sentence Transformers configuration file (`modules.json`),
+which takes priority over the model's defaults.
 
-!!! tip
-    You can customize the model's pooling method via the `--override-pooler-config` option,
-    which takes priority over both the model's and Sentence Transformers's defaults.
+You can further customize this via the `--override-pooler-config` option,
+which takes priority over both the model's and Sentence Transformers's defaults.
+
+!!! note
+
+    The above configuration may be disregarded if the model's implementation in vLLM defines its own pooler
+    that is not based on [PoolerConfig][vllm.config.PoolerConfig].
 
 ## Offline Inference
 
