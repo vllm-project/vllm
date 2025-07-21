@@ -204,7 +204,7 @@ class InputBatch:
         # that are currently in the prefill phase.
         self.num_prompt_logprobs: dict[str, int] = {}
         # Return raw logits in logprobs.
-        self.use_raw_logits: dict[str, bool] = {}
+        self.use_raw_logits: set[str] = {}
 
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
@@ -344,7 +344,8 @@ class InputBatch:
                 self.num_prompt_logprobs[
                     req_id] = sampling_params.prompt_logprobs
             if sampling_params.extra_args and "use_raw_logits" in sampling_params.extra_args:
-                self.use_raw_logits[req_id] = sampling_params.extra_args["use_raw_logits"]
+                if sampling_params.extra_args["use_raw_logits"]:
+                    self.use_raw_logits.add(req_id)
 
             if sampling_params.allowed_token_ids:
                 self.has_allowed_token_ids.add(req_id)
@@ -655,6 +656,7 @@ class InputBatch:
             top_k=None if self.no_top_k else self.top_k[:num_reqs],
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
+            use_raw_logits=len(self.use_raw_logits) > 0,
             prompt_token_ids=prompt_token_ids,
             frequency_penalties=self.frequency_penalties[:num_reqs],
             presence_penalties=self.presence_penalties[:num_reqs],
