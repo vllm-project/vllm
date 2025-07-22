@@ -239,7 +239,7 @@ class PoolerHead(nn.Module):
                 pooling_metadata: PoolingMetadata):
 
         dimensions_list = [
-            pooling_param.dimensions
+            pooling_param.dimensions if pooling_param is not None else None
             for _, pooling_param in pooling_metadata.seq_groups
         ]
         if any(d is not None for d in dimensions_list):

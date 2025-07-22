@@ -39,6 +39,7 @@ class HPUPoolingModelRunner(
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
         warmup_mode=False,
+        **kwargs,
     ) -> Optional[Union[List[PoolerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError(
@@ -188,6 +189,20 @@ class HPUPoolingModelRunner(
         return dataclasses.replace(model_input,
                                    virtual_engine=virtual_engine,
                                    pooling_metadata=pooling_metadata)
+
+    @torch.inference_mode()
+    def prepare_model_input_align_worker(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        virtual_engine: int = 0,
+        finished_requests_ids: Optional[List[str]] = None,
+        align_worker: bool = False,
+    ) -> ModelInputForHPUWithPoolingMetadata:
+        return self.prepare_model_input(
+            seq_group_metadata_list,
+            virtual_engine,
+            finished_requests_ids,
+        )
 
     def _prepare_pooling(
         self,
