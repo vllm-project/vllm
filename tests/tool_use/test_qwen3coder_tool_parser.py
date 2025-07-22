@@ -552,7 +552,9 @@ def test_extract_tool_calls_streaming(qwen3_tool_parser, qwen3_tokenizer,
         assert state["name"] == expected_tool.function.name
 
         # Parse accumulated arguments
-        actual_args = json.loads(state["arguments"])
+        arguments_str = state["arguments"]
+        assert arguments_str is not None
+        actual_args = json.loads(arguments_str)
         expected_args = json.loads(expected_tool.function.arguments)
         assert actual_args == expected_args
 
