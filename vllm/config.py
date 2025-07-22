@@ -1774,8 +1774,8 @@ class CacheConfig:
     - "builtin" is Python's built-in hash.\n
     - "sha256" is collision resistant but with certain overheads.
     This option uses Pickle for object serialization before hashing.\n
-    - "sha256_cbor_64bit" provides a reproducible, cross-language compatible 
-    hash. It serializes objects using canonical CBOR and hashes them with 
+    - "sha256_cbor_64bit" provides a reproducible, cross-language compatible
+    hash. It serializes objects using canonical CBOR and hashes them with
     SHA-256. The resulting hash consists of the lower 64 bits of the SHA-256
     digest."""
     cpu_offload_gb: float = 0
@@ -3721,12 +3721,7 @@ def get_served_model_name(model: str,
     return served_model_name
 
 
-GuidedDecodingBackendV0 = Literal["auto", "outlines", "lm-format-enforcer",
-                                  "xgrammar", "guidance"]
-
-GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance", "outlines"]
-GuidedDecodingBackend = Literal[GuidedDecodingBackendV0,
-                                GuidedDecodingBackendV1]
+GuidedDecodingBackend = Literal["auto", "xgrammar", "guidance", "outlines"]
 
 
 @config
@@ -3776,10 +3771,8 @@ class DecodingConfig:
         return hash_str
 
     def __post_init__(self):
-        if envs.VLLM_USE_V1:
-            valid_guided_backends = get_args(GuidedDecodingBackendV1)
-        else:
-            valid_guided_backends = get_args(GuidedDecodingBackendV0)
+        valid_guided_backends = get_args(GuidedDecodingBackend)
+
         if self.backend not in valid_guided_backends:
             raise ValueError(f"Invalid backend '{self.backend}',"
                              f" must be one of {valid_guided_backends}")
