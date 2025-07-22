@@ -350,7 +350,9 @@ class AsyncLLM(EngineClient):
             raise
         except SchedulerWaitingQueueFullError:
             if self.log_requests:
-                logger.info("Request %s failed (queue full).", request_id)
+                logger.info(
+                    "Request %s failed (waitingqueue full).", request_id
+                )
             raise
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
@@ -510,7 +512,9 @@ class AsyncLLM(EngineClient):
             raise
         except SchedulerWaitingQueueFullError:
             if self.log_requests:
-                logger.info("Request %s failed (queue full).", request_id)
+                logger.info(
+                    "Request %s failed (waitingqueue full).", request_id
+                )
             raise
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:

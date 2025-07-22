@@ -741,7 +741,7 @@ class EngineCoreProc(EngineCore):
     def _send_engine_error(self, exc: Optional[BaseException] = None):
         """Send CustomEngineError status to the EngineCoreClient."""
 
-        # Put ENGINE_CORE_DEAD in the queue.
+        # Put CustomEngineError in the queue.
         self.output_queue.put_nowait((
             0,
             EngineCoreOutputs(engine_error=EngineErrorPayload(
