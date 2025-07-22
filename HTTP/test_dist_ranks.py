@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # python HTTP/test_dist_ranks.py --tensor-parallel-size 2 --pipeline-parallel-size 1 --data-parallel-size 1
-
+# python HTTP/test_dist_ranks.py --tensor-parallel-size 2 --pipeline-parallel-size 2 --token-parallel-size 2 --enable-tknp
 """
 Test script to instantiate a vLLM LLM with distributed configuration
 and print rank information from worker processes using the new print_worker_ranks flag.
@@ -66,6 +66,17 @@ def main():
         action="store_true",
         help="Trust remote code when loading model"
     )
+    parser.add_argument(
+        "--token-parallel-size",
+        type=int,
+        default=1,
+        help="Number of token parallel groups (default: 1)"
+    )
+    parser.add_argument(
+        "--enable-token-parallel",
+        action="store_true",
+        help="Enable token parallelism"
+    )
     
     args = parser.parse_args()
     
@@ -76,6 +87,7 @@ def main():
     print(f"  Tensor Parallel Size: {args.tensor_parallel_size}")
     print(f"  Pipeline Parallel Size: {args.pipeline_parallel_size}")
     print(f"  Data Parallel Size: {args.data_parallel_size}")
+    print(f"  Token Parallel Size: {args.token_parallel_size}")
     print(f"  Total GPUs Required: {total_gpus}")
     print(f"  Model: {args.model}")
     print(f"  Print Worker Ranks: ENABLED")
@@ -100,6 +112,8 @@ def main():
             tensor_parallel_size=args.tensor_parallel_size,
             pipeline_parallel_size=args.pipeline_parallel_size,
             data_parallel_size=args.data_parallel_size,
+            token_parallel_size=args.token_parallel_size,
+            enable_token_parallel=args.enable_token_parallel,
             max_model_len=args.max_model_len,
             dtype=args.dtype,
             trust_remote_code=args.trust_remote_code,

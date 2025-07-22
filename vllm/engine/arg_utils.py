@@ -335,6 +335,9 @@ class EngineArgs:
     data_parallel_address: Optional[str] = None
     data_parallel_rpc_port: Optional[int] = None
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
+    # Token parallel configs
+    token_parallel_size: int = ParallelConfig.token_parallel_size
+    enable_token_parallel: bool = ParallelConfig.enable_token_parallel
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_eplb: bool = ParallelConfig.enable_eplb
     num_redundant_experts: int = ParallelConfig.num_redundant_experts
@@ -729,6 +732,13 @@ class EngineArgs:
             "--enable-multimodal-encoder-data-parallel",
             **parallel_kwargs["enable_multimodal_encoder_data_parallel"])
 
+        parallel_group.add_argument(
+            "--enable-token-parallel",
+            **parallel_kwargs["enable_token_parallel"])
+        parallel_group.add_argument(
+            "--token-parallel-size",
+            **parallel_kwargs["token_parallel_size"])
+        
         # KV cache arguments
         cache_kwargs = get_kwargs(CacheConfig)
         cache_group = parser.add_argument_group(
@@ -1248,6 +1258,8 @@ class EngineArgs:
             print_worker_ranks=self.print_worker_ranks,
             enable_multimodal_encoder_data_parallel=self.
             enable_multimodal_encoder_data_parallel,
+            enable_token_parallel=self.enable_token_parallel,
+            token_parallel_size=self.token_parallel_size,
         )
 
         speculative_config = self.create_speculative_config(

@@ -18,7 +18,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
                                           get_kv_transfer_group,
                                           has_kv_transfer_group)
-from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group, get_tknp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -68,6 +68,13 @@ def _print_worker_rank_info(rank: int) -> None:
         print(f"Rank {global_rank}: Data Parallel: {sorted(dp_group.ranks)}")
     except (AssertionError, AttributeError):
         print(f"Rank {global_rank}: Data Parallel: Not initialized")
+
+    # Print token parallel group ranks
+    try:
+        tknp_group = get_tknp_group()
+        print(f"Rank {global_rank}: Token Parallel: {sorted(tknp_group.ranks)}")
+    except (AssertionError, AttributeError):
+        print(f"Rank {global_rank}: Token Parallel: Not initialized")
 
 # def _print_worker_rank_info(rank: int) -> None:
 #     """Print rank information for this worker process."""

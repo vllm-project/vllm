@@ -1096,6 +1096,8 @@ def initialize_model_parallel(
                                     group_name="pp")
 
     # Build token parallel groups OR data parallel groups
+    global _DP
+
     if enable_tknp:
         # Create token parallel groups
         global _TKNP
@@ -1111,7 +1113,6 @@ def initialize_model_parallel(
             group_name="tknp")
         
         # Still create DP groups with size 1 for compatibility
-        global _DP
         assert _DP is None, ("data parallel group is already initialized")
         # Each rank is its own DP group when token parallelism is enabled
         group_ranks = [[i] for i in range(world_size)]
@@ -1121,7 +1122,6 @@ def initialize_model_parallel(
                                         group_name="dp")
     else:
         # Standard data parallel groups
-        global _DP
         assert _DP is None, ("data parallel group is already initialized")
         group_ranks = all_ranks.transpose(1, 3).reshape(
             -1, data_parallel_size).unbind(0)
