@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 from typing import Annotated, Any, Union, get_args, get_origin, get_type_hints
 
 import torch
+
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class TensorShape:
@@ -23,6 +26,20 @@ class TensorShape:
             else:
                 resolved.append(dim)
         return tuple(resolved)
+
+    def __str__(self) -> str:
+        """Return a string representation of the tensor shape."""
+        dim_strs = []
+        for dim in self.dims:
+            if isinstance(dim, str):
+                if dim in self.dynamic_dims:
+                    dim_strs.append(
+                        f"{dim}*")  # Mark dynamic dimensions with *
+                else:
+                    dim_strs.append(dim)
+            else:
+                dim_strs.append(str(dim))
+        return f"({', '.join(dim_strs)})"
 
 
 class TensorSchema:
@@ -179,7 +196,7 @@ class TensorSchema:
 
     def print_shapes(self) -> None:
         """Print TensorShape annotations for debugging."""
-        print(f"Shapes in {self.__class__.__name__}:")
+        logger.debug("Shapes in %s:", self.__class__.__name__)
         type_hints = get_type_hints(self.__class__, include_extras=True)
 
         for field_name, field_type in type_hints.items():
@@ -187,4 +204,4 @@ class TensorSchema:
                 args = get_args(field_type)
                 for arg in args:
                     if isinstance(arg, TensorShape):
-                        print(f"  {field_name}: {arg}")
+                        logger.debug("  %s: %s", field_name, str(arg))
