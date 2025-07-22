@@ -241,6 +241,12 @@ class LLM:
         else:
             compilation_config_instance = CompilationConfig()
 
+        if 'device' in kwargs:
+            logger.warning_once(
+                "`device` parameter for EngineArgs is deprecated since vllm "
+                "0.10.0, it will be ignored")
+            del kwargs['device']
+
         engine_args = EngineArgs(
             model=model,
             task=task,
