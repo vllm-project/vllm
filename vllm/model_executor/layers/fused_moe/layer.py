@@ -518,6 +518,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        **kwargs,
     ) -> torch.Tensor:
         assert not use_grouped_topk
         assert num_expert_group is None
