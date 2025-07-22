@@ -92,8 +92,10 @@ class Mamba2AttentionMetadataBuilder(
         assert isinstance(kv_cache_spec, MambaSpec)
         self.kv_cache_spec = kv_cache_spec
         self.chunk_size = vllm_config.model_config.get_mamba_chunk_size()
-        assert self.chunk_size is not None, (
-            "chunk_size needs to be set in the model config for Mamba2 models")
+        if isinstance(kv_cache_spec, MambaSpec):
+            assert self.chunk_size is not None, (
+                "chunk_size needs to be set in the model config for "
+                "Mamba2 models")
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
