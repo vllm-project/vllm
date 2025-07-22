@@ -27,7 +27,7 @@ class XPUModelRunner(GPUModelRunner):
         self.cascade_attn_enabled = False
 
     def _init_device_properties(self) -> None:
-        pass
+        self.num_sms = None
 
     def _sync_device(self) -> None:
         torch.xpu.synchronize()

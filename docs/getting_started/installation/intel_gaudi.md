@@ -28,7 +28,7 @@ To verify that the Intel Gaudi software was correctly installed, run:
 hl-smi # verify that hl-smi is in your PATH and each Gaudi accelerator is visible
 apt list --installed | grep habana # verify that habanalabs-firmware-tools, habanalabs-graph, habanalabs-rdma-core, habanalabs-thunk and habanalabs-container-runtime are installed
 pip list | grep habana # verify that habana-torch-plugin, habana-torch-dataloader, habana-pyhlml and habana-media-loader are installed
-pip list | grep neural # verify that neural_compressor is installed
+pip list | grep neural # verify that neural_compressor_pt is installed
 ```
 
 Refer to [Intel Gaudi Software Stack Verification](https://docs.habana.ai/en/latest/Installation_Guide/SW_Verification.html#platform-upgrade)
@@ -109,8 +109,8 @@ docker run \
 
 ### Supported features
 
-- [Offline inference][offline-inference]
-- Online serving via [OpenAI-Compatible Server][serving-openai-compatible-server]
+- [Offline inference](../../serving/offline_inference.md)
+- Online serving via [OpenAI-Compatible Server](../../serving/openai_compatible_server.md)
 - HPU autodetection - no need to manually select device within vLLM
 - Paged KV cache with algorithms enabled for Intel Gaudi accelerators
 - Custom Intel Gaudi implementations of Paged Attention, KV cache ops,
@@ -120,12 +120,13 @@ docker run \
 - Inference with [HPU Graphs](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html)
   for accelerating low-batch latency and throughput
 - Attention with Linear Biases (ALiBi)
+- INC quantization
 
 ### Unsupported features
 
 - Beam search
 - LoRA adapters
-- Quantization
+- AWQ quantization
 - Prefill chunking (mixed-batch inferencing)
 
 ### Supported configurations
@@ -133,36 +134,20 @@ docker run \
 The following configurations have been validated to function with
 Gaudi2 devices. Configurations that are not listed may or may not work.
 
-- [meta-llama/Llama-2-7b](https://huggingface.co/meta-llama/Llama-2-7b)
-  on single HPU, or with tensor parallelism on 2x and 8x HPU, BF16
-  datatype with random or greedy sampling
-- [meta-llama/Llama-2-7b-chat-hf](https://huggingface.co/meta-llama/Llama-2-7b-chat-hf)
-  on single HPU, or with tensor parallelism on 2x and 8x HPU, BF16
-  datatype with random or greedy sampling
-- [meta-llama/Meta-Llama-3-8B](https://huggingface.co/meta-llama/Meta-Llama-3-8B)
-  on single HPU, or with tensor parallelism on 2x and 8x HPU, BF16
-  datatype with random or greedy sampling
-- [meta-llama/Meta-Llama-3-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct)
-  on single HPU, or with tensor parallelism on 2x and 8x HPU, BF16
-  datatype with random or greedy sampling
-- [meta-llama/Meta-Llama-3.1-8B](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B)
-  on single HPU, or with tensor parallelism on 2x and 8x HPU, BF16
-  datatype with random or greedy sampling
-- [meta-llama/Meta-Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct)
-  on single HPU, or with tensor parallelism on 2x and 8x HPU, BF16
-  datatype with random or greedy sampling
-- [meta-llama/Llama-2-70b](https://huggingface.co/meta-llama/Llama-2-70b)
-  with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
-- [meta-llama/Llama-2-70b-chat-hf](https://huggingface.co/meta-llama/Llama-2-70b-chat-hf)
-  with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
-- [meta-llama/Meta-Llama-3-70B](https://huggingface.co/meta-llama/Meta-Llama-3-70B)
-  with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
-- [meta-llama/Meta-Llama-3-70B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-70B-Instruct)
-  with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
-- [meta-llama/Meta-Llama-3.1-70B](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B)
-  with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
-- [meta-llama/Meta-Llama-3.1-70B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B-Instruct)
-  with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
+| Model | TP Size| dtype | Sampling |
+|-------|--------|--------|----------|
+| [meta-llama/Llama-2-7b](https://huggingface.co/meta-llama/Llama-2-7b) | 1, 2, 8 | BF16 | Random / Greedy |
+| [meta-llama/Llama-2-7b-chat-hf](https://huggingface.co/meta-llama/Llama-2-7b-chat-hf) | 1, 2, 8 | BF16 | Random / Greedy |
+| [meta-llama/Meta-Llama-3-8B](https://huggingface.co/meta-llama/Meta-Llama-3-8B) | 1, 2, 8 | BF16 | Random / Greedy |
+| [meta-llama/Meta-Llama-3-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) | 1, 2, 8 | BF16 | Random / Greedy |
+| [meta-llama/Meta-Llama-3.1-8B](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B) | 1, 2, 8 | BF16 | Random / Greedy |
+| [meta-llama/Meta-Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct) | 1, 2, 8 | BF16 | Random / Greedy |
+| [meta-llama/Llama-2-70b](https://huggingface.co/meta-llama/Llama-2-70b) | 8 | BF16 | Random / Greedy |
+| [meta-llama/Llama-2-70b-chat-hf](https://huggingface.co/meta-llama/Llama-2-70b-chat-hf) | 8 | BF16 | Random / Greedy |
+| [meta-llama/Meta-Llama-3-70B](https://huggingface.co/meta-llama/Meta-Llama-3-70B) | 8 | BF16 | Random / Greedy |
+| [meta-llama/Meta-Llama-3-70B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-70B-Instruct) | 8 | BF16 | Random / Greedy |
+| [meta-llama/Meta-Llama-3.1-70B](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B) | 8 | BF16 | Random / Greedy |
+| [meta-llama/Meta-Llama-3.1-70B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B-Instruct) | 8 | BF16 | Random / Greedy |
 
 ## Performance tuning
 
@@ -237,7 +222,7 @@ As an example, if a request of 3 sequences, with max sequence length of 412 come
 
 Warmup is an optional, but highly recommended step occurring before vLLM server starts listening. It executes a forward pass for each bucket with dummy data. The goal is to pre-compile all graphs and not incur any graph compilation overheads within bucket boundaries during server runtime. Each warmup step is logged during vLLM startup:
 
-??? Logs
+??? console "Logs"
 
     ```text
     INFO 08-01 22:26:47 hpu_model_runner.py:1066] [Warmup][Prompt][1/24] batch_size:4 seq_len:1024 free_mem:79.16 GiB
@@ -286,7 +271,7 @@ When there's large amount of requests pending, vLLM scheduler will attempt to fi
 
 Each described step is logged by vLLM server, as follows (negative values correspond to memory being released):
 
-??? Logs
+??? console "Logs"
 
     ```text
     INFO 08-02 17:37:44 hpu_model_runner.py:493] Prompt bucket config (min, step, max_warmup) bs:[1, 32, 4], seq:[128, 128, 1024]

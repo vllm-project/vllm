@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
-
 import vllm
 from vllm.lora.request import LoRARequest
 
@@ -49,9 +47,6 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     return generated_texts
 
 
-# Skipping for V1 for now as we are hitting,
-# "Head size 80 is not supported by FlashAttention." error.
-@pytest.mark.skip(reason="Head size 80 is not supported by FlashAttention")
 def test_phi2_lora(phi2_lora_files):
     # We enable enforce_eager=True here to reduce VRAM usage for lora-test CI,
     # Otherwise, the lora-test will fail due to CUDA OOM.
