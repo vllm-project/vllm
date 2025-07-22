@@ -1,9 +1,8 @@
 from vllm.config import ModelConfig
+from vllm.assets.image import ImageAsset
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from PIL import Image
-import requests
 import pytest
-import torch
+
 
 @pytest.mark.parametrize("model_id",[
     "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
@@ -18,8 +17,8 @@ def test_multimodal_processor(model_id):
         model_config,
     )
 
-    image_url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-    mm_data = {"image": Image.open(requests.get(image_url, stream=True).raw)}
+    image_pil = ImageAsset('cherry_blossom').pil_image
+    mm_data = {"image": image_pil}
     str_prompt = "<|im_start|>user <image>\nWhat is the content of this image?<|im_end|><|im_start|>assistant\n"
     str_processed_inputs = mm_processor.apply(
         prompt=str_prompt,
