@@ -355,6 +355,8 @@ class GroupCoordinator:
                     return cached_buffer.view(shape)
             
             new_buffer = self.device_communicator.get_symm_buffer(shape, dtype)
+            self.device_communicator.pynccl_comm.register_comm_window(new_buffer)
+            # TODO(asamani): when do we deregister the comm window?
             self._symm_buffer_cache[dtype] = new_buffer
             return new_buffer
         else:

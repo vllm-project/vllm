@@ -285,16 +285,24 @@ class PyNcclCommunicator:
                                 ncclDataTypeEnum.from_torch(tensor.dtype), src,
                                 self.comm, cudaStream_t(stream.cuda_stream))
 
-    def register_comm_window(self, tensor: torch.Tensor):
-        return self.nccl.ncclCommWindowRegister(
-            self.comm, buffer_type(tensor.data_ptr()), tensor.numel(), 1
-        )
-
-    def deregister_comm_window(self, window):
-        return self.nccl.ncclCommWindowDeregister(self.comm, window)
-    
     def group_start(self):
         self.nccl.ncclGroupStart()
 
     def group_end(self):
         self.nccl.ncclGroupEnd()
+
+    def register_comm_window(self, tensor: torch.Tensor):
+        return self.nccl.ncclCommWindowRegister(
+            self.comm,
+            buffer_type(tensor.data_ptr()),
+            tensor.numel() * tensor.element_size(),
+            1,
+        )
+
+    def register_comm_window_raw(self, ptr: int, size: int):
+        return self.nccl.ncclCommWindowRegister(
+            self.comm, buffer_type(ptr), size, 1
+        )
+    
+    def deregister_comm_window(self, window):
+        return self.nccl.ncclCommWindowDeregister(self.comm, window)
