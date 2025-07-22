@@ -182,9 +182,6 @@ class CudaPlatformBase(Platform):
             compilation_config.use_cudagraph = False
             if model_config is not None:
                 model_config.enforce_eager = True
-            # TODO (varun): Turning this ON gives incorrect results for the
-            # Deepseek-V2-lite model.
-            vllm_config.compilation_config.use_inductor = False
 
     @classmethod
     def get_current_memory_usage(cls,
