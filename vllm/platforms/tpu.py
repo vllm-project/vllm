@@ -190,6 +190,10 @@ class TpuPlatform(Platform):
                 and params.sampling_type == SamplingType.RANDOM_SEED):
             raise ValueError("Torch XLA does not support per-request seed.")
 
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+        return True
+
 
 try:
     from tpu_commons.platforms import TpuPlatform as TpuCommonsPlatform
