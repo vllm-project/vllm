@@ -7,7 +7,6 @@ from typing import ClassVar, Optional
 import torch
 
 from vllm import _custom_ops as ops
-from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.ops.chunked_prefill_paged_decode import (
@@ -162,13 +161,17 @@ class TritonAttentionBackend(AttentionBackend):
                 "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
                 "FlexAttention backend which supports all head sizes.")
 
+    @classmethod
+    def validate_block_size(cls, block_size: int) -> None:
+        if block_size % 16 != 0:
+            attn_type = cls.__name__.removesuffix("Backend")
+            raise ValueError(
+                f"Block size {block_size} is not supported by {attn_type}."
+                f"For {attn_type}, block size must be a multiple of 16")
+
     @staticmethod
     def get_name() -> str:
         return "TRITON_ATTN_VLLM_V1"
-
-    @staticmethod
-    def get_impl_cls() -> type["TritonAttentionImpl"]:
-        return TritonAttentionImpl
 
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
@@ -192,6 +195,20 @@ class TritonAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["TritonAttentionMetadataBuilder"]:
         return TritonAttentionMetadataBuilder
+
+
+class TritonUnifiedAttentionBackend(TritonAttentionBackend):
+
+    @staticmethod
+    def get_impl_cls() -> type["TritonUnifiedAttentionImpl"]:
+        return TritonUnifiedAttentionImpl
+
+
+class TritonSplitPrefillDecodeAttentionBackend(TritonAttentionBackend):
+
+    @staticmethod
+    def get_impl_cls() -> type["TritonSplitPrefillDecodeAttentionImpl"]:
+        return TritonSplitPrefillDecodeAttentionImpl
 
 
 class TritonAttentionImpl(AttentionImpl):
@@ -241,8 +258,31 @@ class TritonAttentionImpl(AttentionImpl):
                                       "TritonAttentionImpl")
 
         self.fp8_dtype = current_platform.fp8_dtype()
-        self.force_prefill_decode_attn = \
-            envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
+
+    def forward(self,
+                layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output=None,
+                output_scale=None):
+        """Forward pass with FlashAttention.
+
+        Args:
+            query: shape = [num_tokens, num_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size]
+            kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
+            attn_metadata: Metadata for attention.
+        Returns:
+            shape = [num_tokens, num_heads * head_size]
+        """
+        ...
+
+
+class TritonUnifiedAttentionImpl(TritonAttentionImpl):
 
     def forward(
         self,
@@ -255,17 +295,7 @@ class TritonAttentionImpl(AttentionImpl):
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Forward pass with FlashAttention.
 
-        Args:
-            query: shape = [num_tokens, num_heads, head_size]
-            key: shape = [num_tokens, num_kv_heads, head_size]
-            value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
-            attn_metadata: Metadata for attention.
-        Returns:
-            shape = [num_tokens, num_heads * head_size]
-        """
         assert output is not None, "Output tensor must be provided."
 
         if output_scale is not None:
@@ -288,55 +318,26 @@ class TritonAttentionImpl(AttentionImpl):
         # Whenever making a change in this method, please benchmark the
         # performance to make sure it does not introduce any overhead.
 
-        use_prefill_decode_attn = self.force_prefill_decode_attn
         num_actual_tokens = attn_metadata.num_actual_tokens
-
-        if use_prefill_decode_attn:
-            key_cache, value_cache = PagedAttention.split_kv_cache(
-                kv_cache, self.num_kv_heads, self.head_size)
-        else:
-            key_cache, value_cache = kv_cache.unbind(0)
+        key_cache, value_cache = kv_cache.unbind(0)
 
         if self.kv_sharing_target_layer_name is None:
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
-            if use_prefill_decode_attn:
-                PagedAttention.write_to_paged_cache(
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    attn_metadata.slot_mapping,
-                    self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
-                )
-            else:
-                torch.ops._C_cache_ops.reshape_and_cache_flash(
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    attn_metadata.slot_mapping,
-                    self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
-                )
+            torch.ops._C_cache_ops.reshape_and_cache_flash(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                attn_metadata.slot_mapping,
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
 
         if self.kv_cache_dtype.startswith("fp8"):
-            key_cache = key_cache.view(self.fp8_dtype)
-            value_cache = value_cache.view(self.fp8_dtype)
-            num_tokens, num_heads, head_size = query.shape
-            assert layer._q_scale == 1.0, \
-                "A non 1.0 q_scale is not currently supported."
-            if not current_platform.is_rocm():
-                # Skip Q quantization on ROCm, since dequantizing back to
-                # f32 in the attention kernel is not supported.
-                query, _ = ops.scaled_fp8_quant(
-                    query.reshape(
-                        (num_tokens, num_heads * head_size)).contiguous(),
-                    layer._q_scale)
-                query = query.reshape((num_tokens, num_heads, head_size))
+            query, key_cache, value_cache = quantize_qkv_fp8(
+                query, key_cache, value_cache, layer._q_scale, self.fp8_dtype)
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
@@ -344,47 +345,130 @@ class TritonAttentionImpl(AttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
-        if use_prefill_decode_attn:
-            # Compute attention and update output up to `num_actual_tokens`.
-            chunked_prefill_paged_decode(query=query[:num_actual_tokens],
-                                         key=key[:num_actual_tokens],
-                                         value=value[:num_actual_tokens],
-                                         output=output[:num_actual_tokens],
-                                         kv_cache_dtype=self.kv_cache_dtype,
-                                         key_cache=key_cache,
-                                         value_cache=value_cache,
-                                         block_table=block_table,
-                                         query_start_loc=cu_seqlens_q,
-                                         seq_lens=seqused_k,
-                                         max_seq_len=max_seqlen_k,
-                                         max_query_len=max_seqlen_q,
-                                         k_scale=layer._k_scale,
-                                         v_scale=layer._v_scale,
-                                         alibi_slopes=self.alibi_slopes,
-                                         sliding_window=self.sliding_window[0],
-                                         sm_scale=self.scale)
+        descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
-        else:
-            descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
-
-            unified_attention(
-                q=query[:num_actual_tokens],
-                k=key_cache,
-                v=value_cache,
-                out=output[:num_actual_tokens],
-                cu_seqlens_q=cu_seqlens_q,
-                max_seqlen_q=max_seqlen_q,
-                seqused_k=seqused_k,
-                max_seqlen_k=max_seqlen_k,
-                softmax_scale=self.scale,
-                causal=True,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
-                block_table=block_table,
-                softcap=self.logits_soft_cap,
-                q_descale=None,  # Not supported
-                k_descale=layer._k_scale.expand(descale_shape),
-                v_descale=layer._v_scale.expand(descale_shape),
-            )
+        unified_attention(
+            q=query[:num_actual_tokens],
+            k=key_cache,
+            v=value_cache,
+            out=output[:num_actual_tokens],
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            seqused_k=seqused_k,
+            max_seqlen_k=max_seqlen_k,
+            softmax_scale=self.scale,
+            causal=True,
+            alibi_slopes=self.alibi_slopes,
+            window_size=self.sliding_window,
+            block_table=block_table,
+            softcap=self.logits_soft_cap,
+            q_descale=None,  # Not supported
+            k_descale=layer._k_scale.expand(descale_shape),
+            v_descale=layer._v_scale.expand(descale_shape),
+        )
 
         return output
+
+
+class TritonSplitPrefillDecodeAttentionImpl(TritonAttentionImpl):
+
+    def forward(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+        output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        assert output is not None, "Output tensor must be provided."
+
+        if output_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for TritonAttentionImpl")
+
+        if attn_metadata is None:
+            # Profiling run.
+            return output
+
+        assert attn_metadata.use_cascade is False
+
+        # IMPORTANT!
+        # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
+        # eager-mode PyTorch. Thus, we need to be careful about any CPU overhead
+        # in this method. For example, `view` and `slice` (or `[:n]`) operations
+        # are surprisingly slow even in the case they do not invoke any GPU ops.
+        # Minimize the PyTorch ops in this method as much as possible.
+        # Whenever making a change in this method, please benchmark the
+        # performance to make sure it does not introduce any overhead.
+
+        num_actual_tokens = attn_metadata.num_actual_tokens
+
+        key_cache, value_cache = PagedAttention.split_kv_cache(
+            kv_cache, self.num_kv_heads, self.head_size)
+
+        if self.kv_sharing_target_layer_name is None:
+            # Reshape the input keys and values and store them in the cache.
+            # Skip this if sharing KV cache with an earlier attention layer.
+            PagedAttention.write_to_paged_cache(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                attn_metadata.slot_mapping,
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
+
+        if self.kv_cache_dtype.startswith("fp8"):
+            query, key_cache, value_cache = quantize_qkv_fp8(
+                query, key_cache, value_cache, layer._q_scale, self.fp8_dtype)
+
+        cu_seqlens_q = attn_metadata.query_start_loc
+        seqused_k = attn_metadata.seq_lens
+        max_seqlen_q = attn_metadata.max_query_len
+        max_seqlen_k = attn_metadata.max_seq_len
+        block_table = attn_metadata.block_table
+
+        # Compute attention and update output up to `num_actual_tokens`.
+        chunked_prefill_paged_decode(query=query[:num_actual_tokens],
+                                     key=key[:num_actual_tokens],
+                                     value=value[:num_actual_tokens],
+                                     output=output[:num_actual_tokens],
+                                     kv_cache_dtype=self.kv_cache_dtype,
+                                     key_cache=key_cache,
+                                     value_cache=value_cache,
+                                     block_table=block_table,
+                                     query_start_loc=cu_seqlens_q,
+                                     seq_lens=seqused_k,
+                                     max_seq_len=max_seqlen_k,
+                                     max_query_len=max_seqlen_q,
+                                     k_scale=layer._k_scale,
+                                     v_scale=layer._v_scale,
+                                     alibi_slopes=self.alibi_slopes,
+                                     sliding_window=self.sliding_window[0],
+                                     sm_scale=self.scale)
+
+        return output
+
+
+def quantize_qkv_fp8(query: torch.Tensor, key_cache: torch.Tensor,
+                     value_cache: torch.Tensor, q_scale: float,
+                     fp8_dtype: torch.dtype) -> tuple[torch.Tensor, ...]:
+    key_cache = key_cache.view(fp8_dtype)
+    value_cache = value_cache.view(fp8_dtype)
+    num_tokens, num_heads, head_size = query.shape
+    assert q_scale == 1.0, \
+        "A non 1.0 q_scale is not currently supported."
+    if not current_platform.is_rocm():
+        # Skip Q quantization on ROCm, since dequantizing back to
+        # f32 in the attention kernel is not supported.
+        query, _ = ops.scaled_fp8_quant(
+            query.reshape((num_tokens, num_heads * head_size)).contiguous(),
+            q_scale)
+        query = query.reshape((num_tokens, num_heads, head_size))
+    return query, key_cache, value_cache
