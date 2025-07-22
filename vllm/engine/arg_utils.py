@@ -313,7 +313,6 @@ class EngineArgs:
         CacheConfig.prefix_caching_hash_algo
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
-    use_v2_block_manager: bool = True
     swap_space: float = CacheConfig.swap_space
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
@@ -364,7 +363,6 @@ class EngineArgs:
     max_prompt_adapter_token: int = \
         PromptAdapterConfig.max_prompt_adapter_token
 
-    device: Device = DeviceConfig.device
     num_scheduler_steps: int = SchedulerConfig.num_scheduler_steps
     multi_step_stream_outputs: bool = SchedulerConfig.multi_step_stream_outputs
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
@@ -745,16 +743,6 @@ class EngineArgs:
             "--max-prompt-adapter-token",
             **prompt_adapter_kwargs["max_prompt_adapter_token"])
 
-        # Device arguments
-        device_kwargs = get_kwargs(DeviceConfig)
-        device_group = parser.add_argument_group(
-            title="DeviceConfig",
-            description=DeviceConfig.__doc__,
-        )
-        device_group.add_argument("--device",
-                                  **device_kwargs["device"],
-                                  deprecated=True)
-
         # Speculative arguments
         speculative_group = parser.add_argument_group(
             title="SpeculativeConfig",
@@ -856,15 +844,6 @@ class EngineArgs:
                                 **vllm_kwargs["additional_config"])
 
         # Other arguments
-        parser.add_argument('--use-v2-block-manager',
-                            action='store_true',
-                            default=True,
-                            deprecated=True,
-                            help='[DEPRECATED] block manager v1 has been '
-                            'removed and SelfAttnBlockSpaceManager (i.e. '
-                            'block manager v2) is now the default. '
-                            'Setting this flag to True or False'
-                            ' has no effect on vLLM behavior.')
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
