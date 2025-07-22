@@ -42,9 +42,9 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
     VLLM_FLASHINFER_FORCE_TENSOR_CORES: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
-    VLLM_CPU_KVCACHE_SPACE: int = 0
+    VLLM_CPU_KVCACHE_SPACE: Optional[int] = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
-    VLLM_CPU_NUM_OF_RESERVED_CPU: int = 0
+    VLLM_CPU_NUM_OF_RESERVED_CPU: Optional[int] = None
     VLLM_CPU_MOE_PREPACK: bool = True
     VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
@@ -119,7 +119,8 @@ if TYPE_CHECKING:
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: Optional[int] = None
     VLLM_USE_DEEP_GEMM: bool = False
-    VLLM_USE_FLASHINFER_MOE: bool = False
+    VLLM_USE_FLASHINFER_MOE_FP8: bool = False
+    VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -429,9 +430,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
 
     # (CPU backend only) CPU key-value cache space.
-    # default is 4 GiB
+    # default is None and will be set as 4 GB
     "VLLM_CPU_KVCACHE_SPACE":
-    lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0")),
+    lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0"))
+    if "VLLM_CPU_KVCACHE_SPACE" in os.environ else None,
 
     # (CPU backend only) CPU core ids bound by OpenMP threads, e.g., "0-31",
     # "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
@@ -441,7 +443,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (CPU backend only) CPU cores not used by OMP threads .
     # Those CPU cores will not be used by OMP threads of a rank.
     "VLLM_CPU_NUM_OF_RESERVED_CPU":
-    lambda: int(os.getenv("VLLM_CPU_NUM_OF_RESERVED_CPU", "0")),
+    lambda: int(os.getenv("VLLM_CPU_NUM_OF_RESERVED_CPU", "0"))
+    if "VLLM_CPU_NUM_OF_RESERVED_CPU" in os.environ else None,
 
     # (CPU backend only) whether to use prepack for MoE layer. This will be
     # passed to ipex.llm.modules.GatedMLPMOE. On unsupported CPUs, you might
@@ -854,9 +857,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_DEEP_GEMM":
     lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "0"))),
 
+    # Allow use of FlashInfer MoE kernels for fused moe ops.
+    "VLLM_USE_FLASHINFER_MOE_FP8":
+    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP8", "0"))),
+
     # Allow use of FlashInfer CUTLASS kernels for fused moe ops.
-    "VLLM_USE_FLASHINFER_MOE":
-    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE", "0"))),
+    "VLLM_USE_FLASHINFER_MOE_FP4":
+    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP4", "0"))),
 
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.
