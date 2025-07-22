@@ -5,12 +5,13 @@ import traceback
 from itertools import chain
 from typing import TYPE_CHECKING, Optional
 
+from vllm import envs
 from vllm.plugins import load_plugins_by_group
 from vllm.utils import resolve_obj_by_qualname, supports_xccl
 
 from .interface import _Backend  # noqa: F401
 from .interface import CpuArchEnum, Platform, PlatformEnum
-from vllm import envs
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,12 +32,12 @@ def vllm_version_matches_substr(substr: str) -> bool:
 
 def tpu_platform_plugin() -> Optional[str]:
     logger.debug("Checking if TPU platform is available.")
-    
+
     # Check for Pathways TPU proxy
     if envs.VLLM_USING_PATHWAYS:
         logger.debug("Confirmed TPU platform is available via Pathways proxy.")
         return "tpu_commons.platforms.tpu_jax.TpuPlatform"
-    
+
     # Check for libtpu installation
     try:
         # While it's technically possible to install libtpu on a

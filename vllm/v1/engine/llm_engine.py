@@ -124,9 +124,11 @@ class LLMEngine:
         # Disable multiprocessing when using Pathways
         multiprocess_mode = envs.VLLM_ENABLE_V1_MULTIPROCESSING
         if envs.VLLM_USING_PATHWAYS:
-            logger.info("Disabling multiprocessing when using Pathways (JAX_PLATFORMS=proxy)")
+            logger.info(
+                "Disabling multiprocessing when using Pathways (JAX_PLATFORMS=proxy)"
+            )
             multiprocess_mode = False
-            
+
         return cls(vllm_config=vllm_config,
                    executor_class=Executor.get_class(vllm_config),
                    log_stats=(not disable_log_stats),
@@ -152,7 +154,7 @@ class LLMEngine:
             logger.debug("Enabling multiprocessing for LLMEngine.")
             enable_multiprocessing = True
 
-        # Disable multiprocessing when using Pathways 
+        # Disable multiprocessing when using Pathways
         if envs.VLLM_USING_PATHWAYS:
             enable_multiprocessing = False
 
