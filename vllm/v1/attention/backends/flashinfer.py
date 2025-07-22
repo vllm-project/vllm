@@ -21,8 +21,8 @@ from vllm.platforms import current_platform
 from vllm.utils import cdiv
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder, CommonAttentionMetadata, PerLayerParameters,
-    get_kv_cache_layout, get_per_layer_parameters,
+    AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
+    PerLayerParameters, get_kv_cache_layout, get_per_layer_parameters,
     infer_global_hyperparameters, reorder_batch_to_split_decodes_and_prefills,
     split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -224,7 +224,8 @@ class FlashInferMetadata:
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
-    full_cudagraph_supported: ClassVar[bool] = True  # Decode-only
+    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.PURE_DECODE_ONLY
 
     def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
                  device: torch.device):
@@ -236,19 +237,19 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._prefill_wrapper = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
 
-        compilation_config = vllm_config.compilation_config
+        self.compilation_config = vllm_config.compilation_config
         max_num_pages_per_req = cdiv(vllm_config.model_config.max_model_len,
                                      self.kv_cache_spec.block_size)
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
-        self.enable_cuda_graph = compilation_config.full_cuda_graph
+        self.enable_cuda_graph = self.compilation_config.full_cuda_graph
         if self.enable_cuda_graph:
             # For full cudagraph capture, one `decode_wrapper` for each batch
             # size is needed for FlashInfer.
             self._decode_wrappers_cudagraph: dict[
                 int, BatchDecodeWithPagedKVCacheWrapper] = {}
             self._decode_cudagraph_max_bs = min(
-                max_num_reqs, compilation_config.max_capture_size)
+                max_num_reqs, self.compilation_config.max_capture_size)
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 

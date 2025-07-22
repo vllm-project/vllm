@@ -47,7 +47,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         is_pin_memory_available, round_up)
 from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionBackend
 from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder, CommonAttentionMetadata,
+    AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
     make_local_attention_virtual_batches)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec,
@@ -2369,6 +2369,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # can reuse the memory pool allocated for the large shapes.
         with graph_capture(device=self.device):
             full_cg = self.full_cuda_graph
+            # for full cg on pure decode only, do not capture size lager than
+            # max_num_seqs
+            if full_cg and self.attn_metadata_builders[0].attn_cudagraph_support\
+                == AttentionCGSupport.PURE_DECODE_ONLY:
+                max_num_seqs = self.scheduler_config.max_num_seqs
+                self.cudagraph_batch_sizes = [
+                    size for size in self.cudagraph_batch_sizes
+                    if size <= max_num_seqs]
+
             # Only rank 0 should print progress bar during capture
             compilation_cases = reversed(self.cudagraph_batch_sizes)
             if is_global_first_rank():
@@ -2438,7 +2447,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
             if (self.full_cuda_graph
-                    and not attn_metadata_builder_i.full_cudagraph_supported):
+                    and attn_metadata_builder_i.attn_cudagraph_support == \
+                    AttentionCGSupport.NEVER):
                 raise ValueError(
                     f"Full CUDAGraph not supported for "
                     f"{attn_backend_i.__name__}. Turn off CompilationConfig."
