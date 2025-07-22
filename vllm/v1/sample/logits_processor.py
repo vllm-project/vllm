@@ -721,7 +721,7 @@ def init_builtin_logitsprocs(
 
     non_argmax_invariant = [min_tokens_logitproc, logit_bias_logitproc]
 
-    if reasoning_config is not None:
+    if reasoning_config.is_thinking_enabled():
         thinking_token_budget_logitproc = ThinkingTokenBudgetLogitsProcessor(
             reasoning_config=reasoning_config,
             pin_memory=pin_memory_available,
