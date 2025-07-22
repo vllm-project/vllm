@@ -68,6 +68,7 @@ class EngineCoreRequest(
     # belong to, to cover a race condition where the request is sent before
     # a wave finished notification is received.
     current_wave: int = 0
+    priority: int = 0
 
 
 class EngineCoreEventType(enum.IntEnum):
@@ -176,3 +177,19 @@ class EngineCoreRequestType(enum.Enum):
     UTILITY = b'\x03'
     # Sentinel used within EngineCoreProc.
     EXECUTOR_FAILED = b'\x04'
+
+
+class ReconfigureDistributedRequest(msgspec.Struct):
+    new_data_parallel_size: int
+    new_data_parallel_rank: int
+    new_data_parallel_rank_local: int
+    new_data_parallel_master_ip: str
+    new_data_parallel_master_port: int
+
+
+class ReconfigureRankType(enum.IntEnum):
+    """
+    Rank type for reconfiguring distributed request.
+    """
+    KEEP_CURRENT_RANK = -1
+    SHUTDOWN_CURRENT_RANK = -2

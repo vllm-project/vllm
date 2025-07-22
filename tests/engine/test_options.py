@@ -48,9 +48,6 @@ def test_enable_prompt_embeds(hf_runner, model: str,
     ctx = (nullcontext() if enable_prompt_embeds else pytest.raises(
         ValueError, match="set `--enable-prompt-embeds`"))
 
-    # This test checks if the flag skip_tokenizer_init skips the initialization
-    # of tokenizer and detokenizer. The generated output is expected to contain
-    # token ids.
     llm = LLM(
         model=model,
         enable_prompt_embeds=enable_prompt_embeds,

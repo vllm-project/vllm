@@ -15,44 +15,46 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 Next, make a request to the model that should result in it using the available tools:
 
-```python
-from openai import OpenAI
-import json
+??? code
 
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
+    ```python
+    from openai import OpenAI
+    import json
 
-def get_weather(location: str, unit: str):
-    return f"Getting the weather for {location} in {unit}..."
-tool_functions = {"get_weather": get_weather}
+    client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
 
-tools = [{
-    "type": "function",
-    "function": {
-        "name": "get_weather",
-        "description": "Get the current weather in a given location",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
-                "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
-            },
-            "required": ["location", "unit"]
+    def get_weather(location: str, unit: str):
+        return f"Getting the weather for {location} in {unit}..."
+    tool_functions = {"get_weather": get_weather}
+
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the current weather in a given location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
+                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+                },
+                "required": ["location", "unit"]
+            }
         }
-    }
-}]
+    }]
 
-response = client.chat.completions.create(
-    model=client.models.list().data[0].id,
-    messages=[{"role": "user", "content": "What's the weather like in San Francisco?"}],
-    tools=tools,
-    tool_choice="auto"
-)
+    response = client.chat.completions.create(
+        model=client.models.list().data[0].id,
+        messages=[{"role": "user", "content": "What's the weather like in San Francisco?"}],
+        tools=tools,
+        tool_choice="auto"
+    )
 
-tool_call = response.choices[0].message.tool_calls[0].function
-print(f"Function called: {tool_call.name}")
-print(f"Arguments: {tool_call.arguments}")
-print(f"Result: {get_weather(**json.loads(tool_call.arguments))}")
-```
+    tool_call = response.choices[0].message.tool_calls[0].function
+    print(f"Function called: {tool_call.name}")
+    print(f"Arguments: {tool_call.arguments}")
+    print(f"Result: {tool_functions[tool_call.name](**json.loads(tool_call.arguments))}")
+    ```
 
 Example output:
 
@@ -93,9 +95,15 @@ specify the `name` of one of the tools in the `tool_choice` parameter of the cha
 
 ## Required Function Calling
 
-vLLM supports the `tool_choice='required'` option in the chat completion API. Similar to the named function calling, it also uses guided decoding, so this is enabled by default and will work with any supported model. The required guided decoding features (JSON schema with `anyOf`) are currently only supported in the V0 engine with the guided decoding backend `outlines`. However, support for alternative decoding backends are on the [roadmap](https://docs.vllm.ai/en/latest/usage/v1_guide.html#feature-model) for the V1 engine.
+vLLM supports the `tool_choice='required'` option in the chat completion API. Similar to the named function calling, it also uses guided decoding, so this is enabled by default and will work with any supported model. The required guided decoding features (JSON schema with `anyOf`) are currently only supported in the V0 engine with the guided decoding backend `outlines`. However, support for alternative decoding backends are on the [roadmap](../usage/v1_guide.md#features) for the V1 engine.
 
 When tool_choice='required' is set, the model is guaranteed to generate one or more tool calls based on the specified tool list in the `tools` parameter. The number of tool calls depends on the user's query. The output format strictly follows the schema defined in the `tools` parameter.
+
+## None Function Calling
+
+vLLM supports the `tool_choice='none'` option in the chat completion API. When this option is set, the model will not generate any tool calls and will respond with regular text content only, even if tools are defined in the request.
+
+However, when `tool_choice='none'` is specified, vLLM includes tool definitions from the prompt.
 
 ## Automatic Function Calling
 
@@ -254,6 +262,15 @@ For Qwen2.5, the chat template in tokenizer_config.json has already included sup
 
 Flags: `--tool-call-parser hermes`
 
+### MiniMax Models (`minimax_m1`)
+
+Supported models:
+
+* `MiniMaxAi/MiniMax-M1-40k` (use with <gh-file:examples/tool_chat_template_minimax_m1.jinja>)
+* `MiniMaxAi/MiniMax-M1-80k` (use with <gh-file:examples/tool_chat_template_minimax_m1.jinja>)
+
+Flags: `--tool-call-parser minimax --chat-template examples/tool_chat_template_minimax_m1.jinja`
+
 ### DeepSeek-V3 Models (`deepseek_v3`)
 
 Supported models:
@@ -262,6 +279,24 @@ Supported models:
 * `deepseek-ai/DeepSeek-R1-0528` (use with <gh-file:examples/tool_chat_template_deepseekr1.jinja>)
 
 Flags: `--tool-call-parser deepseek_v3 --chat-template {see_above}`
+
+### Kimi-K2 Models (`kimi_k2`)
+
+Supported models:
+
+* `moonshotai/Kimi-K2-Instruct`
+
+Flags: `--tool-call-parser kimi_k2`
+
+### Hunyuan Models (`hunyuan_a13b`)
+
+Supported models:
+
+* `tencent/Hunyuan-A13B-Instruct` (chat template already included huggingface model file.)
+
+Flags:
+* For non-reasoning: `--tool-call-parser hunyuan_a13b`
+* For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b --enable_reasoning`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 
@@ -280,20 +315,17 @@ Limitations:
 
 Example supported models:
 
-* `meta-llama/Llama-3.2-1B-Instruct`\* (use with <gh-file:examples/tool_chat_template_llama3.2_pythonic.jinja>)
-* `meta-llama/Llama-3.2-3B-Instruct`\* (use with <gh-file:examples/tool_chat_template_llama3.2_pythonic.jinja>)
+* `meta-llama/Llama-3.2-1B-Instruct` ⚠️ (use with <gh-file:examples/tool_chat_template_llama3.2_pythonic.jinja>)
+* `meta-llama/Llama-3.2-3B-Instruct` ⚠️ (use with <gh-file:examples/tool_chat_template_llama3.2_pythonic.jinja>)
 * `Team-ACE/ToolACE-8B` (use with <gh-file:examples/tool_chat_template_toolace.jinja>)
 * `fixie-ai/ultravox-v0_4-ToolACE-8B` (use with <gh-file:examples/tool_chat_template_toolace.jinja>)
-* `meta-llama/Llama-4-Scout-17B-16E-Instruct`\* (use with <gh-file:examples/tool_chat_template_llama4_pythonic.jinja>)
-* `meta-llama/Llama-4-Maverick-17B-128E-Instruct`\* (use with <gh-file:examples/tool_chat_template_llama4_pythonic.jinja>)
+* `meta-llama/Llama-4-Scout-17B-16E-Instruct` ⚠️ (use with <gh-file:examples/tool_chat_template_llama4_pythonic.jinja>)
+* `meta-llama/Llama-4-Maverick-17B-128E-Instruct` ⚠️ (use with <gh-file:examples/tool_chat_template_llama4_pythonic.jinja>)
 
 Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 
----
-**WARNING**
-Llama's smaller models frequently fail to emit tool calls in the correct format. Your mileage may vary.
-
----
+!!! warning
+    Llama's smaller models frequently fail to emit tool calls in the correct format. Your mileage may vary.
 
 ## How to write a tool parser plugin
 
@@ -301,53 +333,55 @@ A tool parser plugin is a Python file containing one or more ToolParser implemen
 
 Here is a summary of a plugin file:
 
-```python
+??? code
 
-# import the required packages
+    ```python
 
-# define a tool parser and register it to vllm
-# the name list in register_module can be used
-# in --tool-call-parser. you can define as many
-# tool parsers as you want here.
-@ToolParserManager.register_module(["example"])
-class ExampleToolParser(ToolParser):
-    def __init__(self, tokenizer: AnyTokenizer):
-        super().__init__(tokenizer)
+    # import the required packages
 
-    # adjust request. e.g.: set skip special tokens
-    # to False for tool call output.
-    def adjust_request(
-            self, request: ChatCompletionRequest) -> ChatCompletionRequest:
-        return request
+    # define a tool parser and register it to vllm
+    # the name list in register_module can be used
+    # in --tool-call-parser. you can define as many
+    # tool parsers as you want here.
+    @ToolParserManager.register_module(["example"])
+    class ExampleToolParser(ToolParser):
+        def __init__(self, tokenizer: AnyTokenizer):
+            super().__init__(tokenizer)
 
-    # implement the tool call parse for stream call
-    def extract_tool_calls_streaming(
-        self,
-        previous_text: str,
-        current_text: str,
-        delta_text: str,
-        previous_token_ids: Sequence[int],
-        current_token_ids: Sequence[int],
-        delta_token_ids: Sequence[int],
-        request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
-        return delta
+        # adjust request. e.g.: set skip special tokens
+        # to False for tool call output.
+        def adjust_request(
+                self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+            return request
 
-    # implement the tool parse for non-stream call
-    def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
-    ) -> ExtractedToolCallInformation:
-        return ExtractedToolCallInformation(tools_called=False,
-                                            tool_calls=[],
-                                            content=text)
+        # implement the tool call parse for stream call
+        def extract_tool_calls_streaming(
+            self,
+            previous_text: str,
+            current_text: str,
+            delta_text: str,
+            previous_token_ids: Sequence[int],
+            current_token_ids: Sequence[int],
+            delta_token_ids: Sequence[int],
+            request: ChatCompletionRequest,
+        ) -> Union[DeltaMessage, None]:
+            return delta
 
-```
+        # implement the tool parse for non-stream call
+        def extract_tool_calls(
+            self,
+            model_output: str,
+            request: ChatCompletionRequest,
+        ) -> ExtractedToolCallInformation:
+            return ExtractedToolCallInformation(tools_called=False,
+                                                tool_calls=[],
+                                                content=text)
+
+    ```
 
 Then you can use this plugin in the command line like this.
 
-```console
+```bash
     --enable-auto-tool-choice \
     --tool-parser-plugin <absolute path of the plugin file>
     --tool-call-parser example \

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from copy import deepcopy
 from typing import Optional
 
 import torch
@@ -12,7 +11,6 @@ from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import (get_act_and_mul_fn,
                                                    get_act_fn)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -29,8 +27,6 @@ from vllm.model_executor.models import SupportsV0Only
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.sequence import IntermediateTensors
-
-logger = init_logger(__name__)
 
 
 class BertWithRopeEmbedding(nn.Module):
@@ -408,16 +404,13 @@ class BertWithRope(nn.Module, SupportsV0Only, SupportsQuant):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.vllm_config = vllm_config
-        self.config = self.config_verify(vllm_config)
+        self.config = vllm_config.model_config.hf_config
         self.embeddings = BertWithRopeEmbedding(self.config)
         self.encoder = BertWithRopeEncoder(
             vllm_config=vllm_config,
             bias=getattr(self.config, "bias", True),
             rotary_kwargs=self.config.rotary_kwargs,
             prefix=f"{prefix}.encoder")
-
-    def config_verify(self, vllm_config):
-        raise NotImplementedError
 
     def forward(
         self,
@@ -490,95 +483,6 @@ class NomicBertModel(BertWithRope):
             "norm2": "mlp_ln",
         })
 
-    def config_verify(self, vllm_config):
-        config = vllm_config.model_config.hf_config
-
-        assert config.__class__.__name__ == "NomicBertConfig"
-        assert config.activation_function in ["swiglu", "gelu"]
-        config.position_embedding_type = getattr(config,
-                                                 "position_embedding_type",
-                                                 "rope")
-
-        if config.activation_function == "swiglu":
-            config.hidden_act = "silu"
-        else:
-            config.hidden_act = config.activation_function
-
-        assert (config.mlp_fc1_bias == config.mlp_fc2_bias ==
-                config.qkv_proj_bias)
-        config.bias = config.qkv_proj_bias
-
-        assert config.rotary_emb_scale_base is None
-        assert not config.rotary_emb_interleaved
-
-        config.layer_norm_eps = config.layer_norm_epsilon
-        config.intermediate_size = config.n_inner
-        config.hidden_size = config.n_embd
-        config.num_hidden_layers = config.n_layer
-
-        head_dim = config.hidden_size // config.num_attention_heads
-        rotary_emb_dim = head_dim * config.rotary_emb_fraction
-        max_trained_positions = getattr(config, "max_trained_positions", 2048)
-        config.rotary_kwargs = {
-            "head_size": head_dim,
-            "rotary_dim": rotary_emb_dim,
-            "max_position": max_trained_positions,
-            "base": getattr(config, "rope_theta", config.rotary_emb_base),
-            "rope_scaling": getattr(config, "rope_scaling", None)
-        }
-
-        # we ignore config.rotary_scaling_factor so that for datasets shorter
-        # than max_trained_positions 2048, the results are consistent
-        # with SentenceTransformer.
-        # The context extension uses vllm style rope_theta and rope_scaling.
-        # See #17785 #18755
-        if (not vllm_config.model_config.hf_overrides
-                and vllm_config.model_config.original_max_model_len is None):
-            # Default
-            # Reset max_model_len to max_trained_positions.
-            # nomic-embed-text-v2-moe the length is set to 512
-            # by sentence_bert_config.json.
-            max_model_len_before = vllm_config.model_config.max_model_len
-            max_model_len = min(vllm_config.model_config.max_model_len,
-                                max_trained_positions)
-
-            vllm_config.recalculate_max_model_len(max_model_len)
-            logger.warning(
-                "Nomic context extension is disabled. "
-                "Changing max_model_len from %s to %s. "
-                "To enable context extension, see: "
-                "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/context_extension.html",
-                max_model_len_before, vllm_config.model_config.max_model_len)
-        else:
-            # We need to re-verify max_model_len to avoid lengths
-            # greater than position_embedding.
-            model_config = vllm_config.model_config
-            hf_text_config = model_config.hf_text_config
-
-            if isinstance(model_config.hf_overrides, dict):
-                # hf_overrides_kw
-                max_model_len = model_config.hf_overrides.get(
-                    "max_model_len", vllm_config.model_config.max_model_len)
-            else:
-                # hf_overrides_fn
-                # This might be overridden by sentence_bert_config.json.
-                max_model_len = vllm_config.model_config.max_model_len
-
-            # reset hf_text_config for recalculate_max_model_len.
-            if hasattr(hf_text_config, "max_model_len"):
-                delattr(hf_text_config, "max_model_len")
-            hf_text_config.max_position_embeddings = max_trained_positions
-            hf_text_config.rope_scaling = config.rotary_kwargs["rope_scaling"]
-
-            # The priority of sentence_bert_config.json is higher
-            # than max_position_embeddings
-            encoder_config = deepcopy(model_config.encoder_config)
-            encoder_config.pop("max_seq_length", None)
-            model_config.encoder_config = encoder_config
-
-            vllm_config.recalculate_max_model_len(max_model_len)
-        return config
-
 
 class GteNewModel(BertWithRope):
     # for https://huggingface.co/Alibaba-NLP/new-impl
@@ -599,24 +503,6 @@ class GteNewModel(BertWithRope):
         for layer in self.encoder.layers:
             layer.mlp.gate_up_proj.bias = None
             layer.mlp.gate_up_proj.skip_bias_add = True
-
-    def config_verify(self, vllm_config):
-        config = vllm_config.model_config.hf_config
-
-        assert config.__class__.__name__ == "NewConfig"
-        assert config.hidden_act == "gelu"
-
-        config.hidden_act = "geglu"
-
-        head_dim = config.hidden_size // config.num_attention_heads
-        config.rotary_kwargs = {
-            "head_size": head_dim,
-            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
-            "max_position": config.max_position_embeddings,
-            "base": config.rope_theta,
-            "rope_scaling": getattr(config, "rope_scaling", None)
-        }
-        return config
 
     def split_up_gate_proj(self, weights: Iterable[tuple[str, torch.Tensor]]):
         n = "mlp.up_gate_proj"
@@ -652,24 +538,6 @@ class SnowflakeGteNewModel(GteNewModel):
             "attention.o_proj": "attn.out_proj",
         })
 
-    def config_verify(self, vllm_config):
-        config = vllm_config.model_config.hf_config
-
-        assert config.__class__.__name__ == "GteConfig"
-        assert config.hidden_act == "gelu"
-
-        config.hidden_act = "geglu"
-
-        head_dim = config.hidden_size // config.num_attention_heads
-        config.rotary_kwargs = {
-            "head_size": head_dim,
-            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
-            "max_position": config.max_position_embeddings,
-            "base": config.rope_theta,
-            "rope_scaling": getattr(config, "rope_scaling", None)
-        }
-        return config
-
 
 class JinaRobertaModel(BertWithRope):
     # for https://huggingface.co/jinaai/jina-embeddings-v3
@@ -684,21 +552,6 @@ class JinaRobertaModel(BertWithRope):
             "mlp.fc2": "mlp.down_proj",
             "norm2": "mlp_ln",
         })
-
-    def config_verify(self, vllm_config):
-        config = vllm_config.model_config.hf_config
-
-        assert config.__class__.__name__ == "XLMRobertaFlashConfig"
-
-        head_dim = config.hidden_size // config.num_attention_heads
-        config.rotary_kwargs = {
-            "head_size": head_dim,
-            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
-            "max_position": config.max_position_embeddings,
-            "base": getattr(config, "rope_theta", config.rotary_emb_base),
-            "rope_scaling": getattr(config, "rope_scaling", None)
-        }
-        return config
 
     def forward(
         self,

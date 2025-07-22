@@ -7,7 +7,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
 from .activation_quant_fusion import ActivationQuantFusionPass
-from .collective_fusion import AsyncTPPass
+from .collective_fusion import AllReduceFusionPass, AsyncTPPass
 from .fix_functionalization import FixFunctionalizationPass
 from .fusion import FusionPass
 from .fusion_attn import AttnFusionPass
@@ -51,18 +51,19 @@ class PostGradPassManager(CustomGraphPass):
         if self.pass_config.enable_noop:
             self.passes += [NoOpEliminationPass(config)]
 
-        if self.pass_config.enable_fusion:
-            self.passes += [FusionPass.instance(config)]
-            self.passes += [ActivationQuantFusionPass(config)]
-
         if self.pass_config.enable_sequence_parallelism:
             self.passes += [SequenceParallelismPass(config)]
             if self.pass_config.enable_async_tp:
                 self.passes += [AsyncTPPass(config)]
 
+        if self.pass_config.enable_fusion:
+            self.passes += [FusionPass.instance(config)]
+            self.passes += [ActivationQuantFusionPass(config)]
+
         if self.pass_config.enable_attn_fusion:
             self.passes += [AttnFusionPass(config)]
-
+        if self.pass_config.enable_fi_allreduce_fusion:
+            self.passes += [AllReduceFusionPass(config)]
         self.fix_functionalization = FixFunctionalizationPass(config)
 
     def add(self, pass_: InductorPass):
