@@ -17,8 +17,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.vision import (VisionEncoderInfo,
-                                               VisionModelWithPooling)
+from vllm.model_executor.models.vision import VisionEncoderInfo
 
 
 class SiglipSo400mEncoderInfo(VisionEncoderInfo[SiglipVisionConfig]):
@@ -34,6 +33,10 @@ class SiglipSo400mEncoderInfo(VisionEncoderInfo[SiglipVisionConfig]):
     def get_patch_size(self) -> int:
         return self.vision_config.patch_size
 
+    def get_patch_grid_length(self) -> int:
+        image_size, patch_size = self.get_image_size(), self.get_patch_size()
+        return image_size // patch_size
+
 
 class SiglipSo400mVisionEmbeddings(nn.Module):
 
@@ -48,8 +51,9 @@ class SiglipSo400mVisionEmbeddings(nn.Module):
             stride=config.patch_size,
             padding=0,
         )
+        self.num_patches = (config.image_size // config.patch_size)**2
         self.position_embedding = VocabParallelEmbedding(
-            num_embeddings=(config.image_size // config.patch_size)**2,
+            num_embeddings=self.num_patches,
             embedding_dim=self.embed_dim,
         )
         self.register_buffer(
@@ -57,9 +61,7 @@ class SiglipSo400mVisionEmbeddings(nn.Module):
             torch.arange(self.position_embedding.num_embeddings).unsqueeze(0),
             persistent=False)
 
-    def forward(self,
-                pixel_values: torch.Tensor,
-                interpolate_pos_encoding: bool = False) -> torch.Tensor:
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         patch_embeds = self.patch_embedding(pixel_values)
         embeddings = patch_embeds.flatten(2).transpose(1, 2)
         embeddings += self.position_embedding(
@@ -90,8 +92,8 @@ class SiglipSo400mAttention(nn.Module):
             quant_config=quant_config,
         )
 
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
+        tp_size = get_tensor_model_parallel_world_size()
+        self.num_heads_per_partition = divide(self.num_heads, tp_size)
         self.attn = MultiHeadAttention(self.num_heads_per_partition,
                                        self.head_dim, self.scale)
 
@@ -100,7 +102,7 @@ class SiglipSo400mAttention(nn.Module):
         q, k, v = qkv.chunk(3, dim=-1)
         out = self.attn(q, k, v)
         out, _ = self.out_proj(out)
-        return out, None
+        return out
 
 
 class SiglipSo400mMLP(nn.Module):
@@ -142,8 +144,15 @@ class SiglipSo400mEncoderLayer(nn.Module):
         self.mlp = SiglipSo400mMLP(config, quant_config)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x))[0]
-        x = x + self.mlp(self.norm2(x))
+        residual = x
+        x = self.norm1(x)
+        x = self.attn(x)
+        x = residual + x
+
+        residual = x
+        x = self.norm2(x)
+        x = self.mlp(x)
+        x = residual + x
         return x
 
 
@@ -165,26 +174,23 @@ class SiglipSo400mVisionTransformer(nn.Module):
         x = self.embeddings(pixel_values)
         for layer in self.encoder_layers:
             x = layer(x)
-        x = self.norm(x)
-        # Dynamic pooling using self.config
-        if self.config.pooling_scheme == "mean":
+        pooling_scheme = getattr(self.config, "pooling_scheme", "mean")
+        if pooling_scheme == "mean":
             pooled_output = x.mean(dim=1)
-        elif self.config.pooling_scheme == "cls":
+        elif pooling_scheme == "cls":
             pooled_output = x[:, 0]
         else:
-            raise ValueError(
-                f"Unsupported pooling scheme: {self.config.pooling_scheme}")
+            raise ValueError(f"Unsupported pooling scheme: {pooling_scheme}")
         return pooled_output
 
 
-class SiglipSo400mVisionModel(VisionModelWithPooling):
+class SiglipSo400mVisionModel(nn.Module):
 
     def __init__(self,
                  config: SiglipVisionConfig,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.encoder = SiglipSo400mVisionTransformer(config, quant_config)
-        self.encoder_info = SiglipSo400mEncoderInfo(config)
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         return self.encoder(pixel_values)
@@ -200,8 +206,6 @@ class SiglipSo400mVisionModel(VisionModelWithPooling):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
-            if "attn.qkv_proj" in name:
-                pass
 
             is_qkv = False
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
@@ -215,10 +219,10 @@ class SiglipSo400mVisionModel(VisionModelWithPooling):
                     weight_loader = param.weight_loader
                     weight_loader(param, loaded_weight, shard_id)
                     is_qkv = True
+                    loaded_params.add(name)
                     break
 
             if is_qkv:
-                loaded_params.add(name)
                 continue
 
             if name in params_dict:
