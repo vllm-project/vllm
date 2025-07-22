@@ -430,6 +430,8 @@ class EngineArgs:
         ParallelConfig.enable_multimodal_encoder_data_parallel
 
     async_scheduling: bool = SchedulerConfig.async_scheduling
+    # DEPRECATED
+    enable_prompt_adapter: bool = False
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
