@@ -24,7 +24,7 @@ Vulnerabilities that allow remote attackers to execute arbitrary code, take full
 ### HIGH Severity
 Serious security flaws that allow elevated impact—like RCE in specific, limited contexts or significant data loss—but require advanced conditions or some trust, examples include RCE in advanced deployment modes (e.g. multi-node), or high impact issues where some sort of privileged network access is required. These issues typically have CVSS scores between 7.0 and 8.9
 
-### MODERATE Severity:
+### MODERATE Severity
 Vulnerabilities that cause denial of service or partial disruption, but do not allow arbitrary code execution or data breach and have limited impact. These issues have a CVSS rating between 4.0 and 6.9
 
 ### LOW Severity:
