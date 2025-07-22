@@ -1,7 +1,7 @@
 import tempfile
 import torch
 from torch.cuda.memory import CUDAPluggableAllocator
-from vllm.distributed.group_coordinator import GroupCoordinator
+from vllm.distributed.parallel_state import GroupCoordinator
 
 nccl_allocator_source = """
 #include <nccl.h>
