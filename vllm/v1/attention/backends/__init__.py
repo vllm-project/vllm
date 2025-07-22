@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# in priority/performance order (when available)
-from typing import Optional
 
 import torch
 
@@ -10,6 +8,7 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+# in priority/performance order (when available)
 _POSSIBLE_BACKEND_LIST: list[str] = [
     "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend",
     "vllm.v1.attention.backends.triton_attn.TritonSplitPrefillDecodeAttentionBackend",
@@ -22,7 +21,7 @@ def choose_attention_backend(
     dtype: torch.dtype,
     kv_cache_dtype: str,
     block_size: int,
-) -> Optional[str]:
+) -> str:
     from vllm.attention.selector import is_attn_backend_supported
 
     for backend in _POSSIBLE_BACKEND_LIST:
@@ -45,4 +44,4 @@ def choose_attention_backend(
                                      allow_import_error=False):
             return backend
 
-    return None
+    raise ValueError("Couldn't find any supported backend.")
