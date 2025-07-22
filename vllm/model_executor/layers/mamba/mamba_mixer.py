@@ -27,7 +27,6 @@ from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
 from vllm.model_executor.models.mamba_cache import MambaCacheParams
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadata
-from vllm.v1.kv_cache_interface import MambaType
 
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
@@ -147,10 +146,10 @@ class MambaMixer(MambaBase, CustomOp):
             if prefix in compilation_config.static_forward_context:
                 raise ValueError(f"Duplicate layer name: {prefix}")
             compilation_config.static_forward_context[prefix] = self
-            # The outer list is for v0 PP virtual engine
-            # Initialize with empty tensors in the correct format
-            # conv_state should be in (batch, width-1, dim) format
-            # so when transposed it becomes (batch, dim, width-1)
+            # The outer list is for v0 PP virtual engine. Though this code path
+            # only runs for v1, we have to do this to unify with the interface
+            # of Attention + v0 PP.
+            # The inner tuple is (conv_state, ssm_state)
             self.kv_cache = [(torch.tensor([]), torch.tensor([]))]
 
         self.prefix = prefix
@@ -176,6 +175,9 @@ class MambaMixer(MambaBase, CustomOp):
                 query_start_loc = mamba1_metadata.query_start_loc
                 state_indices_tensor = mamba1_metadata.state_indices_tensor
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+
+                # conv_state should be in (batch, width-1, dim) format
+                # so when transposed it becomes (batch, dim, width-1)
                 conv_state = self_kv_cache[0].transpose(-1, -2)
                 ssm_state = self_kv_cache[1].contiguous()
                 has_initial_state = mamba1_metadata.has_initial_states
@@ -310,5 +312,5 @@ class MambaMixer(MambaBase, CustomOp):
         )
 
     @property
-    def mamba_type(self) -> MambaType:
-        return MambaType.MAMBA1
+    def mamba_type(self) -> str:
+        return "mamba1"

@@ -17,6 +17,7 @@ import vllm.envs as envs
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
+from vllm.attention.mamba_selectors import get_mamba_attn_backend
 from vllm.compilation.counter import compilation_counter
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config, update_config)
@@ -56,7 +57,7 @@ from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         ChunkedLocalAttentionSpec,
                                         FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec, MambaSpec, MambaType,
+                                        KVCacheSpec, MambaSpec,
                                         SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
@@ -2592,7 +2593,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     "Non-Attention backend is not supported by V1 "
                     "GPUModelRunner.")
         elif isinstance(kv_cache_spec, MambaSpec):
-            attn_backend_i = get_mamba_attn_backend(
+                attn_backend_i = get_mamba_attn_backend(
                     kv_cache_spec.mamba_type)
         else:
             raise ValueError(

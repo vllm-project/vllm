@@ -179,11 +179,6 @@ class SlidingWindowSpec(AttentionSpec):
         return (cdiv(num_tokens, self.block_size) + 1) * self.page_size_bytes
 
 
-class MambaType(str, Enum):
-    MAMBA1 = "mamba1"
-    MAMBA2 = "mamba2"
-
-
 @dataclass(frozen=True)
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
