@@ -412,7 +412,6 @@ class OpenAIServing:
             message: Union[str, Exception],
             err_type: str = "BadRequestError",
             status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> ErrorResponse:
-        print(message)
         if isinstance(message, SchedulerWaitingQueueFullError):
             return ErrorResponse(
                 message=str(message),

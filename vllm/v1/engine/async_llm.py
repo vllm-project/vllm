@@ -379,8 +379,7 @@ class AsyncLLM(EngineClient):
                     outputs = await engine_core.get_output_async()
                     if outputs.engine_error:
                         output_processor.propagate_error(
-                            process_engine_error(outputs.engine_error)
-                        )
+                            process_engine_error(outputs.engine_error))
                         continue
                     num_outputs = len(outputs.outputs)
 
