@@ -438,7 +438,6 @@ class AsyncLLM(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
-        truncate_prompt_tokens: Optional[int] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
@@ -460,12 +459,6 @@ class AsyncLLM(EngineClient):
             # we can call __init__ before the event loop, which enables us
             # to handle startup failure gracefully in the OpenAI server.
             self._run_output_handler()
-
-            if tokenization_kwargs is None:
-                tokenization_kwargs = dict[str, Any]()
-
-            _validate_truncation_size(self.model_config.max_model_len,
-                                  truncate_prompt_tokens, tokenization_kwargs)
 
             q = await self.add_request(
                 request_id,

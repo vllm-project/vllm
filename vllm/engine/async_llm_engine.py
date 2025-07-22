@@ -1002,7 +1002,6 @@ class AsyncLLMEngine(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
-        truncate_prompt_tokens: Optional[int] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Generate outputs for a request from a pooling model.
@@ -1071,12 +1070,6 @@ class AsyncLLMEngine(EngineClient):
         ```
         """
         try:
-            if tokenization_kwargs is None:
-                tokenization_kwargs = dict[str, Any]()
-
-            _validate_truncation_size(self.engine.model_config.max_model_len,
-                                  truncate_prompt_tokens, tokenization_kwargs)
-
             async for output in await self.add_request(
                     request_id,
                     prompt,
