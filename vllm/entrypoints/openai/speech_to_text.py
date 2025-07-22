@@ -11,6 +11,7 @@ from typing import Callable, Literal, Optional, TypeVar, Union, cast
 import numpy as np
 from fastapi import Request
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
@@ -37,10 +38,6 @@ SpeechToTextResponse = Union[TranscriptionResponse, TranslationResponse]
 T = TypeVar("T", bound=SpeechToTextResponse)
 
 logger = init_logger(__name__)
-
-# As per https://platform.openai.com/docs/guides/speech-to-text#overview.
-# TODO configurable
-MAX_AUDIO_CLIP_FILESIZE_MB = 25
 
 
 class OpenAISpeechToText(OpenAIServing):
@@ -93,7 +90,7 @@ class OpenAISpeechToText(OpenAIServing):
         lang = request.language or "en"
         self.model_cls.validate_language(lang)
 
-        if len(audio_data) / 1024**2 > MAX_AUDIO_CLIP_FILESIZE_MB:
+        if len(audio_data) / 1024**2 > envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB:
             raise ValueError("Maximum file size exceeded.")
 
         with io.BytesIO(audio_data) as bytes_:
