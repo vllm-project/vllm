@@ -216,14 +216,14 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size,
                                                return_final_states=True)
 
     # just test the last in sequence
-    torch.allclose(Y[:, -1], Y_min[:, -1], atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(Y[:, -1], Y_min[:, -1], atol=5e-2, rtol=5e-2)
 
     # just test the last head
     # NOTE, in the kernel we always cast states to fp32
-    torch.allclose(final_state[:, -1],
+    torch.testing.assert_close(final_state[:, -1],
                    final_state_min[:, -1].to(torch.float32),
-                   atol=1e-3,
-                   rtol=1e-3)
+                   atol=1e-2,
+                   rtol=5e-2)
 
 
 @pytest.mark.parametrize("itype", [torch.float32, torch.float16])
@@ -300,7 +300,7 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
             # just test one dim and dstate
             Y_eg = Y[0, cu_seqlens[i]:cu_seqlens[i + 1], 0, 0]
             Y_min_eg = Y_min[i][:, 0, 0]
-            torch.allclose(Y_eg, Y_min_eg, atol=1e-3, rtol=1e-3)
+            torch.testing.assert_close(Y_eg, Y_min_eg, atol=5e-1, rtol=1)
 
         # update states
         states = new_states
