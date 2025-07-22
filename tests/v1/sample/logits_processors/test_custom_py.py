@@ -98,7 +98,7 @@ def test_custom_logitsprocs_py(monkeypatch,
         # Every other scenario is a different way of loading a custom logitproc
         _run_test(kwargs, logitproc_loaded=False)
         return
-    elif logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_ENTRYPOINT:
+    if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_ENTRYPOINT:
         # Scenario: vLLM loads a logitproc from a preconfigured entrypoint
         # To that end, mock a dummy logitproc entrypoint
         monkeypatch.setenv("VLLM_MOCK_LP_ENTRYPOINT", "1")

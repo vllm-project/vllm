@@ -228,9 +228,9 @@ class InputBatch:
 
         self.req_output_token_ids: list[Optional[list[int]]] = []
 
-        # Build logits processors. If specified by user, load custom
-        # logitsprocs constructors.
-        self.logitsprocs = logitsprocs or LogitsProcessors(None)
+        # Store provided logitsprocs. If none are provided, initialize empty
+        # data structure
+        self.logitsprocs = logitsprocs or LogitsProcessors()
 
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
