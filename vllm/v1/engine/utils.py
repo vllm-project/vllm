@@ -214,7 +214,6 @@ class CoreEngineActorManager:
             name: os.environ[name]
             for name in env_vars_list if name in os.environ
         }
-        runtime_env = RuntimeEnv(env_vars=self.env_vars_dict)
 
         self.addresses = addresses
         self.executor_class = executor_class
@@ -223,9 +222,6 @@ class CoreEngineActorManager:
         local_engine_count = \
             vllm_config.parallel_config.data_parallel_size_local
         world_size = vllm_config.parallel_config.world_size
-        env_vars_set = get_env_vars_to_copy(
-            destination="DPEngineCoreActor",
-            additional_vars={current_platform.device_control_env_var})
 
         if ray.is_initialized():
             logger.info(
@@ -250,6 +246,7 @@ class CoreEngineActorManager:
         assert len(placement_groups) == dp_size, (
             "Number of placement groups must match data parallel size")
 
+        device_env_var = current_platform.device_control_env_var
         self.placement_group_is_local = []
         refs = []
         for index, local_index, pg in zip(range(dp_size), local_dp_ranks,
@@ -257,25 +254,26 @@ class CoreEngineActorManager:
             dp_vllm_config = copy.deepcopy(vllm_config)
             dp_vllm_config.parallel_config.placement_group = pg
             local_client = index < local_engine_count
-            with set_device_control_env_var(vllm_config, local_index):
-                runtime_env = RuntimeEnv(
-                    env_vars={
-                        name: os.environ[name]
-                        for name in env_vars_set if name in os.environ
-                    })
-                actor = ray.remote(DPEngineCoreActor).options(
-                    scheduling_strategy=PlacementGroupSchedulingStrategy(
-                        placement_group=pg,
-                        placement_group_bundle_index=world_size,
-                    ),
-                    runtime_env=runtime_env).remote(
-                        vllm_config=dp_vllm_config,
-                        executor_class=executor_class,
-                        log_stats=log_stats,
-                        local_client=local_client,
-                        addresses=addresses,
-                        dp_rank=index,
-                        local_dp_rank=local_index)
+            if dp_size > 1:
+                with (set_device_control_env_var(vllm_config, local_index)):
+                    runtime_env_vars = self.env_vars_dict | {
+                        device_env_var: os.environ[device_env_var]
+                    }
+            else:
+                runtime_env_vars = self.env_vars_dict
+            runtime_env = RuntimeEnv(env_vars=runtime_env_vars)
+            actor = ray.remote(DPEngineCoreActor).options(
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=pg,
+                    placement_group_bundle_index=world_size,
+                ),
+                runtime_env=runtime_env).remote(vllm_config=dp_vllm_config,
+                                                executor_class=executor_class,
+                                                log_stats=log_stats,
+                                                local_client=local_client,
+                                                addresses=addresses,
+                                                dp_rank=index,
+                                                local_dp_rank=local_index)
             if local_client:
                 self.local_engine_actors.append(actor)
             else:
@@ -473,8 +471,10 @@ class CoreEngineActorManager:
         dp_master_ip = cur_vllm_config.parallel_config.data_parallel_master_ip
         new_local_engines = 0
 
-        runtime_env = RuntimeEnv(env_vars=self.env_vars_dict
-                                 | {"VLLM_ELASTIC_EP_SCALE_UP_LAUNCH": "1"})
+        device_env_var = current_platform.device_control_env_var
+        runtime_env_vars = self.env_vars_dict | {
+            "VLLM_ELASTIC_EP_SCALE_UP_LAUNCH": "1"
+        }
         for i, (pg,
                 local_rank) in enumerate(zip(placement_groups,
                                              local_dp_ranks)):
@@ -483,6 +483,12 @@ class CoreEngineActorManager:
             dp_vllm_config.parallel_config.data_parallel_size = \
                 new_data_parallel_size
             dp_vllm_config.parallel_config.placement_group = pg
+
+            with set_device_control_env_var(cur_vllm_config, local_rank):
+                rank_runtime_env_vars = runtime_env_vars | {
+                    device_env_var: os.environ[device_env_var]
+                }
+                runtime_env = RuntimeEnv(env_vars=rank_runtime_env_vars)
 
             # Check if this placement group is on the head node
             local_client = any(
