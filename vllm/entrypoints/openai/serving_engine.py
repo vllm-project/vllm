@@ -76,6 +76,7 @@ from vllm.tracing import (contains_trace_headers, extract_trace_headers,
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import (AsyncMicrobatchTokenizer, is_list_of,
                         merge_async_iterators, random_uuid)
+from vllm.v1.engine.exceptions import SchedulerWaitingQueueFullError
 
 logger = init_logger(__name__)
 
@@ -442,6 +443,16 @@ class OpenAIServing:
         err_type: str = "BadRequestError",
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
     ) -> ErrorResponse:
+        if isinstance(message, SchedulerWaitingQueueFullError):
+            return ErrorResponse(
+                message=str(message),
+                type="ServiceUnavailableError",
+                code=HTTPStatus.SERVICE_UNAVAILABLE.value,
+            )
+        elif isinstance(message, Exception):
+            message_str = str(message)
+        else:
+            message_str = message
         if self.log_error_stack:
             exc_type, _, _ = sys.exc_info()
             if exc_type is not None:
@@ -452,12 +463,12 @@ class OpenAIServing:
             message=message, type=err_type, code=status_code.value))
 
     def create_streaming_error_response(
-        self,
-        message: str,
-        err_type: str = "BadRequestError",
-        status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
-    ) -> str:
-        json_str = json.dumps(
+            self,
+            message: Union[str, Exception],
+            err_type: str = "BadRequestError",
+            status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> str:
+        json_str = json.dumps({
+            "error":
             self.create_error_response(message=message,
                                        err_type=err_type,
                                        status_code=status_code).model_dump())

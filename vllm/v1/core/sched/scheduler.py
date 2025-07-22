@@ -28,6 +28,7 @@ from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
+from vllm.v1.engine.exceptions import SchedulerWaitingQueueFullError
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -1092,6 +1093,10 @@ class Scheduler(SchedulerInterface):
         return len(self.running), len(self.waiting)
 
     def add_request(self, request: Request) -> None:
+        if (self.scheduler_config.max_waiting_queue_length
+                and len(self.waiting)
+                >= self.scheduler_config.max_waiting_queue_length):
+            raise SchedulerWaitingQueueFullError(request_id=request.request_id)
         self.waiting.add_request(request)
         self.requests[request.request_id] = request
         if self.log_stats:

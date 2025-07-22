@@ -17,6 +17,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
+from vllm.v1.engine.exceptions import SchedulerWaitingQueueFullError
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (IterationStats, LoRARequestStates,
@@ -306,10 +307,18 @@ class OutputProcessor:
 
     def propagate_error(self, e: Exception):
         """Propagate error to all generate() tasks."""
-
-        for _, state in self.request_states.items():
-            assert state.queue is not None
-            state.queue.put(e)
+        if isinstance(e, SchedulerWaitingQueueFullError):
+            # If the exception has a request_id, it is likely a
+            # SchedulerWaitingQueueFullError.
+            request_id = e.request_id
+            if request_id in self.request_states:
+                state = self.request_states.get(request_id)
+                if state and state.queue is not None:
+                    state.queue.put(e)
+        else:
+            for _, state in self.request_states.items():
+                assert state.queue is not None
+                state.queue.put(e)
 
     def abort_requests(
         self,

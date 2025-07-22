@@ -467,6 +467,9 @@ class EngineArgs:
     kv_sharing_fast_prefill: bool = \
         CacheConfig.kv_sharing_fast_prefill
 
+    max_waiting_queue_length: Optional[int] = (
+        SchedulerConfig.max_waiting_queue_length)
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -848,6 +851,9 @@ class EngineArgs:
             title="SchedulerConfig",
             description=SchedulerConfig.__doc__,
         )
+        scheduler_group.add_argument(
+            "--max-waiting-queue-length",
+            **scheduler_kwargs["max_waiting_queue_length"])
         scheduler_group.add_argument(
             "--max-num-batched-tokens",
             **scheduler_kwargs["max_num_batched_tokens"])
@@ -1352,6 +1358,7 @@ class EngineArgs:
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
+            max_waiting_queue_length=self.max_waiting_queue_length,
             cuda_graph_sizes=self.cuda_graph_sizes,
             num_lookahead_slots=num_lookahead_slots,
             delay_factor=self.scheduler_delay_factor,
