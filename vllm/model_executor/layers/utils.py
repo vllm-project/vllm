@@ -102,7 +102,7 @@ def rocm_unquantized_gemm_impl_fake(
         x: torch.Tensor,
         weight: torch.Tensor,
         bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    return weight.new_empty([x.shape[0], weight.shape[0]])
+    return x.new_empty((*x.shape[:-1], weight.shape[0]))
 
 
 def rocm_unquantized_gemm(layer: torch.nn.Module,
