@@ -2280,7 +2280,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             del output
             gc.collect()
 
-        logger.warning("Memory usage (GiB) for pooler: %s", memory_usage)
+        logger.debug("Memory usage (GiB) for pooler: %s", memory_usage)
 
         max_task = max(memory_usage.items(), key=lambda x: x[1])[0]
         return self._dummy_pooler_run_task(hidden_states, max_task)
