@@ -30,7 +30,6 @@ class Qwen3CoderToolParser(ToolParser):
 
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: list[dict] = []
-        self.current_tool_id: int = -1
         self.streamed_args_for_tool: list[str] = []
 
         # Sentinel tokens for streaming mode
@@ -42,6 +41,20 @@ class Qwen3CoderToolParser(ToolParser):
         self.parameter_end_token: str = "</parameter>"
         self.is_tool_call_started: bool = False
         self.failed_count: int = 0
+
+        # Streaming state variables
+        self.current_tool_index: int = 0
+        self.header_sent: bool = False
+        self.current_tool_string_id: Optional[str] = None
+        self.current_function_name: Optional[str] = None
+        self.current_param_name: Optional[str] = None
+        self.current_param_value: str = ""
+        self.param_count: int = 0
+        self.in_param: bool = False
+        self.in_function: bool = False
+        self.accumulated_text: str = ""
+        self.json_started: bool = False
+        self.json_closed: bool = False
 
         # Enhanced streaming state - reset for each new message
         self._reset_streaming_state()
@@ -83,7 +96,7 @@ class Qwen3CoderToolParser(ToolParser):
         self.current_tool_index = 0
         self.is_tool_call_started = False
         self.header_sent = False
-        self.current_tool_id = None
+        self.current_tool_string_id = None
         self.current_function_name = None
         self.current_param_name = None
         self.current_param_value = ""
@@ -128,6 +141,8 @@ class Qwen3CoderToolParser(ToolParser):
             if param_value.lower() == "null":
                 return None
 
+            converted_value: Any
+
             if param_name not in param_config:
                 if param_config != {}:
                     logger.warning(
@@ -151,7 +166,8 @@ class Qwen3CoderToolParser(ToolParser):
                   or param_type.startswith("short")
                   or param_type.startswith("unsigned")):
                 try:
-                    param_value = int(param_value)
+                    converted_value = int(param_value)
+                    return converted_value
                 except ValueError:
                     logger.warning(
                         "Parsed value '%s' of parameter '%s' is not an "
@@ -162,9 +178,10 @@ class Qwen3CoderToolParser(ToolParser):
                   or param_type.startswith("float")):
                 try:
                     float_param_value = float(param_value)
-                    param_value = (float_param_value if float_param_value -
-                                   int(float_param_value) != 0 else
-                                   int(float_param_value))
+                    converted_value = (float_param_value if float_param_value -
+                                       int(float_param_value) != 0 else
+                                       int(float_param_value))
+                    return converted_value
                 except ValueError:
                     logger.warning(
                         "Parsed value '%s' of parameter '%s' is not a float "
@@ -183,8 +200,8 @@ class Qwen3CoderToolParser(ToolParser):
             else:
                 if param_type == "object" or param_type.startswith("dict"):
                     try:
-                        param_value = json.loads(param_value)
-                        return param_value
+                        converted_value = json.loads(param_value)
+                        return converted_value
                     except json.JSONDecodeError:
                         logger.warning(
                             "Parsed value '%s' of parameter '%s' is not a "
@@ -192,7 +209,8 @@ class Qwen3CoderToolParser(ToolParser):
                             "methods to parse it.", param_value, param_name,
                             func_name)
                 try:
-                    param_value = eval(param_value)
+                    converted_value = eval(param_value)
+                    return converted_value
                 except Exception:
                     logger.warning(
                         "Parsed value '%s' of parameter '%s' cannot be "
@@ -360,8 +378,9 @@ class Qwen3CoderToolParser(ToolParser):
                 self.json_closed = False
 
                 # Check if there are more tool calls
-                tool_starts = current_text.count(self.tool_call_start_token)
-                if self.current_tool_index >= tool_starts:
+                tool_starts_count = current_text.count(
+                    self.tool_call_start_token)
+                if self.current_tool_index >= tool_starts_count:
                     # No more tool calls
                     self.is_tool_call_started = False
                 # Continue processing next tool
@@ -398,7 +417,7 @@ class Qwen3CoderToolParser(ToolParser):
 
         # We're in a tool call, find the current tool call portion
         # Need to find the correct tool call based on current_tool_index
-        tool_starts = []
+        tool_starts: list[int] = []
         idx = 0
         while True:
             idx = current_text.find(self.tool_call_start_token, idx)
@@ -431,7 +450,7 @@ class Qwen3CoderToolParser(ToolParser):
                 if func_end != -1:
                     # Found complete function name
                     self.current_function_name = tool_text[func_start:func_end]
-                    self.current_tool_id = self._generate_tool_call_id()
+                    self.current_tool_string_id = self._generate_tool_call_id()
                     self.header_sent = True
                     self.in_function = True
 
@@ -452,7 +471,7 @@ class Qwen3CoderToolParser(ToolParser):
                     return DeltaMessage(tool_calls=[
                         DeltaToolCall(
                             index=self.current_tool_index,
-                            id=self.current_tool_id,
+                            id=self.current_tool_string_id,
                             function=DeltaFunctionCall(
                                 name=self.current_function_name, arguments=""),
                             type="function",
