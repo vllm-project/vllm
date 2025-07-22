@@ -2369,14 +2369,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # can reuse the memory pool allocated for the large shapes.
         with graph_capture(device=self.device):
             full_cg = self.full_cuda_graph
-            # for full cg on pure decode only, do not capture size lager than
-            # max_num_seqs
-            if full_cg and self.attn_metadata_builders[0].attn_cudagraph_support\
-                == AttentionCGSupport.PURE_DECODE_ONLY:
-                max_num_seqs = self.scheduler_config.max_num_seqs
-                self.cudagraph_batch_sizes = [
-                    size for size in self.cudagraph_batch_sizes
-                    if size <= max_num_seqs]
 
             # Only rank 0 should print progress bar during capture
             compilation_cases = reversed(self.cudagraph_batch_sizes)
@@ -2446,13 +2438,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.device,
             )
 
-            if (self.full_cuda_graph
-                    and attn_metadata_builder_i.attn_cudagraph_support == \
-                    AttentionCGSupport.NEVER):
-                raise ValueError(
-                    f"Full CUDAGraph not supported for "
-                    f"{attn_backend_i.__name__}. Turn off CompilationConfig."
-                    f"full_cuda_graph or use a different attention backend.")
+            if self.full_cuda_graph:
+                if attn_metadata_builder_i.attn_cudagraph_support == \
+                    AttentionCGSupport.NEVER:
+                    raise ValueError(
+                        f"Full CUDAGraph not supported for "
+                        f"{attn_backend_i.__name__}. Turn off "
+                        f"CompilationConfig.full_cuda_graph or use a "
+                        f" different attention backend.")
+                if attn_metadata_builder_i.attn_cudagraph_support == \
+                    AttentionCGSupport.PURE_DECODE_ONLY:
+                    self.cudagraph_batch_sizes = [
+                        size for size in self.cudagraph_batch_sizes
+                        if size <= self.scheduler_config.max_num_seqs
+                    ]
 
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)

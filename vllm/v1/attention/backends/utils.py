@@ -63,6 +63,7 @@ class CommonAttentionMetadata:
 
 M = TypeVar("M")
 
+
 class AttentionCGSupport(enum.Enum):
     """ Constants for the cudagraph support of the attention backend
     Here we do not consider the cascade attention, as currently
@@ -75,6 +76,7 @@ class AttentionCGSupport(enum.Enum):
     cudagraph or no cudagraph for mixed prefill-decode batches"""
     ALWAYS = 2
     """Cudagraph always supported"""
+
 
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention.
