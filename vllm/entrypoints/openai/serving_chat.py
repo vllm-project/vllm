@@ -282,7 +282,7 @@ class OpenAIServingChat(OpenAIServing):
             return await self.chat_completion_full_generator(
                 request, result_generator, request_id, model_name,
                 conversation, tokenizer, request_metadata)
-        except Exception as e:
+        except ValueError as e:
             return self.create_error_response(e)
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
@@ -955,7 +955,7 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         assert final_res is not None
 

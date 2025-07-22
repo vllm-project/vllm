@@ -18,7 +18,7 @@ class EngineDeadError(Exception):
         self.__suppress_context__ = suppress_context
 
 
-class SchedulerWaitingQueueFullError(Exception):
+class SchedulerWaitingQueueFullError(ValueError):
     """Raised when the scheduler's waiting queue is full and cannot accept
     new requests."""
 

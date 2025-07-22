@@ -36,7 +36,6 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType, EngineErrorPayload,
                             ReconfigureDistributedRequest, ReconfigureRankType,
                             UtilityOutput)
-from vllm.v1.engine.exceptions import SchedulerWaitingQueueFullError
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.v1.executor.abstract import Executor
@@ -626,7 +625,7 @@ class EngineCoreProc(EngineCore):
             while True:
                 try:
                     engine_core.run_busy_loop()
-                except SchedulerWaitingQueueFullError as e:
+                except ValueError as e:
                     engine_core._send_engine_error(e)
         except SystemExit:
             logger.debug("EngineCore exiting.")
