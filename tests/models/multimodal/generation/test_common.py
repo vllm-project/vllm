@@ -186,8 +186,6 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(0.25, 0.5, 1.0)],
         vllm_runner_kwargs={
             "model_impl": "transformers",
-            "disable_mm_preprocessor_cache": True,
-            "enable_prefix_caching": False,
         },
         marks=[pytest.mark.core_model],
     ),
@@ -205,8 +203,6 @@ VLM_TEST_SETTINGS = {
     #     image_size_factors=[(0.25, 0.5, 1.0)],
     #     vllm_runner_kwargs={
     #         "model_impl": "transformers",
-    #         "disable_mm_preprocessor_cache": True,
-    #         "enable_prefix_caching": False,
     #     },
     #     marks=[pytest.mark.core_model],
     # ),
@@ -223,8 +219,6 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(0.25, 0.2, 0.15)],
         vllm_runner_kwargs={
             "model_impl": "transformers",
-            "disable_mm_preprocessor_cache": True,
-            "enable_prefix_caching": False,
         },
         marks=[large_gpu_mark(min_gb=32)],
     ),
@@ -239,8 +233,6 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(0.25, 0.5, 1.0)],
         vllm_runner_kwargs={
             "model_impl": "auto",
-            "disable_mm_preprocessor_cache": True,
-            "enable_prefix_caching": False,
         },
         auto_cls=AutoModelForImageTextToText,
         marks=[pytest.mark.core_model],
