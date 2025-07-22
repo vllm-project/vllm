@@ -214,21 +214,18 @@ class BlockPool:
             raise ValueError(
                 f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = []
-        idx = 0
-        while idx < num_blocks:
-            # First allocate blocks.
-            curr_block = self.free_block_queue.popleft()
-            assert curr_block.ref_cnt == 0
+        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
 
-            # If the block is cached, evict it.
-            if self.enable_caching:
-                self._maybe_evict_cached_block(curr_block)
-
-            curr_block.incr_ref()
-            ret.append(curr_block)
-            idx += 1
-
+        # In order to only iterate the list once, we duplicated code a bit
+        if self.enable_caching:
+            for block in ret:
+                self._maybe_evict_cached_block(block)
+                assert block.ref_cnt == 0
+                block.ref_cnt += 1
+        else:
+            for block in ret:
+                assert block.ref_cnt == 0
+                block.ref_cnt += 1
         return ret
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
@@ -289,11 +286,14 @@ class BlockPool:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
         """
-        for block in ordered_blocks:
-            block.decr_ref()
-            # null_block should not be added to the free list.
-            if block.ref_cnt == 0 and not block.is_null:
-                self.free_block_queue.append(block)
+        # Materialize the iterable to allow multiple passes.
+        blocks_list = list(ordered_blocks)
+        for block in blocks_list:
+            block.ref_cnt -= 1
+        self.free_block_queue.append_n([
+            block for block in blocks_list
+            if block.ref_cnt == 0 and not block.is_null
+        ])
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
