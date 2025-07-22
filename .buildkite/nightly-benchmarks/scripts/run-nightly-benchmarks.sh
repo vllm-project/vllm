@@ -235,10 +235,9 @@ run_serving_tests() {
           --port $port \
           --save-result \
           --result-dir $RESULTS_FOLDER \
-          --result-filename ${test_name}.json \
+          --result-filename ${new_test_name}.json \
           --request-rate $qps \
-          --metadata "tensor_parallel_size=$tp" \
-          $common_params_str"
+          --ignore-eos \
           $client_args"
 
       elif [[ "$dataset_name" = "sonnet" ]]; then

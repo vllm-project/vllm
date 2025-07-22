@@ -44,7 +44,7 @@ vllm bench serve \
     --dataset-name sharegpt \
     --dataset-path sharegpt.json \
     --profile \
-    --num-prompts 10
+    --num-prompts 2
 ```
 
 ## Profile with NVIDIA Nsight Systems

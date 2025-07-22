@@ -133,15 +133,15 @@ adjusted_input_len=$(( INPUT_LEN - prefix_len ))
         --dataset-name random \
         --random-input-len $adjusted_input_len \
         --random-output-len $OUTPUT_LEN \
-        --random-prefix-len $prefix_len \
-        --num-prompts $NUM_PROMPTS \
-        --port 8004 \
-        --save-result \
-        --result-dir $LOG_FOLDER \
-        --result-filename bm_log_${max_num_seqs}_${max_num_batched_tokens}_requestrate_inf.json \
-        --request-rate inf \
         --ignore-eos \
-        2>&1 | tee $bm_log
+        --disable-tqdm \
+        --request-rate inf \
+        --percentile-metrics ttft,tpot,itl,e2el \
+        --goodput e2el:$MAX_LATENCY_ALLOWED_MS \
+        --num-prompts 1000 \
+        --random-prefix-len $prefix_len \
+        --port 8004 \
+        --profile &> "$bm_log"
     throughput=$(grep "Request throughput (req/s):" "$bm_log" | sed 's/[^0-9.]//g')
     e2el=$(grep "P99 E2EL (ms):" "$bm_log" | awk '{print $NF}')
     goodput=$(grep "Request goodput (req/s):" "$bm_log" | sed 's/[^0-9.]//g')
