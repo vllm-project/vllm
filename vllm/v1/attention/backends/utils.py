@@ -206,6 +206,10 @@ def infer_global_hyperparameters(
     param_sets = list(per_layer_params.values())
     global_params = param_sets[0]
     for params in param_sets:
+        if params.window_left != global_params.window_left:
+            raise ValueError(
+                "Window left is not the same for all layers. One potential fix "
+                "is to set disable_sliding_window=True")
         assert params == global_params, (
             "FlashInfer backend currently only supports models in which all "
             "layers share the same values for the following hyperparameters: "
