@@ -58,6 +58,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
         "VLLM_HOST_IP", "VLLM_HOST_PORT", "LOCAL_RANK", "CUDA_VISIBLE_DEVICES"
     }
 
+    # These non-vLLM env vars are copied from the driver to workers
+    ADDITIONAL_ENV_VARS = {"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"}
+
     uses_ray: bool = True
 
     def _init_executor(self) -> None:
@@ -326,7 +329,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
         # Environment variables to copy from driver to workers
         env_vars_to_copy = get_env_vars_to_copy(
             exclude_vars=self.WORKER_SPECIFIC_ENV_VARS,
-            additional_vars=set(current_platform.additional_env_vars),
+            additional_vars=set(current_platform.additional_env_vars).union(
+                self.ADDITIONAL_ENV_VARS),
             destination="workers")
 
         # Copy existing env vars to each worker's args
