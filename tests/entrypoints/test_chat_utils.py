@@ -12,9 +12,7 @@ from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (_try_extract_ast,
-                                         apply_mistral_chat_template,
-                                         load_chat_template,
+from vllm.entrypoints.chat_utils import (_try_extract_ast, load_chat_template,
                                          parse_chat_messages,
                                          parse_chat_messages_futures,
                                          resolve_chat_template_content_format,
@@ -1462,6 +1460,8 @@ def test_parse_chat_messages_include_thinking_chunk(mistral_model_config,
 
 
 def test_apply_mistral_chat_template_thinking_chunk():
+    # Moved import here to avoid yapf and isort conflicts
+    from vllm.entrypoints.chat_utils import apply_mistral_chat_template
     messages = [{
         "role":
         "system",
