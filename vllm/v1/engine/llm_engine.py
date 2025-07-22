@@ -121,12 +121,18 @@ class LLMEngine:
         stat_loggers: Optional[list[StatLoggerFactory]] = None,
         disable_log_stats: bool = False,
     ) -> "LLMEngine":
+        # Disable multiprocessing when using Pathways
+        multiprocess_mode = envs.VLLM_ENABLE_V1_MULTIPROCESSING
+        if envs.VLLM_USING_PATHWAYS:
+            logger.info("Disabling multiprocessing when using Pathways (JAX_PLATFORMS=proxy)")
+            multiprocess_mode = False
+            
         return cls(vllm_config=vllm_config,
                    executor_class=Executor.get_class(vllm_config),
                    log_stats=(not disable_log_stats),
                    usage_context=usage_context,
                    stat_loggers=stat_loggers,
-                   multiprocess_mode=envs.VLLM_ENABLE_V1_MULTIPROCESSING)
+                   multiprocess_mode=multiprocess_mode)
 
     @classmethod
     def from_engine_args(
@@ -145,6 +151,10 @@ class LLMEngine:
         if envs.VLLM_ENABLE_V1_MULTIPROCESSING:
             logger.debug("Enabling multiprocessing for LLMEngine.")
             enable_multiprocessing = True
+
+        # Disable multiprocessing when using Pathways 
+        if envs.VLLM_USING_PATHWAYS:
+            enable_multiprocessing = False
 
         # Create the LLMEngine.
         return cls(vllm_config=vllm_config,

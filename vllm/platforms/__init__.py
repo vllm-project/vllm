@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import logging
 import traceback
 from itertools import chain
@@ -11,7 +10,7 @@ from vllm.utils import resolve_obj_by_qualname, supports_xccl
 
 from .interface import _Backend  # noqa: F401
 from .interface import CpuArchEnum, Platform, PlatformEnum
-
+from vllm import envs
 logger = logging.getLogger(__name__)
 
 
@@ -31,20 +30,26 @@ def vllm_version_matches_substr(substr: str) -> bool:
 
 
 def tpu_platform_plugin() -> Optional[str]:
-    is_tpu = False
     logger.debug("Checking if TPU platform is available.")
+    
+    # Check for Pathways TPU proxy
+    if envs.VLLM_USING_PATHWAYS:
+        logger.debug("Confirmed TPU platform is available via Pathways proxy.")
+        return "tpu_commons.platforms.tpu_jax.TpuPlatform"
+    
+    # Check for libtpu installation
     try:
         # While it's technically possible to install libtpu on a
         # non-TPU machine, this is a very uncommon scenario. Therefore,
-        # we assume that libtpu is installed if and only if the machine
+        # we assume that libtpu is installed only if the machine
         # has TPUs.
+
         import libtpu  # noqa: F401
-        is_tpu = True
         logger.debug("Confirmed TPU platform is available.")
+        return "vllm.platforms.tpu.TpuPlatform"
     except Exception as e:
         logger.debug("TPU platform is not available because: %s", str(e))
-
-    return "vllm.platforms.tpu.TpuPlatform" if is_tpu else None
+        return None
 
 
 def cuda_platform_plugin() -> Optional[str]:
