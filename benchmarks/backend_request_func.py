@@ -48,6 +48,8 @@ class RequestFuncOutput:
     prompt_len: int = 0
     error: str = ""
 
+    start_time: float = 0.0
+
 
 async def async_request_tgi(
     request_func_input: RequestFuncInput,
@@ -288,8 +290,8 @@ async def async_request_openai_completions(
         output.prompt_len = request_func_input.prompt_len
 
         generated_text = ""
-        st = time.perf_counter()
-        most_recent_timestamp = st
+        output.start_time = time.perf_counter()
+        most_recent_timestamp = output.start_time
         try:
             async with session.post(
                 url=api_url, json=payload, headers=headers
@@ -316,7 +318,7 @@ async def async_request_openai_completions(
                                 # First token
                                 if not first_chunk_received:
                                     first_chunk_received = True
-                                    ttft = time.perf_counter() - st
+                                    ttft = time.perf_counter() - output.start_time
                                     output.ttft = ttft
 
                                 # Decoding phase
@@ -336,7 +338,7 @@ async def async_request_openai_completions(
                             "This response will be marked as failed!"
                         )
                     output.generated_text = generated_text
-                    output.latency = most_recent_timestamp - st
+                    output.latency = most_recent_timestamp - output.start_time
                 else:
                     output.error = response.reason or ""
                     output.success = False

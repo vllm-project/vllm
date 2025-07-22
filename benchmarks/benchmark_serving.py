@@ -72,7 +72,11 @@ from benchmark_dataset import (
     SonnetDataset,
     VisionArenaDataset,
 )
-from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
+from benchmark_utils import (
+    convert_to_pytorch_benchmark_format,
+    print_requests_statistics,
+    write_to_json,
+)
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -417,6 +421,8 @@ async def benchmark(
 
     print(f"Burstiness factor: {burstiness} ({distribution})")
     print(f"Maximum request concurrency: {max_concurrency}")
+
+    print_requests_statistics(input_requests)
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
@@ -861,6 +867,12 @@ def main(args: argparse.Namespace):
             raise ValueError(f"Unknown dataset: {args.dataset_name}") from err
     goodput_config_dict = check_goodput_args(args)
 
+    if args.max_output_len is not None:
+        for request in input_requests:
+            request.expected_output_len = min(
+                request.expected_output_len, args.max_output_len
+            )
+
     # Collect the sampling parameters.
     sampling_params = {
         k: v
@@ -1196,6 +1208,12 @@ def create_argument_parser():
         '"ttft", "tpot", "e2el". For more context on the definition of '
         "goodput, refer to DistServe paper: https://arxiv.org/pdf/2401.09670 "
         "and the blog: https://hao-ai-lab.github.io/blogs/distserve",
+    )
+    parser.add_argument(
+        "--max-output-len",
+        type=int,
+        default=None,
+        help="Maximum number of output tokens per request. This can be used as a clamping value for the output length.",
     )
 
     # group for dataset specific arguments
