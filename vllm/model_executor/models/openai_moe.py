@@ -67,7 +67,7 @@ class OAIAttention(nn.Module):
             torch.empty(config.num_attention_heads // tp_size,
                         dtype=torch.bfloat16))
 
-        self.norm = RMSNorm(config.hidden_size)
+        self.norm = RMSNorm(config.hidden_size, eps=1e-5)
 
         self.q_size = self.num_attention_heads * self.head_dim // tp_size
         self.kv_size = self.num_key_value_heads * self.head_dim // tp_size
@@ -137,7 +137,7 @@ class MLPBlock(torch.nn.Module):
         self.num_experts = config.num_experts
         self.experts_per_token = config.experts_per_token
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
-        self.norm = RMSNorm(config.hidden_size)
+        self.norm = RMSNorm(config.hidden_size, eps=1e-5)
         self.gate = torch.nn.Linear(config.hidden_size,
                                     config.num_experts,
                                     dtype=torch.bfloat16)
@@ -203,7 +203,7 @@ class OpenAIMoeForCausalLM(nn.Module):
                 prefix=maybe_prefix(prefix, f"block.{layer_idx}"),
             ) for layer_idx in range(self.config.num_hidden_layers)
         ])
-        self.norm = RMSNorm(self.config.hidden_size)
+        self.norm = RMSNorm(self.config.hidden_size, eps=1e-5)
         self.lm_head = ParallelLMHead(
             self.config.vocab_size,
             self.config.hidden_size,
