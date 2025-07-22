@@ -32,6 +32,7 @@ from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.engine.utils import (CoreEngineActorManager,
                                   CoreEngineProcManager, launch_core_engines)
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
 logger = init_logger(__name__)
@@ -104,7 +105,7 @@ class EngineCoreClient(ABC):
     def get_output(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
-    def add_request(self, request: EngineCoreRequest) -> None:
+    def add_request(self, request: Union[EngineCoreRequest, Request]) -> None:
         raise NotImplementedError
 
     def profile(self, is_start: bool = True) -> None:
@@ -238,7 +239,7 @@ class InprocClient(EngineCoreClient):
         outputs, _ = self.engine_core.step()
         return outputs.get(0) or EngineCoreOutputs()
 
-    def add_request(self, request: EngineCoreRequest) -> None:
+    def add_request(self, request: Union[EngineCoreRequest, Request]) -> None:
         self.engine_core.add_request(request)
 
     def abort_requests(self, request_ids: list[str]) -> None:
@@ -603,7 +604,7 @@ class SyncMPClient(MPClient):
 
         return future.result()
 
-    def add_request(self, request: EngineCoreRequest) -> None:
+    def add_request(self, request: Union[EngineCoreRequest, Request]) -> None:
         if self.is_dp:
             self.engines_running = True
         self._send_input(EngineCoreRequestType.ADD, request)

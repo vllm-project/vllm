@@ -9,11 +9,11 @@ from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
 from vllm.utils import sha256, sha256_cbor_64bit
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
-from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
-                                         hash_request_tokens, init_none_hash)
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import (Request, RequestStatus, hash_request_tokens,
+                             init_none_hash)
 
 logger = init_logger(__name__)
 
@@ -166,8 +166,8 @@ class KVCacheManager:
         block_hashes = self.req_to_block_hashes[request.request_id]
         if not block_hashes:
             assert self.block_size is not None
-            block_hashes = hash_request_tokens(self.caching_hash_fn,
-                                               self.block_size, request)
+            block_hashes = request.precomputed_block_hashes if request.precomputed_block_hashes is not None else hash_request_tokens(
+                self.caching_hash_fn, self.block_size, request)
             self.req_to_block_hashes[request.request_id] = block_hashes
 
         if self.log_stats:
