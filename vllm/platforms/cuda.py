@@ -242,7 +242,10 @@ class CudaPlatformBase(Platform):
         if use_v1:
             FLASHINFER_V1 = "vllm.v1.attention.backends.flashinfer.FlashInferBackend"  # noqa: E501
             FLEX_ATTENTION_V1 = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"  # noqa: E501
-            TRITON_ATTN_VLLM_V1 = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
+            TRITON_UNIFIED_ATTN_VLLM_V1 = "vllm.v1.attention.backends.triton_attn." \
+            "TritonUnifiedAttentionBackend"  # noqa: E501
+            TRITON_SPLIT_PREFILL_DECODE_ATTN_VLLM_V1 = "vllm.v1.attention.backends.triton_attn." \
+                                            "TritonSplitPrefillDecodeAttentionBackend"                                                                                                                                                                            # noqa: E501
             FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
 
             if selected_backend == _Backend.FLASHINFER:
@@ -255,9 +258,18 @@ class CudaPlatformBase(Platform):
             elif selected_backend == _Backend.FLEX_ATTENTION:
                 logger.info_once("Using FlexAttention backend on V1 engine.")
                 return FLEX_ATTENTION_V1
-            elif selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
-                logger.info_once("Using Triton backend on V1 engine.")
-                return TRITON_ATTN_VLLM_V1
+            elif selected_backend == _Backend.TRITON_UNIFIED_ATTN_VLLM_V1:
+                logger.info_once(
+                    "Using Triton Unified Attention backend on V1 engine.")
+                return TRITON_UNIFIED_ATTN_VLLM_V1
+            elif (selected_backend ==
+                  _Backend.TRITON_SPLIT_PREFILL_DECODE_ATTN_VLLM_V1):
+                logger.info_once(
+                    "Using Triton Split Prefill Decode Attention backend " \
+                    "on V1 engine."
+                )
+
+                return TRITON_SPLIT_PREFILL_DECODE_ATTN_VLLM_V1
             elif selected_backend == _Backend.FLASH_ATTN:
                 logger.info_once("Using Flash Attention backend on V1 engine.")
                 return FLASH_ATTN_V1
