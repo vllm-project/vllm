@@ -22,6 +22,7 @@ from vllm.lora.fully_sharded_layers import (
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
+                              FusedMoEWithLoRA,
                               LinearScalingRotaryEmbeddingWithLoRA,
                               LogitsProcessorWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
@@ -29,8 +30,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
                               QKVParallelLinearWithLoRA,
                               ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
-                              VocabParallelEmbeddingWithLoRA,
-                              FusedMoEWithLoRA)
+                              VocabParallelEmbeddingWithLoRA)
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
 
@@ -196,8 +196,8 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
     for name, module in model.named_modules():
         if isinstance(module, (LinearBase,)):
             supported_lora_modules.add(name.split(".")[-1])
-                
-        if isinstance(module, (FusedMoE, )):
+
+        if isinstance(module, (FusedMoE,)):
             supported_lora_modules.add(name.split(".")[-1])
 
     # step 2: get the embedding modules if the model's mbedding_modules

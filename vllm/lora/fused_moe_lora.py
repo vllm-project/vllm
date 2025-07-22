@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Dict, List, Tuple
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import dict, list, tuple
 
 import torch
 import triton
 import triton.language as tl
 
-_LORA_PTR_DICT: Dict[Tuple[int, ...], torch.tensor] = {}
+_LORA_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
 
 
-def _get_ptr(lora_weights: List[torch.Tensor], device: torch.device):
+def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
     """
     `_LORA_PTR_DICT` collects the required information during `profile_run`, 
     After this, it remains constant and subsequent usage is through LUT.
@@ -43,6 +44,7 @@ def fused_moe_lora(
     K,
     EM,
     num_valid_tokens,
+    num_experts,
     # The stride variables represent how much to increase the ptr by when
     # moving by 1 element in a particular dimension. E.g. `stride_am` is
     # how much to increase `a_ptr` by to get the element one row down
@@ -91,11 +93,8 @@ def fused_moe_lora(
 
     # get the expert_id to process curr shard
     expert_id = tl.load(expert_ids_ptr + lora_idx * stride_el + pid_m)
-    if expert_id >= 64:
+    if expert_id >= num_experts:
         return
-
-    # if expert_id != 0:
-    #     return
 
     # get a_ptr,b_ptr,c_ptr
     cur_a_ptr = a_ptr + (slice_id % num_slice_a) * slice_a_size
@@ -150,8 +149,8 @@ def fused_moe_lora(
 
 
 def fused_moe_w13_lora(qcurr_hidden_states: torch.Tensor,
-                       w13_lora_a_stacked: List[torch.Tensor],
-                       w13_lora_b_stacked: List[torch.Tensor],
+                       w13_lora_a_stacked: list[torch.Tensor],
+                       w13_lora_b_stacked: list[torch.Tensor],
                        topk_weights: torch.Tensor,
                        sorted_token_ids: torch.Tensor, expert_ids: torch.Tensor,
                        num_tokens_post_padded: torch.Tensor, max_lora_rank: int,
@@ -160,7 +159,7 @@ def fused_moe_w13_lora(qcurr_hidden_states: torch.Tensor,
 
     w1_lora_a_stacked = w13_lora_a_stacked[0]
     w1_lora_b_stacked = w13_lora_b_stacked[0]
-
+    num_experts = w13_lora_a_stacked[0].shape[1]
     #============begin============
     N = max_lora_rank
     M = qcurr_hidden_states.shape[0]
@@ -216,6 +215,7 @@ def fused_moe_w13_lora(qcurr_hidden_states: torch.Tensor,
                          K,
                          EM,
                          num_tokens,
+                         num_experts,
                          qcurr_hidden_states.stride(0),
                          qcurr_hidden_states.stride(1),
                          w1_lora_a_stacked.stride(0),
@@ -258,6 +258,7 @@ def fused_moe_w13_lora(qcurr_hidden_states: torch.Tensor,
                          K,
                          EM,
                          num_tokens,
+                         num_experts,
                          w1_a_intermediate_cache1.stride(0),
                          w1_a_intermediate_cache1.stride(1),
                          w1_lora_b_stacked.stride(0),
@@ -288,6 +289,8 @@ def fused_moe_w2_lora(intermediate_cache2, w2_lora_a_stacked: torch.Tensor,
     EM = sorted_token_ids.shape[1]
     M = topk_weights.shape[0]
     num_tokens = topk_weights.numel()
+    num_experts = w2_lora_a_stacked[0].shape[1]
+
     device = intermediate_cache2.device
 
     w2_a_intermediate_cache1 = torch.zeros((M * top_k_num, max_lora_rank),
@@ -324,6 +327,7 @@ def fused_moe_w2_lora(intermediate_cache2, w2_lora_a_stacked: torch.Tensor,
                          K,
                          EM,
                          num_tokens,
+                         num_experts,
                          w2_lora_a_in.stride(0),
                          w2_lora_a_in.stride(1),
                          w2_lora_a_stacked.stride(0),
@@ -365,6 +369,7 @@ def fused_moe_w2_lora(intermediate_cache2, w2_lora_a_stacked: torch.Tensor,
                          K,
                          EM,
                          num_tokens,
+                         num_experts,
                          w2_a_intermediate_cache1.stride(0),
                          w2_a_intermediate_cache1.stride(1),
                          w2_lora_b_stacked.stride(0),

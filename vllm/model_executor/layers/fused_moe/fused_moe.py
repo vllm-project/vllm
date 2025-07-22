@@ -12,6 +12,7 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.lora.fused_moe_lora import fused_moe_w2_lora, fused_moe_w13_lora
 # yapf: disable
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig, get_config_quant_dtype)
@@ -35,7 +36,6 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op
 from vllm.utils.deep_gemm import is_blackwell_deep_gemm_used
-from vllm.lora.fused_moe_lora import (fused_moe_w2_lora, fused_moe_w13_lora)
 
 from .rocm_aiter_fused_moe import is_rocm_aiter_moe_enabled
 

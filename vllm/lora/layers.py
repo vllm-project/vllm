@@ -4,7 +4,7 @@
 # pylint: disable=unused-argument
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, Union, cast, List
+from typing import TYPE_CHECKING, Optional, Union, cast, list
 
 import torch
 import torch.nn as nn
@@ -19,6 +19,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.utils import divide
+from vllm.model_executor.layers.fused_moe import FusedMoE
 # yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
@@ -26,7 +27,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.fused_moe import FusedMoE
 # yapf: enable
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import (
@@ -1293,16 +1293,14 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def load_weights(self, index: int, module_name, lora_model):
 
         for expert_id in range(0, self.base_layer.global_num_experts):
-            if "%s.%s.gate_proj" % (module_name,
-                                    expert_id) not in lora_model.loras:
+            if f"{module_name}.{expert_id}.gate_proj" not in lora_model.loras:
                 continue
 
-            gate_proj = lora_model.loras.get("%s.%s.gate_proj" %
-                                             (module_name, expert_id))
-            up_proj = lora_model.loras.get("%s.%s.up_proj" %
-                                           (module_name, expert_id))
-            down_proj = lora_model.loras.get("%s.%s.down_proj" %
-                                             (module_name, expert_id))
+            gate_proj = lora_model.loras.get(
+                f"{module_name}.{expert_id}.gate_proj")
+            up_proj = lora_model.loras.get(f"{module_name}.{expert_id}.up_proj")
+            down_proj = lora_model.loras.get(
+                f"{module_name}.{expert_id}.down_proj")
 
             self.w1_lora_a_stacked[index, expert_id, :gate_proj.lora_a.
                                    shape[1], :gate_proj.lora_a.shape[0]].copy_(
@@ -1445,12 +1443,12 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             device=self.device,
         )
 
-        setattr(self.base_layer, "w1_lora_a_stacked", self.w1_lora_a_stacked)
-        setattr(self.base_layer, "w1_lora_b_stacked", self.w1_lora_b_stacked)
-        setattr(self.base_layer, "w2_lora_a_stacked", self.w2_lora_a_stacked)
-        setattr(self.base_layer, "w2_lora_b_stacked", self.w2_lora_b_stacked)
-        setattr(self.base_layer, "w3_lora_a_stacked", self.w3_lora_a_stacked)
-        setattr(self.base_layer, "w3_lora_b_stacked", self.w3_lora_b_stacked)
+        self.base_layer.w1_lora_a_stacked = self.w1_lora_a_stacked
+        self.base_layer.w1_lora_b_stacked = self.w1_lora_b_stacked
+        self.base_layer.w2_lora_a_stacked = self.w2_lora_a_stacked
+        self.base_layer.w2_lora_b_stacked = self.w2_lora_b_stacked
+        self.base_layer.w3_lora_a_stacked = self.w3_lora_a_stacked
+        self.base_layer.w3_lora_b_stacked = self.w3_lora_b_stacked
 
     def reset_lora(self, index: int):
         """Resets the lora weights at index back to 0."""
@@ -1477,14 +1475,14 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         punica_wrapper,
     ):
         self.punica_wrapper: PunicaWrapperBase = punica_wrapper
-        setattr(self.base_layer, "punica_wrapper", self.punica_wrapper)
+        self.base_layer.punica_wrapper = self.punica_wrapper
 
     @classmethod
     def can_replace_layer(
         cls,
         source_layer: nn.Module,
         lora_config: LoRAConfig,
-        packed_modules_list: List,
+        packed_modules_list: list,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
