@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from ....conftest import VllmRunner
-
+from vllm.utils import set_default_torch_num_threads
 
 def generate_test_mm_data():
     mm_data = {
@@ -26,12 +26,13 @@ def _run_test(
         "prompt_token_ids": [1],
         "multi_modal_data": mm_data
     }
-    with vllm_runner(model,
+    with set_default_torch_num_threads(1):
+        with vllm_runner(model,
                      task="embed",
                      dtype=torch.float16,
                      enforce_eager=True,
                      skip_tokenizer_init=True) as vllm_model:
-        vllm_model.encode(prompt)
+            vllm_model.encode(prompt)
 
 
 MODELS = ["christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM"]
