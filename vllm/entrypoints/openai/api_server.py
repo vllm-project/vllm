@@ -106,6 +106,10 @@ from vllm.utils import (Device, FlexibleArgumentParser, get_open_zmq_ipc_path,
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
+from fastapi import APIRouter, Request, HTTPException
+from uuid import uuid4
+from .schemas import AnthropicMessagesRequest, AnthropicMessagesResponse
+
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
