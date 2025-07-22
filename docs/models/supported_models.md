@@ -670,7 +670,8 @@ Some models are supported only via the [Transformers backend](#transformers). Th
     This limitation exists because the model's mixed attention pattern (bidirectional for images, causal otherwise) is not yet supported by vLLM's attention backends.
 
 !!! note
-    `Gemma3nForConditionalGeneration` is only supported on V1 due to shared KV caching.
+    `Gemma3nForConditionalGeneration` is only supported on V1 due to shared KV caching and it depends on `timm>=1.0.17` to make use of its
+    MobileNet-v5 vision backbone.
   
     Performance is not yet fully optimized mainly due to:
   
