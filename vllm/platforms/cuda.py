@@ -182,9 +182,6 @@ class CudaPlatformBase(Platform):
             compilation_config.use_cudagraph = False
             if model_config is not None:
                 model_config.enforce_eager = True
-            # TODO (varun): Turning this ON gives incorrect results for the
-            # Deepseek-V2-lite model.
-            vllm_config.compilation_config.use_inductor = False
 
     @classmethod
     def get_current_memory_usage(cls,
@@ -585,6 +582,19 @@ class NonNvmlCudaPlatform(CudaPlatformBase):
             "NVLink detection not possible, as context support was"
             " not found. Assuming no NVLink available.")
         return False
+
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+        fp8_attention = kv_cache_dtype.startswith("fp8")
+        will_use_fa = (not envs.is_set("VLLM_ATTENTION_BACKEND")
+                       ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
+        supported = False
+        if cls.is_device_capability(100):
+            supported = True
+        elif fp8_attention and will_use_fa:
+            from vllm.attention.utils.fa_utils import flash_attn_supports_fp8
+            supported = flash_attn_supports_fp8()
+        return supported
 
 
 # Autodetect either NVML-enabled or non-NVML platform

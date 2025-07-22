@@ -336,6 +336,12 @@ class CompressedTensorsConfig(QuantizationConfig):
                 and self._is_fp8_w8a8(weight_quant, input_quant)
                 and not is_block_quant)
 
+    def _is_fp8_w8a8_sm100(self, weight_quant: QuantizationArgs,
+                           input_quant: QuantizationArgs) -> bool:
+        return (self._check_scheme_supported(
+            100, error=False, match_exact=True)
+                and self._is_fp8_w8a8(weight_quant, input_quant))
+
     def _is_fp8_w8a16(self, weight_quant: QuantizationArgs,
                       input_quant: QuantizationArgs) -> bool:
         # Confirm weights quantized.
