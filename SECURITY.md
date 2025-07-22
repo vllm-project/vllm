@@ -32,7 +32,7 @@ Minor issues such as informational disclosures, logging errors, non-exploitable 
 
 ## Prenotification policy
 
-For certain security issues of CRITICAL, HIGH, or MODERATE severity level, we may prenotify certain organizations or vendors, which ship vLLM.
+For certain security issues of CRITICAL, HIGH, or MODERATE severity level, we may prenotify certain organizations or vendors that ship vLLM. The purpose of this prenotification is to allow for a coordinated release of fixes for severe issues.
 
 * This prenotification is often in the form of adding their security contacts to the github security advisory, typically few days before release.
 
