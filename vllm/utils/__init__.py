@@ -179,6 +179,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e4m3": torch.uint8,
     "fp8_e5m2": torch.uint8,
     "int8": torch.int8,
+    "fp8_inc": torch.float8_e4m3fn,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -813,6 +814,33 @@ def get_ip() -> str:
     return "0.0.0.0"
 
 
+def test_loopback_bind(address, family):
+    try:
+        s = socket.socket(family, socket.SOCK_DGRAM)
+        s.bind((address, 0))  # Port 0 = auto assign
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def get_loopback_ip() -> str:
+    loopback_ip = envs.VLLM_LOOPBACK_IP
+    if loopback_ip:
+        return loopback_ip
+
+    # VLLM_LOOPBACK_IP is not set, try to get it based on network interface
+
+    if test_loopback_bind("127.0.0.1", socket.AF_INET):
+        return "127.0.0.1"
+    elif test_loopback_bind("::1", socket.AF_INET6):
+        return "::1"
+    else:
+        raise RuntimeError(
+            "Neither 127.0.0.1 nor ::1 are bound to a local interface. "
+            "Set the VLLM_LOOPBACK_IP environment variable explicitly.")
+
+
 def is_valid_ipv6_address(address: str) -> bool:
     try:
         ipaddress.IPv6Address(address)
@@ -945,6 +973,13 @@ def next_power_of_2(n) -> int:
     if n < 1:
         return 1
     return 1 << (n - 1).bit_length()
+
+
+def prev_power_of_2(n: int) -> int:
+    """The previous power of 2 (inclusive)"""
+    if n <= 0:
+        return 0
+    return 1 << (n.bit_length() - 1)
 
 
 def round_up(x: int, y: int) -> int:
@@ -1348,12 +1383,11 @@ def find_nccl_library() -> str:
 
 prev_set_stream = torch.cuda.set_stream
 
-_current_stream = None
+_current_stream_tls = threading.local()
 
 
 def _patched_set_stream(stream: torch.cuda.Stream) -> None:
-    global _current_stream
-    _current_stream = stream
+    _current_stream_tls.value = stream
     prev_set_stream(stream)
 
 
@@ -1372,16 +1406,16 @@ def current_stream() -> torch.cuda.Stream:
     from C/C++ code.
     """
     from vllm.platforms import current_platform
-    global _current_stream
-    if _current_stream is None:
+    if not hasattr(_current_stream_tls,
+                   "value") or _current_stream_tls.value is None:
         # when this function is called before any stream is set,
         # we return the default stream.
         # On ROCm using the default 0 stream in combination with RCCL
         # is hurting performance. Therefore creating a dedicated stream
         # per process
-        _current_stream = torch.cuda.Stream() if current_platform.is_rocm(
-        ) else torch.cuda.current_stream()
-    return _current_stream
+        _current_stream_tls.value = torch.cuda.Stream(
+        ) if current_platform.is_rocm() else torch.cuda.current_stream()
+    return _current_stream_tls.value
 
 
 def enable_trace_function_call_for_thread(vllm_config: VllmConfig) -> None:
