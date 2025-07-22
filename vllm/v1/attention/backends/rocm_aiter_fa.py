@@ -13,6 +13,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx9
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -266,6 +267,28 @@ class AiterFlashAttentionBackend(AttentionBackend):
                 f"Supported head sizes are: {supported_head_sizes}. "
                 "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
                 "FlexAttention backend which supports all head sizes.")
+
+    @classmethod
+    def validate_block_size(cls, block_size: int) -> None:
+        if block_size % 16 != 0:
+            attn_type = cls.__name__.removesuffix("Backend")
+            raise ValueError(
+                f"Block size {block_size} is not supported by {attn_type}."
+                f"For {attn_type}, block size must be a multiple of 16")
+
+    @classmethod
+    def validate_device_capabality(cls) -> None:
+        if not on_gfx9():
+            attn_type = cls.__name__.removesuffix("Backend")
+            raise ValueError(
+                f"{attn_type} is only supported on gfx9 architectures")
+
+    @classmethod
+    def validate_kv_cache_dtype(cls, kv_cache_dtype: str) -> None:
+        if is_quantized_kv_cache(kv_cache_dtype):
+            attn_type = cls.__name__.removesuffix("Backend")
+            raise NotImplementedError(
+                f"{attn_type} does not support fp8 kv-cache.")
 
     @staticmethod
     def get_name() -> str:

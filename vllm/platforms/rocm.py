@@ -13,6 +13,7 @@ from torch.distributed.distributed_c10d import is_nccl_available
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils import cuda_device_count_stateless
+from vllm.v1.attention.backends import choose_attention_backend
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
@@ -223,15 +224,9 @@ class RocmPlatform(Platform):
             selected_backend = _Backend.ROCM_FLASH
 
         if envs.VLLM_USE_V1:
-            if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA \
-                and on_gfx9():
-                logger.info("Using Flash Attention backend on V1 engine.")
-                return ("vllm.v1.attention.backends."
-                        "rocm_aiter_fa.AiterFlashAttentionBackend")
-            else:
-                logger.info("Using Triton Attention backend on V1 engine.")
-                return ("vllm.v1.attention.backends."
-                        "triton_attn.TritonAttentionBackend")
+            return choose_attention_backend(head_size, dtype, kv_cache_dtype,
+                                            block_size)
+
         if selected_backend == _Backend.ROCM_FLASH:
             if not cls.has_device_capability(90):
                 # not Instinct series GPUs.

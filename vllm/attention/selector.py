@@ -85,6 +85,9 @@ class _IsSupported:
     can_import: bool
     head_size: bool
     dtype: bool
+    kv_cache_dtype: bool
+    block_size: bool
+    device_capabality: bool
 
     def __bool__(self) -> bool:
         return self.can_import and self.head_size and self.dtype
@@ -94,6 +97,8 @@ def is_attn_backend_supported(
     attn_backend: Union[str, type[AttentionBackend]],
     head_size: int,
     dtype: torch.dtype,
+    kv_cache_dtype: str,
+    block_size: int,
     *,
     allow_import_error: bool = True,
 ) -> _IsSupported:
@@ -104,7 +109,12 @@ def is_attn_backend_supported(
             if not allow_import_error:
                 raise
 
-            return _IsSupported(can_import=False, head_size=False, dtype=False)
+            return _IsSupported(can_import=False,
+                                head_size=False,
+                                dtype=False,
+                                kv_cache_dtype=False,
+                                block_size=False,
+                                device_capabality=False)
 
     assert isinstance(attn_backend, type)
 
@@ -130,10 +140,38 @@ def is_attn_backend_supported(
         raise NotImplementedError(f"{attn_backend.__name__} does not support "
                                   "dtype validation")
 
+    is_kv_cache_dtype_supported = True
+    if validate_kv_cache_dtype := getattr(attn_backend,
+                                          "validate_kv_cache_dtype", None):
+        try:
+            validate_kv_cache_dtype(kv_cache_dtype)
+        except Exception:
+            is_kv_cache_dtype_supported = False
+
+    is_device_capabality_supported = True
+    if validate_device_capabality := getattr(attn_backend,
+                                             "validate_device_capabality",
+                                             None):
+        try:
+            validate_device_capabality()
+        except Exception:
+            is_device_capabality_supported = False
+
+    is_block_size_supported = True
+    if validate_block_size := getattr(attn_backend, "validate_block_size",
+                                      None):
+        try:
+            validate_block_size(block_size)
+        except Exception:
+            is_block_size_supported = False
+
     return _IsSupported(
         can_import=True,
         head_size=is_head_size_supported,
         dtype=is_dtype_supported,
+        kv_cache_dtype=is_kv_cache_dtype_supported,
+        block_size=is_block_size_supported,
+        device_capabality=is_device_capabality_supported,
     )
 
 
