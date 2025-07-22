@@ -41,7 +41,7 @@ from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.pooling_params import PoolingParams, PoolingTask
 from vllm.sampling_params import SamplingType
-from vllm.sequence import IntermediateTensors
+from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, check_use_alibi, get_dtype_size,
                         is_pin_memory_available, round_up)
@@ -2215,12 +2215,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         return sampler_output
 
-    @torch.inference_mode()
-    def _dummy_pooler_run(
+    def _dummy_pooler_run_task(
         self,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-
+        task: PoolingTask,
+    ) -> PoolerOutput:
         num_tokens = hidden_states.shape[0]
         max_num_reqs = self.scheduler_config.max_num_seqs
         num_reqs = min(num_tokens, max_num_reqs)
@@ -2232,10 +2231,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         hidden_states_list = list(
             torch.split(hidden_states, num_scheduled_tokens_list))
-
         req_num_tokens = num_tokens // num_reqs
 
-        model = cast(VllmModelForPooling, self.model)
         dummy_prompt_lens = torch.tensor(
             [h.shape[0] for h in hidden_states_list],
             device=self.device,
@@ -2244,45 +2241,49 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                       dtype=torch.int32,
                                       device=self.device)
 
-        def _run_task(task: PoolingTask):
-            dummy_pooling_params = PoolingParams(task=task)
-            to_update = model.pooler.get_pooling_updates(task)
-            to_update.apply(dummy_pooling_params)
+        model = cast(VllmModelForPooling, self.model)
+        dummy_pooling_params = PoolingParams(task=task)
+        to_update = model.pooler.get_pooling_updates(task)
+        to_update.apply(dummy_pooling_params)
 
-            dummy_metadata = PoolingMetadata(
-                prompt_lens=dummy_prompt_lens,
-                prompt_token_ids=dummy_token_ids,
-                pooling_params=[dummy_pooling_params] * num_reqs,
-            )
+        dummy_metadata = PoolingMetadata(
+            prompt_lens=dummy_prompt_lens,
+            prompt_token_ids=dummy_token_ids,
+            pooling_params=[dummy_pooling_params] * num_reqs,
+        )
 
-            try:
-                return model.pooler(hidden_states=hidden_states_list,
-                                    pooling_metadata=dummy_metadata)
-            except RuntimeError as e:
-                if 'out of memory' in str(e):
-                    raise RuntimeError(
-                        "CUDA out of memory occurred when warming up pooler "
-                        f"({task=}) with {num_reqs} dummy requests. "
-                        "Please try lowering `max_num_seqs` or "
-                        "`gpu_memory_utilization` when initializing the "
-                        "engine.") from e
-                else:
-                    raise e
+        try:
+            return model.pooler(hidden_states=hidden_states_list,
+                                pooling_metadata=dummy_metadata)
+        except RuntimeError as e:
+            if 'out of memory' in str(e):
+                raise RuntimeError(
+                    "CUDA out of memory occurred when warming up pooler "
+                    f"({task=}) with {num_reqs} dummy requests. Please try "
+                    "lowering `max_num_seqs` or `gpu_memory_utilization` when "
+                    "initializing the engine.") from e
+            else:
+                raise e
 
+    @torch.inference_mode()
+    def _dummy_pooler_run(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> PoolerOutput:
         memory_usage = dict[PoolingTask, float]()
-        for dummy_task in self.get_supported_pooling_tasks():
+        for task in self.get_supported_pooling_tasks():
             with DeviceMemoryProfiler() as m:
                 # NOTE: Keep in memory until after the ctx is exited
-                output = _run_task(dummy_task)
+                output = self._dummy_pooler_run_task(hidden_states, task)
 
-            memory_usage[dummy_task] = m.consumed_memory
+            memory_usage[task] = m.consumed_memory / GiB_bytes
             del output
             gc.collect()
 
-        logger.debug("Memory usage for pooler: %s", memory_usage)
+        logger.warning("Memory usage (GiB) for pooler: %s", memory_usage)
 
         max_task = max(memory_usage.items(), key=lambda x: x[1])[0]
-        return _run_task(max_task)
+        return self._dummy_pooler_run_task(hidden_states, max_task)
 
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
