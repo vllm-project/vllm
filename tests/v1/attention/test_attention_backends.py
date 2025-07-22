@@ -17,7 +17,8 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 BACKENDS_TO_TEST = [
     _Backend.FLASH_ATTN_VLLM_V1, _Backend.FLASHINFER_VLLM_V1,
-    _Backend.FLEX_ATTENTION, _Backend.TRITON_ATTN_VLLM_V1
+    _Backend.FLEX_ATTENTION, "FLEX_ATTENTION_SLOW",
+    _Backend.TRITON_ATTN_VLLM_V1
 ]
 
 # Remove flashinfer from the list if it's not available
@@ -97,7 +98,7 @@ def create_and_prepopulate_kv_cache(
         common_attn_metadata: CommonAttentionMetadata,
         randomize_blocks: bool = True) -> torch.Tensor:
     """Create and prepopulate a KV cache with context data.
-    
+
     Args:
         k_contexts: List of key context tensors for each sequence
         v_contexts: List of value context tensors for each sequence
@@ -109,9 +110,9 @@ def create_and_prepopulate_kv_cache(
         device: Device to create the cache on
         num_blocks: Total number of blocks in the cache
         block_table: Block table tensor to populate
-        randomize_blocks: Whether to randomly permute blocks 
+        randomize_blocks: Whether to randomly permute blocks
                           or use sequential order
-        
+
     Returns:
         Tuple of (kv_cache, updated_block_table)
     """
@@ -197,18 +198,28 @@ class MockAttentionLayer:
         self._v_scale_float = 1.0
 
 
-def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
-                          vllm_config, device: torch.device,
+def run_attention_backend(backend,
+                          kv_cache_spec: FullAttentionSpec,
+                          vllm_config,
+                          device: torch.device,
                           common_attn_metadata: CommonAttentionMetadata,
-                          query: torch.Tensor, key: torch.Tensor,
+                          query: torch.Tensor,
+                          key: torch.Tensor,
                           value: torch.Tensor,
-                          kv_cache: torch.Tensor) -> torch.Tensor:
+                          kv_cache: torch.Tensor,
+                          use_direct_block_mask: bool = True) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
-    builder_cls, impl_cls = get_attention_backend(backend)
+    # Handle special case for FLEX_ATTENTION_SLOW
+    actual_backend = backend
+    if backend == "FLEX_ATTENTION_SLOW":
+        actual_backend = _Backend.FLEX_ATTENTION
+        use_direct_block_mask = False
+
+    builder_cls, impl_cls = get_attention_backend(actual_backend)
 
     # Mock flashinfer's get_per_layer_parameters if needed
-    if backend == _Backend.FLASHINFER_VLLM_V1:
+    if actual_backend == _Backend.FLASHINFER_VLLM_V1:
         import unittest.mock
 
         from vllm.v1.attention.backends.flashinfer import PerLayerParameters
@@ -236,10 +247,14 @@ def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
     else:
         # Build metadata
         builder = builder_cls(kv_cache_spec, vllm_config, device)
-        attn_metadata = builder.build(
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
-        )
+        build_kwargs = {
+            "common_prefix_len": 0,
+            "common_attn_metadata": common_attn_metadata,
+        }
+        # Pass direct_build parameter for FlexAttention backend
+        if actual_backend == _Backend.FLEX_ATTENTION:
+            build_kwargs["direct_build"] = use_direct_block_mask
+        attn_metadata = builder.build(**build_kwargs)
 
     # Instantiate implementation
     num_heads = vllm_config.model_config.get_num_attention_heads(
@@ -447,11 +462,6 @@ def test_backend_correctness(batch_spec_name: str, model: str):
         # Check numerical similarity
         rtol = 1e-2
         atol = 5e-3
-
-        if backend_name == _Backend.FLEX_ATTENTION:
-            atol = 5e-1  # TODO: figure out why flex_attention has such large
-            # numerical differences for medium_decode, medium_prefill,
-            # mixed_medium
 
         max_diff = torch.max(torch.abs(backend_output - sdpa_output)).item()
         max_rel_diff = torch.max(
