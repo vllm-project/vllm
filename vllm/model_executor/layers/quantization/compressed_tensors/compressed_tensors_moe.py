@@ -83,7 +83,8 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 return CompressedTensorsWNA16MarlinMoEMethod(quant_config)
         elif quant_config._is_fp4a4_nvfp4(weight_quant, input_quant):
             return CompressedTensorsW4A4MoeMethod()
-        elif quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant):
+        elif (quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
+              or quant_config._is_fp8_w8a8_sm100(weight_quant, input_quant)):
             return CompressedTensorsW8A8Fp8MoECutlassMethod(quant_config)
         elif quant_config._is_fp8_w8a8(weight_quant, input_quant):
             return CompressedTensorsW8A8Fp8MoEMethod(quant_config)
@@ -339,19 +340,19 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         return cutlass_moe_fp4(
             a=x,
             w1_fp4=layer.w13_weight,
-            w1_blockscale=layer.w13_blockscale_swizzled,
-            w1_alphas=layer.g1_alphas,
             w2_fp4=layer.w2_weight,
+            w1_blockscale=layer.w13_blockscale_swizzled,
             w2_blockscale=layer.w2_blockscale_swizzled,
-            w2_alphas=layer.g2_alphas,
+            g1_alphas=layer.g1_alphas,
+            g2_alphas=layer.g2_alphas,
+            a1_gscale=layer.w13_input_scale_quant,
+            a2_gscale=layer.w2_input_scale_quant,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             m=x.shape[0],
             n=layer.w2_weight.shape[2] * 2,
             k=x.shape[1],
             e=layer.w13_weight.shape[0],
-            a1_gscale=layer.w13_input_scale_quant,
-            a2_gscale=layer.w2_input_scale_quant,
             device=x.device,
             apply_router_weight_on_input=apply_router_weight_on_input).to(
                 x.dtype)
@@ -740,6 +741,8 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
         self.topk_indices_dtype = None
         self.fused_experts = None  # type: ignore
         self.disable_expert_map = False
+        self.is_fp8_w8a8_sm100 = self.quant_config._is_fp8_w8a8_sm100(
+            self.weight_quant, self.input_quant)
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -929,11 +932,31 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        a1_scale = layer.w13_input_scale
-        a2_scale = layer.w2_input_scale
-        per_act_token = a1_scale.numel() != 1 if a1_scale is not None else (
-            a2_scale.numel() != 1 if a2_scale is not None else False)
-
+        per_act_token = (
+            self.input_quant.strategy == QuantizationStrategy.TOKEN)
+        per_channel_quant = (
+            self.weight_quant.strategy == QuantizationStrategy.CHANNEL)
+        # Triton fused_experts is faster in small batch sizes on SM100.
+        # Fall back to fused_experts in small batch sizes.
+        if self.is_fp8_w8a8_sm100 and topk_ids.shape[0] <= 8:
+            from vllm.model_executor.layers.fused_moe import fused_experts
+            return fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                inplace=True,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                use_fp8_w8a8=True,
+                per_channel_quant=per_channel_quant,
+                global_num_experts=global_num_experts,
+                expert_map=None if self.disable_expert_map else expert_map,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale)
         if self.fused_experts is None:
             # If no modular kernel is provided, use cutlass_moe_fp8
             from vllm.model_executor.layers.fused_moe.cutlass_moe import (
@@ -950,8 +973,8 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
                 expert_map=None if self.disable_expert_map else expert_map,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
-                a1_scale=a1_scale,
-                a2_scale=a2_scale,
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale,
             )
         else:
             return self.fused_experts(

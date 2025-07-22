@@ -157,6 +157,9 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     """If set to True, enable tracking server_load_metrics in the app state."""
     enable_force_include_usage: bool = False
     """If set to True, including usage on every request."""
+    enable_tokenizer_info_endpoint: bool = False
+    """Enable the /get_tokenizer_info endpoint. May expose chat
+    templates and other tokenizer configuration."""
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -181,6 +184,10 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
 
         # Special case: Middleware needs append action
         frontend_kwargs["middleware"]["action"] = "append"
+        frontend_kwargs["middleware"]["type"] = str
+        if "nargs" in frontend_kwargs["middleware"]:
+            del frontend_kwargs["middleware"]["nargs"]
+        frontend_kwargs["middleware"]["default"] = []
 
         # Special case: Tool call parser shows built-in options.
         valid_tool_parsers = list(ToolParserManager.tool_parsers.keys())
