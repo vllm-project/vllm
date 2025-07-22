@@ -108,7 +108,7 @@ def rocm_unquantized_gemm_impl_fake(
 def rocm_unquantized_gemm(layer: torch.nn.Module,
                           x: torch.Tensor,
                           weight: torch.Tensor,
-                          bias: Optional[torch.Tensor] = None):
+                          bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     return torch.ops.vllm.rocm_unquantized_gemm_impl(x, weight, bias)
 
 
