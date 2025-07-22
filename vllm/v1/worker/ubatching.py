@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
 from typing import Optional
 
@@ -14,17 +15,16 @@ class UBatchContext:
     Context manager for micro-batching synchronization using threading events.
     """
 
-    def __init__(
-            self,
-            id: int,
-            comm_stream: torch.cuda.Stream,
-            compute_stream: torch.cuda.Stream,
-            forward_context: ForwardContext,
-            cpu_wait_event: threading.Event,
-            cpu_signal_event: threading.Event,
-            gpu_comm_done_event: torch.cuda.Event,
-            gpu_compute_done_event: torch.cuda.Event,
-            schedule: str = "default"):
+    def __init__(self,
+                 id: int,
+                 comm_stream: torch.cuda.Stream,
+                 compute_stream: torch.cuda.Stream,
+                 forward_context: ForwardContext,
+                 cpu_wait_event: threading.Event,
+                 cpu_signal_event: threading.Event,
+                 gpu_comm_done_event: torch.cuda.Event,
+                 gpu_compute_done_event: torch.cuda.Event,
+                 schedule: str = "default"):
         self.id = id
         self.comm_stream = comm_stream
         self.compute_stream = compute_stream
@@ -139,9 +139,11 @@ def yield_and_switch_from_comm_to_compute(schedule="default"):
     if ctx is not None and ctx.schedule == schedule:
         ctx.yield_and_switch_from_comm_to_compute()
 
+
 def make_ubatch_contexts(
     num_micro_batches: int,
     compute_stream: torch.cuda.Stream,
+    comm_stream: torch.cuda.Stream,
     forward_contexts: list[ForwardContext],
     device: Optional[torch.device] = None,
     schedule: str = "default",
@@ -158,7 +160,7 @@ def make_ubatch_contexts(
         torch.cuda.Event() for _ in range(num_micro_batches)
     ]
     device = device or torch.cuda.current_device()
-    comm_stream = torch.cuda.Stream(device)
+    # comm_stream = torch.cuda.Stream(device)
 
     assert len(forward_contexts) == 2
 
