@@ -243,8 +243,8 @@ class LLM:
 
         if 'device' in kwargs:
             logger.warning_once(
-                "`device` parameter for EngineArgs is deprecated since vllm "
-                "0.10.0, it will be ignored")
+                "`device` parameter for LLM (EngineArgs) is deprecated since "
+                "vllm 0.10.0, it will be ignored")
             del kwargs['device']
 
         engine_args = EngineArgs(
