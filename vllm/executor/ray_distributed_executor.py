@@ -59,9 +59,7 @@ class RayDistributedExecutor(DistributedExecutorBase):
     }
 
     # These non-vLLM env vars are copied from the driver to workers
-    ADDITIONAL_ENV_VARS = {
-        "HF_TOKEN",
-    }
+    ADDITIONAL_ENV_VARS = {"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"}
 
     uses_ray: bool = True
 
