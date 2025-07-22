@@ -734,6 +734,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_query_len=max_num_scheduled_tokens,
                 block_table_tensor=blk_table_tensor,
                 slot_mapping=slot_mapping,
+                causal=True,
             )
 
             if self.speculative_config and \
@@ -2088,7 +2089,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     block_table_tensor=self.input_batch.block_table[
                         kv_cache_group_id].get_device_tensor()[:num_reqs],
                     slot_mapping=self.input_batch.
-                    block_table[kv_cache_group_id].slot_mapping[:num_tokens])
+                    block_table[kv_cache_group_id].slot_mapping[:num_tokens],
+                    causal=True)
 
                 attn_metadata_i = self.attn_metadata_builders[
                     kv_cache_group_id].build_for_cudagraph_capture(
@@ -2861,6 +2863,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_query_len=max_num_scheduled_tokens,
             block_table_tensor=dummy_block_table,
             slot_mapping=dummy_slot_mapping,
+            causal=False,
         )
 
         return common_metadata, builder.build(

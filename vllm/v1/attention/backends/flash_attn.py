@@ -130,6 +130,8 @@ class FlashAttentionMetadata:
     prefix_scheduler_metadata: Optional[torch.Tensor] = None
     max_num_splits: int = 0
 
+    causal: bool = True
+
 
 def _get_sliding_window_configs(
         vllm_config: VllmConfig) -> set[Optional[tuple[int, int]]]:
@@ -213,6 +215,7 @@ class FlashAttentionMetadataBuilder(
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
+        causal = common_attn_metadata.causal
 
         # the overhead of the aot schedule is not worth it for spec-decode
         aot_schedule = self.aot_schedule and not fast_build
@@ -288,7 +291,7 @@ class FlashAttentionMetadataBuilder(
                                           max_query_len=max_query_len,
                                           seqlens=seq_lens,
                                           max_seq_len=max_seq_len,
-                                          causal=True)
+                                          causal=causal)
 
         if self.use_full_cuda_graph:
             assert scheduler_metadata is not None
@@ -326,7 +329,7 @@ class FlashAttentionMetadataBuilder(
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
-        )
+            causal=causal)
         return attn_metadata
 
     def can_run_in_cudagraph(
@@ -388,22 +391,6 @@ class FlashAttentionImpl(AttentionImpl):
             and not flash_attn_supports_fp8():
             raise NotImplementedError(
                 "FlashAttention does not support fp8 kv-cache on this device.")
-
-    @staticmethod
-    def _is_causal_attention(attn_type: str) -> bool:
-        """
-        Determine whether the given attention type is suitable for causal
-        attention mechanisms.
-
-        Args:
-            attn_type (AttentionType): The type of attention being evaluated
-
-        Returns:
-            bool: Returns `True` if the attention type is suitable for causal
-            attention (i.e., not encoder, encoder-only, or encoder-decoder),
-            otherwise returns `False`.
-        """
-        return attn_type == AttentionType.DECODER
 
     def forward(
         self,
@@ -516,7 +503,7 @@ class FlashAttentionImpl(AttentionImpl):
                 seqused_k=seqused_k,
                 max_seqlen_k=max_seqlen_k,
                 softmax_scale=self.scale,
-                causal=FlashAttentionImpl._is_causal_attention(attn_type),
+                causal=attn_metadata.causal,
                 alibi_slopes=self.alibi_slopes,
                 window_size=self.sliding_window,
                 block_table=block_table,
