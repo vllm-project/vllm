@@ -1,9 +1,11 @@
 ﻿# SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
+
 import torch
 import torch.nn as nn
 from transformers import Qwen2Config
+
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
@@ -12,11 +14,16 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.qwen2 import (Qwen2DecoderLayer, 
+from vllm.model_executor.models.qwen2 import (Qwen2DecoderLayer,
                                               Qwen2ForCausalLM)
+
 from .utils import AutoWeightsLoader, maybe_prefix
+
 logger = init_logger(__name__)
+
+
 class Qwen2DecoderLayer(Qwen2DecoderLayer):
+
     def __init__(
         self,
         config: Qwen2Config,
@@ -29,8 +36,11 @@ class Qwen2DecoderLayer(Qwen2DecoderLayer):
         if disable_input_layernorm:
             del self.input_layernorm
             self.input_layernorm = nn.Identity()
+
+
 @support_torch_compile
 class Qwen2Model(nn.Module):
+
     def __init__(
         self,
         *,
@@ -57,6 +67,7 @@ class Qwen2Model(nn.Module):
         self.fc = torch.nn.Linear(self.config.hidden_size * 2,
                                   self.config.hidden_size,
                                   bias=False)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -75,6 +86,7 @@ class Qwen2Model(nn.Module):
             )
         hidden_states = hidden_states + residual
         return hidden_states, hidden_states
+
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -107,7 +119,10 @@ class Qwen2Model(nn.Module):
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
+
+
 class EagleQwen2ForCausalLM(Qwen2ForCausalLM):
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.config = vllm_config. \
@@ -120,6 +135,7 @@ class EagleQwen2ForCausalLM(Qwen2ForCausalLM):
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.config.vocab_size,
                                                 scale=logit_scale)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -127,6 +143,7 @@ class EagleQwen2ForCausalLM(Qwen2ForCausalLM):
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(input_ids, positions, hidden_states)
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(
             self,
