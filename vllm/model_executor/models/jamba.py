@@ -8,6 +8,7 @@ import torch
 from torch import nn
 from transformers import JambaConfig
 
+from vllm import envs
 from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -112,7 +113,8 @@ class JambaMambaDecoderLayer(nn.Module):
                                 use_rms_norm=True,
                                 rms_norm_eps=config.rms_norm_eps,
                                 activation=config.hidden_act,
-                                is_lora_enabled = self.is_lora_enabled
+                                is_lora_enabled = self.is_lora_enabled,
+                                prefix=f"{prefix}.mixer",
                                 )
 
         num_experts = config.layers_num_experts[layer_idx]
@@ -344,7 +346,8 @@ class JambaModel(nn.Module):
             layer_mamba_cache_params = None
             if isinstance(layer, JambaAttentionDecoderLayer):
                 kv_cache_index += 1
-            if isinstance(layer, JambaMambaDecoderLayer):
+            if isinstance(layer,
+                          JambaMambaDecoderLayer) and mamba_cache_params:
                 current_state_layer = mamba_cache_index
                 layer_mamba_cache_params = mamba_cache_params.at_layer_idx(
                     current_state_layer)
@@ -441,6 +444,7 @@ class JambaModel(nn.Module):
         return loaded_params
 
 
+# TODO: Remove SupportsV0Only once v1 is fully supported
 class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                        IsHybrid, SupportsV0Only):
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={
@@ -509,12 +513,17 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
-        if self.mamba_cache is None:
-            num_mamba_layers = self.model_config.get_num_layers_by_block_type(
+        # NOTE: mamba_cache_params is not needed for v1
+        mamba_cache_params = None
+
+        if not envs.VLLM_USE_V1 and self.mamba_cache is None:
+            num_layers = self.model_config.get_num_layers_by_block_type(
                 self.vllm_config.parallel_config, LayerBlockType.mamba)
-            self.mamba_cache = MambaCacheManager(
-                self.vllm_config, self.lm_head.weight.dtype, num_mamba_layers,
-                *self._get_mamba_cache_shape())
+            state_shape = self.get_mamba_state_shape_from_config(
+                self.vllm_config, use_v1=False)
+            self.mamba_cache = MambaCacheManager(self.vllm_config,
+                                                 self.lm_head.weight.dtype,
+                                                 num_layers, *state_shape)
 
         mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 
@@ -529,19 +538,23 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
 
-    def _get_mamba_cache_shape(
-            self) -> tuple[tuple[int, int], tuple[int, int]]:
-        world_size = get_tensor_model_parallel_world_size()
-        hidden_size = self.config.hidden_size
-        conv_state_shape = (
-            self.config.mamba_expand * hidden_size // world_size,
-            self.config.mamba_d_conv - 1,
+    @classmethod
+    def get_mamba_state_shape_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+        use_v1: bool = True,
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        parallel_config = vllm_config.parallel_config
+        hf_config = vllm_config.model_config.hf_config
+        hidden_size = hf_config.hidden_size
+
+        return MambaStateShapeCalculator.mamba1_state_shape(
+            tp_world_size=parallel_config.tensor_parallel_size,
+            intermediate_size=hf_config.mamba_expand * hidden_size,
+            state_size=hf_config.mamba_d_state,
+            conv_kernel=hf_config.mamba_d_conv,
+            use_v1=use_v1,
         )
-        temporal_state_shape = (
-            self.config.mamba_expand * hidden_size // world_size,
-            self.config.mamba_d_state,
-        )
-        return conv_state_shape, temporal_state_shape
 
     def compute_logits(
         self,
