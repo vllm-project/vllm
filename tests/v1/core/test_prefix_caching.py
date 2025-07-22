@@ -1124,25 +1124,25 @@ def test_maybe_evict_cached_block():
     block0, block1, block2, block3 = pool.blocks
     assert pool.cached_block_hash_to_block == {
         block_hash0: {
-            0: block0,
-            3: block3
+            block0.block_id: block0,
+            block3.block_id: block3
         },
         block_hash1: {
-            1: block1
+            block1.block_id: block1
         },
         block_hash2: {
-            2: block2
+            block2.block_id: block2
         }
     }
     # Evict block1
     pool._maybe_evict_cached_block(block1)
     assert pool.cached_block_hash_to_block == {
         block_hash0: {
-            0: block0,
-            3: block3
+            block0.block_id: block0,
+            block3.block_id: block3
         },
         block_hash2: {
-            2: block2
+            block2.block_id: block2
         }
     }
     # Evict block0: block_hash0 entry should NOT be removed, as block3
@@ -1150,10 +1150,10 @@ def test_maybe_evict_cached_block():
     pool._maybe_evict_cached_block(block0)
     assert pool.cached_block_hash_to_block == {
         block_hash0: {
-            3: block3
+            block3.block_id: block3
         },
         block_hash2: {
-            2: block2
+            block2.block_id: block2
         }
     }
     # Evict block2
