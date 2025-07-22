@@ -79,13 +79,6 @@ endif()
 #
 find_package(Torch REQUIRED)
 
-#
-# Ignore nvToolsExt for cuda-12.9
-#
-if (NOT TARGET CUDA::nvToolsExt)
-    add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
-endif()
-
 # Supported NVIDIA architectures.
 # This check must happen after find_package(Torch) because that's when CMAKE_CUDA_COMPILER_VERSION gets defined
 if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
+
 import torch
 
 from vllm import envs
@@ -16,10 +18,19 @@ from vllm.model_executor.layers.mamba.mamba2_metadata import (Mamba2Metadata,
                                                               update_metadata)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn, causal_conv1d_update)
-from vllm.model_executor.models.conv_cache import ConvCacheParams
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionMetadata
+
+
+@dataclass
+class ConvCacheParams:
+    conv_state: torch.Tensor = torch.Tensor()
+    state_indices_tensor: torch.Tensor = torch.Tensor()
+
+    def at_layer_idx(self, layer_idx):
+        return ConvCacheParams(self.conv_state[layer_idx],
+                               self.state_indices_tensor)
 
 
 @CustomOp.register("short_conv")
