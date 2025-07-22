@@ -492,7 +492,7 @@ def runai_safetensors_weights_iterator(
             total=total_tensors,
             desc="Loading safetensors using Runai Model Streamer",
             bar_format=_BAR_FORMAT,
-            disable=not use_tqdm_on_load,
+            disable=not enable_tqdm(use_tqdm_on_load),
         )
 
         yield from tensor_iter
