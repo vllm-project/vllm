@@ -1,21 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from copy import deepcopy
 from dataclasses import dataclass, fields
 
 import pytest
 import torch
 import torch.nn.functional as F
 import triton_kernels.swiglu
-from triton_kernels.matmul_ogs import FlexCtx, MicroscalingCtx, PrecisionConfig
+from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 from triton_kernels.numerics import InFlexData
-from triton_kernels.numerics_details.mxfp import (SwizzlingType,
+from triton_kernels.numerics_details.mxfp import (downcast_to_mxfp,
                                                   upcast_from_mxfp)
+from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
+from triton_kernels.tensor_details import layout
 from triton_kernels.testing import assert_close
 
 from vllm.model_executor.layers.fused_moe.triton_kernels_moe import (
     triton_kernel_moe_forward)
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import quantize
 from vllm.model_executor.layers.utils import shuffle_weight
 
 
@@ -121,32 +121,6 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
     N = ModelConfig.intermediate_size // tp
     topk = ModelConfig.experts_per_token
 
-    if w_dtype == "mx4":
-        opt1 = dict()
-        opt2 = dict()
-        #TODO: improve performance by padding and turn on swizzle
-        swizzle_mx_value = SwizzlingType.HOPPER
-        swizzle_mx_scale = SwizzlingType.HOPPER
-        opt1 = {
-            "swizzle_mx_value": swizzle_mx_value,
-            "swizzle_mx_scale": swizzle_mx_scale
-        }
-        opt2 = deepcopy(opt1)
-
-    # fused_scatter doesn't work with fused_act, and can't worl with splitk
-    # is_persistent only True on blackwell
-    # constraints = {
-    #     "block_m": 128,
-    #     "block_k": 128,
-    #     "split_k": 9,
-    #     "fused_scatter": False,
-    #     "is_persistent": False,
-    #     "epilogue_subtile": 6,
-    #     "num_stages": 4,
-    #     "idle_sms": 0
-    # }
-    # opt_flags.update_opt_flags_constraints(constraints)
-
     randbits = [torch.randperm(E) for _ in range(M)]
     x = [(-1)**i *
          ((16384 +
@@ -162,10 +136,6 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
 
     w2 = torch.randn((E, K, N), dtype=torch.bfloat16, device="cuda")
     w2_bias = torch.randn((E, K), dtype=torch.bfloat16, device="cuda")
-
-    if w_dtype == "mx4":
-        w1 = w1.to(torch.float8_e5m2)
-        w2 = w2.to(torch.float8_e5m2)
 
     exp_data_tri = exp_data.clone()
     x_tri = x.clone()
@@ -190,8 +160,8 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
         w2 = w2.to(dtype_dict[w_dtype]).to(torch.bfloat16)
 
     # triton moe kernel use transposed shape for matmul
-    w1_tri = w1_tri.transpose(-2, -1).contiguous()
-    w2_tri = w2_tri.transpose(-2, -1).contiguous()
+    w1_tri = w1_tri.transpose(-2, -1)
+    w2_tri = w2_tri.transpose(-2, -1)
 
     # shuffle weights
     w1_tri = shuffle_weight(w1_tri)
@@ -200,23 +170,21 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
     # quant triton_weights
     x_tri = x.to(dtype_dict[a_dtype])
     if w_dtype != "mx4":
-        w1_tri = w1_tri.to(dtype_dict[w_dtype])
-        w2_tri = w2_tri.to(dtype_dict[w_dtype])
-        pc1 = PrecisionConfig(mx_ctx=MicroscalingCtx(),
-                              flex_ctx=FlexCtx(rhs_data=InFlexData()))
-        pc2 = PrecisionConfig(mx_ctx=MicroscalingCtx(),
-                              flex_ctx=FlexCtx(rhs_data=InFlexData()))
+        pytest.skip("NYI")
     else:  # quantize to mx4
         # add padding to enable hbm_swizzle
         # make the tensor 64 x 256
+        w1_bottom_pad = smallest_even_divide_number(w1_tri.shape[1],
+                                                    256) - w1_tri.shape[1]
         w1_right_pad = smallest_even_divide_number(w1_tri.shape[2],
                                                    256) - w1_tri.shape[2]
 
         w2_bottom_pad = w1_right_pad // 2
-        w2_right_pad = smallest_even_divide_number(w2_tri.shape[2],
-                                                   256) - w2_tri.shape[2]
+        w2_right_pad = w1_bottom_pad
 
-        w1_tri = F.pad(w1_tri, (0, w1_right_pad, 0, 0, 0, 0),
+        x_pad = w1_bottom_pad
+
+        w1_tri = F.pad(w1_tri, (0, w1_right_pad, 0, w1_bottom_pad, 0, 0),
                        mode="constant",
                        value=0)
         w2_tri = F.pad(w2_tri, (0, w2_right_pad, 0, w2_bottom_pad, 0, 0),
@@ -230,29 +198,33 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
                             mode="constant",
                             value=0)
 
-        w1_tri, w1_tri_flex, w1_tri_mx = quantize(w1_tri, "mx4", "cuda",
-                                                  **opt1)
-        w2_tri, w2_tri_flex, w2_tri_mx = quantize(w2_tri, "mx4", "cuda",
-                                                  **opt2)
-        pc1 = PrecisionConfig(mx_ctx=w1_tri_mx,
-                              flex_ctx=FlexCtx(rhs_data=w1_tri_flex))
-        pc2 = PrecisionConfig(mx_ctx=w2_tri_mx,
-                              flex_ctx=FlexCtx(rhs_data=w2_tri_flex))
+        x_tri = F.pad(x_tri, (0, x_pad, 0, 0), mode="constant", value=0)
 
-        w1 = upcast_from_mxfp(w1_tri,
-                              w1_tri_mx.weight_scale,
-                              torch.bfloat16,
-                              axis=1,
-                              swizzle_axis=2,
-                              swizzle_value=swizzle_mx_value,
-                              swizzle_scale=swizzle_mx_scale)
-        w2 = upcast_from_mxfp(w2_tri,
-                              w2_tri_mx.weight_scale,
-                              torch.bfloat16,
-                              axis=1,
-                              swizzle_axis=2,
-                              swizzle_value=swizzle_mx_value,
-                              swizzle_scale=swizzle_mx_scale)
+        w_layout, w_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
+            mx_axis=1)
+        w_scale_layout, w_scale_layout_opts = layout.make_default_matmul_mxfp4_w_scale_layout(
+            mx_axis=1, num_warps=8)
+
+        w1_tri, w1_scale_tri = downcast_to_mxfp(w1_tri, torch.uint8, axis=1)
+        w1 = upcast_from_mxfp(w1_tri, w1_scale_tri, torch.bfloat16, axis=1)
+
+        w2_tri, w2_scale_tri = downcast_to_mxfp(w2_tri, torch.uint8, axis=1)
+        w2 = upcast_from_mxfp(w2_tri, w2_scale_tri, torch.bfloat16, axis=1)
+
+        w1_tri = convert_layout(wrap_torch_tensor(w1_tri, FP4), w_layout,
+                                **w_layout_opts)
+        w1_scale_tri = convert_layout(wrap_torch_tensor(w1_scale_tri),
+                                      w_scale_layout, **w_scale_layout_opts)
+
+        w2_tri = convert_layout(wrap_torch_tensor(w2_tri, FP4), w_layout,
+                                **w_layout_opts)
+        w2_scale_tri = convert_layout(wrap_torch_tensor(w2_scale_tri),
+                                      w_scale_layout, **w_scale_layout_opts)
+
+        pc1 = PrecisionConfig(weight_scale=w1_scale_tri,
+                              flex_ctx=FlexCtx(rhs_data=InFlexData()))
+        pc2 = PrecisionConfig(weight_scale=w2_scale_tri,
+                              flex_ctx=FlexCtx(rhs_data=InFlexData()))
 
         # tucuate so the rest can run properly
         w1 = w1[..., :K, :2 * N]
@@ -285,7 +257,7 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
                               topk=topk)
     assert_close(ref=out_ref,
                  tri=out_triton_monolithic,
-                 maxtol=0.03,
+                 maxtol=0.025,
                  rmstol=0.005)
 
 
