@@ -515,9 +515,6 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
-        # NOTE: mamba_cache_params is not needed for v1
-        mamba_cache_params = None
-
         if not envs.VLLM_USE_V1 and self.mamba_cache is None:
             num_layers = self.model_config.get_num_layers_by_block_type(
                 self.vllm_config.parallel_config, LayerBlockType.mamba)
@@ -527,7 +524,10 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                                                  self.lm_head.weight.dtype,
                                                  num_layers, *state_shape)
 
-        mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
+            mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
+        else:
+            # NOTE: mamba_cache_params is not needed for v1
+            mamba_cache_params = None
 
         hidden_states = self.model(input_ids, positions, mamba_cache_params,
                                    intermediate_tensors, inputs_embeds)
