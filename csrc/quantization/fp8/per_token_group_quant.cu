@@ -16,7 +16,7 @@ __device__ __forceinline__ float GroupReduceMax(float val, const int tid) {
 #ifndef USE_ROCM
   unsigned mask = 0xffff;
 #else
-  unsigned long mask = 0xffffffff;
+  unsigned long long mask = 0xffff;
 #endif
 
   val = fmaxf(val, __shfl_xor_sync(mask, val, 8));
