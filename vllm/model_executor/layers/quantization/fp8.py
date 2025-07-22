@@ -286,7 +286,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 layer.register_parameter("weight_scale_inv", scale)
 
             # INPUT ACTIVATION SCALE
-            if self.quant_config.activation_scheme == "static":
+            if self.act_q_static:
                 scale = create_fp8_input_scale(output_partition_sizes,
                                                weight_loader)
                 set_weight_attrs(scale, {"scale_type": "input_scale"})
@@ -319,7 +319,7 @@ class Fp8LinearMethod(LinearMethodBase):
         else:
             layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
                                                     requires_grad=False)
-            if self.quant_config.activation_scheme == "static":
+            if self.act_q_static:
                 layer.input_scale = torch.nn.Parameter(layer.input_scale.data,
                                                        requires_grad=False)
 
@@ -335,7 +335,7 @@ class Fp8LinearMethod(LinearMethodBase):
                         getattr(layer, 'input_scale', None)))
 
             weight = weight.t()
-            if self.quant_config.activation_scheme == "static":
+            if self.act_q_static:
                 assert input_scale is not None
                 layer.input_scale = Parameter(input_scale.max(),
                                               requires_grad=False)
