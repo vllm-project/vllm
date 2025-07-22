@@ -352,7 +352,7 @@ class GroupCoordinator:
             if dtype in self._symm_buffer_cache:
                 cached_buffer = self._symm_buffer_cache[dtype]
                 if cached_buffer.numel() >= requested_numel:
-                    return cached_buffer.view(shape)
+                    return cached_buffer.view(-1)[:shape.numel()].view(shape)
             
             new_buffer = self.device_communicator.get_symm_buffer(shape, dtype)
             self.device_communicator.pynccl_comm.register_comm_window(new_buffer)

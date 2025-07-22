@@ -53,7 +53,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-
+from vllm.distributed.communication_op import (
+    tensor_model_parallel_maybe_get_symm_buffer,)
 from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -192,15 +193,25 @@ class DeepseekV2MoE(nn.Module):
             # See DeepseekV2DecoderLayer for more details.
             final_hidden_states = self.experts(hidden_states=hidden_states,
                                                router_logits=router_logits)
+        final_hidden_states_out = tensor_model_parallel_maybe_get_symm_buffer(
+            final_hidden_states.shape, final_hidden_states.dtype)
         if shared_output is not None:
             if hidden_states.dtype != torch.float16:
-                final_hidden_states = final_hidden_states + shared_output
+                #final_hidden_states = final_hidden_states + shared_output
+                torch.add(
+                    final_hidden_states,
+                    shared_output,
+                    out=final_hidden_states_out)
             else:
                 # Fix FP16 overflow
                 # See DeepseekV2DecoderLayer for more details.
-                final_hidden_states = final_hidden_states + shared_output \
-                    * (1. / self.routed_scaling_factor)
-
+                #final_hidden_states = final_hidden_states + shared_output \
+                #    * (1. / self.routed_scaling_factor)
+                torch.add(
+                    final_hidden_states,
+                    shared_output* (1. / self.routed_scaling_factor),
+                    out=final_hidden_states_out)
+            final_hidden_states = final_hidden_states_out
         if self.tp_size > 1:
             final_hidden_states = (
                 self.experts.maybe_all_reduce_tensor_model_parallel(

@@ -51,34 +51,3 @@ def get_nccl_mem_pool():
         _mem_pool = torch.cuda.MemPool(_allocator)
 
     return _mem_pool
-
-
-class SymmMemoryTensor:
-    def __init__(self, group_coordinator: GroupCoordinator):
-        self.tensor = None
-        #self.window = None
-        self.group_coordinator = group_coordinator
-
-    def is_supported(self) -> bool:
-        return (
-            self.group_coordinator.pynccl_comm is not None
-            and self.group_coordinator.pynccl_comm.nccl_version >= 22703
-        )
-
-    def get_tensor(self, shape: torch.Size, dtype: torch.dtype) -> torch.Tensor:
-        assert self.is_supported(), "Symmetric memory is not supported"
-
-        if (self.tensor is not None and
-            self.tensor.dtype == dtype and
-            self.tensor.numel() >= shape.numel()):
-            view = self.tensor.view(-1)[:shape.numel()].view(shape)
-            return view
-        else:
-            # if self.window is not None:
-            #     self.group_coordinator.pynccl_comm.deregister_comm_window(self.window)
-            #     self.window = None
-            with torch.cuda.use_mem_pool(get_nccl_mem_pool()):
-                self.tensor = torch.empty(shape, dtype=dtype, device='cuda')
-            #self.window =
-            self.group_coordinator.pynccl_comm.register_comm_window(self.tensor)
-            return self.tensor
