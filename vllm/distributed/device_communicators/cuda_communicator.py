@@ -115,7 +115,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             assert out is not None
             return out
         symm_mem_comm = self.symm_mem_comm
-        if symm_mem_comm is not None and not symm_mem_comm.disabled and \
+        if symm_mem_comm is not None and \
             symm_mem_comm.should_use_symm_mem(input_):
             out = symm_mem_comm.all_reduce(input_)
             assert out is not None
