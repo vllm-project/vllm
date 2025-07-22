@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -27,14 +27,6 @@ class Mamba1AttentionBackend(AttentionBackend):
 
 @dataclass
 class Mamba1AttentionMetadata:
-    """
-    Attention metadata for Mamba1 models.
-
-    Mamba1 is simpler than Mamba2:
-    - No chunking/grouping
-    - No multi-head structure
-    - Simpler state management
-    """
     num_prefills: int
     num_prefill_tokens: int
     num_decodes: int
@@ -44,9 +36,6 @@ class Mamba1AttentionMetadata:
     context_lens_tensor: torch.Tensor
     state_indices_tensor: torch.Tensor
     has_initial_states: torch.Tensor
-    cu_seqlen: int
-    nums_dict: Optional[dict] = None
-    batch_ptr: Optional[torch.Tensor] = None
 
 
 class Mamba1AttentionMetadataBuilder(
@@ -106,5 +95,4 @@ class Mamba1AttentionMetadataBuilder(
             seq_lens=seq_lens,
             has_initial_states=has_initial_states.to(query_start_loc.device),
             state_indices_tensor=state_indices_tensor,
-            cu_seqlen=common_attn_metadata.max_query_len,
         )
