@@ -87,7 +87,7 @@ MESH_DEVICE=T3K WH_ARCH_YAML=wormhole_b0_80_arch_eth_dispatch.yaml python exampl
 - `"llama2_70b"` for the old Llama implementation
 
 **Note 4 (Other Models)**: By default, the inference example will run with Llama-3.1-70B. To run with other Llama models, or Qwen-2.5, ensure that the apprioriate environment variables are set as per the [demo instructions](https://github.com/tenstorrent/tt-metal/tree/main/models/tt_transformers), then set `MESH_DEVICE=<device>` (valid options for `<device>` are `N150`, `N300`, `T3K`, or `TG`) and one of the following:
-- Llama-3.1-8B: `--model "meta-llama/Llama-3.1-8B"`
+- Llama-3.1-8B: `--model "meta-llama/Llama-3.1-8B"` (Note that on N150, `--max_model_len 65536` must be set for this model, see the [tt_transformers demo](https://github.com/tenstorrent/tt-metal/tree/main/models/tt_transformers) for details about the max context length)
 - Llama-3.2-1B: `--model "meta-llama/Llama-3.2-1B"`
 - Llama-3.2-3B: `--model "meta-llama/Llama-3.2-3B"`
 - Qwen-2.5-7B: `--model "Qwen/Qwen2.5-7B"` (currently only supported on N300)
