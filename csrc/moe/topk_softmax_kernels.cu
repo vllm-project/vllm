@@ -20,7 +20,6 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include "../cuda_compat.h"
-#include <cuda/std/functional>
 
 #ifndef USE_ROCM
     #include <cub/util_type.cuh>
@@ -63,7 +62,7 @@ __launch_bounds__(TPB) __global__
 
     const int thread_row_offset = blockIdx.x * num_cols;
 
-    cuda::std::plus<float> sum;
+    cub::Sum sum;
     float threadData(-FLT_MAX);
 
     // Don't touch finished rows.
