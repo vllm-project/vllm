@@ -27,7 +27,7 @@ Serious security flaws that allow elevated impact—like RCE in specific, limite
 ### MODERATE Severity
 Vulnerabilities that cause denial of service or partial disruption, but do not allow arbitrary code execution or data breach and have limited impact. These issues have a CVSS rating between 4.0 and 6.9
 
-### LOW Severity:
+### LOW Severity
 Minor issues such as informational disclosures, logging errors, non-exploitable flaws, or weaknesses that require local or high-privilege access and offer negligible impact. Examples include side channel attacks or hash collisions. These issues often have CVSS scores less than 4.0
 
 ## Prenotification policy
