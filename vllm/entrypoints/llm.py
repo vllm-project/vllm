@@ -1141,7 +1141,8 @@ class LLM:
         if tokenization_kwargs is None:
             tokenization_kwargs = dict[str, Any]()
             _validate_truncation_size(model_config.max_model_len,
-                                    truncate_prompt_tokens, tokenization_kwargs)
+                                      truncate_prompt_tokens,
+                                      tokenization_kwargs)
 
         self._validate_and_add_requests(
             prompts=parsed_prompts,
