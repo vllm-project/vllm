@@ -9,12 +9,12 @@ import torch
 class TensorShape:
 
     def __init__(self,
-                 *dims: tuple[Union[int, str]],
-                 dynamic_dims: set[str] = None) -> None:
+                 *dims: Union[int, str],
+                 dynamic_dims: set[str, ...] = None) -> None:
         self.dims = dims
         self.dynamic_dims = dynamic_dims if dynamic_dims else set()
 
-    def resolve(self, **bindings: dict[str, int]) -> tuple[str, int]:
+    def resolve(self, **bindings: dict[str, int]) -> tuple[Union[int, str], ...]:
         resolved = []
         for dim in self.dims:
             if isinstance(dim, str) and dim in bindings:
@@ -39,10 +39,10 @@ class TensorSchema:
         if validate:
             self.validate()
 
-    def _match_shape_with_dynamic(self, actual: tuple[int, str],
-                                  reference: tuple[int, str],
-                                  expected_shape: tuple[Union[int, str]],
-                                  dynamic_dims: set[str]) -> bool:
+    def _match_shape_with_dynamic(self, actual: tuple[int, ...],
+                                  reference: tuple[int, ...],
+                                  expected_shape: tuple[Union[int, str], ...],
+                                  dynamic_dims: set[str, ...]) -> bool:
         if len(actual) != len(reference) or len(actual) > len(expected_shape):
             return False
 
@@ -59,11 +59,11 @@ class TensorSchema:
                 return False
         return True
 
-    def _validate_nested_tensors(self, value: Union[list[torch.Tensor],
-                                                    tuple[torch.Tensor]],
+    def _validate_nested_tensors(self, value: Union[list[torch.Tensor, ...],
+                                                    tuple[torch.Tensor, ...]],
                                  field_name: str,
-                                 expected_shape: tuple[Union[int, str]],
-                                 dynamic_dims: set[str]) -> tuple[int, str]:
+                                 expected_shape: tuple[Union[int, str], ...],
+                                 dynamic_dims: set[str, ...]) -> tuple[int, ...]:
         """Validate a list/tuple of tensors and return the actual shape."""
         if not value:
             raise ValueError(f"{field_name} is an empty list")
@@ -89,11 +89,11 @@ class TensorSchema:
         # shape = (len(list), *tensor.shape)
         return (len(value), ) + first.shape
 
-    def _validate_tensor_shape_expected(self, actual_shape: tuple[int, str],
-                                        expected_shape: tuple[Union[int, str]],
+    def _validate_tensor_shape_expected(self, actual_shape: tuple[int, ...],
+                                        expected_shape: tuple[Union[int, str], ...],
                                         field_name: str, shape_env: dict[str,
                                                                          int],
-                                        dynamic_dims: set[str]) -> None:
+                                        dynamic_dims: set[str, ...]) -> None:
         """Validate that the actual tensor shape matches the expected shape."""
         if len(actual_shape) != len(expected_shape):
             raise ValueError(f"{field_name} has rank {len(actual_shape)} "
