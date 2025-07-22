@@ -738,7 +738,7 @@ class EngineCoreProc(EngineCore):
             logger.fatal("vLLM shutdown signal from EngineCore failed "
                          "to send. Please report this issue.")
 
-    def _send_engine_error(self, exc: Optional[BaseException] = None):
+    def _send_engine_error(self, exc: BaseException):
         """Send CustomEngineError status to the EngineCoreClient."""
 
         # Put CustomEngineError in the queue.

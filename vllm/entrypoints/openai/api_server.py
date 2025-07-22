@@ -618,11 +618,23 @@ async def cancel_responses(response_id: str, raw_request: Request):
     "/v1/chat/completions",
     dependencies=[Depends(validate_json_request)],
     responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-        HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": ErrorResponse},
+        HTTPStatus.OK.value: {
+            "content": {
+                "text/event-stream": {}
+            }
+        },
+        HTTPStatus.BAD_REQUEST.value: {
+            "model": ErrorResponse
+        },
+        HTTPStatus.NOT_FOUND.value: {
+            "model": ErrorResponse
+        },
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+            "model": ErrorResponse
+        },
+        HTTPStatus.SERVICE_UNAVAILABLE.value: {
+            "model": ErrorResponse
+        },
     },
 )
 @with_cancellation
@@ -650,11 +662,23 @@ async def create_chat_completion(request: ChatCompletionRequest,
     "/v1/completions",
     dependencies=[Depends(validate_json_request)],
     responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-        HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": ErrorResponse},
+        HTTPStatus.OK.value: {
+            "content": {
+                "text/event-stream": {}
+            }
+        },
+        HTTPStatus.BAD_REQUEST.value: {
+            "model": ErrorResponse
+        },
+        HTTPStatus.NOT_FOUND.value: {
+            "model": ErrorResponse
+        },
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+            "model": ErrorResponse
+        },
+        HTTPStatus.SERVICE_UNAVAILABLE.value: {
+            "model": ErrorResponse
+        },
     },
 )
 @with_cancellation
