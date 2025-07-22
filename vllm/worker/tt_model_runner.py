@@ -85,7 +85,7 @@ def top_pk_logits_efficient(logits,
                             return_probs=False):
     # Do not keep the entire vocab size after top k.
     # Instead, keep the k size tensor and record the associated indices.
-    if k == -1:  # no top-k sampling
+    if k < 1:  # no top-k sampling if set to -1 or 0
         top_k_values, top_k_indices = logits, torch.arange(
             logits.shape[-1]).unsqueeze(0).repeat(logits.shape[0], 1)
     else:

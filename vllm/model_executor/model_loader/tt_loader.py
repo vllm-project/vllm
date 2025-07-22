@@ -21,8 +21,8 @@ class TTModelLoader(BaseModelLoader):
         scheduler_config = vllm_config.scheduler_config
 
         arch_names = model_config.hf_config.architectures
-        assert len(model_config.hf_config.architectures) == 1
-        arch_names[0] = "TT" + arch_names[0]
+        for i in range(len(arch_names)):
+            arch_names[i] = "TT" + arch_names[i]
 
         model_class, _ = get_model_architecture(model_config)
 
