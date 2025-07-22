@@ -1361,7 +1361,7 @@ class FusedMoE(torch.nn.Module):
                 or self.use_deepep_ll_kernels)
 
     def maybe_all_reduce_tensor_model_parallel(
-            self, final_hidden_states: torch.Tensor):
+            self, final_hidden_states: torch.Tensor, is_symm: bool = False):
         """
         The pplx combine kernel reduces across GPU ranks by default.
         """
@@ -1369,7 +1369,12 @@ class FusedMoE(torch.nn.Module):
                 or self.use_deepep_ll_kernels):
             return final_hidden_states
         else:
-            return tensor_model_parallel_all_reduce(final_hidden_states)
+            if is_symm:
+                return tensor_model_parallel_all_reduce(
+                    final_hidden_states,
+                    final_hidden_states)
+            else:
+                return tensor_model_parallel_all_reduce(final_hidden_states)
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
