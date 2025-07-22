@@ -3,27 +3,34 @@
 import pytest
 
 from vllm.v1.engine.async_llm import AsyncEngineArgs, AsyncLLM
-from vllm.v1.metrics.loggers import PrometheusStatLogger
+from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
+
+DEFAULT_ENGINE_ARGS = AsyncEngineArgs(
+    model="distilbert/distilgpt2",
+    dtype="half",
+    disable_log_stats=False,
+    enforce_eager=True,
+)
 
 
 @pytest.mark.asyncio
-async def test_async_llm_add_logger():
-    # Minimal model config for test
-    model_name = "distilbert/distilgpt2"
-    dtype = "half"
-    engine_args = AsyncEngineArgs(
-        model=model_name,
-        dtype=dtype,
-        disable_log_stats=False,
-        enforce_eager=True,
-    )
+async def test_async_llm_replace_default_loggers():
+    # Empty stat_loggers removes default loggers
+    engine = AsyncLLM.from_engine_args(DEFAULT_ENGINE_ARGS, stat_loggers=[])
+    await engine.add_logger(RayPrometheusStatLogger)
 
-    # Force empty list to avoid default loggers
-    engine = AsyncLLM.from_engine_args(engine_args, stat_loggers=[])
+    # Verify that only this logger is present in shared loggers
+    assert len(engine.logger_manager.shared_loggers) == 1
+    assert isinstance(engine.logger_manager.shared_loggers[0],
+                      RayPrometheusStatLogger)
 
-    # Add PrometheusStatLogger and verify no exception is raised
-    await engine.add_logger(PrometheusStatLogger)
 
-    # Verify that logger is present in the first DP rank
-    assert len(engine.stat_loggers[0]) == 1
-    assert isinstance(engine.stat_loggers[0][0], PrometheusStatLogger)
+@pytest.mark.asyncio
+async def test_async_llm_add_to_default_loggers():
+    # Start with default loggers, including PrometheusStatLogger
+    engine = AsyncLLM.from_engine_args(DEFAULT_ENGINE_ARGS)
+
+    # Add another PrometheusStatLogger subclass
+    await engine.add_logger(RayPrometheusStatLogger)
+
+    assert len(engine.logger_manager.shared_loggers) == 2
