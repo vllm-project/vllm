@@ -366,7 +366,6 @@ def per_token_group_quant_fp8(
     dtype: Optional[torch.dtype] = None,
     column_major_scales: bool = False,
     out_q: Optional[torch.Tensor] = None,
-    use_ue8m0: bool = is_blackwell_deep_gemm_used(),
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Function to perform per-token-group quantization on an input tensor `x`.
     It converts the tensor values into signed float8 values and returns the
@@ -398,7 +397,8 @@ def per_token_group_quant_fp8(
     if x_q is None:
         x_q = torch.empty_like(x, device=x.device, dtype=dtype)
 
-    # Allocate the scale tensor in either row- or column-major format.
+    M = x.numel() // group_size
+    N = group_size
     if column_major_scales:
         shape = (x.shape[-1] // group_size, ) + x.shape[:-1]
         x_s = torch.empty(shape, device=x.device,
@@ -407,15 +407,6 @@ def per_token_group_quant_fp8(
         shape = x.shape[:-1] + (x.shape[-1] // group_size, )
         x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
 
-    # prefer CUDA kernel if available
-    if current_platform.is_cuda() and x.is_contiguous():
-        torch.ops._C.per_token_group_fp8_quant(x, x_q, x_s, group_size, eps,
-                                               fp8_min, fp8_max, use_ue8m0)
-        return x_q, x_s
-
-    # TRITON FALLBACK
-    M = x.numel() // group_size
-    N = group_size
     BLOCK = triton.next_power_of_2(N)
     # heuristics for number of warps
     num_warps = min(max(BLOCK // 256, 1), 8)
@@ -432,7 +423,7 @@ def per_token_group_quant_fp8(
             eps,
             fp8_min=fp8_min,
             fp8_max=fp8_max,
-            use_ue8m0=use_ue8m0,
+            use_ue8m0=is_blackwell_deep_gemm_used(),
             BLOCK=BLOCK,
             num_warps=num_warps,
             num_stages=num_stages,
@@ -448,7 +439,7 @@ def per_token_group_quant_fp8(
             eps,
             fp8_min=fp8_min,
             fp8_max=fp8_max,
-            use_ue8m0=use_ue8m0,
+            use_ue8m0=is_blackwell_deep_gemm_used(),
             BLOCK=BLOCK,
             num_warps=num_warps,
             num_stages=num_stages,
@@ -789,3 +780,222 @@ def requant_weight_ue8m0_inplace(
         # Write back the results in-place.
         w_q.copy_(w_requant)
         s_old.copy_(s_requant)
+
+
+def check_aiter_fp8_linear_support() -> bool:
+    """AITER is only supported on ROCm and only for FP8_FNUZ
+    and at the moment are MI300 series"""
+    return (current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER
+            and envs.VLLM_ROCM_USE_AITER_LINEAR
+            and current_platform.is_fp8_fnuz())
+
+
+def _maybe_pad_fp8_weight(weight: torch.Tensor) -> torch.Tensor:
+    """Pad the weight tensor. This is an optimization on ROCm platform, which
+    can benefit from tensors located far enough from one another in memory"""
+    if (envs.VLLM_ROCM_FP8_PADDING and current_platform.is_rocm()
+            and weight.stride(-1) == 1
+            and (weight.stride(-2) * weight.element_size()) % 512 == 0):
+        num_pad = 256 // weight.element_size()
+        import torch.nn.functional as F
+        weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
+        torch.cuda.empty_cache()
+    return weight
+
+
+def validate_fp8_block_shape(input_size: int, output_size: int,
+                             input_size_per_partition: int,
+                             output_partition_sizes: list[int],
+                             block_size: list[int]) -> None:
+    """Validate block quantization shapes for tensor parallelism."""
+    from vllm.distributed import get_tensor_model_parallel_world_size
+
+    tp_size = get_tensor_model_parallel_world_size()
+    block_n, block_k = block_size[0], block_size[1]
+
+    # Required by row parallel
+    if (tp_size > 1 and input_size // input_size_per_partition == tp_size
+            and input_size_per_partition % block_k != 0):
+        raise ValueError(
+            f"Weight input_size_per_partition = {input_size_per_partition} "
+            f"is not divisible by weight quantization block_k = {block_k}.")
+
+    # Required by column parallel or enabling merged weights
+    if ((tp_size > 1 and output_size // sum(output_partition_sizes) == tp_size)
+            or len(output_partition_sizes) > 1):
+        for output_partition_size in output_partition_sizes:
+            if output_partition_size % block_n != 0:
+                raise ValueError(
+                    f"Weight output_partition_size = {output_partition_size} "
+                    "is not divisible by weight quantization "
+                    f"block_n = {block_n}.")
+
+
+def create_fp8_weight_parameter(
+        output_size_per_partition: int, input_size_per_partition: int,
+        weight_loader: Optional[Callable]) -> torch.nn.Parameter:
+    """Create FP8 weight parameter."""
+    from vllm.model_executor.parameter import ModelWeightParameter
+
+    return ModelWeightParameter(data=torch.empty(output_size_per_partition,
+                                                 input_size_per_partition,
+                                                 dtype=torch.float8_e4m3fn),
+                                input_dim=1,
+                                output_dim=0,
+                                weight_loader=weight_loader)
+
+
+def create_fp8_scale_parameter(
+        strategy: Union[str, Any], output_partition_sizes: list[int],
+        input_size_per_partition: int, block_size: Optional[list[int]],
+        weight_loader: Optional[Callable]) -> torch.nn.Parameter:
+    """Create scale parameter based on quantization strategy."""
+    from vllm.model_executor.parameter import (BlockQuantScaleParameter,
+                                               ChannelQuantScaleParameter,
+                                               PerTensorScaleParameter)
+
+    # Handle string strategy names
+    if isinstance(strategy, str):
+        if strategy == "CHANNEL" or strategy == "channel":
+            strategy_type = "channel"
+        elif strategy == "BLOCK" or strategy == "block":
+            strategy_type = "block"
+        else:
+            strategy_type = "tensor"
+    else:
+        # Handle enum types - check the string representation
+        strategy_str = str(strategy)
+        if "CHANNEL" in strategy_str or "channel" in strategy_str:
+            strategy_type = "channel"
+        elif "BLOCK" in strategy_str or "block" in strategy_str:
+            strategy_type = "block"
+        else:
+            strategy_type = "tensor"
+
+    if strategy_type == "channel":
+        scale = ChannelQuantScaleParameter(data=torch.empty(
+            (sum(output_partition_sizes), 1), dtype=torch.float32),
+                                           output_dim=0,
+                                           weight_loader=weight_loader)
+    elif strategy_type == "block":
+        assert block_size is not None
+        block_n, block_k = block_size[0], block_size[1]
+        output_size_per_partition = sum(output_partition_sizes)
+        scale = BlockQuantScaleParameter(
+            data=torch.empty(
+                (output_size_per_partition + block_n - 1) // block_n,
+                (input_size_per_partition + block_k - 1) // block_k,
+                dtype=torch.float32,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+    else:
+        assert strategy_type == "tensor"
+        scale = PerTensorScaleParameter(data=torch.empty(
+            len(output_partition_sizes), dtype=torch.float32),
+                                        weight_loader=weight_loader)
+
+    scale[:] = torch.finfo(torch.float32).min
+    return scale
+
+
+def create_fp8_input_scale(
+        output_partition_sizes: list[int],
+        weight_loader: Optional[Callable]) -> torch.nn.Parameter:
+    """Create input scale parameter for static activation quantization."""
+    from vllm.model_executor.parameter import PerTensorScaleParameter
+
+    scale = PerTensorScaleParameter(data=torch.empty(
+        len(output_partition_sizes), dtype=torch.float32),
+                                    weight_loader=weight_loader)
+    scale[:] = torch.finfo(torch.float32).min
+    return scale
+
+
+def process_fp8_weight_tensor_strategy(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    logical_widths: list[int],
+    input_scale: Optional[torch.Tensor] = None
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """Process weights for tensor-wise quantization strategy."""
+    from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+        normalize_e4m3fn_to_e4m3fnuz, requantize_with_max_scale)
+
+    if current_platform.is_fp8_fnuz():
+        weight, weight_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
+            weight=weight, weight_scale=weight_scale, input_scale=input_scale)
+
+    # Requantize with max scale
+    weight_scale, weight = requantize_with_max_scale(
+        weight=weight,
+        weight_scale=weight_scale,
+        logical_widths=logical_widths,
+    )
+
+    weight = _maybe_pad_fp8_weight(weight)
+    return weight.t(), weight_scale, input_scale
+
+
+def process_fp8_weight_channel_strategy(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    input_scale: Optional[torch.Tensor] = None
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """Process weights for channel-wise quantization strategy."""
+    from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+        normalize_e4m3fn_to_e4m3fnuz)
+
+    if current_platform.is_fp8_fnuz():
+        weight, weight_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
+            weight=weight, weight_scale=weight_scale, input_scale=input_scale)
+
+    return weight.t(), weight_scale, input_scale
+
+
+def process_fp8_weight_block_strategy(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Process weights for block-wise quantization strategy."""
+    from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+        normalize_e4m3fn_to_e4m3fnuz)
+
+    if current_platform.is_fp8_fnuz():
+        weight, weight_scale, _ = normalize_e4m3fn_to_e4m3fnuz(
+            weight=weight, weight_scale=weight_scale)
+
+    weight = _maybe_pad_fp8_weight(weight)
+    return weight, weight_scale
+
+
+def maybe_deepgemm_requant(layer: torch.nn.Module) -> None:
+    """On B200, DeepGemm only support E8M0 scale, which means we need to
+    requantize the weight and input to the specific scale at the same time."""
+    from vllm.utils.deep_gemm import is_blackwell_deep_gemm_used
+
+    if is_blackwell_deep_gemm_used() and layer.weight_block_size is not None:
+        block_sz = tuple(layer.weight_block_size)
+        requant_weight_ue8m0_inplace(layer.weight.data,
+                                     layer.weight_scale.data, block_sz)
+
+
+def apply_fp8_block_linear(layer: torch.nn.Module, input: torch.Tensor,
+                           bias: Optional[torch.Tensor],
+                           cutlass_block_fp8_supported: bool,
+                           use_aiter_and_is_supported: bool) -> torch.Tensor:
+    """Apply block-wise FP8 linear operation."""
+    assert layer.weight_block_size is not None
+
+    return torch.ops.vllm.apply_w8a8_block_fp8_linear(
+        input=input,
+        weight=layer.weight,
+        block_size=layer.weight_block_size,
+        weight_scale=layer.weight_scale,
+        input_scale=layer.input_scale,
+        bias=bias,
+        cutlass_block_fp8_supported=cutlass_block_fp8_supported,
+        use_aiter_and_is_supported=use_aiter_and_is_supported,
+    )
