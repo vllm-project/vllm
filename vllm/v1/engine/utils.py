@@ -690,6 +690,9 @@ def wait_for_engine_startup(
     poller = zmq.Poller()
     poller.register(handshake_socket, zmq.POLLIN)
 
+    remote_should_be_headless = not parallel_config.data_parallel_hybrid_lb \
+        and not parallel_config.data_parallel_external_lb
+
     if proc_manager is not None:
         for sentinel in proc_manager.sentinels():
             poller.register(sentinel, zmq.POLLIN)
@@ -733,15 +736,15 @@ def wait_for_engine_startup(
                                f"{'local' if engine.local else 'remote'}")
 
         # Remote engines must be headless iff we aren't in hybrid dp lb mode.
-        if not local and headless == parallel_config.data_parallel_hybrid_lb:
+        if not local and headless != remote_should_be_headless:
             if headless:
                 raise RuntimeError(f"Remote engine {eng_index} must not use "
-                                   f"--headless in --data-parallel-hybrid-lb "
+                                   f"--headless in external or hybrid dp lb "
                                    f"mode")
             else:
                 raise RuntimeError(f"Remote engine {eng_index} must use "
-                                   f"--headless unless"
-                                   f"in --data-parallel-hybrid-lb mode")
+                                   f"--headless unless in external or hybrid "
+                                   f"dp lb mode")
 
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
 
