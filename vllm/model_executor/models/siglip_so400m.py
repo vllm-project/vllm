@@ -17,7 +17,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.vision import VisionEncoderInfo
+from vllm.model_executor.models.vision import (VisionEncoderInfo,
+                                               VisionModelWithPooling)
 
 
 class SiglipSo400mEncoderInfo(VisionEncoderInfo[SiglipVisionConfig]):
@@ -59,8 +60,8 @@ class SiglipSo400mVisionEmbeddings(nn.Module):
     def forward(self,
                 pixel_values: torch.Tensor,
                 interpolate_pos_encoding: bool = False) -> torch.Tensor:
-        patch_embeds = self.patch_embedding(pixel_values)  # [B, C, H, W]
-        embeddings = patch_embeds.flatten(2).transpose(1, 2)  # [B, N, C]
+        patch_embeds = self.patch_embedding(pixel_values)
+        embeddings = patch_embeds.flatten(2).transpose(1, 2)
         embeddings += self.position_embedding(
             self.position_ids[:, :embeddings.size(1)])
         return embeddings
@@ -152,6 +153,7 @@ class SiglipSo400mVisionTransformer(nn.Module):
                  config: SiglipVisionConfig,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
+        self.config = config
         self.embeddings = SiglipSo400mVisionEmbeddings(config)
         self.encoder_layers = nn.ModuleList([
             SiglipSo400mEncoderLayer(config, quant_config)
@@ -164,29 +166,66 @@ class SiglipSo400mVisionTransformer(nn.Module):
         for layer in self.encoder_layers:
             x = layer(x)
         x = self.norm(x)
-        return x.mean(dim=1)  # mean pooling
+        # Dynamic pooling using self.config
+        if self.config.pooling_scheme == "mean":
+            pooled_output = x.mean(dim=1)
+        elif self.config.pooling_scheme == "cls":
+            pooled_output = x[:, 0]
+        else:
+            raise ValueError(
+                f"Unsupported pooling scheme: {self.config.pooling_scheme}")
+        return pooled_output
 
 
-class SiglipSo400mVisionModel(nn.Module):
+class SiglipSo400mVisionModel(VisionModelWithPooling):
 
     def __init__(self,
                  config: SiglipVisionConfig,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.encoder = SiglipSo400mVisionTransformer(config, quant_config)
+        self.encoder_info = SiglipSo400mEncoderInfo(config)
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         return self.encoder(pixel_values)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ]
         params_dict = dict(self.named_parameters())
-        loaded = set()
-        for name, tensor in weights:
+        loaded_params: set[str] = set()
+
+        for name, loaded_weight in weights:
+            if "attn.qkv_proj" in name:
+                pass
+
+            is_qkv = False
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+
+                vllm_param_name = name.replace(weight_name, param_name)
+
+                if vllm_param_name in params_dict:
+                    param = params_dict[vllm_param_name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, shard_id)
+                    is_qkv = True
+                    break
+
+            if is_qkv:
+                loaded_params.add(name)
+                continue
+
             if name in params_dict:
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                weight_loader(param, tensor)
-                loaded.add(name)
-        return loaded
+                weight_loader(param, loaded_weight)
+                loaded_params.add(name)
+
+        return loaded_params
