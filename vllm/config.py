@@ -2472,7 +2472,8 @@ class SchedulerConfig:
                 self.max_num_batched_tokens,
                 self.max_num_seqs * self.max_model_len)
 
-        if self.max_pending_context_tokens is not None and self.max_pending_context_tokens < 1:
+        if (self.max_pending_context_tokens is not None
+                 and self.max_pending_context_tokens < 1):
             raise ValueError(
                 "max_pending_context_tokens "
                 f"({self.max_pending_context_tokens}) must be greater than or "
