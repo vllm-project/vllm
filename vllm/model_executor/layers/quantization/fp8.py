@@ -257,9 +257,16 @@ class Fp8LinearMethod(LinearMethodBase):
                     f"{input_size_per_partition} is not divisible by "
                     f"weight quantization block_k = {block_k}.")
             # Required by column parallel or enabling merged weights
-            if (tp_size > 1 and output_size // output_size_per_partition
-                    == tp_size) or len(output_partition_sizes) > 1:
-                for output_partition_size in output_partition_sizes:
+            is_tp_split = (tp_size > 1 and
+                           output_size // output_size_per_partition == tp_size)
+            is_merged_gemm = len(output_partition_sizes) > 1
+            if is_tp_split or is_merged_gemm:
+                sizes_to_check = output_partition_sizes
+                if not is_tp_split and is_merged_gemm:
+                    # In case of merged matrices, we allow the last
+                    # matrix to not be a multiple of block size
+                    sizes_to_check = output_partition_sizes[:-1]
+                for output_partition_size in sizes_to_check:
                     if output_partition_size % block_n != 0:
                         raise ValueError(
                             f"Weight output_partition_size = "
