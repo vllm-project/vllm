@@ -26,7 +26,7 @@ def test_logits_processor_force_generate(
     dtype: str,
 ) -> None:
     with vllm_runner(model, dtype=dtype) as vllm_model:
-        tokenizer = vllm_model.model.get_tokenizer()
+        tokenizer = vllm_model.llm.get_tokenizer()
         repeat_times = 2
         enforced_answers = " vLLM"
         vllm_token_ids = tokenizer.encode(enforced_answers,
@@ -45,13 +45,13 @@ def test_logits_processor_force_generate(
         )
 
         # test logits_processors when prompt_logprobs is not None
-        vllm_model.model._add_request(
+        vllm_model.llm._add_request(
             example_prompts[0],
             params=params_with_logprobs,
         )
 
         # test prompt_logprobs is not None
-        vllm_model.model._add_request(
+        vllm_model.llm._add_request(
             example_prompts[1],
             params=SamplingParams(
                 prompt_logprobs=3,
@@ -60,11 +60,11 @@ def test_logits_processor_force_generate(
         )
 
         # test grouped requests
-        vllm_model.model._add_request(
+        vllm_model.llm._add_request(
             example_prompts[2],
             params=SamplingParams(max_tokens=max_tokens),
         )
 
-        outputs = vllm_model.model._run_engine(use_tqdm=False)
+        outputs = vllm_model.llm._run_engine(use_tqdm=False)
 
         assert outputs[0].outputs[0].text == enforced_answers * repeat_times
