@@ -1013,6 +1013,7 @@ class EngineArgs:
     def create_engine_config(
         self,
         usage_context: Optional[UsageContext] = None,
+        headless: bool = False,
     ) -> VllmConfig:
         """
         Create the VllmConfig.
@@ -1101,6 +1102,10 @@ class EngineArgs:
             # but we should not do this here.
             placement_group = ray.util.get_current_placement_group()
 
+        assert not headless or not self.data_parallel_hybrid_lb, (
+            "data_parallel_hybrid_lb is not applicable in "
+            "headless mode")
+
         data_parallel_external_lb = self.data_parallel_rank is not None
         # Local DP rank = 1, use pure-external LB.
         if data_parallel_external_lb:
@@ -1110,24 +1115,25 @@ class EngineArgs:
             data_parallel_size_local = 1
             # Use full external lb if we have local_size of 1.
             self.data_parallel_hybrid_lb = False
-        # Local DP rank > 1, use hybrid LB.
-        elif self.data_parallel_hybrid_lb:
-            assert self.data_parallel_start_rank is not None, (
-                "data_parallel_start_rank must be set to use "
-                "data_parallel_hybrid_lb.")
-            assert self.data_parallel_size_local is not None, (
-                "data_parallel_size_local must be set to use "
-                "data_parallel_hybrid_lb.")
-            # Use full external lb if we have local_size of 1.
-            if self.data_parallel_size_local == 1:
+        elif self.data_parallel_size_local is not None and (
+                self.data_parallel_size_local != self.data_parallel_size):
+            data_parallel_size_local = self.data_parallel_size_local
+
+            if self.data_parallel_start_rank and not headless:
+                # Infer hybrid LB mode.
+                self.data_parallel_hybrid_lb = True
+
+            if self.data_parallel_hybrid_lb and data_parallel_size_local == 1:
+                # Use full external lb if we have local_size of 1.
                 data_parallel_external_lb = True
                 self.data_parallel_hybrid_lb = False
-            data_parallel_size_local = self.data_parallel_size_local
-            self.data_parallel_rank = self.data_parallel_start_rank
-        elif self.data_parallel_size_local is not None:
-            data_parallel_size_local = self.data_parallel_size_local
-            self.data_parallel_rank = self.data_parallel_start_rank
+
+            self.data_parallel_rank = self.data_parallel_start_rank or 0
         else:
+            assert self.data_parallel_hybrid_lb is None, (
+                "data_parallel_size_local must be set to use "
+                "data_parallel_hybrid_lb.")
+
             # Local DP size defaults to global DP size if not set.
             data_parallel_size_local = self.data_parallel_size
 

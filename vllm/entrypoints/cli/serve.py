@@ -81,7 +81,8 @@ def run_headless(args: argparse.Namespace):
     # Create the EngineConfig.
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
     usage_context = UsageContext.OPENAI_API_SERVER
-    vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    vllm_config = engine_args.create_engine_config(usage_context=usage_context,
+                                                   headless=True)
 
     if not envs.VLLM_USE_V1:
         raise ValueError("Headless mode is only supported for V1")

@@ -467,13 +467,14 @@ class EngineCoreProc(EngineCore):
         For DP>1 with internal loadbalancing this is with the shared front-end
         process which may reside on a different node.
 
-        For DP>1 with external loadbalancing, two handshakes are performed:
+        For DP>1 with external or hybrid loadbalancing, two handshakes are
+        performed:
             - With the rank 0 front-end process which retrieves the
               DP Coordinator ZMQ addresses and DP process group address.
             - With the colocated front-end process which retrieves the
               client input/output socket addresses.
-        with the exception of the rank 0 engine itself which doesn't require
-        the second handshake.
+        with the exception of the rank 0 and colocated engines themselves which
+        don't require the second handshake.
 
         Here, "front-end" process can mean the process containing the engine
         core client (which is the API server process in the case the API
@@ -489,8 +490,9 @@ class EngineCoreProc(EngineCore):
             with handshake as addresses:
                 yield addresses
         else:
+            assert local_client
             local_handshake = self._perform_handshake(
-                input_ctx, client_handshake_address, identity, local_client,
+                input_ctx, client_handshake_address, identity, True,
                 vllm_config)
             with handshake as addresses, local_handshake as client_addresses:
                 addresses.inputs = client_addresses.inputs
