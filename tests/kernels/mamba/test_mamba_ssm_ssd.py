@@ -300,7 +300,7 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
             # just test one dim and dstate
             Y_eg = Y[0, cu_seqlens[i]:cu_seqlens[i + 1], 0, 0]
             Y_min_eg = Y_min[i][:, 0, 0]
-            torch.testing.assert_close(Y_eg, Y_min_eg, atol=5e-1, rtol=1)
+            torch.testing.assert_close(Y_eg, Y_min_eg, atol=5e-1, rtol=5e-1)
 
         # update states
         states = new_states
