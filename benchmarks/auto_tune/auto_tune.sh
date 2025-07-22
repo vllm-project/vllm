@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# This script aims to tune the best server parameter combinations to maximize throughput for given requirement. 
+# This script aims to tune the best server parameter combinations to maximize throughput for given requirement.
 # See details in README (benchmarks/auto_tune/README.md).
 
 TAG=$(date +"%Y_%m_%d_%H_%M")
@@ -47,7 +47,7 @@ start_server() {
     local max_num_batched_tokens=$3
     local vllm_log=$4
     local profile_dir=$5
-    
+
     pkill -f vllm
 
     VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 VLLM_TORCH_PROFILER_DIR=$profile_dir vllm serve $MODEL \
@@ -64,9 +64,9 @@ start_server() {
 
     # wait for 10 minutes...
     server_started=0
-    for i in {1..60}; do  
+    for i in {1..60}; do
         RESPONSE=$(curl -s -X GET "http://0.0.0.0:8004/health" -w "%{http_code}" -o /dev/stdout)
-        STATUS_CODE=$(echo "$RESPONSE" | tail -n 1) 
+        STATUS_CODE=$(echo "$RESPONSE" | tail -n 1)
         if [[ "$STATUS_CODE" -eq 200 ]]; then
             server_started=1
             break
@@ -89,10 +89,10 @@ update_best_profile() {
     selected_profile_file=
     if [[ "$SYSTEM" == "TPU" ]]; then
         selected_profile_file="${sorted_paths[$profile_index]}/*.xplane.pb"
-    fi 
+    fi
     if [[ "$SYSTEM" == "GPU" ]]; then
         selected_profile_file="${sorted_paths[$profile_index]}"
-    fi 
+    fi
     rm -f $PROFILE_PATH/*
     cp $selected_profile_file $PROFILE_PATH
 }
@@ -120,28 +120,28 @@ run_benchmark() {
         echo "server started."
     fi
     echo
-    
+
     echo "run benchmark test..."
     meet_latency_requirement=0
     # get a basic qps by using request-rate inf
     bm_log="$LOG_FOLDER/bm_log_${max_num_seqs}_${max_num_batched_tokens}_requestrate_inf.txt"
     prefix_len=$(( INPUT_LEN * MIN_CACHE_HIT_PCT / 100 ))
 adjusted_input_len=$(( INPUT_LEN - prefix_len ))
-    python3 benchmarks/benchmark_serving.py \
+    vllm3 bench serve \
         --backend vllm \
         --model $MODEL  \
         --dataset-name random \
         --random-input-len $adjusted_input_len \
         --random-output-len $OUTPUT_LEN \
-        --ignore-eos \
-        --disable-tqdm \
-        --request-rate inf \
-        --percentile-metrics ttft,tpot,itl,e2el \
-        --goodput e2el:$MAX_LATENCY_ALLOWED_MS \
-        --num-prompts 1000 \
         --random-prefix-len $prefix_len \
+        --num-prompts $NUM_PROMPTS \
         --port 8004 \
-        --profile &> "$bm_log"
+        --save-result \
+        --result-dir $LOG_FOLDER \
+        --result-filename bm_log_${max_num_seqs}_${max_num_batched_tokens}_requestrate_inf.json \
+        --request-rate inf \
+        --ignore-eos \
+        2>&1 | tee $bm_log
     throughput=$(grep "Request throughput (req/s):" "$bm_log" | sed 's/[^0-9.]//g')
     e2el=$(grep "P99 E2EL (ms):" "$bm_log" | awk '{print $NF}')
     goodput=$(grep "Request goodput (req/s):" "$bm_log" | sed 's/[^0-9.]//g')
@@ -160,7 +160,7 @@ adjusted_input_len=$(( INPUT_LEN - prefix_len ))
             curl -X POST http://0.0.0.0:8004/reset_prefix_cache
             sleep 5
             bm_log="$LOG_FOLDER/bm_log_${max_num_seqs}_${max_num_batched_tokens}_requestrate_${request_rate}.txt"
-            python3 benchmarks/benchmark_serving.py \
+            vllm bench serve \
                 --backend vllm \
                 --model $MODEL  \
                 --dataset-name random \
@@ -245,4 +245,3 @@ done
 echo "finish permutations"
 echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput, profile saved in: $PROFILE_PATH"
 echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput, profile saved in: $PROFILE_PATH" >> "$RESULT"
-

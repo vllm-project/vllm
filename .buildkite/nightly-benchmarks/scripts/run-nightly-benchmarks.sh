@@ -73,7 +73,7 @@ get_current_llm_serving_engine() {
     echo "Container: vllm"
     # move to a completely irrelevant directory, to avoid import vllm from current folder
     export CURRENT_LLM_SERVING_ENGINE=vllm
-    
+
     return
   fi
 }
@@ -225,7 +225,7 @@ run_serving_tests() {
 
       if [[ "$dataset_name" = "sharegpt" ]]; then
 
-        client_command="python3 benchmark_serving.py \
+        client_command="vllm bench serve \
           --backend $backend \
           --tokenizer /tokenizer_cache \
           --model $model \
@@ -235,9 +235,10 @@ run_serving_tests() {
           --port $port \
           --save-result \
           --result-dir $RESULTS_FOLDER \
-          --result-filename ${new_test_name}.json \
+          --result-filename ${test_name}.json \
           --request-rate $qps \
-          --ignore-eos \
+          --metadata "tensor_parallel_size=$tp" \
+          $common_params_str"
           $client_args"
 
       elif [[ "$dataset_name" = "sonnet" ]]; then
@@ -246,7 +247,7 @@ run_serving_tests() {
         sonnet_output_len=$(echo "$common_params" | jq -r '.sonnet_output_len')
         sonnet_prefix_len=$(echo "$common_params" | jq -r '.sonnet_prefix_len')
 
-        client_command="python3 benchmark_serving.py \
+        client_command="vllm bench serve \
           --backend $backend \
           --tokenizer /tokenizer_cache \
           --model $model \
@@ -265,13 +266,13 @@ run_serving_tests() {
           $client_args"
 
       else
-  
+
         echo "The dataset name must be either 'sharegpt' or 'sonnet'. Got $dataset_name."
         exit 1
 
       fi
 
-        
+
 
       echo "Running test case $test_name with qps $qps"
       echo "Client command: $client_command"
@@ -302,7 +303,7 @@ run_serving_tests() {
 }
 
 run_genai_perf_tests() {
-  # run genai-perf tests 
+  # run genai-perf tests
 
   # $1: a json file specifying genai-perf test cases
   local genai_perf_test_file
@@ -311,14 +312,14 @@ run_genai_perf_tests() {
   # Iterate over genai-perf tests
   jq -c '.[]' "$genai_perf_test_file" | while read -r params; do
     # get the test name, and append the GPU type back to it.
-    test_name=$(echo "$params" | jq -r '.test_name')    
-    
+    test_name=$(echo "$params" | jq -r '.test_name')
+
     # if TEST_SELECTOR is set, only run the test cases that match the selector
     if [[ -n "$TEST_SELECTOR" ]] && [[ ! "$test_name" =~ $TEST_SELECTOR ]]; then
       echo "Skip test case $test_name."
       continue
     fi
-    
+
     # prepend the current serving engine to the test name
     test_name=${CURRENT_LLM_SERVING_ENGINE}_${test_name}
 
@@ -369,10 +370,10 @@ run_genai_perf_tests() {
         qps=$num_prompts
         echo "now qps is $qps"
       fi
-    
+
       new_test_name=$test_name"_qps_"$qps
       backend=$CURRENT_LLM_SERVING_ENGINE
-      
+
       if [[ "$backend" == *"vllm"* ]]; then
         backend="vllm"
       fi
@@ -413,7 +414,7 @@ prepare_dataset() {
   do
     cat sonnet.txt >> sonnet_4x.txt
   done
-  
+
 }
 
 main() {
