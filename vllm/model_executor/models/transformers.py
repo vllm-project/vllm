@@ -320,6 +320,11 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
         mm_items = self._to_mm_items(mm_data)
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        if not isinstance(prompt, str):
+            # the prompt is the tokenized ids which is not supported
+            # by the hf_processor, which is why we would need to decode the ids
+            # into string
+            prompt = hf_processor.decode(prompt)
 
         (prompt_ids, processed_data,
          mm_token_type_ids) = self._apply_hf_processor_text_mm(
