@@ -243,22 +243,27 @@ class BlockPool:
             True if the block is evicted, False otherwise.
         """
         block_hash = block.block_hash
-        if block_hash and block_hash in self.cached_block_hash_to_block:
-            block.reset_hash()
-            del self.cached_block_hash_to_block[block_hash][block.block_id]
+        if block_hash is None:
+            # The block doesn't have hash, eviction is not needed
+            return False
+        blocks_by_id = self.cached_block_hash_to_block.get(block_hash)
+        if blocks_by_id is None:
+            # block_hash not found in cached_block_hash_to_block,
+            # eviction is not needed
+            return False
+        block.reset_hash()
+        blocks_by_id.pop(block.block_id, None)
+        if blocks_by_id:
+            del self.cached_block_hash_to_block[block_hash]
 
-            if len(self.cached_block_hash_to_block[block_hash]) == 0:
-                del self.cached_block_hash_to_block[block_hash]
-
-            if self.enable_kv_cache_events:
-                # FIXME (Chen): Not sure whether we should return `hash_value`
-                # or `(hash_value, group_id)` here. But it's fine now because
-                # we disable hybrid kv cache manager when kv cache event is
-                # enabled, so there is only one group.
-                self.kv_event_queue.append(
-                    BlockRemoved(block_hashes=[block_hash.get_hash_value()]))
-            return True
-        return False
+        if self.enable_kv_cache_events:
+            # FIXME (Chen): Not sure whether we should return `hash_value`
+            # or `(hash_value, group_id)` here. But it's fine now because
+            # we disable hybrid kv cache manager when kv cache event is
+            # enabled, so there is only one group.
+            self.kv_event_queue.append(
+                BlockRemoved(block_hashes=[block_hash.get_hash_value()]))
+        return True
 
     def touch(self, blocks: tuple[list[KVCacheBlock], ...]) -> None:
         """Touch a block increases its reference count by 1, and may remove
