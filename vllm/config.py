@@ -2474,17 +2474,13 @@ class SchedulerConfig:
                 "max_num_batched_tokens and makes vLLM reject longer "
                 "sequences. Please increase max_num_batched_tokens or "
                 "decrease max_model_len.")
-        if self.max_waiting_queue_length == 0:
-            raise ValueError(
-                "max_waiting_queue_length cannot be 0. Use None for unlimited "
-                "queue or a positive integer for a limited queue."
-            )
         if (
             self.max_waiting_queue_length is not None
-            and self.max_waiting_queue_length < 0
+            and self.max_waiting_queue_length <= 0
         ):
             raise ValueError(
-                "max_waiting_queue_length must be None or a positive integer"
+                "max_waiting_queue_length must be a positive integer. "
+                "Use None for an unlimited queue."
             )
         if self.max_num_batched_tokens < self.max_num_seqs:
             raise ValueError(

@@ -230,9 +230,6 @@ def _process_engine_error(engine_error: EngineErrorPayload) -> Exception:
     except Exception:
         exc_class = RuntimeError  # fallback
     exc = exc_class(*engine_error.exc_args)
-    if isinstance(exc,
-                  SchedulerWaitingQueueFullError) and engine_error.exc_args:
-        exc.request_id = engine_error.exc_args[0]
     return exc
 
 
@@ -805,7 +802,6 @@ class AsyncMPClient(MPClient):
                 self.add_pending_message(f.result(), objects)
 
         future.add_done_callback(add_pending)
-        print(f"_send_input_message")
         return future
 
     async def call_utility_async(self, method: str, *args) -> Any:
@@ -825,7 +821,6 @@ class AsyncMPClient(MPClient):
         return await future
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
-        print(f"add_request_async {request.request_id}=")
         request.client_index = self.client_index
         await self._send_input(EngineCoreRequestType.ADD, request)
         self._ensure_output_queue_task()
