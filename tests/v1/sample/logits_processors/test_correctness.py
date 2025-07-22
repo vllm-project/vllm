@@ -466,8 +466,8 @@ def _generate_fake_step_update(
         # Replace as many removed requests as possible with added requests
         add_remove_idx = batch_update_builder.pop_removed()
         batch_update_builder.added.append(
-            (add_remove_idx, add_req_params.params, add_req_params.out_tokens,
-             add_req_params.prompt_tokens))
+            (add_req_params.prompt_tokens, add_remove_idx,
+             add_req_params.params, add_req_params.out_tokens))
         persistent_batch[add_remove_idx] = add_req_params
 
     # Append remaining added requests to end of batch
@@ -475,8 +475,8 @@ def _generate_fake_step_update(
                                        num_step_add_replace):(wdx +
                                                               num_step_add)]
     batch_update_builder.added.extend([
-        (adx + batch_size, add_req_params.params, add_req_params.out_tokens,
-         add_req_params.prompt_tokens)
+        (add_req_params.prompt_tokens, adx + batch_size, add_req_params.params,
+         add_req_params.out_tokens)
         for adx, add_req_params in enumerate(add_reqs_append)
     ])
     persistent_batch.extend(add_reqs_append)

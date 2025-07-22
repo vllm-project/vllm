@@ -257,8 +257,8 @@ class InputBatch:
         params = (request.sampling_params
                   if request.sampling_params else request.pooling_params)
         self.batch_update_builder.added.append(
-            (req_index, params, request.output_token_ids,
-             request.prompt_token_ids))
+            (request.prompt_token_ids, req_index, params,
+             request.output_token_ids))
         return req_index
 
     def add_request(
