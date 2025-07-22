@@ -10,6 +10,7 @@ from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
 from typing import TYPE_CHECKING, Callable, Optional, Union
+from unittest.mock import patch
 
 import msgspec
 import zmq
@@ -123,35 +124,13 @@ class CoreEngineProcManager:
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
 
-        evar = current_platform.device_control_env_var
-        world_size = vllm_config.parallel_config.world_size
-        dp_size = vllm_config.parallel_config.data_parallel_size
+        data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
-                # Set CUDA_VISIBLE_DEVICES or equivalent if we have DP
-                original_value = os.environ.get(evar, None)
-                if dp_size > 1:
-                    try:
-                        os.environ[evar] = ",".join(
-                            str(
-                                current_platform.
-                                device_id_to_physical_device_id(i))
-                            for i in range(local_dp_rank *
-                                           world_size, (local_dp_rank + 1) *
-                                           world_size))
-                    except IndexError as e:
-                        raise Exception(
-                            f"Error setting {evar}: "
-                            f"local range: [{local_dp_rank * world_size}, "
-                            f"{(local_dp_rank + 1) * world_size}) "
-                            "base value: "
-                            f"\"{os.getenv(evar)}\"") from e
-
-                proc.start()
-                if original_value is None and evar in os.environ:
-                    del os.environ[evar]
-                elif original_value is not None:
-                    os.environ[evar] = original_value
+                with set_device_control_env_var(
+                        vllm_config, local_dp_rank) if (
+                            data_parallel) else contextlib.nullcontext():
+                    proc.start()
         finally:
             # Kill other procs if not all are running.
             if self.finished_procs():
@@ -174,6 +153,30 @@ class CoreEngineProcManager:
             proc.name: proc.exitcode
             for proc in self.processes if proc.exitcode is not None
         }
+
+
+@contextlib.contextmanager
+def set_device_control_env_var(vllm_config: VllmConfig,
+                               local_dp_rank: int) -> Iterator[None]:
+    """
+    Temporarily set CUDA_VISIBLE_DEVICES or equivalent
+    for engine subprocess.
+    """
+    world_size = vllm_config.parallel_config.world_size
+    evar = current_platform.device_control_env_var
+    try:
+        value = ",".join(
+            str(current_platform.device_id_to_physical_device_id(i))
+            for i in range(local_dp_rank * world_size, (local_dp_rank + 1) *
+                           world_size))
+    except IndexError as e:
+        raise Exception(f"Error setting {evar}: "
+                        f"local range: [{local_dp_rank * world_size}, "
+                        f"{(local_dp_rank + 1) * world_size}) "
+                        "base value: "
+                        f"\"{os.getenv(evar)}\"") from e
+    with patch.dict(os.environ, values=((evar, value), )):
+        yield
 
 
 class CoreEngineActorManager:
@@ -246,18 +249,20 @@ class CoreEngineActorManager:
             pg = placement_groups[index]
             dp_vllm_config.parallel_config.placement_group = pg
             local_client = index < local_engine_count
-            actor = ray.remote(DPEngineCoreActor).options(
-                scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=pg,
-                    placement_group_bundle_index=world_size,
-                ),
-                runtime_env=runtime_env).remote(vllm_config=dp_vllm_config,
-                                                executor_class=executor_class,
-                                                log_stats=log_stats,
-                                                local_client=local_client,
-                                                addresses=addresses,
-                                                dp_rank=index,
-                                                local_dp_rank=local_index)
+            with set_device_control_env_var(vllm_config, local_index):
+                actor = ray.remote(DPEngineCoreActor).options(
+                    scheduling_strategy=PlacementGroupSchedulingStrategy(
+                        placement_group=pg,
+                        placement_group_bundle_index=world_size,
+                    ),
+                    runtime_env=runtime_env).remote(
+                        vllm_config=dp_vllm_config,
+                        executor_class=executor_class,
+                        log_stats=log_stats,
+                        local_client=local_client,
+                        addresses=addresses,
+                        dp_rank=index,
+                        local_dp_rank=local_index)
             if local_client:
                 self.local_engine_actors.append(actor)
             else:
