@@ -5,12 +5,7 @@ import argparse
 import json
 import math
 import os
-from typing import TYPE_CHECKING, Any
-
-import numpy as np
-
-if TYPE_CHECKING:
-    from benchmark_dataset import SampleRequest
+from typing import Any
 
 
 def convert_to_pytorch_benchmark_format(
@@ -77,49 +72,3 @@ def write_to_json(filename: str, records: list) -> None:
             cls=InfEncoder,
             default=lambda o: f"<{type(o).__name__} object is not JSON serializable>",
         )
-
-
-def print_requests_statistics(requests: list["SampleRequest"]) -> None:
-    def get_stats(lens):
-        return {
-            "p10": np.percentile(lens, 10),
-            "p50": np.percentile(lens, 50),
-            "p90": np.percentile(lens, 90),
-            "p99": np.percentile(lens, 99),
-            "min": np.min(lens),
-            "max": np.max(lens),
-            "avg": np.mean(lens),
-        }
-
-    input_lens = [request.prompt_len for request in requests]
-    output_lens = [request.expected_output_len for request in requests]
-
-    stats = {
-        "Input": get_stats(input_lens),
-        "Output": get_stats(output_lens),
-    }
-
-    headers = ["Type", "Count", "p10", "p50", "p90", "p99", "min", "max", "avg"]
-    row_format = "{:<8} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6}"
-
-    print("=" * 70)
-    print(f"Requests Statistics: {len(requests)} requests")
-    print("-" * 70)
-    print(row_format.format(*headers))
-    print("-" * 70)
-    for name, lens in [("Input", input_lens), ("Output", output_lens)]:
-        s = stats[name]
-        print(
-            row_format.format(
-                name,
-                len(lens),
-                f"{s['p10']:.0f}",
-                f"{s['p50']:.0f}",
-                f"{s['p90']:.0f}",
-                f"{s['p99']:.0f}",
-                f"{s['min']:.0f}",
-                f"{s['max']:.0f}",
-                f"{s['avg']:.0f}",
-            )
-        )
-    print("=" * 70)
