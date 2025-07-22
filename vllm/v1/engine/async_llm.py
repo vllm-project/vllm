@@ -28,7 +28,7 @@ from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device, cdiv
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.v1.engine.core_client import EngineCoreClient, process_engine_error
 from vllm.v1.engine.exceptions import (EngineDeadError, EngineGenerateError,
                                        SchedulerWaitingQueueFullError)
 from vllm.v1.engine.output_processor import (OutputProcessor,
@@ -378,10 +378,10 @@ class AsyncLLM(EngineClient):
                 while True:
                     # 1) Pull EngineCoreOutputs from the EngineCore.
                     outputs = await engine_core.get_output_async()
-                    if isinstance(outputs, SchedulerWaitingQueueFullError):
-                        # If the waiting queue is full, we return the error
-                        # to the caller.
-                        output_processor.propagate_error(outputs)
+                    if outputs.engine_error:
+                        output_processor.propagate_error(
+                            process_engine_error(outputs.engine_error)
+                        )
                         continue
                     num_outputs = len(outputs.outputs)
 

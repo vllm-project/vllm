@@ -222,16 +222,6 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
 
-def _process_engine_error(engine_error: EngineErrorPayload) -> Exception:
-    """Process an engine error payload and raise an exception."""
-    try:
-        module = sys.modules.get(engine_error.exc_module)
-        exc_class = getattr(module, engine_error.exc_type)
-    except Exception:
-        exc_class = RuntimeError  # fallback
-    exc = exc_class(*engine_error.exc_args)
-    return exc
-
 
 class InprocClient(EngineCoreClient):
     """
@@ -732,8 +722,7 @@ class AsyncMPClient(MPClient):
                     resources.validate_alive(frames)
                     outputs: EngineCoreOutputs = decoder.decode(frames)
                     if outputs.engine_error:
-                        outputs_queue.put_nowait(
-                            _process_engine_error(outputs.engine_error))
+                        outputs_queue.put_nowait(outputs)
                         continue
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output,
@@ -763,8 +752,6 @@ class AsyncMPClient(MPClient):
         # from this (run_output_handler) task to shut down the server.
         assert self.outputs_queue is not None
         outputs = await self.outputs_queue.get()
-        if isinstance(outputs, SchedulerWaitingQueueFullError):
-            return outputs
         if isinstance(outputs, Exception):
             raise self._format_exception(outputs) from None
         return outputs
@@ -1252,3 +1239,13 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         logger.info(
             "[Elastic EP] Scale down completed, new data parallel size: %s",
             new_data_parallel_size)
+
+def process_engine_error(engine_error: EngineErrorPayload) -> Exception:
+    """Process an engine error payload and raise an exception."""
+    try:
+        module = sys.modules.get(engine_error.exc_module)
+        exc_class = getattr(module, engine_error.exc_type)
+    except Exception:
+        exc_class = RuntimeError  # fallback
+    exc = exc_class(*engine_error.exc_args)
+    return exc
