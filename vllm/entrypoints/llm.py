@@ -1138,14 +1138,6 @@ class LLM:
             for pooling_param in pooling_params:
                 pooling_param.verify(pooling_task, model_config)
 
-        if truncate_prompt_tokens is not None:
-            warnings.warn(
-                "truncate_prompt_tokens is deprecated, use "
-                "tokenization_kwargs instead",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
         if tokenization_kwargs is None:
             tokenization_kwargs = dict[str, Any]()
             _validate_truncation_size(model_config.max_model_len,
