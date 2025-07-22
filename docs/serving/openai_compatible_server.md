@@ -355,7 +355,6 @@ Code example: <gh-file:examples/online_serving/openai_transcription_client.py>
 Set the maximum audio file size (in MB) that VLLM will accept, via the
 VLLM_MAX_AUDIO_CLIP_FILESIZE_MB environment variable. Default is 25 MB.
 
-
 #### Extra Parameters
 
 The following [sampling parameters][sampling-params] are supported.
