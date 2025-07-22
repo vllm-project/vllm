@@ -390,7 +390,7 @@ class FlashAttentionImpl(AttentionImpl):
                 "FlashAttention does not support fp8 kv-cache on this device.")
 
     @staticmethod
-    def _get_causal_option(attn_type: str) -> bool:
+    def _is_causal_attention(attn_type: str) -> bool:
         """
         Determine whether the given attention type is suitable for causal
         attention mechanisms.
@@ -516,7 +516,7 @@ class FlashAttentionImpl(AttentionImpl):
                 seqused_k=seqused_k,
                 max_seqlen_k=max_seqlen_k,
                 softmax_scale=self.scale,
-                causal=FlashAttentionImpl._get_causal_option(attn_type),
+                causal=FlashAttentionImpl._is_causal_attention(attn_type),
                 alibi_slopes=self.alibi_slopes,
                 window_size=self.sliding_window,
                 block_table=block_table,
