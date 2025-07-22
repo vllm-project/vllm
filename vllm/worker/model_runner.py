@@ -1930,25 +1930,26 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 output.model_forward_time = (orig_model_forward_time +
                                              model_forward_time)
 
-        if model_input.inputs_embeds is not None:
-            if self.is_driver_worker:
-                sampled_token_ids = []
-                valid_outputs = []
-                for sequence_group_output in output.outputs:
-                    if len(sequence_group_output.samples) == 0:
-                        continue
-                    assert len(sequence_group_output.samples) == 1
-                    valid_outputs.append(sequence_group_output)
-                    sampled_token_ids.append(
-                        sequence_group_output.samples[0].output_token)
-                if len(sampled_token_ids) > 0:
-                    self.sampler.include_gpu_probs_tensor = \
-                        orig_include_gpu_probs
-                    sampled_token_embeds = self.model.get_input_embeddings(
-                        torch.tensor(sampled_token_ids, device=self.device))
-                    for i, sequence_group_output in enumerate(valid_outputs):
-                        sequence_group_output.samples[0].output_embed = \
-                            sampled_token_embeds[i]
+        if model_input.inputs_embeds is not None and self.is_driver_worker:
+            sampled_token_ids = []
+            valid_outputs = []
+            for sequence_group_output in output.outputs:
+                if len(sequence_group_output.samples) == 0:
+                    continue
+                assert len(sequence_group_output.samples) == 1
+                valid_outputs.append(sequence_group_output)
+                sampled_token_ids.append(
+                    sequence_group_output.samples[0].output_token)
+            if len(sampled_token_ids) > 0:
+                self.sampler.include_gpu_probs_tensor = \
+                    orig_include_gpu_probs
+                sampled_token_embeds = self.model.get_input_embeddings(
+                        async_tensor_h2d(sampled_token_ids, 
+                            torch.long, self.device, self.pin_memory)
+                        )
+                for i, sequence_group_output in enumerate(valid_outputs):
+                    sequence_group_output.samples[0].output_embed = \
+                        sampled_token_embeds[i]
 
         if not self.is_driver_worker:
             return []
