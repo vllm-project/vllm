@@ -62,9 +62,16 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
 
 
 def _is_moe(config: PretrainedConfig) -> bool:
-    return getattr(config, "num_experts", None) and (
-        (isinstance(config.num_experts, int) and config.num_experts > 1) or
-        (isinstance(config.num_experts, list) and max(config.num_experts) > 1))
+    num_experts = getattr(config, "num_experts", None)
+    if isinstance(num_experts, int):
+        return num_experts > 1
+    if isinstance(num_experts, list) and num_experts:
+        # Ensure all elements are integers before calling max.
+        if all(isinstance(e, int) for e in num_experts):
+            return max(num_experts) > 1
+        else:
+            return False
+    return False
 
 
 def _get_cla_factor(config: PretrainedConfig) -> int:
