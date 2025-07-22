@@ -38,4 +38,4 @@ For certain security issues of CRITICAL, HIGH, or MODERATE severity level, we ma
 
 * If you wish to be added to the prenotification group, please send an email copying all the members of the [vulnerability management team](https://docs.vllm.ai/en/latest/contributing/vulnerability_management.html). Each vendor contact will be analyzed on a case-by-case basis.
 
-* We may withdraw notifying certain organizations from future prenotifications if they leak issues before they are public or over time do not add value.
+* We may withdraw organizations from receiving future prenotifications if they release fixes or any other information about issues before they are public. Group membership may also change based on policy refinements for who may be included.
