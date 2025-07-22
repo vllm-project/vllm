@@ -35,6 +35,8 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device, weak_bind
+from vllm.entrypoints.utils import _validate_truncation_size
+
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -1000,6 +1002,7 @@ class AsyncLLMEngine(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
+        truncate_prompt_tokens: Optional[int] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Generate outputs for a request from a pooling model.
@@ -1068,6 +1071,12 @@ class AsyncLLMEngine(EngineClient):
         ```
         """
         try:
+            if tokenization_kwargs is None:
+                tokenization_kwargs = dict[str, Any]()
+
+            _validate_truncation_size(self.engine.model_config.max_model_len,
+                                  truncate_prompt_tokens, tokenization_kwargs)
+
             async for output in await self.add_request(
                     request_id,
                     prompt,
