@@ -153,8 +153,8 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
         }
 
 
-class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
-                                ):
+class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
+                                 ):
 
     def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.info.get_hf_processor().feature_extractor
@@ -313,7 +313,7 @@ class Gemma3nMultimodalEmbedder(nn.Module):
         return self.embedding_post_projection_norm(emb_norm_proj)
 
 
-@MULTIMODAL_REGISTRY.register_processor(Gemma3MultiModalProcessor,
+@MULTIMODAL_REGISTRY.register_processor(Gemma3nMultiModalProcessor,
                                         info=Gemma3nProcessingInfo,
                                         dummy_inputs=Gemma3nDummyInputsBuilder)
 class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
