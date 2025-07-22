@@ -225,7 +225,6 @@ class Device(enum.Enum):
 class LayerBlockType(enum.Enum):
     attention = "attention"
     mamba = "mamba"
-    conv = "conv"
 
 
 class Counter:

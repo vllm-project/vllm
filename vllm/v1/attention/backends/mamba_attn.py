@@ -11,7 +11,7 @@ from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
     reorder_batch_to_split_decodes_and_prefills, split_decodes_and_prefills)
-from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec, ShortConvSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -90,16 +90,11 @@ class Mamba2AttentionMetadataBuilder(
     def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
                  device: torch.device):
         self.kv_cache_spec = kv_cache_spec
+        self.chunk_size = vllm_config.model_config.get_mamba_chunk_size()
         if isinstance(kv_cache_spec, MambaSpec):
-            self.chunk_size = \
-                vllm_config.model_config.get_mamba_chunk_size()
             assert self.chunk_size is not None, (
                 "chunk_size needs to be set in the model config for "
                 "Mamba2 models")
-        elif isinstance(kv_cache_spec, ShortConvSpec):
-            self.chunk_size = 1
-        else:
-            raise ValueError(f"Unsupported kv_cache_spec: {kv_cache_spec}")
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
