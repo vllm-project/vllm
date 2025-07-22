@@ -95,7 +95,6 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
                         dtype=q.dtype,
                         device=q.device)
 
-        page_size = kv_c_and_k_pe_cache.size(1)
         max_seq_len = attn_metadata.decode.seq_lens.max().item()
 
         workspace_buffer = torch.empty(
@@ -103,17 +102,15 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             dtype=torch.uint8,
             device=q.device,
         )
-        kv_cache_duplicate = torch.stack([kv_c_and_k_pe_cache, kv_c_and_k_pe_cache], dim=1)
         trtllm_batch_decode_with_kv_cache_mla(
             query=q,
-            kv_cache=kv_cache_duplicate,
+            kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
             workspace_buffer=workspace_buffer,
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
             block_tables=attn_metadata.decode.block_table,
             seq_lens=attn_metadata.decode.seq_lens,
-            block_size=page_size,
             max_seq_len=max_seq_len,
             out=o,
             bmm1_scale=self.scale,
