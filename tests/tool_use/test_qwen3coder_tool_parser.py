@@ -16,12 +16,7 @@ from vllm.entrypoints.openai.tool_parsers.qwen3coder_tool_parser import (
 from vllm.transformers_utils.detokenizer import detokenize_incrementally
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
-MODEL = "Qwen/Qwen3-Coder-480A35"
-
-pytest.skip(
-    "skip qwen3coder parser test, to be enabled when the model is released "
-    "publicly",
-    allow_module_level=True)
+MODEL = "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
 
 
 @pytest.fixture(scope="module")
