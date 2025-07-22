@@ -155,6 +155,17 @@ async def anthropic_messages(request: Request):
     return output
 
 
+def convert_messages_to_prompt(messages):
+    # Converts an Anthropic-style conversation to a plain prompt string.
+    prompt = ""
+    for msg in messages:
+        if msg["role"] == "user":
+            prompt += f"Human: {msg['content']}\n"
+        elif msg["role"] == "assistant":
+            prompt += f"Assistant: {msg['content']}\n"
+    return prompt
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
