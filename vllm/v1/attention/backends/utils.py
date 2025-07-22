@@ -22,7 +22,7 @@ import vllm.envs as envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout)
 from vllm.logger import init_logger
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 
 logger = init_logger(__name__)
 _KV_CACHE_LAYOUT_OVERRIDE = None
@@ -68,9 +68,9 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     full_cudagraph_supported: ClassVar[bool] = False
 
     @abstractmethod
-    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
-                 device: torch.device):
-        self.kv_cache_spec = kv_cache_spec
+    def __init__(self, kv_cache_group_spec: KVCacheGroupSpec,
+                 vllm_config: VllmConfig, device: torch.device):
+        pass
 
     @abstractmethod
     def build(self,
@@ -162,14 +162,14 @@ class PerLayerParameters:
 
 
 def get_per_layer_parameters(
-        vllm_config: VllmConfig,
+        vllm_config: VllmConfig, layer_names: list[str],
         cls_: type['AttentionImpl']) -> dict[str, PerLayerParameters]:
     """
-    Scan all attention layers and determine some hyperparameters
+    Scan layers in `layer_names` and determine some hyperparameters
     to use during `plan`.
     """
 
-    layers = get_layers_from_vllm_config(vllm_config, Attention)
+    layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
     per_layer_params: dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():

@@ -12,7 +12,7 @@ from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       get_attention_backend)
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 
 BACKENDS_TO_TEST = [
     _Backend.FLASH_ATTN_VLLM_V1, _Backend.FLASHINFER_VLLM_V1,
@@ -212,16 +212,17 @@ def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
 
         from vllm.v1.attention.backends.flashinfer import PerLayerParameters
 
-        def mock_get_per_layer_parameters(vllm_config):
+        def mock_get_per_layer_parameters(vllm_config, layer_names, cls_):
             # Return mock parameters for a single layer
             head_size = vllm_config.model_config.get_head_size()
             return {
-                "mock_layer":
+                layer_name:
                 PerLayerParameters(
                     window_left=-1,  # No sliding window
                     logits_soft_cap=0.0,  # No soft cap
                     sm_scale=1.0 / (head_size**0.5)  # Standard scale
                 )
+                for layer_name in layer_names
             }
 
         with unittest.mock.patch(
@@ -301,6 +302,10 @@ def test_backend_correctness(batch_spec_name: str, model: str):
     device = torch.device("cuda:0")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+    kv_cache_group_spec = KVCacheGroupSpec(
+        kv_cache_spec=kv_cache_spec,
+        layer_names=["placeholder"],
+    )
 
     # 1. Setup
     batch_size = batch_spec.batch_size
@@ -419,12 +424,10 @@ def test_backend_correctness(batch_spec_name: str, model: str):
         if backend_name == _Backend.FLASHINFER_VLLM_V1:
             kv_cache_for_backend = kv_cache.transpose(0, 1)
 
-        backend_output = run_attention_backend(backend_name, kv_cache_spec,
-                                               vllm_config, device,
-                                               common_attn_metadata,
-                                               query_vllm, key_vllm,
-                                               value_vllm,
-                                               kv_cache_for_backend)
+        backend_output = run_attention_backend(
+            backend_name, kv_cache_group_spec, vllm_config, device,
+            common_attn_metadata, query_vllm, key_vllm, value_vllm,
+            kv_cache_for_backend)
 
         # Check shape and dtype consistency
         assert backend_output.shape == sdpa_output.shape, (

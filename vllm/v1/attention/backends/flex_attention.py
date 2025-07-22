@@ -19,7 +19,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 
 logger = init_logger(__name__)
 
@@ -258,8 +258,8 @@ class FlexAttentionMetadata:
 class FlexAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlexAttentionMetadata]):
 
-    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
-                 device: torch.device):
+    def __init__(self, kv_cache_group_spec: KVCacheGroupSpec,
+                 vllm_config: VllmConfig, device: torch.device):
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
         self.cache_config = vllm_config.cache_config
@@ -269,8 +269,8 @@ class FlexAttentionMetadataBuilder(
         self.num_heads_kv = self.model_config.get_num_kv_heads(
             vllm_config.parallel_config)
         self.headdim = self.model_config.get_head_size()
-        self.block_size = kv_cache_spec.block_size
-        self.kv_cache_spec = kv_cache_spec
+        self.kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+        self.block_size = self.kv_cache_spec.block_size
         self.device = device
 
     def build(self,

@@ -20,11 +20,10 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder, CommonAttentionMetadata, PerLayerParameters,
-    get_kv_cache_layout, get_per_layer_parameters,
-    infer_global_hyperparameters, reorder_batch_to_split_decodes_and_prefills,
-    split_decodes_and_prefills)
-from vllm.v1.kv_cache_interface import AttentionSpec
+    AttentionMetadataBuilder, CommonAttentionMetadata, get_kv_cache_layout,
+    get_per_layer_parameters, infer_global_hyperparameters,
+    reorder_batch_to_split_decodes_and_prefills, split_decodes_and_prefills)
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheGroupSpec
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -224,8 +223,8 @@ class FlashInferMetadata:
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
-    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
-                 device: torch.device):
+    def __init__(self, kv_cache_group_spec: KVCacheGroupSpec,
+                 vllm_config: VllmConfig, device: torch.device):
         self.device = device
         self._workspace_buffer = None
         self._prefill_wrapper = None  # Wrapper for prefill/append
@@ -233,11 +232,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
         # Global hyperparameters shared by all attention layers
-        self.global_hyperparameters: Optional[PerLayerParameters] = None
+        self.global_hyperparameters = infer_global_hyperparameters(
+            get_per_layer_parameters(vllm_config,
+                                     kv_cache_group_spec.layer_names,
+                                     FlashInferImpl))
 
         self.vllm_config = vllm_config
         self.cache_config = vllm_config.cache_config
-        self.kv_cache_spec = kv_cache_spec
+        assert isinstance(kv_cache_group_spec.kv_cache_spec, AttentionSpec)
+        self.kv_cache_spec = kv_cache_group_spec.kv_cache_spec
 
     def reorder_batch(self, input_batch: InputBatch,
                       scheduler_output: SchedulerOutput) -> bool:
@@ -282,9 +285,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _plan(self, num_prefills: int, num_decodes: int,
               attn_metadata: FlashInferMetadata):
-        if self.global_hyperparameters is None:
-            self.global_hyperparameters = infer_global_hyperparameters(
-                get_per_layer_parameters(self.vllm_config, FlashInferImpl))
         if attn_metadata.use_cascade:
             attn_metadata.cascade_wrapper = self._get_cascade_wrapper()
             attn_metadata.cascade_wrapper.plan(
