@@ -17,6 +17,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     group_broadcast)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED)
+from vllm.model_executor.parameter import (BlockQuantScaleParameter,
+                                           ChannelQuantScaleParameter,
+                                           PerTensorScaleParameter)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv, direct_register_custom_op, has_deep_gemm
@@ -855,42 +858,20 @@ def create_fp8_weight_parameter(
 
 
 def create_fp8_scale_parameter(
-        strategy: Union[str, Any], output_partition_sizes: list[int],
+        parameter_type: torch.nn.Parameter, output_partition_sizes: list[int],
         input_size_per_partition: int, block_size: Optional[list[int]],
         weight_loader: Optional[Callable]) -> torch.nn.Parameter:
     """Create scale parameter based on quantization strategy."""
-    from vllm.model_executor.parameter import (BlockQuantScaleParameter,
-                                               ChannelQuantScaleParameter,
-                                               PerTensorScaleParameter)
-
-    # Handle string strategy names
-    if isinstance(strategy, str):
-        if strategy == "CHANNEL" or strategy == "channel":
-            strategy_type = "channel"
-        elif strategy == "BLOCK" or strategy == "block":
-            strategy_type = "block"
-        else:
-            strategy_type = "tensor"
-    else:
-        # Handle enum types - check the string representation
-        strategy_str = str(strategy)
-        if "CHANNEL" in strategy_str or "channel" in strategy_str:
-            strategy_type = "channel"
-        elif "BLOCK" in strategy_str or "block" in strategy_str:
-            strategy_type = "block"
-        else:
-            strategy_type = "tensor"
-
-    if strategy_type == "channel":
-        scale = ChannelQuantScaleParameter(data=torch.empty(
+    if parameter_type == ChannelQuantScaleParameter:
+        scale = parameter_type(data=torch.empty(
             (sum(output_partition_sizes), 1), dtype=torch.float32),
-                                           output_dim=0,
-                                           weight_loader=weight_loader)
-    elif strategy_type == "block":
+                               output_dim=0,
+                               weight_loader=weight_loader)
+    elif parameter_type == BlockQuantScaleParameter:
         assert block_size is not None
         block_n, block_k = block_size[0], block_size[1]
         output_size_per_partition = sum(output_partition_sizes)
-        scale = BlockQuantScaleParameter(
+        scale = parameter_type(
             data=torch.empty(
                 (output_size_per_partition + block_n - 1) // block_n,
                 (input_size_per_partition + block_k - 1) // block_k,
@@ -900,11 +881,12 @@ def create_fp8_scale_parameter(
             output_dim=0,
             weight_loader=weight_loader,
         )
+    elif parameter_type == PerTensorScaleParameter:
+        scale = parameter_type(data=torch.empty(len(output_partition_sizes),
+                                                dtype=torch.float32),
+                               weight_loader=weight_loader)
     else:
-        assert strategy_type == "tensor"
-        scale = PerTensorScaleParameter(data=torch.empty(
-            len(output_partition_sizes), dtype=torch.float32),
-                                        weight_loader=weight_loader)
+        raise ValueError(f"Unknown parameter type: {parameter_type}")
 
     scale[:] = torch.finfo(torch.float32).min
     return scale

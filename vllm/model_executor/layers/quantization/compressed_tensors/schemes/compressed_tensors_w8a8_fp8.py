@@ -20,8 +20,17 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp, cutlass_block_fp8_supported, maybe_create_device_identity)
+from vllm.model_executor.parameter import (BlockQuantScaleParameter,
+                                           ChannelQuantScaleParameter,
+                                           PerTensorScaleParameter)
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
+
+strategy_to_parameter_type = {
+    QuantizationStrategy.BLOCK: BlockQuantScaleParameter,
+    QuantizationStrategy.CHANNEL: ChannelQuantScaleParameter,
+    QuantizationStrategy.TENSOR: PerTensorScaleParameter,
+}
 
 
 class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
@@ -74,11 +83,9 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         layer.register_parameter("weight", weight)
 
         # WEIGHT SCALE
-        weight_scale = create_fp8_scale_parameter(self.strategy,
-                                                  output_partition_sizes,
-                                                  input_size_per_partition,
-                                                  layer.weight_block_size,
-                                                  weight_loader)
+        weight_scale = create_fp8_scale_parameter(
+            strategy_to_parameter_type[self.strategy], output_partition_sizes,
+            input_size_per_partition, layer.weight_block_size, weight_loader)
         layer.register_parameter("weight_scale", weight_scale)
 
         # INPUT SCALE

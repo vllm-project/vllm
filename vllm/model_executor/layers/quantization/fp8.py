@@ -38,7 +38,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp, all_close_1d, cutlass_block_fp8_supported,
     cutlass_fp8_supported, maybe_create_device_identity,
     normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize)
-from vllm.model_executor.parameter import ModelWeightParameter
+from vllm.model_executor.parameter import (BlockQuantScaleParameter,
+                                           ModelWeightParameter,
+                                           PerTensorScaleParameter)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
@@ -265,18 +267,16 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.quant_config.is_checkpoint_fp8_serialized:
             # WEIGHT SCALE
             if not self.block_quant:
-                strategy = "tensor"
-                scale = create_fp8_scale_parameter(strategy,
+                scale = create_fp8_scale_parameter(PerTensorScaleParameter,
                                                    output_partition_sizes,
                                                    input_size_per_partition,
                                                    None, weight_loader)
                 set_weight_attrs(scale, {"scale_type": "weight_scale"})
                 layer.register_parameter("weight_scale", scale)
             else:
-                assert self.quant_config.activation_scheme == "dynamic"
+                assert not self.act_q_static
                 assert self.weight_block_size is not None
-                strategy = "block"
-                scale = create_fp8_scale_parameter(strategy,
+                scale = create_fp8_scale_parameter(BlockQuantScaleParameter,
                                                    output_partition_sizes,
                                                    input_size_per_partition,
                                                    self.weight_block_size,
@@ -299,7 +299,7 @@ class Fp8LinearMethod(LinearMethodBase):
         input_scale = None
         # TODO(rob): refactor block quant into separate class.
         if self.block_quant:
-            assert self.quant_config.activation_scheme == "dynamic"
+            assert not self.act_q_static
             size_k_first = False
 
             weight, weight_scale = process_fp8_weight_block_strategy(
