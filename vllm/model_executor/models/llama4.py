@@ -35,6 +35,7 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 
@@ -573,21 +574,22 @@ class Llama4ForCausalLM(LlamaForCausalLM):
     ) -> tuple[str, torch.Tensor]:
 
         def permute(w: torch.Tensor, n_heads: int):
-            attn_in = self.config.head_dim * n_heads
-            attn_out = self.config.hidden_size
-
-            return w.view(n_heads, attn_in // n_heads // 2, 2,
-                          attn_out).transpose(1, 2).reshape(attn_in, attn_out)
+            head_dim = w.shape[0] // n_heads
+            return (
+                w.view(n_heads, head_dim // 2, 2, w.shape[1])
+                .transpose(1, 2)
+                .reshape(w.shape[0], w.shape[1])
+            )
 
         modules = name.split(".")
 
-        is_fp4_weight = loaded_weight.dtype == torch.uint8
-        if ("wk" in modules or "k_proj" in modules) and not is_fp4_weight \
-           and modules[-1] == "weight":
+
+        if ("wk" in modules or "k_proj" in modules) \
+           and (modules[-1] == "weight" or modules[-1] == "weight_scale"):
             loaded_weight = permute(loaded_weight,
                                     self.config.num_key_value_heads)
-        elif ("wq" in modules or "q_proj" in modules) and not is_fp4_weight \
-                and modules[-1] == "weight":
+        elif ("wq" in modules or "q_proj" in modules) \
+           and (modules[-1] == "weight" or modules[-1] == "weight_scale"):
             loaded_weight = permute(loaded_weight,
                                     self.config.num_attention_heads)
 
