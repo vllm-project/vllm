@@ -21,10 +21,11 @@ struct sm90_fp8_config_default {
       cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
   using TileShape = cute::Shape<cute::_64, cute::_256, cute::_128>;
   using ClusterShape = cute::Shape<cute::_1, cute::_2, cute::_1>;
+  using ArchTag = cutlass::arch::Sm90;
 
   using Cutlass3xGemm =
-      cutlass_3x_group_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                            KernelSchedule, EpilogueSchedule>;
+      cutlass_3x_group_gemm<InType, OutType, ArchTag, Epilogue, TileShape,
+                            ClusterShape, KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -38,10 +39,12 @@ struct sm90_fp8_config_M4 {
       cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
   using TileShape = cute::Shape<cute::_128, cute::_16, cute::_128>;
   using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
+  using ArchTag = cutlass::arch::Sm90;
 
   using Cutlass3xGemm =
-      cutlass_3x_group_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                            KernelSchedule, EpilogueSchedule, true>;
+      cutlass_3x_group_gemm<InType, OutType, ArchTag, Epilogue, TileShape,
+                            ClusterShape, KernelSchedule, EpilogueSchedule,
+                            true>;
 };
 
 template <typename InType, typename OutType,
@@ -55,10 +58,12 @@ struct sm90_fp8_config_M64 {
       cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
   using TileShape = cute::Shape<cute::_128, cute::_16, cute::_256>;
   using ClusterShape = cute::Shape<cute::_2, cute::_1, cute::_1>;
+  using ArchTag = cutlass::arch::Sm90;
 
   using Cutlass3xGemm =
-      cutlass_3x_group_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                            KernelSchedule, EpilogueSchedule, true>;
+      cutlass_3x_group_gemm<InType, OutType, ArchTag, Epilogue, TileShape,
+                            ClusterShape, KernelSchedule, EpilogueSchedule,
+                            true>;
 };
 
 template <typename InType, typename OutType,
@@ -72,10 +77,11 @@ struct sm90_fp8_config_K8192 {
       cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
   using TileShape = cute::Shape<cute::_128, cute::_128, cute::_128>;
   using ClusterShape = cute::Shape<cute::_1, cute::_8, cute::_1>;
+  using ArchTag = cutlass::arch::Sm90;
 
   using Cutlass3xGemm =
-      cutlass_3x_group_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                            KernelSchedule, EpilogueSchedule>;
+      cutlass_3x_group_gemm<InType, OutType, ArchTag, Epilogue, TileShape,
+                            ClusterShape, KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType,
@@ -89,10 +95,11 @@ struct sm90_fp8_config_N8192 {
       cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
   using TileShape = cute::Shape<cute::_64, cute::_128, cute::_256>;
   using ClusterShape = cute::Shape<cute::_1, cute::_8, cute::_1>;
+  using ArchTag = cutlass::arch::Sm90;
 
   using Cutlass3xGemm =
-      cutlass_3x_group_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
-                            KernelSchedule, EpilogueSchedule>;
+      cutlass_3x_group_gemm<InType, OutType, ArchTag, Epilogue, TileShape,
+                            ClusterShape, KernelSchedule, EpilogueSchedule>;
 };
 
 template <typename InType, typename OutType>
@@ -111,9 +118,6 @@ void run_cutlass_moe_mm_sm90(
               "A tensors must be of type float8_e4m3fn.");
   TORCH_CHECK(b_tensors.dtype() == torch::kFloat8_e4m3fn,
               "B tensors must be of type float8_e4m3fn.");
-
-  TORCH_CHECK(a_tensors.dtype() == torch::kFloat8_e4m3fn);
-  TORCH_CHECK(b_tensors.dtype() == torch::kFloat8_e4m3fn);
 
   using Cutlass3xGemmN8192 = typename sm90_fp8_config_N8192<
       InType, OutType, vllm::c3x::ScaledEpilogueArray>::Cutlass3xGemm;
