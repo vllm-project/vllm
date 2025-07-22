@@ -958,9 +958,6 @@ class Scheduler(SchedulerInterface):
         return len(self.running), len(self.waiting)
 
     def add_request(self, request: Request) -> None:
-        print(
-            f"max_waiting_queue_length {self.scheduler_config.max_waiting_queue_length}"
-        )
         if (
             self.scheduler_config.max_waiting_queue_length
             and len(self.waiting)
