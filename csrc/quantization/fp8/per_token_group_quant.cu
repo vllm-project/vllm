@@ -13,7 +13,11 @@
 #include "../../dispatch_utils.h"
 
 __device__ __forceinline__ float GroupReduceMax(float val, const int tid) {
+#ifndef USE_ROCM
   unsigned mask = 0xffff;
+#else
+  unsigned long mask = 0xffffffff;
+#endif
 
   val = fmaxf(val, __shfl_xor_sync(mask, val, 8));
   val = fmaxf(val, __shfl_xor_sync(mask, val, 4));
@@ -198,6 +202,8 @@ void per_token_group_quant_8bit(const torch::Tensor& input,
       input.scalar_type(), "per_token_group_quant_8bit", ([&] {
         if (dst_type == at::ScalarType::Float8_e4m3fn) {
           LAUNCH_KERNEL(scalar_t, c10::Float8_e4m3fn);
+        } else if (dst_type == at::ScalarType::Float8_e4m3fnuz) {
+          LAUNCH_KERNEL(scalar_t, c10::Float8_e4m3fnuz);
         }
       }));
 

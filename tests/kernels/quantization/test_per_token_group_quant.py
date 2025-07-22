@@ -32,7 +32,8 @@ def test_per_token_group_quant_fp8(shape, column_major: bool,
     )
 
     # triton ref
-    with patch("vllm.platforms.current_platform.is_cuda", return_value=False):
+    with patch("vllm.platforms.current_platform.is_cuda_alike",
+               return_value=False):
         ref_q, ref_s = fp8_utils.per_token_group_quant_fp8(
             x,
             group_size,
