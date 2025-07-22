@@ -587,7 +587,8 @@ class VllmBackend:
 
         if not self.compilation_config.use_cudagraph or \
             not self.compilation_config.cudagraph_copy_inputs:
-            return self.split_gm
+            from vllm.compilation.nano_split import init_split_manager_and_get_callable
+            return init_split_manager_and_get_callable(self.split_gm)
 
         # if we need to copy input buffers for cudagraph
         from torch._guards import detect_fake_mode

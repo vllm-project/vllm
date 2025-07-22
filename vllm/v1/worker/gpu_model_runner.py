@@ -18,6 +18,7 @@ from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
 from vllm.compilation.counter import compilation_counter
+from vllm.compilation.nano_split import InputInfo, auto_search_and_split, set_forward_hook
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config, update_config)
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -27,7 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture, is_global_first_rank,
     prepare_communication_buffer_for_model)
-from vllm.forward_context import (DPMetadata, get_forward_context,
+from vllm.forward_context import (DPMetadata, ForwardContext, get_forward_context, override_forward_context,
                                   set_forward_context)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaBase
@@ -789,6 +790,120 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return (attn_metadata, attention_cuda_graphs, logits_indices,
                 spec_decode_metadata, num_scheduled_tokens,
                 spec_decode_common_attn_metadata)
+    
+    def _split_inputs_for_nano_split(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> None:
+        """
+        For each group of requests (as defined by split_indices), generate
+        separate attention metadata.
+
+        Args:
+            scheduler_output: SchedulerOutput for the whole batch.
+            nano_batch_size: List of nano batch sizes.
+
+        Returns:
+            List of attention_metadata dicts, one per group.
+        """
+        req_ids = self.input_batch.req_ids
+        num_reqs = len(req_ids)
+        num_tokens = [scheduler_output.num_scheduled_tokens[rid] for rid in req_ids]
+        cached_seqlens = self.input_batch.num_computed_tokens_cpu[:num_reqs].tolist()
+        batch_sizes = auto_search_and_split(
+            InputInfo(
+                batch_size=num_reqs,
+                num_tokens=num_tokens,
+                cached_seqlens=cached_seqlens,
+            )
+        )
+        attn_metadatas = []
+
+        start_req_idx = 0
+        end_req_idx = 0
+        for nano_batch_size in batch_sizes:
+            start_req_idx = end_req_idx
+            end_req_idx = start_req_idx + nano_batch_size
+            nano_batch_req_ids = req_ids[start_req_idx:end_req_idx]
+
+            # Gather per-request info for this group
+            nano_batch_num_scheduled_tokens = np.array(
+                [scheduler_output.num_scheduled_tokens[rid] for rid in nano_batch_req_ids],
+                dtype=np.int32
+            )
+            nano_batch_cu_num_tokens, nano_batch_arange = self._get_cumsum_and_arange(nano_batch_num_scheduled_tokens)
+            nano_batch_total_tokens = int(nano_batch_cu_num_tokens[-1])
+            nano_batch_req_indices = np.repeat(np.arange(len(nano_batch_req_ids)), nano_batch_num_scheduled_tokens)
+
+            # Compute positions for this group
+            nano_batch_positions_np = np.empty(nano_batch_total_tokens, dtype=np.int64)
+            np.add(
+                self.input_batch.num_computed_tokens_cpu[start_req_idx:end_req_idx][nano_batch_req_indices],
+                nano_batch_arange,
+                out=nano_batch_positions_np
+            )
+
+            # Prepare attention metadata for each KV cache group
+            nano_batch_attn_metadata = {}
+            for kv_cache_group_id, kv_cache_group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
+                blk_table = self.input_batch.block_table[kv_cache_group_id]
+                blk_table_tensor = blk_table.get_device_tensor()[start_req_idx:end_req_idx]
+                slot_mapping = blk_table.slot_mapping[:nano_batch_total_tokens]
+
+                common_attn_metadata = CommonAttentionMetadata(
+                    query_start_loc=self.query_start_loc[start_req_idx:end_req_idx + 1],
+                    query_start_loc_cpu=self.query_start_loc_cpu[start_req_idx:end_req_idx + 1],
+                    seq_lens=self.seq_lens[start_req_idx:end_req_idx],
+                    seq_lens_cpu=self.seq_lens_cpu[start_req_idx:end_req_idx],
+                    num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[start_req_idx:end_req_idx],
+                    num_reqs=nano_batch_size,
+                    num_actual_tokens=nano_batch_total_tokens,
+                    max_query_len=int(max(nano_batch_num_scheduled_tokens)),
+                    block_table_tensor=blk_table_tensor,
+                    slot_mapping=slot_mapping,
+                )
+
+                if isinstance(kv_cache_group_spec.kv_cache_spec, ChunkedLocalAttentionSpec):
+                    common_attn_metadata = make_local_attention_virtual_batches(
+                        kv_cache_group_spec.kv_cache_spec.attention_chunk_size,
+                        common_attn_metadata, self.cache_config.block_size)
+
+                # Prepare for cascade attention if enabled & beneficial.
+                common_prefix_len = 0
+                builder = self.attn_metadata_builders[kv_cache_group_id]
+                if self.cascade_attn_enabled:
+                    common_prefix_len = self._compute_cascade_attn_prefix_len(
+                        nano_batch_num_scheduled_tokens,
+                        scheduler_output.num_common_prefix_blocks[kv_cache_group_id],
+                        kv_cache_group_spec.kv_cache_spec,
+                        builder,
+                    )
+
+                attn_metadata_i = builder.build(
+                    common_prefix_len=common_prefix_len,
+                    common_attn_metadata=common_attn_metadata,
+                )
+
+                for layer_name in kv_cache_group_spec.layer_names:
+                    nano_batch_attn_metadata[layer_name] = attn_metadata_i
+
+            attn_metadatas.append(nano_batch_attn_metadata)
+        
+        assert end_req_idx == num_reqs, f"invalid nano batch size: {batch_sizes}"
+        forward_contexts = [
+            ForwardContext(
+                no_compile_layers=self.vllm_config.compilation_config.static_forward_context,
+                virtual_engine=0,
+                attn_metadata=attn_metadata,
+                dp_metadata=None,
+                skip_cuda_graphs=True,
+            ) for attn_metadata in attn_metadatas
+        ]
+        def pre_forward_hook() -> None:
+            pass
+        def pre_op_hook(node_name: str, idx: int, args: tuple, kwargs: dict) -> None:
+            override_forward_context(forward_contexts[idx])
+        set_forward_hook(pre_forward_hook, pre_op_hook)
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -1396,6 +1511,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # If attention doesn't support CUDA Graphs for this batch, but we
         # compiled with full CUDA graphs, we have to skip them entirely.
         skip_cuda_graphs = self.full_cuda_graph and not attention_cuda_graphs
+        self._split_inputs_for_nano_split(scheduler_output)
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.

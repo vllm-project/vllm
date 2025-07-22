@@ -108,6 +108,11 @@ def get_forward_context() -> ForwardContext:
     return _forward_context
 
 
+def override_forward_context(forward_context: ForwardContext) -> None:
+    global _forward_context
+    _forward_context = forward_context
+
+
 @contextmanager
 def set_forward_context(
     attn_metadata: Any,
