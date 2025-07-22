@@ -315,11 +315,6 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         Apply HF Processor on prompt text and multi-modal data together,
         outputting token IDs and processed tensors.
         """
-        if return_mm_hashes:
-            raise ValueError(
-                "TransformersForMultimodalLM doesn't support mm hashing yet! "
-                "Probably you didn't set `disable_mm_preprocessor_cache=True`")
-
         if tokenization_kwargs is None:
             tokenization_kwargs = {}
 
@@ -375,12 +370,14 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                                        num_image_patches),
         )
 
+        mm_hashes = self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
+                                        tokenization_kwargs)
         return MultiModalInputs(
             type="multimodal",
             prompt=prompt,
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
-            mm_hashes=None,
+            mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholders,
         )
 
