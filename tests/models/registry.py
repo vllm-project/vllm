@@ -135,6 +135,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                    trust_remote_code=True),
     "AquilaForCausalLM": _HfExamplesInfo("BAAI/AquilaChat2-7B",
                                          trust_remote_code=True),
+    "ArceeForCausalLM": _HfExamplesInfo("arcee-ai/AFM-4.5B-Base",
+                                        is_available_online=False),
     "ArcticForCausalLM": _HfExamplesInfo("Snowflake/snowflake-arctic-instruct",
                                          trust_remote_code=True),
     "BaiChuanForCausalLM": _HfExamplesInfo("baichuan-inc/Baichuan-7B",
