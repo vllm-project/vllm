@@ -52,7 +52,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
@@ -551,7 +550,7 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
-        
+
         # Implement the MixtureOfExperts protocol.
         self.expert_weights = []
 
@@ -569,7 +568,7 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
 
         if example_layer is None:
             raise RuntimeError("No Qwen3MoE layer found in model.layers.")
-        
+
         self.num_expert_groups = 1
         self.num_logical_experts = example_layer.n_logical_experts
         self.num_physical_experts = example_layer.n_physical_experts
@@ -600,7 +599,7 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
     ) -> None:
         # TODO: Support Qwen3 MoE elastic expert parallel
         ...
-   
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
