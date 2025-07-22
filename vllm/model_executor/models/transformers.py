@@ -750,18 +750,27 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
     embedding_padding_modules = ["lm_head"]
     embedding_modules = ["embed_tokens"]
 
-    # Backwards compatibility for prev released models
-    # State dicts back then had different formats
-    # and cannot be loaded with `AutoModel` mapping
-    # as is
+    # Backwards compatibility for prev released models. State dicts back then
+    # had different formats and cannot be loaded with `AutoModel` mapping as is
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            "language_model.model": "language_model",
-            "text_model.model": "text_model",
+            "language_model.model": "model.language_model",
+            "text_model.model": "model.text_model",
+            "vision_tower": "model.vision_tower",
+            "vqmodel": "model.vqmodel",
+            "visual": "model.visual",
+            "vision_model": "model.vision_model",
+            "vision_embed_tokens": "model.vision_embed_tokens",
+            "image_newline": "model.image_newline",
+            "multi_modal_projector": "model.multi_modal_projector",
             "text_model.lm_head": "lm_head",
             "language_model.lm_head": "lm_head",
-            # deal with Qwen2-VL mapping
-            "model.layers": "language_model.layers",
+            # Qwen models used "model" as the name for the language model.
+            # Therefore, we must map each of submodule explicitly to avoid
+            # conflicts with newer models that use "model.language_model".
+            "model.embed_tokens": "model.language_model.embed_tokens",
+            "model.layers": "model.language_model.layers",
+            "model.norm": "model.language_model.norm",
         })
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
