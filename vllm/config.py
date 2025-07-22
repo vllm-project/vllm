@@ -2475,7 +2475,7 @@ class SchedulerConfig:
                 "sequences. Please increase max_num_batched_tokens or "
                 "decrease max_model_len.")
         if (self.max_waiting_queue_length is not None
-            and self.max_waiting_queue_length <= 0):
+                and self.max_waiting_queue_length <= 0):
             raise ValueError(
                 "max_waiting_queue_length must be a positive integer. "
                 "Use None for an unlimited queue.")
