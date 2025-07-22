@@ -121,20 +121,13 @@ class LLMEngine:
         stat_loggers: Optional[list[StatLoggerFactory]] = None,
         disable_log_stats: bool = False,
     ) -> "LLMEngine":
-        # Disable multiprocessing when using Pathways
-        multiprocess_mode = envs.VLLM_ENABLE_V1_MULTIPROCESSING
-        if envs.VLLM_USING_PATHWAYS:
-            logger.info(
-                "Disabling multiprocessing when using Pathways (JAX_PLATFORMS=proxy)"
-            )
-            multiprocess_mode = False
 
         return cls(vllm_config=vllm_config,
                    executor_class=Executor.get_class(vllm_config),
                    log_stats=(not disable_log_stats),
                    usage_context=usage_context,
                    stat_loggers=stat_loggers,
-                   multiprocess_mode=multiprocess_mode)
+                   multiprocess_mode=cls._get_multiprocessing_mode())
 
     @classmethod
     def from_engine_args(
@@ -149,22 +142,26 @@ class LLMEngine:
         # Create the engine configs.
         vllm_config = engine_args.create_engine_config(usage_context)
         executor_class = Executor.get_class(vllm_config)
-
-        if envs.VLLM_ENABLE_V1_MULTIPROCESSING:
-            logger.debug("Enabling multiprocessing for LLMEngine.")
-            enable_multiprocessing = True
-
-        # Disable multiprocessing when using Pathways
-        if envs.VLLM_USING_PATHWAYS:
-            enable_multiprocessing = False
-
         # Create the LLMEngine.
         return cls(vllm_config=vllm_config,
                    executor_class=executor_class,
                    log_stats=not engine_args.disable_log_stats,
                    usage_context=usage_context,
                    stat_loggers=stat_loggers,
-                   multiprocess_mode=enable_multiprocessing)
+                   multiprocess_mode=self._get_multiprocessing_mode())
+
+    @staticmethod
+    def _get_multiprocessing_mode() -> bool:
+        if envs.VLLM_USING_PATHWAYS:
+            logger.info("Disabling multiprocessing when using Pathways "
+                        "(JAX_PLATFORMS=proxy)")
+            return False
+
+        enable_multiprocessing = envs.VLLM_ENABLE_V1_MULTIPROCESSING
+        if enable_multiprocessing:
+            logger.debug("Enabling multiprocessing for LLMEngine.")
+
+        return enable_multiprocessing
 
     def get_num_unfinished_requests(self) -> int:
         return self.output_processor.get_num_unfinished_requests()

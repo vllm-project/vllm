@@ -976,7 +976,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether using Pathways
     "VLLM_USING_PATHWAYS":
     lambda: bool("proxy" in os.getenv("JAX_PLATFORMS", "").lower()),
-
 }
 
 # --8<-- [end:env-vars-definition]
