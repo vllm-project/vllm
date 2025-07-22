@@ -44,7 +44,7 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.outputs import (ClassificationRequestOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput, RequestOutput,
                           ScoringRequestOutput)
-from vllm.pooling_params import PoolingParams
+from vllm.pooling_params import PoolingParams, PoolingTask
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
@@ -968,6 +968,7 @@ class LLM:
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        pooling_task: PoolingTask = "encode",
     ) -> list[PoolingRequestOutput]:
         ...
 
@@ -983,6 +984,7 @@ class LLM:
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        pooling_task: PoolingTask = "encode",
     ) -> list[PoolingRequestOutput]:
         ...
 
@@ -998,6 +1000,7 @@ class LLM:
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        pooling_task: PoolingTask = "encode",
     ) -> list[PoolingRequestOutput]:
         ...
 
@@ -1014,6 +1017,7 @@ class LLM:
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        pooling_task: PoolingTask = "encode",
     ) -> list[PoolingRequestOutput]:
         ...
 
@@ -1030,6 +1034,7 @@ class LLM:
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        pooling_task: PoolingTask = "encode",
     ) -> list[PoolingRequestOutput]:
         ...
 
@@ -1044,6 +1049,7 @@ class LLM:
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        pooling_task: PoolingTask = "encode",
     ) -> list[PoolingRequestOutput]:
         ...
 
@@ -1063,6 +1069,7 @@ class LLM:
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        pooling_task: PoolingTask = "encode",
     ) -> list[PoolingRequestOutput]:
         """Apply pooling to the hidden states corresponding to the input
         prompts.
@@ -1084,6 +1091,7 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             prompt_adapter_request: Prompt Adapter request to use for
                 generation, if any.
+            pooling_task: Override the pooling task to use.
 
         Returns:
             A list of `PoolingRequestOutput` objects containing the
@@ -1120,11 +1128,12 @@ class LLM:
         if pooling_params is None:
             # Use default pooling params.
             pooling_params = PoolingParams()
-        elif isinstance(pooling_params, PoolingParams):
-            pooling_params.verify(model_config)
+
+        if isinstance(pooling_params, PoolingParams):
+            pooling_params.verify(pooling_task, model_config)
         else:
             for pooling_param in pooling_params:
-                pooling_param.verify(model_config)
+                pooling_param.verify(pooling_task, model_config)
 
         tokenization_kwargs = dict[str, Any]()
         _validate_truncation_size(model_config.max_model_len,
@@ -1185,12 +1194,15 @@ class LLM:
             raise ValueError("Embedding API is not supported by this model. "
                              "Please set `--task embed`.")
 
-        items = self.encode(prompts,
-                            truncate_prompt_tokens=truncate_prompt_tokens,
-                            use_tqdm=use_tqdm,
-                            pooling_params=pooling_params,
-                            lora_request=lora_request,
-                            prompt_adapter_request=prompt_adapter_request)
+        items = self.encode(
+            prompts,
+            truncate_prompt_tokens=truncate_prompt_tokens,
+            use_tqdm=use_tqdm,
+            pooling_params=pooling_params,
+            lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request,
+            pooling_task="embed",
+        )
 
         return [EmbeddingRequestOutput.from_base(item) for item in items]
 
@@ -1232,10 +1244,13 @@ class LLM:
                 "Classification API is not supported by this model. "
                 "Please set `--task classify`.")
 
-        items = self.encode(prompts,
-                            use_tqdm=use_tqdm,
-                            lora_request=lora_request,
-                            prompt_adapter_request=prompt_adapter_request)
+        items = self.encode(
+            prompts,
+            use_tqdm=use_tqdm,
+            lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request,
+            pooling_task="classify",
+        )
 
         return [ClassificationRequestOutput.from_base(item) for item in items]
 
@@ -1255,7 +1270,9 @@ class LLM:
             truncate_prompt_tokens=truncate_prompt_tokens,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request)
+            prompt_adapter_request=prompt_adapter_request,
+            pooling_task="embed",
+        )
 
         encoded_output_1: list[PoolingRequestOutput] = encoded_output[
             0:len(text_1)]
@@ -1291,7 +1308,7 @@ class LLM:
         if len(data_1) == 1:
             data_1 = data_1 * len(data_2)
 
-        pooling_params = PoolingParams(use_cross_encoder=True)
+        pooling_params = PoolingParams(task="score")
         tokenization_kwargs: dict[str, Any] = {}
         _validate_truncation_size(self.llm_engine.model_config.max_model_len,
                                   truncate_prompt_tokens, tokenization_kwargs)
