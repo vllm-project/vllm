@@ -6,7 +6,10 @@ from collections.abc import Mapping
 from typing import Literal, Optional
 
 import pytest
-from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
+from mistral_common.tokens.tokenizers.base import (SpecialTokenPolicy,
+                                                   SpecialTokens)
+from mistral_common.tokens.tokenizers.tekken import (SpecialTokenInfo,
+                                                     Tekkenizer)
 
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
@@ -1498,8 +1501,33 @@ def test_apply_mistral_chat_template_thinking_chunk():
         "content": "Thanks, what is 3+3?"
     }]
 
+    # TODO(Julien): upon model release change to a tokenizer already configured.
+    # =================================================================
     mistral_tokenizer = MistralTokenizer.from_pretrained(
-        "mistralai/Magistral-Small-2507")
+        "mistralai/Devstral-Small-2507")
+    assert isinstance(mistral_tokenizer.tokenizer, Tekkenizer)
+    # Add think special tokens to the tokenizer
+    mistral_tokenizer.tokenizer._all_special_tokens[35] = SpecialTokenInfo(
+        SpecialTokenInfo(rank=35,
+                         is_control=True,
+                         token_str=SpecialTokens.begin_think.value))
+    mistral_tokenizer.tokenizer._all_special_tokens[36] = SpecialTokenInfo(
+        SpecialTokenInfo(rank=36,
+                         is_control=True,
+                         token_str=SpecialTokens.end_think.value))
+    mistral_tokenizer.tokenizer._special_tokens_reverse_vocab = {
+        k: v
+        for k, v in
+        mistral_tokenizer.tokenizer._special_tokens_reverse_vocab.items()
+        if v not in {35, 36}
+    }
+    mistral_tokenizer.tokenizer._special_tokens_reverse_vocab[
+        SpecialTokens.begin_think.value] = 35
+    mistral_tokenizer.tokenizer._special_tokens_reverse_vocab[
+        SpecialTokens.end_think.value] = 36
+    mistral_tokenizer.instruct.BEGIN_THINK = 35
+    mistral_tokenizer.instruct.END_THINK = 36
+    # =================================================================
 
     tokens_ids = apply_mistral_chat_template(mistral_tokenizer,
                                              messages,

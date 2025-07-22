@@ -169,7 +169,9 @@ def make_mistral_chat_completion_request(
                     if chunk.get("type") == "text" and len(
                             aggregated_content
                     ) > 0 and aggregated_content[-1].get("type") == "text":
-                        aggregated_content[-1]["text"] += "\n" + chunk.get(
+
+-                         aggregated_content[-1]["text"] += "\n\n" + chunk.get(
+
                             "text")
                     else:
                         aggregated_content.append(chunk)
@@ -487,8 +489,13 @@ class MistralTokenizer(TokenizerBase):
         if self.is_tekken:
             # skip special tokens except tool call
             ids = [
-                i for i in ids if i > self.tokenizer.num_special_tokens or i ==
-                self.tokenizer.get_control_token(SpecialTokens.tool_calls)
+                i for i in ids
+                if i > self.tokenizer.num_special_tokens or i in [
+                    self.tokenizer.get_control_token(SpecialTokens.tool_calls),
+                    self.tokenizer.get_control_token(
+                        SpecialTokens.begin_think),
+                    self.tokenizer.get_control_token(SpecialTokens.end_think)
+                ]
             ]
 
         tokens = [self.tokenizer.id_to_piece(id) for id in ids]
