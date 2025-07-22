@@ -1944,9 +1944,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 self.sampler.include_gpu_probs_tensor = \
                     orig_include_gpu_probs
                 sampled_token_embeds = self.model.get_input_embeddings(
-                        async_tensor_h2d(sampled_token_ids, 
-                            torch.long, self.device, self.pin_memory)
-                        )
+                    async_tensor_h2d(sampled_token_ids, torch.long,
+                                     self.device, self.pin_memory))
                 for i, sequence_group_output in enumerate(valid_outputs):
                     sequence_group_output.samples[0].output_embed = \
                         sampled_token_embeds[i]
