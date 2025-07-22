@@ -18,7 +18,7 @@ Please see [PyTorch's Security Policy](https://github.com/pytorch/pytorch/blob/m
 
 We will determine the risk of each issue, taking into account our experience dealing with past issues, versions affected, common defaults, and use cases. We use the following severity categories:
 
-### CRITICAL Severity:
+### CRITICAL Severity
 Vulnerabilities that allow remote attackers to execute arbitrary code, take full control of the system, or significantly compromise confidentiality, integrity, or availability without any interaction or privileges needed, examples include remote code execution via network, deserialization issues that allow exploit chains. Generally those issues which are rated as CVSS  ≥ 9.0.
 
 ### HIGH Severity:
