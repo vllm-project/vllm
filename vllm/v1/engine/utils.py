@@ -212,12 +212,9 @@ class CoreEngineActorManager:
         local_engine_count = \
             vllm_config.parallel_config.data_parallel_size_local
         world_size = vllm_config.parallel_config.world_size
-        env_vars_set = get_env_vars_to_copy(destination="DPEngineCoreActor")
-        env_vars_dict = {
-            name: os.environ[name]
-            for name in env_vars_set if name in os.environ
-        }
-        runtime_env = RuntimeEnv(env_vars=env_vars_dict)
+        env_vars_set = get_env_vars_to_copy(
+            destination="DPEngineCoreActor",
+            additional_vars={current_platform.device_control_env_var})
 
         if ray.is_initialized():
             logger.info(
@@ -243,13 +240,17 @@ class CoreEngineActorManager:
             "Number of placement groups must match data parallel size")
 
         refs = []
-        for index in range(dp_size):
-            local_index = local_dp_ranks[index]
+        for index, local_index, pg in zip(range(dp_size), local_dp_ranks,
+                                          placement_groups):
             dp_vllm_config = copy.deepcopy(vllm_config)
-            pg = placement_groups[index]
             dp_vllm_config.parallel_config.placement_group = pg
             local_client = index < local_engine_count
             with set_device_control_env_var(vllm_config, local_index):
+                runtime_env = RuntimeEnv(
+                    env_vars={
+                        name: os.environ[name]
+                        for name in env_vars_set if name in os.environ
+                    })
                 actor = ray.remote(DPEngineCoreActor).options(
                     scheduling_strategy=PlacementGroupSchedulingStrategy(
                         placement_group=pg,
