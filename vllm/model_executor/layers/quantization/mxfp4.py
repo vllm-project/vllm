@@ -8,10 +8,7 @@ from torch.nn.parameter import Parameter
 from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 from triton_kernels.numerics import InFlexData
 from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
-from triton_kernels.tensor_details.layout import (BlackwellMXScaleLayout,
-                                                  HopperMXScaleLayout,
-                                                  HopperMXValueLayout,
-                                                  StridedLayout)
+from triton_kernels.tensor_details import layout
 
 from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.linear import (LinearBase,
@@ -26,14 +23,16 @@ from vllm.platforms import current_platform
 
 
 def swizzle_mxfp4(quant_tensor, scale):
-    value_layout = StridedLayout
-    scale_layout = StridedLayout
     if current_platform.is_cuda():
-        if torch.cuda.get_device_capability()[0] == 9:
-            value_layout = HopperMXValueLayout
-            scale_layout = HopperMXScaleLayout
+        # FIXME add swizzling later after triton fix
+        # max_batched_tokens = get_current_vllm_config().scheduler_config.max_num_batched_tokens
+        # num_warps = 8 if max_batched_tokens <= 512 else 8
+        # value_layout, value_layout_opts = layout.make_default_matmul_mxfp4_w_layout(mx_axis=1)
+        # scale_layout, scale_layout_opts = layout.make_default_matmul_mxfp4_w_scale_layout(
+        #     mx_axis=1, num_warps=num_warps)
+        value_layout, value_layout_opts = layout.StridedLayout, dict()
+        scale_layout, scale_layout_opts = layout.StridedLayout, dict()
         if torch.cuda.get_device_capability()[0] == 10:
-            scale_layout = BlackwellMXScaleLayout
             constraints = {
                 "is_persistent": True,
                 "epilogue_subtile": 1,
@@ -42,8 +41,9 @@ def swizzle_mxfp4(quant_tensor, scale):
     quant_tensor = quant_tensor.transpose(-2, -1)
     scale = scale.transpose(-2, -1)
     quant_tensor = convert_layout(wrap_torch_tensor(quant_tensor, dtype=FP4),
-                                  value_layout)
-    scale = convert_layout(wrap_torch_tensor(scale), scale_layout)
+                                  value_layout, **value_layout_opts)
+    scale = convert_layout(wrap_torch_tensor(scale), scale_layout,
+                           **scale_layout_opts)
     return quant_tensor, InFlexData(), scale
 
 
@@ -185,6 +185,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         del layer.w13_weight
         del layer.w2_weight
+        torch.cuda.empty_cache()
 
         layer.w13_weight_triton_tensor = w13_weight
         layer.w2_weight_triton_tensor = w2_weight
