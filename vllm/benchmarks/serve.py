@@ -179,12 +179,12 @@ async def get_request(
         delay_ts = [delay * normalize_factor for delay in delay_ts]
 
     start_ts = time.time()
-    request_index = 0
     for request_index, request in enumerate(input_requests):
-        current_ts = time.time()
-        sleep_interval_s = start_ts + delay_ts[request_index] - current_ts
-        if sleep_interval_s > 0:
-            await asyncio.sleep(sleep_interval_s)
+        if delay_ts[request_index] > 0:
+            current_ts = time.time()
+            sleep_interval_s = start_ts + delay_ts[request_index] - current_ts
+            if sleep_interval_s > 0:
+                await asyncio.sleep(sleep_interval_s)
         yield request, request_rates[request_index]
 
 
