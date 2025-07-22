@@ -10,7 +10,7 @@ Looking for setup and installation instructions? Find them [here](https://docs.v
 
 When selecting the ideal number of chips for a single serving instance, it's important to account for both the model size and the average request context length. Adequate HBM for the KV cache is essential to ensure a sufficient number of concurrent requests can be processed.
 
-The following colab [calculator](https://colab.sandbox.google.com/drive/1M_f3xZm-_Ce2D-UMAyGNyacEIN-6rUbf) will tell you:
+The following colab [calculator](https://colab.research.google.com/github/ericehanley/rightsize-vllm/blob/main/HBM_Calculator.ipynb) will tell you:
 
 - KV cache size requirement per token and per request
 - TPU/GPU memory consumed by the model weights
