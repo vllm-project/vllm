@@ -2481,8 +2481,6 @@ def direct_register_custom_op(
 
     import torch.library
     if hasattr(torch.library, "infer_schema"):
-        print(f"op_func={op_func}, type(op_func)={type(op_func)}")
-        print(f"vllm_lib={vllm_lib}")
         schema_str = torch.library.infer_schema(op_func,
                                                 mutates_args=mutates_args)
     else:
