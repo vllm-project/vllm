@@ -122,3 +122,14 @@ def consume_space(i: int, s: str) -> int:
     while i < len(s) and s[i].isspace():
         i += 1
     return i
+
+def convert_messages_to_prompt(messages):
+    # Converts an Anthropic-style conversation to a plain prompt string.
+    prompt = ""
+    for msg in messages:
+        if msg["role"] == "user":
+            prompt += f"Human: {msg['content']}\n"
+        elif msg["role"] == "assistant":
+            prompt += f"Assistant: {msg['content']}\n"
+    return prompt
+
