@@ -439,6 +439,7 @@ class EngineArgs:
 
     max_waiting_queue_length: Optional[int] = (
         SchedulerConfig.max_waiting_queue_length)
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a

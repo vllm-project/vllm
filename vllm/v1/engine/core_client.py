@@ -28,8 +28,7 @@ from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             UtilityOutput)
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
-from vllm.v1.engine.exceptions import (EngineDeadError,
-                                       SchedulerWaitingQueueFullError)
+from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.engine.utils import (CoreEngineActorManager,
                                   CoreEngineProcManager, launch_core_engines)
 from vllm.v1.executor.abstract import Executor
@@ -220,7 +219,6 @@ class EngineCoreClient(ABC):
             args: tuple = (),
             kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         raise NotImplementedError
-
 
 
 class InprocClient(EngineCoreClient):
@@ -1239,6 +1237,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         logger.info(
             "[Elastic EP] Scale down completed, new data parallel size: %s",
             new_data_parallel_size)
+
 
 def process_engine_error(engine_error: EngineErrorPayload) -> Exception:
     """Process an engine error payload and raise an exception."""
