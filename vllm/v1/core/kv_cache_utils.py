@@ -406,9 +406,9 @@ def need_extra_keys(request: Request) -> bool:
     # Multimodal requests need to include the MM hash.
     # LoRA requests need to include the LoRA ID.
     # Request with provided cache salt need to include the salt.
-    return bool(request.mm_positions) or (request.lora_request
-                                          is not None) or (request.cache_salt
-                                                           is not None)
+    return bool(request.mm_hashes) or (request.lora_request
+                                       is not None) or (request.cache_salt
+                                                        is not None)
 
 
 def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
