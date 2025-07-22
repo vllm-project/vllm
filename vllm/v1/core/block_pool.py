@@ -253,7 +253,7 @@ class BlockPool:
             return False
         block.reset_hash()
         blocks_by_id.pop(block.block_id, None)
-        if blocks_by_id:
+        if len(blocks_by_id) == 0:
             del self.cached_block_hash_to_block[block_hash]
 
         if self.enable_kv_cache_events:
