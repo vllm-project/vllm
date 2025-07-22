@@ -104,8 +104,7 @@ vllm bench serve \
   --endpoint /v1/completions \
   --dataset-name sharegpt \
   --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
-  --num-prompts 10 \
-  --request-rate 3 # By default <request_rate> is inf
+  --num-prompts 10
 ```
 
 If successful, you will see the following output
@@ -232,7 +231,7 @@ vllm bench serve \
   --dataset-name hf \
   --dataset-path Aeala/ShareGPT_Vicuna_unfiltered \
   --hf-split train \
-  --num-prompts 1000
+  --num-prompts 10
 ```
 
 **`AI-MO/aimo-validation-aime`**
