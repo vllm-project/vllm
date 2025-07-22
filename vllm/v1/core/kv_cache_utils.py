@@ -154,7 +154,7 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
-    # TODO(Jialin): For performance, let callers to handle ref_cnt bumps to
+    # TODO(Jialin): For performance, let callers handle ref_cnt bumps to
     # avoid function calls.
     def incr_ref(self):
         self.ref_cnt += 1
@@ -284,9 +284,9 @@ class FreeKVCacheBlockQueue:
         Returns:
             A list of n free blocks.
         """
-        assert self.num_free_blocks >= n
         if n == 0:
             return []
+        assert self.num_free_blocks >= n
         self.num_free_blocks -= n
 
         curr_block = self.fake_free_list_head.next_free_block
