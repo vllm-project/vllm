@@ -370,12 +370,14 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                                        num_image_patches),
         )
 
+        mm_hashes = self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
+                                        tokenization_kwargs)
         return MultiModalInputs(
             type="multimodal",
             prompt=prompt,
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
-            mm_hashes=None,
+            mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholders,
         )
 
