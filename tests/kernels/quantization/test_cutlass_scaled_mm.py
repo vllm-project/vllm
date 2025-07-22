@@ -643,3 +643,182 @@ def test_cutlass_fp8_group_gemm(num_experts: int, per_act_token: bool,
         print(c)
         print("*")
         torch.testing.assert_close(c, baseline, rtol=1e-2, atol=5e-4)
+
+
+@pytest.mark.parametrize("num_experts", [8, 40])
+@pytest.mark.parametrize("per_act_block", [True, False])
+@pytest.mark.parametrize("repeat", range(10))
+@pytest.mark.skipif(
+    (lambda x: x is None or (x.to_int() != 90 and x.to_int() != 100))(
+        current_platform.get_device_capability()),
+    reason="Block Scaled Grouped GEMM is only supported on SM90 or SM100.")
+def test_cutlass_fp8_blockwise_group_gemm(num_experts: int,
+                                          per_act_block: bool, repeat: int):
+
+    block_size_n = 128
+    block_size_k = 128
+
+    # Device and dtype setup
+    device = "cuda"
+    out_dtype = torch.half
+
+    # Get CUDA architecture
+    cuda_arch = current_platform.get_device_capability().to_int()
+
+    # Create separate A, B, C tensors for each group
+    a_tensors = []
+    b_tensors = []
+    a_scales_tensors = []
+    b_scales_tensors = []
+    baseline_tensors = []
+
+    expert_offsets = torch.zeros((num_experts + 1),
+                                 device=device,
+                                 dtype=torch.int32)
+
+    problem_sizes = torch.zeros((num_experts, 3),
+                                device=device,
+                                dtype=torch.int32)
+
+    if not per_act_block:
+        one_scale_a = torch.randn((1, 1), device=device, dtype=torch.float32)
+
+    alignment_m = 16
+    alignment_n = max(16, block_size_n)
+    alignment_k = block_size_k
+    # For variation, each group has dimensions
+    n_g = alignment_n * random.randint(1, 16)
+    k_g = alignment_k * random.randint(1, 16)
+    for g in range(num_experts):
+        m_g = alignment_m * random.randint(1, 64)
+
+        expert_offsets[g + 1] = expert_offsets[g] + m_g
+        problem_sizes[g][0] = m_g
+        problem_sizes[g][1] = n_g
+        problem_sizes[g][2] = k_g
+
+        m_a_scales = m_g if per_act_block else 1
+        n_b_scales = n_g // block_size_n
+        k_b_scales = k_g // block_size_k
+
+        print("shape:", m_g, n_g, k_g)
+
+        # Create group-specific A and B (FP8) and output (FP16/FP32)
+        a_g = to_fp8(torch.randn((m_g, k_g), device=device))
+        b_g = to_fp8(torch.randn((n_g, k_g), device=device).t())
+        a_tensors.append(a_g)
+        b_tensors.append(b_g)
+
+        # Set up A/B scales
+        scale_b = torch.randn((k_b_scales, n_b_scales),
+                              device=device,
+                              dtype=torch.float32)
+        b_scales_tensors.append(scale_b)
+
+        ground_scale_b = scale_b.repeat_interleave(
+            block_size_k, dim=0).repeat_interleave(block_size_n, dim=1)
+
+        if per_act_block:
+            scale_a = torch.randn((m_a_scales, k_b_scales),
+                                  device=device,
+                                  dtype=torch.float32)
+            ground_scale_a = scale_a.clone()
+            a_scales_tensors.append(scale_a)
+        else:
+            ground_scale_a = one_scale_a.clone()
+            scale_a = one_scale_a.repeat_interleave(
+                m_g, dim=0).repeat_interleave(k_b_scales, dim=1)
+
+        # Compute baseline result for this group
+        baseline_g = baseline_scaled_mm(a_g, b_g, ground_scale_a,
+                                        ground_scale_b, out_dtype, None)
+        baseline_tensors.append(baseline_g)
+
+    a_tensors_stacked = torch.empty((expert_offsets[num_experts], k_g),
+                                    device=device,
+                                    dtype=torch.float8_e4m3fn)
+    b_tensors_stacked = torch.empty((num_experts, n_g, k_g),
+                                    device=device,
+                                    dtype=torch.float8_e4m3fn)
+
+    for g in range(num_experts):
+        a_tensors_stacked[expert_offsets[g]:expert_offsets[g +
+                                                           1]] = a_tensors[g]
+        b_tensors_stacked[g] = b_tensors[g].t()
+    b_tensors_stacked = b_tensors_stacked.transpose(1, 2)
+
+    if cuda_arch == 90:
+        if per_act_block:
+            a_scales_tensors_stacked = torch.empty(
+                (k_b_scales * expert_offsets[num_experts]),
+                device=device,
+                dtype=torch.float32)
+            for g in range(num_experts):
+                a_scales_tensors_stacked[expert_offsets[g] *
+                                         k_b_scales:expert_offsets[g + 1] *
+                                         k_b_scales] = a_scales_tensors[g].t(
+                                         ).flatten()
+        else:
+            a_scales_tensors_stacked = one_scale_a.repeat_interleave(
+                expert_offsets[num_experts],
+                dim=1).repeat_interleave(k_b_scales, dim=0)
+    else:
+        if per_act_block:
+            a_scales_tensors_stacked = torch.empty(
+                (expert_offsets[num_experts], k_b_scales),
+                device=device,
+                dtype=torch.float32)
+            for g in range(num_experts):
+                a_scales_tensors_stacked[
+                    expert_offsets[g]:expert_offsets[g +
+                                                     1]] = a_scales_tensors[g]
+        else:
+            a_scales_tensors_stacked = one_scale_a.repeat_interleave(
+                expert_offsets[num_experts],
+                dim=0).repeat_interleave(k_b_scales, dim=1)
+
+    b_scales_shape = ((num_experts, k_b_scales,
+                       n_b_scales) if cuda_arch == 90 else
+                      (num_experts, n_b_scales, k_b_scales))
+    b_scales_tensors_stacked = torch.empty(b_scales_shape,
+                                           device=device,
+                                           dtype=torch.float32)
+    for g in range(num_experts):
+        b_scales_tensors_stacked[g] = (b_scales_tensors[g]
+                                       if cuda_arch == 90 else
+                                       b_scales_tensors[g].t().contiguous())
+
+    out_tensors_stacked = torch.zeros((expert_offsets[num_experts], n_g),
+                                      device=device,
+                                      dtype=out_dtype)
+
+    ab_strides = torch.full((num_experts, ),
+                            a_tensors_stacked.stride(0),
+                            device="cuda",
+                            dtype=torch.int64)
+    c_strides = torch.full((num_experts, ),
+                           out_tensors_stacked.stride(0),
+                           device="cuda",
+                           dtype=torch.int64)
+
+    if cuda_arch == 90:
+        blockwise_mm_kernel = ops.cutlass_blockwise_scaled_grouped_mm_sm90
+    else:
+        blockwise_mm_kernel = ops.cutlass_blockwise_scaled_grouped_mm_sm100
+
+    blockwise_mm_kernel(out_tensors_stacked,
+                        a_tensors_stacked, b_tensors_stacked,
+                        a_scales_tensors_stacked.contiguous(),
+                        b_scales_tensors_stacked, expert_offsets[:-1],
+                        problem_sizes, ab_strides, ab_strides, c_strides,
+                        per_act_block)
+
+    # Validate each group's result against the baseline
+    for g in range(num_experts):
+        baseline = baseline_tensors[g]
+        c = out_tensors_stacked[expert_offsets[g]:expert_offsets[g + 1]]
+        # uncomment for debugging
+        # print("c:", c)
+        # print("baseline:", baseline)
+        # print("*")
+        torch.testing.assert_close(c, baseline, rtol=1e-2, atol=5e-4)

@@ -39,6 +39,14 @@ void cutlass_moe_mm_sm90(
     torch::Tensor const& b_strides, torch::Tensor const& c_strides,
     bool per_act_token, bool per_out_ch);
 
+void cutlass_moe_blockwise_mm_sm90(
+    torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides,
+    bool per_act_block);
+
 #endif
 
 #if defined ENABLE_SCALED_MM_SM120 && ENABLE_SCALED_MM_SM120
@@ -73,6 +81,11 @@ void get_cutlass_pplx_moe_mm_data_caller(torch::Tensor& expert_offsets,
                                          const int64_t num_local_experts,
                                          const int64_t padded_m,
                                          const int64_t n, const int64_t k);
+
+torch::Tensor transpose_cutlass_moe_a_scales_caller(
+    torch::Tensor& a_scales, torch::Tensor& expert_offsets,
+    torch::Tensor& problem_sizes);
+
 #endif
 
 void cutlass_scaled_mm_azp_sm75(torch::Tensor& c, torch::Tensor const& a,
@@ -147,6 +160,21 @@ bool cutlass_group_gemm_supported(int64_t cuda_device_capability) {
 #if defined CUDA_VERSION
   if (cuda_device_capability == 90) {
     return CUDA_VERSION >= 12030;
+  }
+#endif
+
+  return false;
+}
+
+bool cutlass_blockwise_group_gemm_supported(int64_t cuda_device_capability) {
+  // Blockwise CUTLASS grouped FP8 kernels need SM90/SM100 (Hopper/Blackwell)
+  // and CUDA 12.3/12.8 (respectively)
+
+#if defined CUDA_VERSION
+  if (cuda_device_capability == 90) {
+    return CUDA_VERSION >= 12030;
+  } else if (cuda_device_capability == 100) {
+    return CUDA_VERSION >= 12080;
   }
 #endif
 
@@ -246,6 +274,26 @@ void cutlass_moe_mm(
       ". Required capability: 90");
 }
 
+void cutlass_blockwise_scaled_grouped_mm_sm90(
+    torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides,
+    bool per_act_block) {
+  int32_t version_num = get_sm_version_num();
+#if defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90
+  cutlass_moe_blockwise_mm_sm90(out_tensors, a_tensors, b_tensors, a_scales,
+                                b_scales, expert_offsets, problem_sizes,
+                                a_strides, b_strides, c_strides, per_act_block);
+  return;
+#endif
+  TORCH_CHECK_NOT_IMPLEMENTED(
+      false,
+      "No compiled cutlass_scaled_mm for CUDA device capability: ", version_num,
+      ". Required capability: 90");
+}
+
 void get_cutlass_moe_mm_data(
     const torch::Tensor& topk_ids, torch::Tensor& expert_offsets,
     torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
@@ -292,6 +340,23 @@ void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
       "No compiled get_cutlass_pplx_moe_mm_data: no cutlass_scaled_mm kernel "
       "for CUDA device capability: ",
       version_num, ". Required capability: 90 or 100");
+}
+
+torch::Tensor transpose_cutlass_moe_a_scales(torch::Tensor& a_scales,
+                                             torch::Tensor& expert_offsets,
+                                             torch::Tensor& problem_sizes) {
+  // This function currently gets compiled only if we have a valid cutlass moe
+  // mm to run it for.
+  int32_t version_num = get_sm_version_num();
+#if defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90
+  return transpose_cutlass_moe_a_scales_caller(a_scales, expert_offsets,
+                                               problem_sizes);
+#endif
+  TORCH_CHECK_NOT_IMPLEMENTED(
+      false,
+      "No compiled get_cutlass_pplx_moe_mm_data_caller: no cutlass_scaled_mm "
+      "kernel for CUDA device capability: ",
+      version_num, ". Required capability: 90");
 }
 
 void cutlass_scaled_mm_azp(torch::Tensor& c, torch::Tensor const& a,
