@@ -317,8 +317,93 @@ class TPUWorker:
 
 
 try:
-    from tpu_commons.worker import TPUWorker as TPUCommonsWorker
-    TPUWorker = TPUCommonsWorker  # type: ignore
+    # DI imports
+    from tpu_commons.adapters.vllm_adapters import VllmKVCacheConfigAdapter
+    from tpu_commons.backend import TPUBackend
+    logger.info("Found tpu_commons. Attempting to use DI-based TPUBackend.")
+
+    class VllmTPUBackend(TPUBackend):
+        """
+        A vLLM backend that delegates operations to the TPU Commons backend.
+
+        This class acts as a bridge between the vLLM engine and the tpu_commons
+        library. It uses a direct, synchronous push model for execution.
+        """
+
+        def __init__(
+            self,
+            vllm_config: VllmConfig,
+            local_rank: int,
+            rank: int,
+            distributed_init_method: str,
+            is_driver_worker: bool = False,
+        ):
+            worker_kwargs = {
+                "vllm_config": vllm_config,
+                "local_rank": local_rank,
+                "rank": rank,
+                "distributed_init_method": distributed_init_method,
+                "is_driver_worker": is_driver_worker,
+            }
+
+            super().__init__(**worker_kwargs)
+
+        def execute_model(
+            self,
+            scheduler_output: "SchedulerOutput",
+        ) -> Optional[ModelRunnerOutput]:
+            return self.launch_tpu_batch(scheduler_output)
+
+        def initialize_cache(self, num_gpu_blocks: int,
+                             num_cpu_blocks: int) -> None:
+            self.worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+
+        def init_device(self):
+            self.worker.init_device()
+
+        def determine_available_memory(self) -> int:
+            return self.worker.determine_available_memory()
+
+        def profile(self, is_start: bool = True):
+            self.worker.profile(is_start)
+
+        def add_lora(self, lora_request: LoRARequest) -> bool:
+            return self.add_lora(lora_request)
+
+        def load_model(self) -> None:
+            self.worker.load_model()
+
+        def update_config(self, overrides: dict[str, Any]) -> None:
+            raise NotImplementedError(
+                "update_config is not supported by the TPU commons backend yet."
+            )
+
+        def compile_or_warm_up_model(self) -> None:
+            self.worker.compile_or_warm_up_model()
+
+        def get_model(self) -> nn.Module:
+            return self.worker.get_model()
+
+        def get_supported_pooling_tasks(self) -> list[PoolingTask]:
+            raise NotImplementedError(
+                "get_supported_pooling_tasks is not supported by the "
+                "VllmTPUBackend yet.")
+
+        def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+            return self.worker.get_kv_cache_spec()
+
+        def initialize_from_config(self,
+                                   kv_cache_config: KVCacheConfig) -> None:
+            adapted_config = VllmKVCacheConfigAdapter(kv_cache_config)
+            self.worker.initialize_from_config(adapted_config)
+
+        def check_health(self) -> None:
+            self.worker.check_health()
+
+    # The final swap.
+    TPUWorker = VllmTPUBackend  # type: ignore
+    logger.info("Successfully replaced vLLM's TPUWorker with VllmTPUBackend.")
+
 except ImportError:
-    logger.info("tpu_commons not found, using vLLM's TPUWorker.")
+    logger.info("tpu_commons not found, using vLLM's default TPUWorker.")
     pass
