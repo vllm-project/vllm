@@ -128,23 +128,55 @@ class ModelCase:
 
 
 @dataclass
-class GSM8KAccuracyTestConfig:
+class AccuracyTestConfig:
     model_name: str
     excepted_value: float
 
-    def get_model_args(self) -> str:
+    def get_model_args(self, tp: int) -> str:
         return (
             f"pretrained={self.model_name},"
-            "dtype=auto,add_bos_token=True,tensor_parallel_size=8,gpu_memory_utilization=0.7,max_model_len=38768"
+            f"dtype=auto,add_bos_token=True,tensor_parallel_size={tp},gpu_memory_utilization=0.7,max_model_len=38768"
         )
 
 
 ACCURACY_CONFIGS = [
     # Private model.
-    GSM8KAccuracyTestConfig(
+    AccuracyTestConfig(
         model_name="amd/DeepSeek-R1-WMXFP4-AMXFP4-Scale-UINT8-MoE-Quant",
         excepted_value=0.96),
 ]
+
+
+WIKITEXT_ACCURACY_CONFIGS = [
+    AccuracyTestConfig(model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3", excepted_value=11.3),
+    AccuracyTestConfig(model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2", excepted_value=10.3),
+    AccuracyTestConfig(model_name="fxmarty/qwen_1.5-moe-a2.7b-mxfp4", excepted_value=12.4),
+]
+
+@pytest.mark.parametrize("config", WIKITEXT_ACCURACY_CONFIGS)
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
+    if torch.cuda.device_count() < 8:
+        pytest.skip(
+            f"This test requires >=8 gpus, got only {torch.cuda.device_count()}"
+        )
+
+    task = "wikitext"
+    rtol = 0.1
+
+    results = lm_eval.simple_evaluate(
+        model="vllm",
+        model_args=config.get_model_args(tp_size=tp_size),
+        tasks=task,
+        batch_size=64,
+    )
+
+    EXPECTED_VALUE = config.excepted_value
+    print("results[results][task]", results["results"][task])
+    measured_value = results["results"][task]["word_perplexity"]
+    assert (measured_value < EXPECTED_VALUE + rtol
+            and measured_value > EXPECTED_VALUE - rtol
+            ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
 
 @pytest.mark.parametrize("config", ACCURACY_CONFIGS)
@@ -166,7 +198,7 @@ def test_mxfp4_gsm8k_correctness(config: GSM8KAccuracyTestConfig):
 
     results = lm_eval.simple_evaluate(
         model="vllm",
-        model_args=config.get_model_args(),
+        model_args=config.get_model_args(tp_size=8),
         tasks=task,
         batch_size=64,
         num_fewshot=8,
