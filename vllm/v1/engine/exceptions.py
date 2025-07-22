@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from http import HTTPStatus
 
+
 class EngineGenerateError(Exception):
     """Raised when a AsyncLLM.generate() fails. Recoverable."""
     pass
@@ -18,6 +19,7 @@ class EngineDeadError(Exception):
         # silencing irrelevant ZMQError.
         self.__suppress_context__ = suppress_context
 
+
 class GracefulHTTPError(ValueError):
     """Represent exceptions that should be propagated gracefully to the user.
 
@@ -32,6 +34,7 @@ class GracefulHTTPError(ValueError):
         super().__init__()
         self.message = message
         self.http_status = http_status
+
 
 class QueueOverflowError(GracefulHTTPError):
 

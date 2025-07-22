@@ -285,6 +285,10 @@ class OutputProcessor:
         self.parent_requests: dict[str, ParentRequest] = {}
         self.lora_states = LoRARequestStates()
 
+    def get_num_pending_context_tokens(self) -> int:
+        return sum(req.prompt_len for req in self.request_states.values()
+                   if req.is_prefilling)
+
     def get_num_unfinished_requests(self):
         return len(self.request_states)
 

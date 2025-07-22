@@ -2479,10 +2479,9 @@ class SchedulerConfig:
                 "equal to 1.")
 
         if self.max_num_reqs is not None and self.max_num_reqs < 1:
-            raise ValueError(
-                "max_num_reqs "
-                f"({self.max_num_reqs}) must be greater than or "
-                "equal to 1.")
+            raise ValueError("max_num_reqs "
+                             f"({self.max_num_reqs}) must be greater than or "
+                             "equal to 1.")
 
         if self.num_lookahead_slots < 0:
             raise ValueError(
