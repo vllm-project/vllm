@@ -269,7 +269,7 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
     # (i.e. chunked prefill)
 
     seqlen, chunk_size, num_examples, cases = seq_len_chunk_size_cases
-    
+
     # TODO: the irregular chunk size cases have some issues and require higher
     # tolerance. This is to be invesigated
     if chunk_size not in {8, 256}:
