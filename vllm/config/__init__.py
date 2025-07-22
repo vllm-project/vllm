@@ -3368,6 +3368,14 @@ class ReasoningConfig:
     high_effort_token_budget: int = 8192
     """Token budget for high effort reasoning."""
 
+    def is_thinking_enabled(self) -> bool:
+        """Check if both start and end thinking token IDs
+        are set to enable thinking token budget logic."""
+        return (self.think_start_token_ids is not None
+                and self.think_end_token_ids is not None
+                and len(self.think_start_token_ids) > 0
+                and len(self.think_end_token_ids) > 0)
+
 
 @config
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
