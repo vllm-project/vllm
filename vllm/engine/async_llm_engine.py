@@ -35,7 +35,6 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device, weak_bind
-from vllm.entrypoints.utils import _validate_truncation_size
 
 
 logger = init_logger(__name__)
