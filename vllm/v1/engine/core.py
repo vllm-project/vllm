@@ -523,6 +523,7 @@ class EngineCoreProc(EngineCore):
                              bind=False) as handshake_socket:
             # Register engine with front-end.
             addresses = self.startup_handshake(handshake_socket, local_client,
+                                               headless,
                                                parallel_config_to_update)
             yield addresses
 
@@ -545,6 +546,7 @@ class EngineCoreProc(EngineCore):
     def startup_handshake(
         handshake_socket: zmq.Socket,
         local_client: bool,
+        headless: bool,
         parallel_config: Optional[ParallelConfig] = None,
     ) -> EngineZmqAddresses:
 
@@ -553,6 +555,7 @@ class EngineCoreProc(EngineCore):
             msgspec.msgpack.encode({
                 "status": "HELLO",
                 "local": local_client,
+                "headless": headless,
             }))
 
         # Receive initialization message.
