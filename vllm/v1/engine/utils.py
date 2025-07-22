@@ -725,12 +725,23 @@ def wait_for_engine_startup(
             raise RuntimeError(f"Message from engine with unexpected data "
                                f"parallel rank: {eng_index}")
         msg = msgspec.msgpack.decode(ready_msg_bytes)
-        status, local = msg["status"], msg["local"]
+        status, local, headless = msg["status"], msg["local"], msg["headless"]
         if local != engine.local:
             raise RuntimeError(f"{status} message from "
                                f"{'local' if local else 'remote'} "
                                f"engine {eng_index}, expected it to be "
                                f"{'local' if engine.local else 'remote'}")
+
+        # Remote engines must be headless iff we aren't in hybrid dp lb mode.
+        if not local and headless == parallel_config.data_parallel_hybrid_lb:
+            if headless:
+                raise RuntimeError(f"Remote engine {eng_index} must not use "
+                                   f"--headless in --data-parallel-hybrid-lb "
+                                   f"mode")
+            else:
+                raise RuntimeError(f"Remote engine {eng_index} must use "
+                                   f"--headless unless"
+                                   f"in --data-parallel-hybrid-lb mode")
 
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
 

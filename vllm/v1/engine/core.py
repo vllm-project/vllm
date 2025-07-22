@@ -483,8 +483,10 @@ class EngineCoreProc(EngineCore):
         """
         input_ctx = zmq.Context()
         is_local = local_client and client_handshake_address is None
+        headless = not local_client
         handshake = self._perform_handshake(input_ctx, handshake_address,
-                                            identity, is_local, vllm_config,
+                                            identity, is_local, headless,
+                                            vllm_config,
                                             vllm_config.parallel_config)
         if client_handshake_address is None:
             with handshake as addresses:
@@ -492,7 +494,7 @@ class EngineCoreProc(EngineCore):
         else:
             assert local_client
             local_handshake = self._perform_handshake(
-                input_ctx, client_handshake_address, identity, True,
+                input_ctx, client_handshake_address, identity, True, False,
                 vllm_config)
             with handshake as addresses, local_handshake as client_addresses:
                 addresses.inputs = client_addresses.inputs
@@ -509,6 +511,7 @@ class EngineCoreProc(EngineCore):
         handshake_address: str,
         identity: bytes,
         local_client: bool,
+        headless: bool,
         vllm_config: VllmConfig,
         parallel_config_to_update: Optional[ParallelConfig] = None,
     ) -> Generator[EngineZmqAddresses, None, None]:
@@ -533,6 +536,7 @@ class EngineCoreProc(EngineCore):
                 msgspec.msgpack.encode({
                     "status": "READY",
                     "local": local_client,
+                    "headless": headless,
                     "num_gpu_blocks": num_gpu_blocks,
                     "dp_stats_address": dp_stats_address,
                 }))
