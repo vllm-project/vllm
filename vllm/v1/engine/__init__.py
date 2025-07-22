@@ -135,6 +135,13 @@ class UtilityOutput(
     result: Any = None
 
 
+class EngineErrorPayload(msgspec.Struct):
+    exc_type: str
+    exc_module: str
+    exc_args: list
+    exc_traceback: str
+
+
 class EngineCoreOutputs(
         msgspec.Struct,
         array_like=True,  # type: ignore[call-arg]
@@ -160,6 +167,8 @@ class EngineCoreOutputs(
     # In DP case, used to signal that a request was received for an
     # "old" wave, so the next wave needs to be started in other engines.
     start_wave: Optional[int] = None
+
+    engine_error: Optional[EngineErrorPayload] = None
 
     def __post_init__(self):
         if self.timestamp == 0.0:

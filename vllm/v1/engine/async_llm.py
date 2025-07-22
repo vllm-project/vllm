@@ -29,7 +29,8 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Device, cdiv
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+from vllm.v1.engine.exceptions import (EngineDeadError, EngineGenerateError,
+                                       SchedulerWaitingQueueFullError)
 from vllm.v1.engine.output_processor import (OutputProcessor,
                                              RequestOutputCollector)
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -347,7 +348,10 @@ class AsyncLLM(EngineClient):
             if self.log_requests:
                 logger.info("Request %s failed (bad request).", request_id)
             raise
-
+        except SchedulerWaitingQueueFullError:
+            if self.log_requests:
+                logger.info("Request %s failed (queue full).", request_id)
+            raise
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
             await self.abort(request_id)
@@ -373,6 +377,11 @@ class AsyncLLM(EngineClient):
                 while True:
                     # 1) Pull EngineCoreOutputs from the EngineCore.
                     outputs = await engine_core.get_output_async()
+                    if isinstance(outputs, SchedulerWaitingQueueFullError):
+                        # If the waiting queue is full, we return the error
+                        # to the caller.
+                        output_processor.propagate_error(outputs)
+                        continue
                     num_outputs = len(outputs.outputs)
 
                     iteration_stats = IterationStats() if (
@@ -499,7 +508,10 @@ class AsyncLLM(EngineClient):
             if self.log_requests:
                 logger.info("Request %s failed (bad request).", request_id)
             raise
-
+        except SchedulerWaitingQueueFullError:
+            if self.log_requests:
+                logger.info("Request %s failed (queue full).", request_id)
+            raise
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
             await self.abort(request_id)

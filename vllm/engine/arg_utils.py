@@ -437,6 +437,9 @@ class EngineArgs:
     # DEPRECATED
     enable_prompt_adapter: bool = False
 
+    max_waiting_queue_length: Optional[int] = (
+        SchedulerConfig.max_waiting_queue_length
+    )
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -778,6 +781,9 @@ class EngineArgs:
             title="SchedulerConfig",
             description=SchedulerConfig.__doc__,
         )
+        scheduler_group.add_argument(
+            "--max-waiting-queue-length",
+            **scheduler_kwargs["max_waiting_queue_length"])
         scheduler_group.add_argument(
             "--max-num-batched-tokens",
             **scheduler_kwargs["max_num_batched_tokens"])

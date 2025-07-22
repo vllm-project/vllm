@@ -614,24 +614,17 @@ async def cancel_responses(response_id: str, raw_request: Request):
     return JSONResponse(content=response.model_dump())
 
 
-@router.post("/v1/chat/completions",
-             dependencies=[Depends(validate_json_request)],
-             responses={
-                 HTTPStatus.OK.value: {
-                     "content": {
-                         "text/event-stream": {}
-                     }
-                 },
-                 HTTPStatus.BAD_REQUEST.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.NOT_FOUND.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-                     "model": ErrorResponse
-                 }
-             })
+@router.post(
+    "/v1/chat/completions",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+        HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": ErrorResponse},
+    },
+)
 @with_cancellation
 @load_aware_call
 async def create_chat_completion(request: ChatCompletionRequest,
@@ -653,24 +646,17 @@ async def create_chat_completion(request: ChatCompletionRequest,
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post("/v1/completions",
-             dependencies=[Depends(validate_json_request)],
-             responses={
-                 HTTPStatus.OK.value: {
-                     "content": {
-                         "text/event-stream": {}
-                     }
-                 },
-                 HTTPStatus.BAD_REQUEST.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.NOT_FOUND.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-                     "model": ErrorResponse
-                 },
-             })
+@router.post(
+    "/v1/completions",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+        HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": ErrorResponse},
+    },
+)
 @with_cancellation
 @load_aware_call
 async def create_completion(request: CompletionRequest, raw_request: Request):

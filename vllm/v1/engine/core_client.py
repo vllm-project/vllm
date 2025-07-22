@@ -23,12 +23,13 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.utils import get_open_port, get_open_zmq_inproc_path, make_zmq_socket
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
-                            EngineCoreRequestType,
+                            EngineCoreRequestType, EngineErrorPayload,
                             ReconfigureDistributedRequest, ReconfigureRankType,
                             UtilityOutput)
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
-from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.exceptions import (EngineDeadError,
+                                       SchedulerWaitingQueueFullError)
 from vllm.v1.engine.utils import (CoreEngineActorManager,
                                   CoreEngineProcManager, launch_core_engines)
 from vllm.v1.executor.abstract import Executor
@@ -219,6 +220,20 @@ class EngineCoreClient(ABC):
             args: tuple = (),
             kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         raise NotImplementedError
+
+
+def _process_engine_error(engine_error: EngineErrorPayload) -> Exception:
+    """Process an engine error payload and raise an exception."""
+    try:
+        module = sys.modules.get(engine_error.exc_module)
+        exc_class = getattr(module, engine_error.exc_type)
+    except Exception:
+        exc_class = RuntimeError  # fallback
+    exc = exc_class(*engine_error.exc_args)
+    if isinstance(exc,
+                  SchedulerWaitingQueueFullError) and engine_error.exc_args:
+        exc.request_id = engine_error.exc_args[0]
+    return exc
 
 
 class InprocClient(EngineCoreClient):
@@ -719,6 +734,10 @@ class AsyncMPClient(MPClient):
                     frames = await output_socket.recv_multipart(copy=False)
                     resources.validate_alive(frames)
                     outputs: EngineCoreOutputs = decoder.decode(frames)
+                    if outputs.engine_error:
+                        outputs_queue.put_nowait(
+                            _process_engine_error(outputs.engine_error))
+                        continue
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output,
                                                 utility_results)
@@ -747,6 +766,8 @@ class AsyncMPClient(MPClient):
         # from this (run_output_handler) task to shut down the server.
         assert self.outputs_queue is not None
         outputs = await self.outputs_queue.get()
+        if isinstance(outputs, SchedulerWaitingQueueFullError):
+            return outputs
         if isinstance(outputs, Exception):
             raise self._format_exception(outputs) from None
         return outputs
@@ -784,6 +805,7 @@ class AsyncMPClient(MPClient):
                 self.add_pending_message(f.result(), objects)
 
         future.add_done_callback(add_pending)
+        print(f"_send_input_message")
         return future
 
     async def call_utility_async(self, method: str, *args) -> Any:
@@ -803,6 +825,7 @@ class AsyncMPClient(MPClient):
         return await future
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
+        print(f"add_request_async {request.request_id}=")
         request.client_index = self.client_index
         await self._send_input(EngineCoreRequestType.ADD, request)
         self._ensure_output_queue_task()
