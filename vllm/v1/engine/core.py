@@ -42,7 +42,7 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request, RequestStatus, hash_request_tokens
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.version import __version__ as VLLM_VERSION
@@ -396,7 +396,12 @@ class EngineCore:
         
         This function could be directly used in input processing thread to allow
         request initialization running in parallel with Model forward"""
-        return Request.from_engine_core_request(request)
+        converted_request = Request.from_engine_core_request(request)
+        # TODO(Jialin): Use the right hash function here
+        # TODO(Jialin): Use the right block size here
+        converted_request.precomputed_block_hashes = hash_request_tokens(
+            hash, 16, converted_request)
+        return converted_request
 
 
 class EngineCoreProc(EngineCore):

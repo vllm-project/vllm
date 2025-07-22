@@ -8,10 +8,9 @@ from vllm.distributed.kv_events import (AllBlocksCleared, BlockRemoved,
                                         BlockStored, KVCacheEvent)
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
-                                         FreeKVCacheBlockQueue, KVCacheBlock,
-                                         generate_block_hash_extra_keys,
-                                         hash_block_tokens)
-from vllm.v1.request import Request
+                                         FreeKVCacheBlockQueue, KVCacheBlock)
+from vllm.v1.request import (Request, generate_block_hash_extra_keys,
+                             hash_block_tokens)
 
 logger = init_logger(__name__)
 

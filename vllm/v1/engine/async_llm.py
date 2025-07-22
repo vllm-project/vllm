@@ -39,6 +39,7 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
+from vllm.v1.request import init_none_hash
 
 logger = init_logger(__name__)
 
@@ -131,6 +132,11 @@ class AsyncLLM(EngineClient):
             self.logger_manager.log_engine_initialized()
 
         self.output_handler: Optional[asyncio.Task] = None
+
+        # logger.info("===jialino init_none_hash")
+        # TODO(Jialin): Extract the right hash function from vllm_config @nocommit
+        init_none_hash(hash)
+
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
             asyncio.get_running_loop()
