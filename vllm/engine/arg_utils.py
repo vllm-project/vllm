@@ -1130,7 +1130,7 @@ class EngineArgs:
 
             self.data_parallel_rank = self.data_parallel_start_rank or 0
         else:
-            assert self.data_parallel_hybrid_lb is None, (
+            assert not self.data_parallel_hybrid_lb, (
                 "data_parallel_size_local must be set to use "
                 "data_parallel_hybrid_lb.")
 
