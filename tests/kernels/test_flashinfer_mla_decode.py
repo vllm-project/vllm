@@ -50,7 +50,6 @@ def ref_mla(
 @pytest.mark.parametrize("block_size", [32, 64])
 def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int,
                             block_size: int):
-    torch.set_default_dtype(dtype)
     torch.set_default_device('cuda')
     torch.manual_seed(42)
 
@@ -92,8 +91,8 @@ def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int,
         ]
         block_id += num_blocks_needed
 
-    kv_cache = torch.randn(block_tables.numel(), block_size, qk_head_dim)
-    q = torch.randn(bs, num_heads, qk_head_dim)
+    kv_cache = torch.randn(block_tables.numel(), block_size, qk_head_dim).to(dtype)
+    q = torch.randn(bs, num_heads, qk_head_dim).to(dtype)
 
     out_ref = q.new_zeros(bs, num_heads, kv_lora_rank)
     ref_mla(out_ref, q, kv_cache, scale, block_tables, seq_lens_tensor)
@@ -103,22 +102,20 @@ def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int,
         dtype=torch.uint8,
         device=q.device,
     )
-    kv_cache_duplicate = torch.stack([kv_cache, kv_cache], dim=1)
     # Flashinfer MLA expects the query to be of shape
-    # (bs, acc_q_len, num_heads, qk_head_dim),
-    # where acc_q_len is # MTP draft tokens + 1.
+    # (bs, q_len_per_request, num_heads, qk_head_dim),
+    # where q_len_per_request is the MTP query length (=1 without MTP)
     q = q.unsqueeze(1)
 
     out_ans = trtllm_batch_decode_with_kv_cache_mla(
         query=q,
-        kv_cache=kv_cache_duplicate,
+        kv_cache=kv_cache.unsqueeze(1),
         workspace_buffer=workspace_buffer,
         qk_nope_head_dim=qk_nope_head_dim,
         kv_lora_rank=kv_lora_rank,
         qk_rope_head_dim=qk_rope_head_dim,
         block_tables=block_tables,
         seq_lens=seq_lens_tensor,
-        block_size=block_size,
         max_seq_len=max_seq_len,
         bmm1_scale=scale,
     )
