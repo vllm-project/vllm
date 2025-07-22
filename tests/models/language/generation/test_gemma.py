@@ -15,13 +15,13 @@ def test_dummy_loader(vllm_runner, monkeypatch, model: str) -> None:
                 load_format="dummy",
         ) as llm:
             if model == "google/gemma-3-4b-it":
-                normalizers = llm.model.collective_rpc(
+                normalizers = llm.llm.collective_rpc(
                     lambda self: self.model_runner.model.language_model.model.
                     normalizer.cpu().item())
-                config = llm.model.llm_engine.model_config.hf_config.text_config
+                config = llm.llm.llm_engine.model_config.hf_config.text_config
             else:
-                normalizers = llm.model.collective_rpc(
+                normalizers = llm.llm.collective_rpc(
                     lambda self: self.model_runner.model.model.normalizer.cpu(
                     ).item())
-                config = llm.model.llm_engine.model_config.hf_config
+                config = llm.llm.llm_engine.model_config.hf_config
             assert np.allclose(normalizers, config.hidden_size**0.5, rtol=2e-3)
