@@ -1,20 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
 from collections.abc import Generator
 from typing import Optional
 
 import pytest
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest, ChatCompletionToolsParam, DeltaMessage, 
-    DeltaFunctionCall, DeltaToolCall, FunctionCall, ToolCall
-)
+
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              ChatCompletionToolsParam,
+                                              DeltaMessage, FunctionCall,
+                                              ToolCall)
+from vllm.entrypoints.openai.tool_parsers.qwen3coder_tool_parser import (
+    Qwen3CoderToolParser)
 from vllm.transformers_utils.detokenizer import detokenize_incrementally
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
-from qwen3coder_tool_parser import Qwen3CoderToolParser
-
 MODEL = "Qwen/Qwen3-Coder-480A35"
+
+pytest.skip(
+    "skip qwen3coder parser test, to be enabled when the model is released "
+    "publicly",
+    allow_module_level=True)
 
 
 @pytest.fixture(scope="module")
@@ -30,37 +37,51 @@ def qwen3_tool_parser(qwen3_tokenizer):
 @pytest.fixture
 def sample_tools():
     return [
-        ChatCompletionToolsParam(
-            type="function",
-            function={
-                "name": "get_current_weather",
-                "description": "Get the current weather",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "city": {"type": "string", "description": "The city name"},
-                        "state": {"type": "string", "description": "The state code"},
-                        "unit": {"type": "string", "enum": ["fahrenheit", "celsius"]}
-                    },
-                    "required": ["city", "state"]
-                }
-            }
-        ),
-        ChatCompletionToolsParam(
-            type="function",
-            function={
-                "name": "calculate_area",
-                "description": "Calculate area of a shape",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "shape": {"type": "string"},
-                        "dimensions": {"type": "object"},
-                        "precision": {"type": "integer"}
-                    }
-                }
-            }
-        )
+        ChatCompletionToolsParam(type="function",
+                                 function={
+                                     "name": "get_current_weather",
+                                     "description": "Get the current weather",
+                                     "parameters": {
+                                         "type": "object",
+                                         "properties": {
+                                             "city": {
+                                                 "type": "string",
+                                                 "description": "The city name"
+                                             },
+                                             "state": {
+                                                 "type": "string",
+                                                 "description":
+                                                 "The state code"
+                                             },
+                                             "unit": {
+                                                 "type": "string",
+                                                 "enum":
+                                                 ["fahrenheit", "celsius"]
+                                             }
+                                         },
+                                         "required": ["city", "state"]
+                                     }
+                                 }),
+        ChatCompletionToolsParam(type="function",
+                                 function={
+                                     "name": "calculate_area",
+                                     "description":
+                                     "Calculate area of a shape",
+                                     "parameters": {
+                                         "type": "object",
+                                         "properties": {
+                                             "shape": {
+                                                 "type": "string"
+                                             },
+                                             "dimensions": {
+                                                 "type": "object"
+                                             },
+                                             "precision": {
+                                                 "type": "integer"
+                                             }
+                                         }
+                                     }
+                                 })
     ]
 
 
@@ -72,13 +93,18 @@ def assert_tool_calls(actual_tool_calls: list[ToolCall],
                                                     expected_tool_calls):
         # Qwen3 parser doesn't generate IDs during extraction
         assert actual_tool_call.type == "function"
-        assert actual_tool_call.function.name == expected_tool_call.function.name
-        assert json.loads(actual_tool_call.function.arguments) == json.loads(expected_tool_call.function.arguments)
+        assert (
+            actual_tool_call.function.name == expected_tool_call.function.name)
+        assert (json.loads(actual_tool_call.function.arguments) == json.loads(
+            expected_tool_call.function.arguments))
 
 
 def stream_delta_message_generator(
-        qwen3_tool_parser: Qwen3CoderToolParser, qwen3_tokenizer: AnyTokenizer,
-        model_output: str, request: Optional[ChatCompletionRequest] = None) -> Generator[DeltaMessage, None, None]:
+    qwen3_tool_parser: Qwen3CoderToolParser,
+    qwen3_tokenizer: AnyTokenizer,
+    model_output: str,
+    request: Optional[ChatCompletionRequest] = None
+) -> Generator[DeltaMessage, None, None]:
     all_token_ids = qwen3_tokenizer.encode(model_output,
                                            add_special_tokens=False)
 
@@ -117,8 +143,8 @@ def stream_delta_message_generator(
             yield delta_message
 
         previous_text = current_text
-        previous_tokens = previous_tokens + new_tokens if previous_tokens\
-            else new_tokens
+        previous_tokens = (previous_tokens +
+                           new_tokens if previous_tokens else new_tokens)
         prefix_offset = new_prefix_offset
         read_offset = new_read_offset
 
@@ -142,8 +168,7 @@ def test_extract_tool_calls_no_tools(qwen3_tool_parser):
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
-        (
-            '''<tool_call>
+        ('''<tool_call>
 <function=get_current_weather>
 <parameter=city>
 Dallas
@@ -155,21 +180,16 @@ TX
 fahrenheit
 </parameter>
 </function>
-</tool_call>''',
-            [
-                ToolCall(function=FunctionCall(
-                    name="get_current_weather",
-                    arguments=json.dumps({
-                        "city": "Dallas",
-                        "state": "TX",
-                        "unit": "fahrenheit"
-                    })
-                ))
-            ],
-            None
-        ),
-        (
-            '''Sure! Let me check the weather for you.<tool_call>
+</tool_call>''', [
+            ToolCall(
+                function=FunctionCall(name="get_current_weather",
+                                      arguments=json.dumps({
+                                          "city": "Dallas",
+                                          "state": "TX",
+                                          "unit": "fahrenheit"
+                                      })))
+        ], None),
+        ('''Sure! Let me check the weather for you.<tool_call>
 <function=get_current_weather>
 <parameter=city>
 Dallas
@@ -181,21 +201,16 @@ TX
 fahrenheit
 </parameter>
 </function>
-</tool_call>''',
-            [
-                ToolCall(function=FunctionCall(
-                    name="get_current_weather",
-                    arguments=json.dumps({
-                        "city": "Dallas",
-                        "state": "TX",
-                        "unit": "fahrenheit"
-                    })
-                ))
-            ],
-            "Sure! Let me check the weather for you."
-        ),
-        (
-            '''<tool_call>
+</tool_call>''', [
+            ToolCall(
+                function=FunctionCall(name="get_current_weather",
+                                      arguments=json.dumps({
+                                          "city": "Dallas",
+                                          "state": "TX",
+                                          "unit": "fahrenheit"
+                                      })))
+        ], "Sure! Let me check the weather for you."),
+        ('''<tool_call>
 <function=calculate_area>
 <parameter=shape>
 rectangle
@@ -208,21 +223,18 @@ rectangle
 2
 </parameter>
 </function>
-</tool_call>''',
-            [
-                ToolCall(function=FunctionCall(
-                    name="calculate_area",
-                    arguments=json.dumps({
-                        "shape": "rectangle",
-                        "dimensions": {"width": 10, "height": 20},
-                        "precision": 2
-                    })
-                ))
-            ],
-            None
-        ),
-        (
-            '''<tool_call>
+</tool_call>''', [
+            ToolCall(function=FunctionCall(name="calculate_area",
+                                           arguments=json.dumps({
+                                               "shape": "rectangle",
+                                               "dimensions": {
+                                                   "width": 10,
+                                                   "height": 20
+                                               },
+                                               "precision": 2
+                                           })))
+        ], None),
+        ('''<tool_call>
 <function=get_current_weather>
 <parameter=city>
 Dallas
@@ -247,29 +259,23 @@ FL
 fahrenheit
 </parameter>
 </function>
-</tool_call>''',
-            [
-                ToolCall(function=FunctionCall(
-                    name="get_current_weather",
-                    arguments=json.dumps({
-                        "city": "Dallas",
-                        "state": "TX",
-                        "unit": "fahrenheit"
-                    })
-                )),
-                ToolCall(function=FunctionCall(
-                    name="get_current_weather",
-                    arguments=json.dumps({
-                        "city": "Orlando",
-                        "state": "FL",
-                        "unit": "fahrenheit"
-                    })
-                ))
-            ],
-            None
-        ),
-        (
-            '''Let me calculate that area for you.<tool_call>
+</tool_call>''', [
+            ToolCall(
+                function=FunctionCall(name="get_current_weather",
+                                      arguments=json.dumps({
+                                          "city": "Dallas",
+                                          "state": "TX",
+                                          "unit": "fahrenheit"
+                                      }))),
+            ToolCall(
+                function=FunctionCall(name="get_current_weather",
+                                      arguments=json.dumps({
+                                          "city": "Orlando",
+                                          "state": "FL",
+                                          "unit": "fahrenheit"
+                                      })))
+        ], None),
+        ('''Let me calculate that area for you.<tool_call>
 <function=calculate_area>
 <parameter=shape>
 circle
@@ -281,28 +287,23 @@ circle
 3
 </parameter>
 </function>
-</tool_call>''',
-            [
-                ToolCall(function=FunctionCall(
-                    name="calculate_area",
-                    arguments=json.dumps({
-                        "shape": "circle",
-                        "dimensions": {"radius": 15.5},
-                        "precision": 3
-                    })
-                ))
-            ],
-            "Let me calculate that area for you."
-        ),
+</tool_call>''', [
+            ToolCall(function=FunctionCall(name="calculate_area",
+                                           arguments=json.dumps({
+                                               "shape": "circle",
+                                               "dimensions": {
+                                                   "radius": 15.5
+                                               },
+                                               "precision": 3
+                                           })))
+        ], "Let me calculate that area for you."),
     ],
 )
 def test_extract_tool_calls(qwen3_tool_parser, sample_tools, model_output,
-                           expected_tool_calls, expected_content):
-    request = ChatCompletionRequest(
-        model=MODEL,
-        messages=[],
-        tools=sample_tools
-    )
+                            expected_tool_calls, expected_content):
+    request = ChatCompletionRequest(model=MODEL,
+                                    messages=[],
+                                    tools=sample_tools)
     extracted_tool_calls = qwen3_tool_parser.extract_tool_calls(
         model_output, request=request)
     assert extracted_tool_calls.tools_called
@@ -322,41 +323,48 @@ Dallas
 TX
 </parameter>
 </function>'''
-    
-    request = ChatCompletionRequest(
-        model=MODEL,
-        messages=[],
-        tools=sample_tools
-    )
+
+    request = ChatCompletionRequest(model=MODEL,
+                                    messages=[],
+                                    tools=sample_tools)
     extracted_tool_calls = qwen3_tool_parser.extract_tool_calls(
         model_output, request=request)
-    
+
     assert extracted_tool_calls.tools_called
     assert len(extracted_tool_calls.tool_calls) == 1
-    assert extracted_tool_calls.tool_calls[0].function.name == "get_current_weather"
+    assert (extracted_tool_calls.tool_calls[0].function.name ==
+            "get_current_weather")
 
 
 def test_extract_tool_calls_type_conversion(qwen3_tool_parser):
     """Test parameter type conversion based on tool schema"""
     tools = [
-        ChatCompletionToolsParam(
-            type="function",
-            function={
-                "name": "test_types",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "int_param": {"type": "integer"},
-                        "float_param": {"type": "float"},
-                        "bool_param": {"type": "boolean"},
-                        "str_param": {"type": "string"},
-                        "obj_param": {"type": "object"}
-                    }
-                }
-            }
-        )
+        ChatCompletionToolsParam(type="function",
+                                 function={
+                                     "name": "test_types",
+                                     "parameters": {
+                                         "type": "object",
+                                         "properties": {
+                                             "int_param": {
+                                                 "type": "integer"
+                                             },
+                                             "float_param": {
+                                                 "type": "float"
+                                             },
+                                             "bool_param": {
+                                                 "type": "boolean"
+                                             },
+                                             "str_param": {
+                                                 "type": "string"
+                                             },
+                                             "obj_param": {
+                                                 "type": "object"
+                                             }
+                                         }
+                                     }
+                                 })
     ]
-    
+
     model_output = '''<tool_call>
 <function=test_types>
 <parameter=int_param>
@@ -376,15 +384,11 @@ hello world
 </parameter>
 </function>
 </tool_call>'''
-    
-    request = ChatCompletionRequest(
-        model=MODEL,
-        messages=[],
-        tools=tools
-    )
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
     extracted_tool_calls = qwen3_tool_parser.extract_tool_calls(
         model_output, request=request)
-    
+
     args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
     assert args["int_param"] == 42
     assert args["float_param"] == 3.14
@@ -403,8 +407,7 @@ hello world
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
         ("This is a test without tools", [], "This is a test without tools"),
-        (
-            '''<tool_call>
+        ('''<tool_call>
 <function=get_current_weather>
 <parameter=city>
 Dallas
@@ -416,21 +419,16 @@ TX
 fahrenheit
 </parameter>
 </function>
-</tool_call>''',
-            [
-                ToolCall(function=FunctionCall(
-                    name="get_current_weather",
-                    arguments=json.dumps({
-                        "city": "Dallas",
-                        "state": "TX",
-                        "unit": "fahrenheit"
-                    })
-                ))
-            ],
-            ""
-        ),
-        (
-            '''Sure! Let me check the weather for you.<tool_call>
+</tool_call>''', [
+            ToolCall(
+                function=FunctionCall(name="get_current_weather",
+                                      arguments=json.dumps({
+                                          "city": "Dallas",
+                                          "state": "TX",
+                                          "unit": "fahrenheit"
+                                      })))
+        ], ""),
+        ('''Sure! Let me check the weather for you.<tool_call>
 <function=get_current_weather>
 <parameter=city>
 Dallas
@@ -442,21 +440,16 @@ TX
 fahrenheit
 </parameter>
 </function>
-</tool_call>''',
-            [
-                ToolCall(function=FunctionCall(
-                    name="get_current_weather",
-                    arguments=json.dumps({
-                        "city": "Dallas",
-                        "state": "TX",
-                        "unit": "fahrenheit"
-                    })
-                ))
-            ],
-            "Sure! Let me check the weather for you."
-        ),
-        (
-            '''<tool_call>
+</tool_call>''', [
+            ToolCall(
+                function=FunctionCall(name="get_current_weather",
+                                      arguments=json.dumps({
+                                          "city": "Dallas",
+                                          "state": "TX",
+                                          "unit": "fahrenheit"
+                                      })))
+        ], "Sure! Let me check the weather for you."),
+        ('''<tool_call>
 <function=get_current_weather>
 <parameter=city>
 Dallas
@@ -481,42 +474,35 @@ FL
 celsius
 </parameter>
 </function>
-</tool_call>''',
-            [
-                ToolCall(function=FunctionCall(
-                    name="get_current_weather",
-                    arguments=json.dumps({
-                        "city": "Dallas",
-                        "state": "TX",
-                        "unit": "fahrenheit"
-                    })
-                )),
-                ToolCall(function=FunctionCall(
-                    name="get_current_weather",
-                    arguments=json.dumps({
-                        "city": "Orlando",
-                        "state": "FL",
-                        "unit": "celsius"
-                    })
-                ))
-            ],
-            ""
-        ),
+</tool_call>''', [
+            ToolCall(
+                function=FunctionCall(name="get_current_weather",
+                                      arguments=json.dumps({
+                                          "city": "Dallas",
+                                          "state": "TX",
+                                          "unit": "fahrenheit"
+                                      }))),
+            ToolCall(
+                function=FunctionCall(name="get_current_weather",
+                                      arguments=json.dumps({
+                                          "city": "Orlando",
+                                          "state": "FL",
+                                          "unit": "celsius"
+                                      })))
+        ], ""),
     ],
 )
 def test_extract_tool_calls_streaming(qwen3_tool_parser, qwen3_tokenizer,
-                                     sample_tools, model_output, 
-                                     expected_tool_calls, expected_content):
+                                      sample_tools, model_output,
+                                      expected_tool_calls, expected_content):
     """Test incremental streaming behavior"""
-    request = ChatCompletionRequest(
-        model=MODEL,
-        messages=[],
-        tools=sample_tools
-    )
-    
+    request = ChatCompletionRequest(model=MODEL,
+                                    messages=[],
+                                    tools=sample_tools)
+
     other_content = ''
     tool_states = {}  # Track state per tool index
-    
+
     for delta_message in stream_delta_message_generator(
             qwen3_tool_parser, qwen3_tokenizer, model_output, request):
         # role should never be streamed from tool parser
@@ -528,7 +514,7 @@ def test_extract_tool_calls_streaming(qwen3_tool_parser, qwen3_tokenizer,
         if delta_message.tool_calls:
             for tool_call in delta_message.tool_calls:
                 idx = tool_call.index
-                
+
                 # Initialize state for new tool
                 if idx not in tool_states:
                     tool_states[idx] = {
@@ -537,45 +523,48 @@ def test_extract_tool_calls_streaming(qwen3_tool_parser, qwen3_tokenizer,
                         "arguments": "",
                         "type": None
                     }
-                
+
                 # First chunk should have id, name, and type
                 if tool_call.id:
                     tool_states[idx]["id"] = tool_call.id
-                    
+
                 if tool_call.type:
                     assert tool_call.type == "function"
                     tool_states[idx]["type"] = tool_call.type
-                    
+
                 if tool_call.function:
                     if tool_call.function.name:
-                        assert tool_states[idx]["name"] is None  # Should only be set once
+                        # Should only be set once
+                        assert tool_states[idx]["name"] is None
                         tool_states[idx]["name"] = tool_call.function.name
-                        
+
                     if tool_call.function.arguments is not None:
                         # Accumulate arguments incrementally
-                        tool_states[idx]["arguments"] += tool_call.function.arguments
+                        tool_states[idx][
+                            "arguments"] += tool_call.function.arguments
 
     # Verify final content
     assert other_content == expected_content
 
     # Verify we got all expected tool calls
     assert len(tool_states) == len(expected_tool_calls)
-    
+
     # Verify each tool call
     for idx, expected_tool in enumerate(expected_tool_calls):
         state = tool_states[idx]
         assert state["id"] is not None
         assert state["type"] == "function"
         assert state["name"] == expected_tool.function.name
-        
+
         # Parse accumulated arguments
         actual_args = json.loads(state["arguments"])
         expected_args = json.loads(expected_tool.function.arguments)
         assert actual_args == expected_args
 
 
-def test_extract_tool_calls_streaming_incremental(qwen3_tool_parser, qwen3_tokenizer,
-                                                 sample_tools):
+def test_extract_tool_calls_streaming_incremental(qwen3_tool_parser,
+                                                  qwen3_tokenizer,
+                                                  sample_tools):
     """Test that streaming is truly incremental"""
     model_output = '''I'll check the weather.<tool_call>
 <function=get_current_weather>
@@ -587,45 +576,44 @@ TX
 </parameter>
 </function>
 </tool_call>'''
-    
-    request = ChatCompletionRequest(
-        model=MODEL,
-        messages=[],
-        tools=sample_tools
-    )
-    
+
+    request = ChatCompletionRequest(model=MODEL,
+                                    messages=[],
+                                    tools=sample_tools)
+
     chunks = []
     for delta_message in stream_delta_message_generator(
             qwen3_tool_parser, qwen3_tokenizer, model_output, request):
         chunks.append(delta_message)
-    
+
     # Should have multiple chunks
     assert len(chunks) > 3
-    
+
     # First chunk(s) should be content
     assert chunks[0].content is not None
     assert chunks[0].tool_calls is None or chunks[0].tool_calls == []
-    
+
     # Should have a chunk with tool header (id, name, type)
     header_found = False
     for chunk in chunks:
         if chunk.tool_calls and chunk.tool_calls[0].id:
             header_found = True
-            assert chunk.tool_calls[0].function.name == "get_current_weather"
+            assert (chunk.tool_calls[0].function.name == "get_current_weather")
             assert chunk.tool_calls[0].type == "function"
-            assert chunk.tool_calls[0].function.arguments == ""  # Empty initially
+            # Empty initially
+            assert chunk.tool_calls[0].function.arguments == ""
             break
     assert header_found
-    
+
     # Should have chunks with incremental arguments
     arg_chunks = []
     for chunk in chunks:
         if chunk.tool_calls and chunk.tool_calls[0].function.arguments:
             arg_chunks.append(chunk.tool_calls[0].function.arguments)
-    
+
     # Arguments should be streamed incrementally
     assert len(arg_chunks) > 1
-    
+
     # Concatenated arguments should form valid JSON
     full_args = "".join(arg_chunks)
     parsed_args = json.loads(full_args)
