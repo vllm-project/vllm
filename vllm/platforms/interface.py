@@ -543,6 +543,13 @@ class Platform:
         """
         raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
 
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+        """
+        Returns if the kv_cache_dtype is supported by the current platform.
+        """
+        return False
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
