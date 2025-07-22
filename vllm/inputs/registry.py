@@ -173,12 +173,6 @@ class InputProcessingContext(InputContext):
             return x
 
         try:
-            if not isinstance(data["text"], str):
-                # the data["text"] field is the tokenized ids which is unsupported
-                # in the hf_processor, which is why we would need to decode the ids
-                # into string
-                data["text"] = hf_processor.decode(data["text"])
-            
             output = hf_processor(**data, **merged_kwargs, return_tensors="pt")
             # this emulates output.to(dtype=self.model_config.dtype)
             if isinstance(output, BatchFeature):
