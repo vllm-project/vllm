@@ -3280,9 +3280,9 @@ class ReasoningConfig:
     """String that indicates the start of reasoning."""
     think_end_str: Optional[str] = None
     """String that indicates the end of reasoning."""
-    think_start_token_ids: Optional[int] = None
+    think_start_token_ids: Optional[list[int]] = None
     """Token ID that indicates the start of reasoning."""
-    think_end_token_ids: Optional[int] = None
+    think_end_token_ids: Optional[list[int]] = None
     """Token ID that indicates the end of reasoning."""
     low_effort_token_budget: int = 1024
     """Token budget for low effort reasoning."""
