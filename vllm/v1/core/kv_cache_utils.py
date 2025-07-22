@@ -220,11 +220,11 @@ class FreeKVCacheBlockQueue:
             if i < self.num_free_blocks - 1:
                 blocks[i].next_free_block = blocks[i + 1]
 
-        # Create a fake head and a tail block for the doubly linked list to
-        # reduce branching in the code
+        # Create a fake head tail blocks for the doubly linked list to
+        # reduce branching in the code.
         #
-        # The implementation garenteed that the fake head and tail
-        # are NEVER got popped, so we could safely assume each real blocks
+        # The implementation guarantees that the fake head and tail
+        # are NEVER popped, so we can safely assume each real block
         # in the queue has prev and next blocks.
         self.fake_free_list_head = KVCacheBlock(block_id=-1)
         self.fake_free_list_tail = KVCacheBlock(block_id=-1)
@@ -246,22 +246,15 @@ class FreeKVCacheBlockQueue:
         Returns:
             The first free block.
         """
-        if (self.fake_free_list_head.next_free_block
-                is self.fake_free_list_tail
-                or self.fake_free_list_head.next_free_block is None):
-            assert self.num_free_blocks == 0, (
-                f"num_free_blocks ({self.num_free_blocks}) is out of sync "
-                "with the free list.")
-            raise ValueError("No free blocks available")
-
+        assert (self.fake_free_list_head.next_free_block
+                is not self.fake_free_list_tail), "No free blocks available"
+        assert (self.fake_free_list_head.next_free_block is not None
+                ), "fake_free_list_head.next_free_block should always exist"
         first_block: KVCacheBlock = self.fake_free_list_head.next_free_block
 
-        if first_block.next_free_block is None:
-            # This should not happen if the block is from the free list.
-            # It indicates a bug in the caller's logic.
-            raise RuntimeError("Invalid block found in popleft() "
-                               "which doesn't have a valid next_free_block")
-
+        assert (
+            first_block.next_free_block
+            is not None), "next_free_block of real blocks should always exist"
         # Connect fake_head and the next block of first_block (i.e. second block
         # or fake tail).
         self.fake_free_list_head.next_free_block = first_block.next_free_block
@@ -300,9 +293,8 @@ class FreeKVCacheBlockQueue:
         Args:
             block: The block to append.
         """
-        if self.fake_free_list_tail.prev_free_block is None:
-            raise RuntimeError(
-                "prev_free_block of fake_free_list_tail should always exist")
+        assert (self.fake_free_list_tail.prev_free_block is not None
+                ), "fake_free_list_tail.prev_free_block should always exist"
         last_block: KVCacheBlock = self.fake_free_list_tail.prev_free_block
 
         # Connect the new block after the last block.
