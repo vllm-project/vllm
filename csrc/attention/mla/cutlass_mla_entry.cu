@@ -35,7 +35,7 @@ void sm100_cutlass_mla_decode(
 
 int64_t sm100_cutlass_mla_get_workspace_size(int64_t max_seq_len,
                                              int64_t num_batches,
-                                             int64_t sm_count = 0,
+                                             int64_t sm_count,
                                              int64_t num_kv_splits) {
   TORCH_CHECK_NOT_IMPLEMENTED(false, "No compiled cutlass MLA");
 }
