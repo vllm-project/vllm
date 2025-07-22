@@ -211,6 +211,12 @@ class AsyncLLM(EngineClient):
         if handler := getattr(self, "output_handler", None):
             handler.cancel()
 
+    def get_num_unfinished_requests(self) -> int:
+        return self.output_processor.get_num_unfinished_requests()
+
+    def get_num_pending_context_tokens(self) -> int:
+        return self.output_processor.get_num_pending_context_tokens()
+
     def _validate_max_num_reqs_scheduling(
         self,
         request_id: str,
@@ -289,6 +295,8 @@ class AsyncLLM(EngineClient):
         sampling_params: SamplingParams,
         tier: float,
     ) -> None:
+        if tier <= 0:
+            raise ValueError(f"tier must be > 0, but got {tier}")
         self._validate_max_num_reqs_scheduling(request_id, sampling_params,
                                                tier)
         self._validate_max_pending_context_tokens_scheduling(request_id, tier)

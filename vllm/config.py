@@ -2472,6 +2472,18 @@ class SchedulerConfig:
                 self.max_num_batched_tokens,
                 self.max_num_seqs * self.max_model_len)
 
+        if self.max_pending_context_tokens is not None and self.max_pending_context_tokens < 1:
+            raise ValueError(
+                "max_pending_context_tokens "
+                f"({self.max_pending_context_tokens}) must be greater than or "
+                "equal to 1.")
+
+        if self.max_num_reqs is not None and self.max_num_reqs < 1:
+            raise ValueError(
+                "max_num_reqs "
+                f"({self.max_num_reqs}) must be greater than or "
+                "equal to 1.")
+
         if self.num_lookahead_slots < 0:
             raise ValueError(
                 "num_lookahead_slots "
