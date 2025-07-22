@@ -2365,12 +2365,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         # Trigger CUDA graph capture for specific shapes.
-        # Capture the large shapes first so that the smaller shapes
-        # can reuse the memory pool allocated for the large shapes.
         with graph_capture(device=self.device):
             full_cg = self.full_cuda_graph
-            # Only rank 0 should print progress bar during capture
+            # Capture the large shapes first so that the smaller shapes
+            # can reuse the memory pool allocated for the large shapes.
             compilation_cases = reversed(self.cudagraph_batch_sizes)
+            # Only rank 0 should print progress bar during capture
             if is_global_first_rank():
                 compilation_cases = tqdm(
                     list(compilation_cases),
