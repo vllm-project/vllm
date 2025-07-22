@@ -62,13 +62,13 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     def _init_executor(self) -> None:
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
-        if envs.VLLM_USE_V1 and not current_platform.is_xpu():
+        if envs.VLLM_USE_V1:
             # V1 uses SPMD worker and compiled DAG
             os.environ["VLLM_USE_RAY_SPMD_WORKER"] = "1"
             os.environ["VLLM_USE_RAY_COMPILED_DAG"] = "1"
 
-            # For TPU, avoid compiling NVIDIA's NCCL
-            if current_platform.is_tpu():
+            # For TPU or XPU, avoid compiling NVIDIA's NCCL
+            if current_platform.is_tpu() or current_platform.is_xpu():
                 os.environ["VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE"] = "shm"
 
         # If the env var is set, it uses the Ray's compiled DAG API

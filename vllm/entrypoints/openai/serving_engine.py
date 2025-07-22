@@ -23,11 +23,6 @@ if sys.version_info >= (3, 12):
 else:
     from typing_extensions import TypedDict
 
-if sys.version_info >= (3, 12):
-    from typing import TypedDict
-else:
-    from typing_extensions import TypedDict
-
 import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -231,7 +226,7 @@ class OpenAIServing:
 
     def _get_async_tokenizer(self, tokenizer) -> AsyncMicrobatchTokenizer:
         """
-        Return (and cache) an `AsyncMicrobatchTokenizer` bound to the 
+        Return (and cache) an `AsyncMicrobatchTokenizer` bound to the
         given tokenizer.
         """
         async_tokenizer = self._async_tokenizer_pool.get(tokenizer)
@@ -310,6 +305,16 @@ class OpenAIServing:
                     " Please, select a smaller truncation size.")
         return None
 
+    def _create_pooling_params(
+        self,
+        ctx: ServeContext,
+    ) -> Union[PoolingParams, ErrorResponse]:
+        if not hasattr(ctx.request, "to_pooling_params"):
+            return self.create_error_response(
+                "Request type does not support pooling parameters")
+
+        return ctx.request.to_pooling_params()
+
     async def _prepare_generators(
         self,
         ctx: ServeContext,
@@ -323,11 +328,9 @@ class OpenAIServing:
             trace_headers = (None if ctx.raw_request is None else await
                              self._get_trace_headers(ctx.raw_request.headers))
 
-            if not hasattr(ctx.request, "to_pooling_params"):
-                return self.create_error_response(
-                    "Request type does not support pooling parameters")
-
-            pooling_params = ctx.request.to_pooling_params()
+            pooling_params = self._create_pooling_params(ctx)
+            if isinstance(pooling_params, ErrorResponse):
+                return pooling_params
 
             if ctx.engine_prompts is None:
                 return self.create_error_response(
@@ -438,9 +441,7 @@ class OpenAIServing:
 
         if self._is_model_supported(request.model):
             return None
-        if request.model in [
-                lora.lora_name for lora in self.models.lora_requests
-        ]:
+        if request.model in self.models.lora_requests:
             return None
         if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING and request.model and (
                 load_result := await self.models.resolve_lora(request.model)):
@@ -460,20 +461,73 @@ class OpenAIServing:
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND)
 
+    def _get_active_default_mm_loras(
+            self, request: AnyRequest) -> Optional[LoRARequest]:
+        """Determine if there are any active default multimodal loras."""
+        # TODO: Currently this is only enabled for chat completions
+        # to be better aligned with only being enabled for .generate
+        # when run offline. It would be nice to support additional
+        # tasks types in the future.
+        message_types = self._get_message_types(request)
+        default_mm_loras = set()
+
+        for lora in self.models.lora_requests.values():
+            # Best effort match for default multimodal lora adapters;
+            # There is probably a better way to do this, but currently
+            # this matches against the set of 'types' in any content lists
+            # up until '_', e.g., to match audio_url -> audio
+            if lora.lora_name in message_types:
+                default_mm_loras.add(lora)
+
+        # Currently only support default modality specific loras if
+        # we have exactly one lora matched on the request.
+        if len(default_mm_loras) == 1:
+            return default_mm_loras.pop()
+        return None
+
     def _maybe_get_adapters(
-        self, request: AnyRequest
+        self,
+        request: AnyRequest,
+        supports_default_mm_loras: bool = False,
     ) -> Union[tuple[None, None], tuple[LoRARequest, None], tuple[
             None, PromptAdapterRequest]]:
+
+        if request.model in self.models.lora_requests:
+            return self.models.lora_requests[request.model], None
+
+        # Currently only support default modality specific loras
+        # if we have exactly one lora matched on the request.
+        if supports_default_mm_loras:
+            default_mm_lora = self._get_active_default_mm_loras(request)
+            if default_mm_lora is not None:
+                return default_mm_lora, None
+
         if self._is_model_supported(request.model):
             return None, None
-        for lora in self.models.lora_requests:
-            if request.model == lora.lora_name:
-                return lora, None
+
         for prompt_adapter in self.models.prompt_adapter_requests:
             if request.model == prompt_adapter.prompt_adapter_name:
                 return None, prompt_adapter
         # if _check_model has been called earlier, this will be unreachable
         raise ValueError(f"The model `{request.model}` does not exist.")
+
+    def _get_message_types(self, request: AnyRequest) -> set[str]:
+        """Retrieve the set of types from message content dicts up
+        until `_`; we use this to match potential multimodal data
+        with default per modality loras.
+        """
+        message_types: set[str] = set()
+
+        if not hasattr(request, "messages"):
+            return message_types
+
+        for message in request.messages:
+            if (isinstance(message, dict) and "content" in message
+                    and isinstance(message["content"], list)):
+                for content_dict in message["content"]:
+                    if "type" in content_dict:
+                        message_types.add(content_dict["type"].split("_")[0])
+        return message_types
 
     async def _normalize_prompt_text_to_input(
         self,
@@ -765,6 +819,12 @@ class OpenAIServing:
                 prompt_token_ids=request_prompt_text["prompt_token_ids"])
             for request_prompt_text in request_prompts_text
         ]
+        cache_salt = request.cache_salt if (
+            hasattr(request, "cache_salt")
+            and request.cache_salt is not None) else None
+        if cache_salt:
+            for prompt_text in engine_prompts_text:
+                prompt_text["cache_salt"] = cache_salt
 
         # This check is equivalent to simply checking if
         # `request_prompts_embeds` is empty, but it's difficult to propagate
@@ -782,6 +842,9 @@ class OpenAIServing:
                 prompt_embeds=request_prompt_embeds["prompt_embeds"])
             for request_prompt_embeds in request_prompts_embeds
         ]
+        if cache_salt:
+            for prompt_embed in engine_prompts_embeds:
+                prompt_embed["cache_salt"] = cache_salt
 
         request_prompts = request_prompts_embeds + request_prompts_text
         engine_prompts = engine_prompts_embeds + engine_prompts_text

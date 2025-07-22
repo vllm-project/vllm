@@ -35,7 +35,9 @@ class TpuPlatform(Platform):
     device_control_env_var: str = "TPU_VISIBLE_CHIPS"
     simple_compile_backend: str = "openxla"
 
-    supported_quantization: list[str] = ["tpu_int8", "compressed-tensors"]
+    supported_quantization: list[str] = [
+        "fp8", "tpu_int8", "compressed-tensors"
+    ]
 
     additional_env_vars: list[str] = [
         "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"
@@ -54,6 +56,13 @@ class TpuPlatform(Platform):
             raise ValueError("TPU backend only supports V1.")
         logger.info("Using Pallas V1 backend.")
         return "vllm.v1.attention.backends.pallas.PallasAttentionBackend"
+
+    @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Set the device for the current platform.
+        """
+        torch.tpu.set_device(device)
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -109,11 +118,13 @@ class TpuPlatform(Platform):
         assert vllm_config.speculative_config is None, \
             "TPU does not support speculative decoding"
 
-        if vllm_config.model_config.dtype in (torch.float16, torch.float32):
+        model_config = vllm_config.model_config
+        if model_config is not None and model_config.dtype in (torch.float16,
+                                                               torch.float32):
             logger.warning(
                 "The TPU backend currently does not support %s. "
-                "Using bfloat16 instead.", vllm_config.model_config.dtype)
-            vllm_config.model_config.dtype = torch.bfloat16
+                "Using bfloat16 instead.", model_config.dtype)
+            model_config.dtype = torch.bfloat16
 
         from vllm.v1.attention.backends.pallas import PallasAttentionBackend
         cache_config.block_size = PallasAttentionBackend.get_page_size(
@@ -139,7 +150,7 @@ class TpuPlatform(Platform):
             "Forcing --disable_chunked_mm_input.")
             scheduler_config.disable_chunked_mm_input = True
 
-        if vllm_config.model_config and vllm_config.model_config.use_mla:
+        if model_config and model_config.use_mla:
             logger.info(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled.")
@@ -178,6 +189,10 @@ class TpuPlatform(Platform):
         if (isinstance(params, SamplingParams)
                 and params.sampling_type == SamplingType.RANDOM_SEED):
             raise ValueError("Torch XLA does not support per-request seed.")
+
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+        return True
 
 
 try:
