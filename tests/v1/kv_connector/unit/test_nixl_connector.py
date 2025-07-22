@@ -444,6 +444,14 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
         kv_connector="NixlConnector",
         kv_role="kv_both",
     )
+    llm_kwargs = {
+        "model": model_name,
+        "enforce_eager": True,
+        "gpu_memory_utilization": 0.5,
+        "kv_transfer_config": kv_transfer_config,
+        "distributed_executor_backend": distributed_executor_backend,
+    }
+
     timeout = 6
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", str(timeout))
@@ -459,29 +467,14 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
             }
             ray.init(runtime_env=runtime_env)
 
-            llm = LLM(
-                model=model_name,
-                enforce_eager=True,
-                gpu_memory_utilization=0.5,
-                kv_transfer_config=kv_transfer_config,
-                distributed_executor_backend=distributed_executor_backend,
-            )
-
-            _run_abort_timeout_test(llm, timeout)
+            _run_abort_timeout_test(llm_kwargs, timeout)
     else:
-        llm = LLM(
-            model=model_name,
-            enforce_eager=True,
-            gpu_memory_utilization=0.5,
-            kv_transfer_config=kv_transfer_config,
-            distributed_executor_backend=distributed_executor_backend,
-        )
-
-        _run_abort_timeout_test(llm, timeout)
+        _run_abort_timeout_test(llm_kwargs, timeout)
 
 
-def _run_abort_timeout_test(llm: LLM, timeout: int):
+def _run_abort_timeout_test(llm_kwargs: dict, timeout: int):
     """Helper function to run the abort timeout test logic."""
+    llm = LLM(**llm_kwargs)
     remote_prefill_opts = {
         "do_remote_decode": True,
         "do_remote_prefill": False,
