@@ -272,6 +272,9 @@ class GroupCoordinator:
         self.use_custom_op_call = (current_platform.is_cuda_alike()
                                    or current_platform.is_tpu())
 
+        self.use_cpu_custom_send_recv = (current_platform.is_cpu() and hasattr(
+            torch.ops._C, "init_shm_manager"))
+
     @property
     def first_rank(self):
         """Return the global rank of the first process in the group"""
@@ -383,6 +386,12 @@ class GroupCoordinator:
                               dim: int) -> torch.Tensor:
         return self.device_communicator.all_gather(input_, dim)
 
+    def all_gatherv(self,
+                    input_: Union[torch.Tensor, list[torch.Tensor]],
+                    dim: int = 0,
+                    sizes: Optional[list[int]] = None):
+        return self.device_communicator.all_gatherv(input_, dim, sizes)
+
     def reduce_scatter(self,
                        input_: torch.Tensor,
                        dim: int = -1) -> torch.Tensor:
@@ -400,6 +409,12 @@ class GroupCoordinator:
                                                  group_name=self.unique_name)
         else:
             return self._reduce_scatter_out_place(input_, dim)
+
+    def reduce_scatterv(self,
+                        input_: torch.Tensor,
+                        dim: int = -1,
+                        sizes: Optional[list[int]] = None) -> torch.Tensor:
+        return self.device_communicator.reduce_scatterv(input_, dim, sizes)
 
     def _reduce_scatter_out_place(self, input_: torch.Tensor,
                                   dim: int) -> torch.Tensor:
@@ -651,6 +666,11 @@ class GroupCoordinator:
             dst = (self.rank_in_group + 1) % self.world_size
         assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
+        if self.use_cpu_custom_send_recv:
+            self.device_communicator.send_tensor_dict(  # type: ignore
+                tensor_dict, dst)
+            return None
+
         metadata_list: list[tuple[Any, Any]] = []
         assert isinstance(
             tensor_dict,
@@ -705,6 +725,10 @@ class GroupCoordinator:
         if src is None:
             src = (self.rank_in_group - 1) % self.world_size
         assert src < self.world_size, f"Invalid src rank ({src})"
+
+        if self.use_cpu_custom_send_recv:
+            return self.device_communicator.recv_tensor_dict(  # type: ignore
+                src)
 
         recv_metadata_list = self.recv_object(src=src)
         tensor_dict: dict[str, Any] = {}

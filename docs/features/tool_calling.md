@@ -95,7 +95,7 @@ specify the `name` of one of the tools in the `tool_choice` parameter of the cha
 
 ## Required Function Calling
 
-vLLM supports the `tool_choice='required'` option in the chat completion API. Similar to the named function calling, it also uses guided decoding, so this is enabled by default and will work with any supported model. The required guided decoding features (JSON schema with `anyOf`) are currently only supported in the V0 engine with the guided decoding backend `outlines`. However, support for alternative decoding backends are on the [roadmap](https://docs.vllm.ai/en/latest/usage/v1_guide.html#feature-model) for the V1 engine.
+vLLM supports the `tool_choice='required'` option in the chat completion API. Similar to the named function calling, it also uses guided decoding, so this is enabled by default and will work with any supported model. The required guided decoding features (JSON schema with `anyOf`) are currently only supported in the V0 engine with the guided decoding backend `outlines`. However, support for alternative decoding backends are on the [roadmap](../usage/v1_guide.md#features) for the V1 engine.
 
 When tool_choice='required' is set, the model is guaranteed to generate one or more tool calls based on the specified tool list in the `tools` parameter. The number of tool calls depends on the user's query. The output format strictly follows the schema defined in the `tools` parameter.
 
@@ -103,9 +103,7 @@ When tool_choice='required' is set, the model is guaranteed to generate one or m
 
 vLLM supports the `tool_choice='none'` option in the chat completion API. When this option is set, the model will not generate any tool calls and will respond with regular text content only, even if tools are defined in the request.
 
-By default, when `tool_choice='none'` is specified, vLLM excludes tool definitions from the prompt to optimize context usage. To include tool definitions even with `tool_choice='none'`, use the `--expand-tools-even-if-tool-choice-none` option.
-
-Note: This behavior will change in v0.10.0, where tool definitions will be included by default even with `tool_choice='none'`.
+However, when `tool_choice='none'` is specified, vLLM includes tool definitions from the prompt.
 
 ## Automatic Function Calling
 
@@ -281,6 +279,24 @@ Supported models:
 * `deepseek-ai/DeepSeek-R1-0528` (use with <gh-file:examples/tool_chat_template_deepseekr1.jinja>)
 
 Flags: `--tool-call-parser deepseek_v3 --chat-template {see_above}`
+
+### Kimi-K2 Models (`kimi_k2`)
+
+Supported models:
+
+* `moonshotai/Kimi-K2-Instruct`
+
+Flags: `--tool-call-parser kimi_k2`
+
+### Hunyuan Models (`hunyuan_a13b`)
+
+Supported models:
+
+* `tencent/Hunyuan-A13B-Instruct` (chat template already included huggingface model file.)
+
+Flags:
+* For non-reasoning: `--tool-call-parser hunyuan_a13b`
+* For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b --enable_reasoning`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 

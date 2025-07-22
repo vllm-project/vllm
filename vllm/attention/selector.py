@@ -3,6 +3,7 @@
 
 import os
 from contextlib import contextmanager
+from dataclasses import dataclass
 from functools import cache
 from typing import Generator, Optional, Union
 
@@ -79,31 +80,61 @@ def get_global_forced_attn_backend() -> Optional[_Backend]:
     return forced_attn_backend
 
 
-def supports_head_size(
+@dataclass(frozen=True)
+class _IsSupported:
+    can_import: bool
+    head_size: bool
+    dtype: bool
+
+    def __bool__(self) -> bool:
+        return self.can_import and self.head_size and self.dtype
+
+
+def is_attn_backend_supported(
     attn_backend: Union[str, type[AttentionBackend]],
     head_size: int,
-) -> bool:
+    dtype: torch.dtype,
+    *,
+    allow_import_error: bool = True,
+) -> _IsSupported:
     if isinstance(attn_backend, str):
         try:
             attn_backend = resolve_obj_by_qualname(attn_backend)
         except ImportError:
-            return False
+            if not allow_import_error:
+                raise
+
+            return _IsSupported(can_import=False, head_size=False, dtype=False)
 
     assert isinstance(attn_backend, type)
 
     # TODO: Update the interface once V0 is removed
     if get_supported_head_sizes := getattr(attn_backend,
                                            "get_supported_head_sizes", None):
-        return head_size in get_supported_head_sizes()
-    if validate_head_size := getattr(attn_backend, "validate_head_size", None):
+        is_head_size_supported = head_size in get_supported_head_sizes()
+    elif validate_head_size := getattr(attn_backend, "validate_head_size",
+                                       None):
         try:
             validate_head_size(head_size)
-            return True
+            is_head_size_supported = True
         except Exception:
-            return False
+            is_head_size_supported = False
+    else:
+        raise NotImplementedError(f"{attn_backend.__name__} does not support "
+                                  "head size validation")
 
-    raise NotImplementedError(f"{attn_backend.__name__} does not support "
-                              "head size validation")
+    if get_supported_dtypes := getattr(attn_backend, "get_supported_dtypes",
+                                       None):
+        is_dtype_supported = dtype in get_supported_dtypes()
+    else:
+        raise NotImplementedError(f"{attn_backend.__name__} does not support "
+                                  "dtype validation")
+
+    return _IsSupported(
+        can_import=True,
+        head_size=is_head_size_supported,
+        dtype=is_dtype_supported,
+    )
 
 
 def get_attn_backend(
@@ -112,7 +143,6 @@ def get_attn_backend(
     kv_cache_dtype: Optional[str],
     block_size: int,
     is_attention_free: bool,
-    is_blocksparse: bool = False,
     use_mla: bool = False,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
@@ -126,7 +156,6 @@ def get_attn_backend(
         kv_cache_dtype=kv_cache_dtype,
         block_size=block_size,
         is_attention_free=is_attention_free,
-        is_blocksparse=is_blocksparse,
         use_v1=envs.VLLM_USE_V1,
         use_mla=use_mla,
     )
@@ -139,16 +168,9 @@ def _cached_get_attn_backend(
     kv_cache_dtype: Optional[str],
     block_size: int,
     is_attention_free: bool,
-    is_blocksparse: bool = False,
     use_v1: bool = False,
     use_mla: bool = False,
 ) -> type[AttentionBackend]:
-    if is_blocksparse:
-        logger.info("Using BlocksparseFlashAttention backend.")
-        from vllm.attention.backends.blocksparse_attn import (
-            BlocksparseFlashAttentionBackend)
-        return BlocksparseFlashAttentionBackend
-
     # If there are no attention layers (e.g. we are running Mamba),
     # use the placeholder NO_ATTENTION
     if is_attention_free:
