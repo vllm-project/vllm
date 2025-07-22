@@ -543,6 +543,13 @@ class MixtureOfExperts(Protocol):
         """
         ...
 
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        ...
+
 
 def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
     return isinstance(model, MixtureOfExperts)
@@ -597,13 +604,6 @@ def supports_cross_encoding(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
     return is_pooling_model(model) and _supports_cross_encoding(model)
-
-
-def has_step_pooler(model: Union[type[object], object]) -> bool:
-    """Check if the model uses step pooler."""
-    from vllm.model_executor.layers.pooler import StepPooler
-
-    return is_pooling_model(model) and isinstance(model.pooler, StepPooler)
 
 
 class SupportsQuant:
