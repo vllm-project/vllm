@@ -481,8 +481,16 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
-        **kwargs,
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
     ):
+        if enable_eplb is not False or expert_load_view is not None or \
+                logical_to_physical_map is not None or \
+                logical_replica_count is not None:
+            raise NotImplementedError("Expert load balancing is not supported "
+                                      "for TPU.")
         return layer.cpu_fused_moe(
             layer,
             x,
