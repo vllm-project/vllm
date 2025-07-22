@@ -128,7 +128,8 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
     llm: LLM = vllm_model.llm
 
     for i in range(len(example_prompts)):
-        llm.llm_engine.add_request(str(i), example_prompts[i], sampling_params_list[i])
+        llm.llm_engine.add_request(str(i), example_prompts[i], 
+                                   sampling_params_list[i])
     
     outputs = []
     while llm.llm_engine.has_unfinished_requests():
