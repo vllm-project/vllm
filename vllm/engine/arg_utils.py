@@ -313,7 +313,6 @@ class EngineArgs:
         CacheConfig.prefix_caching_hash_algo
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
-    use_v2_block_manager: bool = True
     swap_space: float = CacheConfig.swap_space
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
@@ -358,15 +357,12 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
     lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
     lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
-    long_lora_scaling_factors: Optional[tuple[float, ...]] = \
-        LoRAConfig.long_lora_scaling_factors
     # PromptAdapter fields
     enable_prompt_adapter: bool = False
     max_prompt_adapters: int = PromptAdapterConfig.max_prompt_adapters
     max_prompt_adapter_token: int = \
         PromptAdapterConfig.max_prompt_adapter_token
 
-    device: Device = DeviceConfig.device
     num_scheduler_steps: int = SchedulerConfig.num_scheduler_steps
     multi_step_stream_outputs: bool = SchedulerConfig.multi_step_stream_outputs
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
@@ -723,8 +719,6 @@ class EngineArgs:
             "--lora-dtype",
             **lora_kwargs["lora_dtype"],
         )
-        lora_group.add_argument("--long-lora-scaling-factors",
-                                **lora_kwargs["long_lora_scaling_factors"])
         lora_group.add_argument("--max-cpu-loras",
                                 **lora_kwargs["max_cpu_loras"])
         lora_group.add_argument("--fully-sharded-loras",
@@ -748,16 +742,6 @@ class EngineArgs:
         prompt_adapter_group.add_argument(
             "--max-prompt-adapter-token",
             **prompt_adapter_kwargs["max_prompt_adapter_token"])
-
-        # Device arguments
-        device_kwargs = get_kwargs(DeviceConfig)
-        device_group = parser.add_argument_group(
-            title="DeviceConfig",
-            description=DeviceConfig.__doc__,
-        )
-        device_group.add_argument("--device",
-                                  **device_kwargs["device"],
-                                  deprecated=True)
 
         # Speculative arguments
         speculative_group = parser.add_argument_group(
@@ -860,15 +844,6 @@ class EngineArgs:
                                 **vllm_kwargs["additional_config"])
 
         # Other arguments
-        parser.add_argument('--use-v2-block-manager',
-                            action='store_true',
-                            default=True,
-                            deprecated=True,
-                            help='[DEPRECATED] block manager v1 has been '
-                            'removed and SelfAttnBlockSpaceManager (i.e. '
-                            'block manager v2) is now the default. '
-                            'Setting this flag to True or False'
-                            ' has no effect on vLLM behavior.')
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
@@ -1245,7 +1220,6 @@ class EngineArgs:
             default_mm_loras=self.default_mm_loras,
             fully_sharded_loras=self.fully_sharded_loras,
             lora_extra_vocab_size=self.lora_extra_vocab_size,
-            long_lora_scaling_factors=self.long_lora_scaling_factors,
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
@@ -1271,8 +1245,8 @@ class EngineArgs:
         )
 
         observability_config = ObservabilityConfig(
-            show_hidden_metrics_for_version=self.
-            show_hidden_metrics_for_version,
+            show_hidden_metrics_for_version=(
+                self.show_hidden_metrics_for_version),
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
         )
@@ -1357,23 +1331,8 @@ class EngineArgs:
 
         # No Fp8 KV cache so far.
         if self.kv_cache_dtype != "auto":
-            fp8_attention = self.kv_cache_dtype.startswith("fp8")
-            will_use_fa = (
-                current_platform.is_cuda()
-                and not envs.is_set("VLLM_ATTENTION_BACKEND")
-            ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
-            supported = False
-            if current_platform.is_rocm() or (
-                    current_platform.is_cuda()
-                    and current_platform.is_device_capability(100)) or (
-                        current_platform.device_name
-                        == "hpu"):  # handle hpu also for OOT platform
-                supported = True
-            elif fp8_attention and will_use_fa:
-                from vllm.attention.utils.fa_utils import (
-                    flash_attn_supports_fp8)
-                supported = flash_attn_supports_fp8()
-
+            supported = current_platform.is_kv_cache_dtype_supported(
+                self.kv_cache_dtype)
             if not supported:
                 _raise_or_fallback(feature_name="--kv-cache-dtype",
                                    recommend_to_remove=False)
@@ -1418,28 +1377,12 @@ class EngineArgs:
             return False
 
         # V1 supports N-gram, Medusa, and Eagle speculative decoding.
-        is_ngram_enabled = False
-        is_eagle_enabled = False
-        is_medusa_enabled = False
-        if self.speculative_config is not None:
-            # This is supported but experimental (handled below).
-            speculative_method = self.speculative_config.get("method")
-            if speculative_method:
-                if speculative_method in ("ngram", "[ngram]"):
-                    is_ngram_enabled = True
-                elif speculative_method == "medusa":
-                    is_medusa_enabled = True
-                elif speculative_method in ("eagle", "eagle3", "deepseek_mtp"):
-                    is_eagle_enabled = True
-            else:
-                speculative_model = self.speculative_config.get("model")
-                if speculative_model in ("ngram", "[ngram]"):
-                    is_ngram_enabled = True
-            if not (is_ngram_enabled or is_eagle_enabled or is_medusa_enabled):
-                # Other speculative decoding methods are not supported yet.
-                _raise_or_fallback(feature_name="Speculative Decoding",
-                                   recommend_to_remove=False)
-                return False
+        if (self.speculative_config is not None
+                and self.speculative_config.get("method") == "draft_model"):
+            raise NotImplementedError(
+                "Speculative decoding with draft model is not supported yet. "
+                "Please consider using other speculative decoding methods "
+                "such as ngram, medusa, eagle, or deepseek_mtp.")
 
         # No XFormers so far.
         V1_BACKENDS = [
@@ -1661,13 +1604,14 @@ class EngineArgs:
 
         # cpu specific default values.
         if current_platform.is_cpu():
+            world_size = self.pipeline_parallel_size * self.tensor_parallel_size
             default_max_num_batched_tokens = {
-                UsageContext.LLM_CLASS: 4096,
-                UsageContext.OPENAI_API_SERVER: 2048,
+                UsageContext.LLM_CLASS: 4096 * world_size,
+                UsageContext.OPENAI_API_SERVER: 2048 * world_size,
             }
             default_max_num_seqs = {
-                UsageContext.LLM_CLASS: 128,
-                UsageContext.OPENAI_API_SERVER: 32,
+                UsageContext.LLM_CLASS: 256 * world_size,
+                UsageContext.OPENAI_API_SERVER: 128 * world_size,
             }
 
         use_context_value = usage_context.value if usage_context else None

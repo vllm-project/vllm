@@ -116,23 +116,6 @@ def rocm_platform_plugin() -> Optional[str]:
     return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None
 
 
-def hpu_platform_plugin() -> Optional[str]:
-    is_hpu = False
-    logger.debug("Checking if HPU platform is available.")
-    try:
-        from importlib import util
-        is_hpu = util.find_spec('habana_frameworks') is not None
-        if is_hpu:
-            logger.debug("Confirmed HPU platform is available.")
-        else:
-            logger.debug("HPU platform is not available because "
-                         "habana_frameworks is not found.")
-    except Exception as e:
-        logger.debug("HPU platform is not available because: %s", str(e))
-
-    return "vllm.platforms.hpu.HpuPlatform" if is_hpu else None
-
-
 def xpu_platform_plugin() -> Optional[str]:
     is_xpu = False
     logger.debug("Checking if XPU platform is available.")
@@ -208,7 +191,6 @@ builtin_platform_plugins = {
     'tpu': tpu_platform_plugin,
     'cuda': cuda_platform_plugin,
     'rocm': rocm_platform_plugin,
-    'hpu': hpu_platform_plugin,
     'xpu': xpu_platform_plugin,
     'cpu': cpu_platform_plugin,
     'neuron': neuron_platform_plugin,
