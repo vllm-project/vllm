@@ -120,6 +120,7 @@ def mixer2_gated_norm_tensor_parallel(
     )
     ref_output = mixer_single_gpu(hidden_states, gate_states)
     torch.testing.assert_close(output,
-                   ref_output[..., local_rank * N:(local_rank + 1) * N],
-                   atol=5e-3,
-                   rtol=1e-3)
+                               ref_output[...,
+                                          local_rank * N:(local_rank + 1) * N],
+                               atol=5e-3,
+                               rtol=1e-3)
