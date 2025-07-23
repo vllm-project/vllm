@@ -22,12 +22,14 @@ def _run_test(
     model: str,
 ) -> None:
 
-    mm_data = generate_test_mm_data()
-    prompt = {
-        # This model deals with no text input
-        "prompt_token_ids": [1],
-        "multi_modal_data": mm_data
-    }
+    prompt = [
+        {
+            # This model deals with no text input
+            "prompt_token_ids": [1],
+            "multi_modal_data": generate_test_mm_data(),
+        } for _ in range(10)
+    ]
+
     with (
             set_default_torch_num_threads(1),
             vllm_runner(
@@ -36,6 +38,9 @@ def _run_test(
                 dtype=torch.float16,
                 enforce_eager=True,
                 skip_tokenizer_init=True,
+                # Limit the maximum number of sequences to avoid the
+                # test going OOM during the warmup run
+                max_num_seqs=32,
             ) as vllm_model,
     ):
         vllm_model.encode(prompt)
