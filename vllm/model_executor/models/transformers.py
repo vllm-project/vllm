@@ -315,16 +315,16 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         Apply HF Processor on prompt text and multi-modal data together,
         outputting token IDs and processed tensors.
         """
-        if return_mm_hashes:
-            raise ValueError(
-                "TransformersForMultimodalLM doesn't support mm hashing yet! "
-                "Probably you didn't set `disable_mm_preprocessor_cache=True`")
-
         if tokenization_kwargs is None:
             tokenization_kwargs = {}
 
         mm_items = self._to_mm_items(mm_data)
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        if not isinstance(prompt, str):
+            # the prompt is the tokenized ids which is not supported
+            # by the hf_processor, which is why we would need to decode the ids
+            # into string
+            prompt = hf_processor.decode(prompt)
 
         (prompt_ids, processed_data,
          mm_token_type_ids) = self._apply_hf_processor_text_mm(
@@ -375,12 +375,14 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                                        num_image_patches),
         )
 
+        mm_hashes = self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
+                                        tokenization_kwargs)
         return MultiModalInputs(
             type="multimodal",
             prompt=prompt,
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
-            mm_hashes=None,
+            mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholders,
         )
 
@@ -412,7 +414,7 @@ class ConfigOverride:
                 setattr(self.config, key, value)
 
 
-class TransformersModel(nn.Module):
+class TransformersModel:
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -452,9 +454,6 @@ class TransformersModel(nn.Module):
         # method after v4.54.0 is released
         self.text_config._attn_implementation = "vllm"
         with init_on_device_without_buffers("meta"), config_override:
-            # FIXME(Isotr0py): We need to refactor this part in the future to
-            # avoid registering an extra model layer, otherwise we will need a
-            # weights mapper to rename weights.
             self.model: PreTrainedModel = AutoModel.from_config(
                 config,
                 torch_dtype=model_config.dtype,
@@ -618,9 +617,6 @@ class TransformersModel(nn.Module):
         for child in module.children():
             self.init_parameters(child)
 
-    def get_input_embeddings(self) -> nn.Module:
-        return self.model.get_input_embeddings()
-
     def forward(
         self,
         input_ids: Optional[torch.Tensor],
@@ -692,7 +688,9 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
 
         self.config = config
 
-        self.model = TransformersModel(vllm_config=vllm_config, prefix=prefix)
+        self.transformers_model = TransformersModel(vllm_config=vllm_config,
+                                                    prefix=prefix)
+        self.model = self.transformers_model.model
 
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
@@ -714,22 +712,7 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
             self.lm_head = PPMissingLayer()
 
         self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
-
-    # FIXME(Isotr0py): Don't use any weights mapper for Transformers backend,
-    # this makes thing complicated. We need to remove this mapper after refactor
-    # `TransformersModel` in the future.
-    # NOTE: `SupportsQuant` can be updated after property decorator is removed
-    @property
-    def hf_to_vllm_mapper(self):
-        prefix_mapper = {
-            name: "model." + name
-            for name, _ in self.model.model.named_children()
-        }
-        return WeightsMapper(
-            orig_to_new_substr={"model.": "model.model."},
-            orig_to_new_prefix=prefix_mapper,
-        )
+            self.transformers_model.make_empty_intermediate_tensors)
 
     def forward(
         self,
@@ -738,8 +721,9 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        model_output = self.model(input_ids, positions, intermediate_tensors,
-                                  inputs_embeds)
+        model_output = self.transformers_model.forward(input_ids, positions,
+                                                       intermediate_tensors,
+                                                       inputs_embeds)
         return model_output
 
     def compute_logits(
@@ -753,12 +737,10 @@ class TransformersForCausalLM(nn.Module, SupportsQuant, SupportsLoRA,
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."]
-                           if self.config.tie_word_embeddings else None),
-        )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        skip_prefixes = ["lm_head."
+                         ] if self.config.tie_word_embeddings else None
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        return loader.load_weights(weights)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -770,6 +752,29 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
     embedding_padding_modules = ["lm_head"]
     embedding_modules = ["embed_tokens"]
 
+    # Backwards compatibility for prev released models. State dicts back then
+    # had different formats and cannot be loaded with `AutoModel` mapping as is
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "language_model.model": "model.language_model",
+            "text_model.model": "model.text_model",
+            "vision_tower": "model.vision_tower",
+            "vqmodel": "model.vqmodel",
+            "visual": "model.visual",
+            "vision_model": "model.vision_model",
+            "vision_embed_tokens": "model.vision_embed_tokens",
+            "image_newline": "model.image_newline",
+            "multi_modal_projector": "model.multi_modal_projector",
+            "text_model.lm_head": "lm_head",
+            "language_model.lm_head": "lm_head",
+            # Qwen models used "model" as the name for the language model.
+            # Therefore, we must map each of submodule explicitly to avoid
+            # conflicts with newer models that use "model.language_model".
+            "model.embed_tokens": "model.language_model.embed_tokens",
+            "model.layers": "model.language_model.layers",
+            "model.norm": "model.language_model.norm",
+        })
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: PretrainedConfig = vllm_config.model_config.hf_config
@@ -778,7 +783,9 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
         self.config = config
         self.dtype = vllm_config.model_config.dtype
 
-        self.model = TransformersModel(vllm_config=vllm_config, prefix=prefix)
+        self.transformers_model = TransformersModel(vllm_config=vllm_config,
+                                                    prefix=prefix)
+        self.model = self.transformers_model.model
         text_config = config.get_text_config()
 
         if get_pp_group().is_last_rank:
@@ -801,32 +808,7 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
             self.lm_head = PPMissingLayer()
 
         self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
-
-    @property
-    def hf_to_vllm_mapper(self):
-        # Backwards compatibility for prev released models
-        # State dicts back then had different formats
-        # and cannot be loaded with `AutoModel` mapping
-        # as is
-        prefix_mapper = {
-            "language_model.model": "model.language_model",
-            "text_model.model": "model.text_model",
-            "vision_tower": "model.vision_tower",
-            "vqmodel": "model.vqmodel",
-            "vision_model": "model.vision_model",
-            "vision_embed_tokens": "model.vision_embed_tokens",
-            "image_newline": "model.image_newline",
-            "multi_modal_projector": "model.multi_modal_projector",
-            "text_model.lm_head": "lm_head",
-            "language_model.lm_head": "lm_head",
-        }
-        # Don't change the order for QwenVL
-        if 'Qwen2' in self.config.__class__.__name__:
-            prefix_mapper["model"] = "model.language_model"
-            prefix_mapper["visual"] = "model.visual"
-
-        return WeightsMapper(orig_to_new_prefix=prefix_mapper, )
+            self.transformers_model.make_empty_intermediate_tensors)
 
     def forward(
         self,
@@ -846,8 +828,9 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
                     input_ids, multimodal_embeds)
                 input_ids = None
 
-        model_output = self.model(input_ids, positions, intermediate_tensors,
-                                  inputs_embeds)
+        model_output = self.transformers_model.forward(input_ids, positions,
+                                                       intermediate_tensors,
+                                                       inputs_embeds)
         return model_output
 
     def compute_logits(
@@ -896,7 +879,7 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
             if isinstance(num_image_patches, list):
                 num_image_patches = torch.cat(num_image_patches)
 
-            vision_embeddings = self.model.model.get_image_features(
+            vision_embeddings = self.model.get_image_features(
                 pixel_values,
                 **{
                     k: v.flatten(0, 1)
@@ -926,7 +909,7 @@ class TransformersForMultimodalLM(nn.Module, SupportsQuant, SupportsLoRA,
         input_ids: torch.Tensor,
         multimodal_embeddings=None,
     ) -> torch.Tensor:
-        inputs_embeds = self.model.model.get_input_embeddings()(input_ids)
+        inputs_embeds = self.model.get_input_embeddings()(input_ids)
         if (multimodal_embeddings is not None
                 and len(multimodal_embeddings) != 0):
             mask = (input_ids == self.config.image_token_id)
