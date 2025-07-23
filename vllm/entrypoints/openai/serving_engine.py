@@ -23,11 +23,6 @@ if sys.version_info >= (3, 12):
 else:
     from typing_extensions import TypedDict
 
-if sys.version_info >= (3, 12):
-    from typing import TypedDict
-else:
-    from typing_extensions import TypedDict
-
 import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -231,7 +226,7 @@ class OpenAIServing:
 
     def _get_async_tokenizer(self, tokenizer) -> AsyncMicrobatchTokenizer:
         """
-        Return (and cache) an `AsyncMicrobatchTokenizer` bound to the 
+        Return (and cache) an `AsyncMicrobatchTokenizer` bound to the
         given tokenizer.
         """
         async_tokenizer = self._async_tokenizer_pool.get(tokenizer)
@@ -310,6 +305,16 @@ class OpenAIServing:
                     " Please, select a smaller truncation size.")
         return None
 
+    def _create_pooling_params(
+        self,
+        ctx: ServeContext,
+    ) -> Union[PoolingParams, ErrorResponse]:
+        if not hasattr(ctx.request, "to_pooling_params"):
+            return self.create_error_response(
+                "Request type does not support pooling parameters")
+
+        return ctx.request.to_pooling_params()
+
     async def _prepare_generators(
         self,
         ctx: ServeContext,
@@ -323,11 +328,9 @@ class OpenAIServing:
             trace_headers = (None if ctx.raw_request is None else await
                              self._get_trace_headers(ctx.raw_request.headers))
 
-            if not hasattr(ctx.request, "to_pooling_params"):
-                return self.create_error_response(
-                    "Request type does not support pooling parameters")
-
-            pooling_params = ctx.request.to_pooling_params()
+            pooling_params = self._create_pooling_params(ctx)
+            if isinstance(pooling_params, ErrorResponse):
+                return pooling_params
 
             if ctx.engine_prompts is None:
                 return self.create_error_response(
@@ -816,6 +819,12 @@ class OpenAIServing:
                 prompt_token_ids=request_prompt_text["prompt_token_ids"])
             for request_prompt_text in request_prompts_text
         ]
+        cache_salt = request.cache_salt if (
+            hasattr(request, "cache_salt")
+            and request.cache_salt is not None) else None
+        if cache_salt:
+            for prompt_text in engine_prompts_text:
+                prompt_text["cache_salt"] = cache_salt
 
         # This check is equivalent to simply checking if
         # `request_prompts_embeds` is empty, but it's difficult to propagate
@@ -833,6 +842,9 @@ class OpenAIServing:
                 prompt_embeds=request_prompt_embeds["prompt_embeds"])
             for request_prompt_embeds in request_prompts_embeds
         ]
+        if cache_salt:
+            for prompt_embed in engine_prompts_embeds:
+                prompt_embed["cache_salt"] = cache_salt
 
         request_prompts = request_prompts_embeds + request_prompts_text
         engine_prompts = engine_prompts_embeds + engine_prompts_text

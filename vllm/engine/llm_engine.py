@@ -238,14 +238,14 @@ class LLMEngine:
         self.log_stats = log_stats
         self.use_cached_outputs = use_cached_outputs
 
-        if not self.model_config.skip_tokenizer_init:
-            self.tokenizer = self._init_tokenizer()
-            self.detokenizer = Detokenizer(self.tokenizer)
-            tokenizer_group = self.get_tokenizer_group()
-        else:
+        if self.model_config.skip_tokenizer_init:
             self.tokenizer = None
             self.detokenizer = None
             tokenizer_group = None
+        else:
+            self.tokenizer = self._init_tokenizer()
+            self.detokenizer = Detokenizer(self.tokenizer)
+            tokenizer_group = self.get_tokenizer_group()
 
         # Ensure that the function doesn't contain a reference to self,
         # to avoid engine GC issues
@@ -1780,13 +1780,6 @@ class LLMEngine:
                 num_generation_tokens_from_prefill_groups)
             num_tokens_iter = (num_generation_tokens_iter +
                                num_prompt_tokens_iter)
-        # Spec decode, if enabled, emits specialized metrics from the worker in
-        # sampler output.
-        if model_output and isinstance(model_output[0], SamplerOutput) and (
-                model_output[0].spec_decode_worker_metrics is not None):
-            spec_decode_metrics = model_output[0].spec_decode_worker_metrics
-        else:
-            spec_decode_metrics = None
 
         return Stats(
             now=now,
@@ -1808,7 +1801,6 @@ class LLMEngine:
             num_tokens_iter=num_tokens_iter,
             time_to_first_tokens_iter=time_to_first_tokens_iter,
             time_per_output_tokens_iter=time_per_output_tokens_iter,
-            spec_decode_metrics=spec_decode_metrics,
             num_preemption_iter=num_preemption_iter,
 
             # Request stats

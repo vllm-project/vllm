@@ -32,6 +32,8 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe import get_default_config
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate)
 from vllm.platforms import current_platform
 from vllm.utils import round_up
 
@@ -371,6 +373,7 @@ def pplx_prepare_finalize(
         chunk_topk_weight,
         chunk_topk_ids,
         False,
+        weight_and_reduce_impl=TopKWeightAndReduceDelegate(),
     )
 
     torch.cuda.synchronize()

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from argparse import ArgumentError, ArgumentTypeError
+from argparse import ArgumentError
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Annotated, Literal, Optional
@@ -12,8 +12,8 @@ import pytest
 from vllm.config import CompilationConfig, config
 from vllm.engine.arg_utils import (EngineArgs, contains_type, get_kwargs,
                                    get_type, get_type_hints, is_not_builtin,
-                                   is_type, literal_to_kwargs, nullable_kvs,
-                                   optional_type, parse_type)
+                                   is_type, literal_to_kwargs, optional_type,
+                                   parse_type)
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -25,18 +25,10 @@ from vllm.utils import FlexibleArgumentParser
         "foo": 1,
         "bar": 2
     }),
-    (json.loads, "foo=1,bar=2", {
-        "foo": 1,
-        "bar": 2
-    }),
 ])
 def test_parse_type(type, value, expected):
     parse_type_func = parse_type(type)
-    context = nullcontext()
-    if value == "foo=1,bar=2":
-        context = pytest.warns(DeprecationWarning)
-    with context:
-        assert parse_type_func(value) == expected
+    assert parse_type_func(value) == expected
 
 
 def test_optional_type():
@@ -203,34 +195,6 @@ def test_get_kwargs():
     assert kwargs["from_cli_config2"]["type"]('{"field": 2}').field == 4
 
 
-@pytest.mark.parametrize(("arg", "expected"), [
-    (None, dict()),
-    ("image=16", {
-        "image": 16
-    }),
-    ("image=16,video=2", {
-        "image": 16,
-        "video": 2
-    }),
-    ("Image=16, Video=2", {
-        "image": 16,
-        "video": 2
-    }),
-])
-def test_limit_mm_per_prompt_parser(arg, expected):
-    """This functionality is deprecated and will be removed in the future.
-    This argument should be passed as JSON string instead.
-    
-    TODO: Remove with nullable_kvs."""
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    if arg is None:
-        args = parser.parse_args([])
-    else:
-        args = parser.parse_args(["--limit-mm-per-prompt", arg])
-
-    assert args.limit_mm_per_prompt == expected
-
-
 @pytest.mark.parametrize(
     ("arg", "expected"),
     [
@@ -324,18 +288,6 @@ def test_prefix_cache_default():
     args = parser.parse_args(["--no-enable-prefix-caching"])
     engine_args = EngineArgs.from_cli_args(args=args)
     assert not engine_args.enable_prefix_caching
-
-
-@pytest.mark.parametrize(
-    ("arg"),
-    [
-        "image",  # Missing =
-        "image=4,image=5",  # Conflicting values
-        "image=video=4"  # Too many = in tokenized arg
-    ])
-def test_bad_nullable_kvs(arg):
-    with pytest.raises(ArgumentTypeError):
-        nullable_kvs(arg)
 
 
 # yapf: disable
