@@ -235,8 +235,6 @@ class Processor:
         # TODO(woosuk): Support encoder-decoder models.
         self._validate_lora(lora_request)
         self._validate_params(params, lora_request)
-        if trace_headers is not None:
-            raise ValueError("V1 does not support tracing yet.")
         if prompt_adapter_request is not None:
             raise ValueError("V1 does not support prompt_adapter_request.")
 
@@ -356,6 +354,7 @@ class Processor:
             cache_salt=decoder_inputs.get("cache_salt"),
             priority=priority,
             data_parallel_rank=data_parallel_rank,
+            trace_headers=trace_headers,
         )
 
     def _validate_model_inputs(self,
