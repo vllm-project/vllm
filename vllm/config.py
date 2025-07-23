@@ -4473,10 +4473,8 @@ class VllmConfig:
     """The configurations for distributed KV cache transfer."""
     kv_events_config: Optional[KVEventsConfig] = None
     """The configurations for event publishing."""
-    il_config: Optional[IntermediateLoggingConfig] = None
+    intermediate_log_config: Optional[IntermediateLoggingConfig] = None
     """Configuration for intermediate tensor logging."""
-    il_config_path: Optional[str] = None
-    """Path to a JSON file containing intermediate logging configuration."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
@@ -4561,8 +4559,8 @@ class VllmConfig:
             vllm_factors.append(self.kv_transfer_config.compute_hash())
         else:
             vllm_factors.append("None")
-        if self.il_config:
-            vllm_factors.append(self.il_config.compute_hash())
+        if self.intermediate_log_config:
+            vllm_factors.append(self.intermediate_log_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.additional_config:
@@ -4776,18 +4774,6 @@ class VllmConfig:
                 # Hybrid KV cache manager is not yet supported with chunked
                 # local attention + eagle.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
-        # Load intermediate logging config from file if provided
-        if self.il_config_path is not None:
-            try:
-                logger.info(f"Loading intermediate logging config from {self.il_config_path}")
-                with open(self.il_config_path, 'r') as f:
-                    il_config_dict = json.load(f)
-                    self.il_config = IntermediateLoggingConfig.from_dict(il_config_dict)
-                    logger.info(f"Successfully loaded intermediate logging config: {self.il_config.to_dict()}")
-            except Exception as e:
-                logger.error(f"Failed to load intermediate logging config from {self.il_config_path}: {e}")
-                raise ValueError(f"Failed to load intermediate logging config from {self.il_config_path}: {e}") from e
-
 
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:

@@ -16,17 +16,23 @@ This is manily useful for debugging model accucacy gaps with 2 runs
 
 ## Usage
 
-### Enabling via Configuration File
+### Enabling via parameters or config file
 
-The easiest way to enable intermediate logging is by providing a configuration file:
+**Offline Inference example**
+
+Dump all modules, all devices for step 0 (default behavior)
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model <your_model> \
-  --il-config-path /path/to/config.json
+python3 ./examples/offline_inference/llm_engine_example.py --model "meta-llama/Llama-3.1-8B-Instruct"  --enforce-eager  --intermediate-log-config '{"enabled": true}'
 ```
 
-### Configuration Options
+Dump first layers module, all devices for step 0
+
+```bash
+python3 ./examples/offline_inference/llm_engine_example.py --model "meta-llama/Llama-3.1-8B-Instruct"  --enforce-eager  --intermediate-log-config '{"enabled": true, "module_call_match": "layers\\.0\\."}'
+```
+
+Dump customized layers, devices, steps through a config file
 
 The configuration file should be a JSON file with the following structure:
 
@@ -38,6 +44,11 @@ The configuration file should be a JSON file with the following structure:
   "device_names": ["cuda:0"]
 }
 ```
+
+```bash
+python3 ./examples/offline_inference/llm_engine_example.py --model "meta-llama/Llama-3.1-8B-Instruct"  --enforce-eager  --intermediate-log-config-path $HOME/intermediate_logging_config.json
+```
+
 
 #### Configuration Parameters
 

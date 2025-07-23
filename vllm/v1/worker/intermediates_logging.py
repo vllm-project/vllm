@@ -265,11 +265,11 @@ def save_tensors_metadata_if_too_large(tensor: torch.Tensor,
         tensor: The tensor to dump.
         file_path: Base path where to save the tensor (without extension).
     """
-    il_config = get_current_il_config()
-    if il_config is None:
+    intermediate_log_config = get_current_il_config()
+    if intermediate_log_config is None:
         return False
-    if il_config.max_tensor_size is not None and tensor.numel(
-    ) > il_config.max_tensor_size:
+    if intermediate_log_config.max_tensor_size is not None and tensor.numel(
+    ) > intermediate_log_config.max_tensor_size:
         # Save tensor metadata instead of full tensor
         tensor_info = {
             "shape":
@@ -282,7 +282,7 @@ def save_tensors_metadata_if_too_large(tensor: torch.Tensor,
             tensor.numel(),
             "skipped":
             f"Tensor size {tensor.numel()} exceeds max_tensor_size "
-            f"{il_config.max_tensor_size}"
+            f"{intermediate_log_config.max_tensor_size}"
         }
         os.makedirs(os.path.dirname(f"{file_path}.json"), exist_ok=True)
         with open(f"{file_path}.json", "w") as f:
@@ -308,8 +308,8 @@ def save_tensors(tensor: Any, file_path: str) -> None:
         device_name = str(tensor.device)
         # Skip if device filtering is enabled and this device should not be
         # logged
-        il_config = get_current_il_config()
-        if not should_log_device(il_config, device_name):
+        intermediate_log_config = get_current_il_config()
+        if not should_log_device(intermediate_log_config, device_name):
             logger.debug("Skipping tensor on device %s due to device filter",
                          device_name)
             return
@@ -357,11 +357,11 @@ def step_fwd(module: torch.nn.Module, inputs: tuple[Any, ...],
     _CURRENT_STEP_MODULE_CALLS = {}
 
 
-def _prepare_module_log_dir(il_config: IntermediateLoggingConfig,
+def _prepare_module_log_dir(intermediate_log_config: IntermediateLoggingConfig,
                             module_name: str) -> Path:
 
     # Create a unique directory for this step if not
-    dump_dir = Path(il_config.output_run_dir) / f"step_{get_step()}"
+    dump_dir = Path(intermediate_log_config.output_run_dir) / f"step_{get_step()}"
     dump_dir.mkdir(exist_ok=True, parents=True)
 
     # Create module directory
@@ -392,10 +392,10 @@ def get_current_step_module_call(module_name: str) -> int:
 def prepare_log_current_fwd(module,
                             update_fwd_counter: bool = False
                             ) -> Optional[Path]:
-    il_config = get_current_il_config()
-    if il_config is None or not il_config.enabled:
+    intermediate_log_config = get_current_il_config()
+    if intermediate_log_config is None or not intermediate_log_config.enabled:
         return None
-    if not should_log_step(il_config):
+    if not should_log_step(intermediate_log_config):
         return None
 
     module_name = get_il_module_name(module)
@@ -407,7 +407,7 @@ def prepare_log_current_fwd(module,
 
     log_dir = None
     if should_log:
-        log_dir = _prepare_module_log_dir(il_config, module_name)
+        log_dir = _prepare_module_log_dir(intermediate_log_config, module_name)
     if update_fwd_counter:
         update_current_step_module_call(module_name)
     return log_dir
@@ -442,9 +442,9 @@ def log_post_fwd_hook(module: torch.nn.Module, inputs: tuple[Any, ...],
     if log_dir := prepare_log_current_fwd(module, update_fwd_counter=False):
         dump_intermediates_to_json(outputs, log_dir / "outputs.json")
         save_tensors(outputs, str(log_dir / "outputs"))
-        il_config = get_current_il_config()
-        assert il_config is not None, "IL config should not be None"
-        if il_config.log_post_fwd_inputs:
+        intermediate_log_config = get_current_il_config()
+        assert intermediate_log_config is not None, "IL config should not be None"
+        if intermediate_log_config.log_post_fwd_inputs:
             dump_intermediates_to_json(inputs,
                                        log_dir / "post_fwd_inputs.json")
             save_tensors(inputs, str(log_dir / "post_fwd_inputs"))

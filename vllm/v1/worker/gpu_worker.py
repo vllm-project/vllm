@@ -335,7 +335,7 @@ class Worker(WorkerBase):
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
 
-        with intermediate_logging(self.vllm_config.il_config):
+        with intermediate_logging(self.vllm_config.intermediate_log_config):
             output = self.model_runner.execute_model(scheduler_output,
                                                      intermediate_tensors)
 
