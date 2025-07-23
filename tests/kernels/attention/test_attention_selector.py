@@ -126,7 +126,8 @@ def test_env(
                                                block_size,
                                                False,
                                                use_mla=use_mla)
-                    expected = "TRITON_UNIFIED_ATTENTION_V1" if use_v1 else "ROCM_FLASH"
+                    expected = ("TRITON_UNIFIED_ATTENTION_V1"
+                                if use_v1 else "ROCM_FLASH")
                     assert backend.get_name() == expected
 
         elif device == "cuda":
