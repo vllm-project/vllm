@@ -246,8 +246,7 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
                     tensor_parallel_size,
                     intermediate_size=self.config.intermediate_size,
                     state_size=self.config.state_size,
-                    conv_kernel=self.config.conv_kernel,
-                    use_v1=False)
+                    conv_kernel=self.config.conv_kernel)
                 self.mamba_cache = MambaCacheManager(self.vllm_config,
                                                      self.lm_head.weight.dtype,
                                                      num_layers, *state_shape)

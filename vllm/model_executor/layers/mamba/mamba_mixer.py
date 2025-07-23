@@ -175,11 +175,8 @@ class MambaMixer(MambaBase, CustomOp):
                 query_start_loc = mamba1_metadata.query_start_loc
                 state_indices_tensor = mamba1_metadata.state_indices_tensor
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-
-                # conv_state should be in (batch, width-1, dim) format
-                # so when transposed it becomes (batch, dim, width-1)
-                conv_state = self_kv_cache[0].transpose(-1, -2)
-                ssm_state = self_kv_cache[1].contiguous()
+                conv_state = self_kv_cache[0]
+                ssm_state = self_kv_cache[1]
                 has_initial_state = mamba1_metadata.has_initial_states
                 context_lens_tensor = mamba1_metadata.context_lens_tensor
         else:
@@ -308,7 +305,6 @@ class MambaMixer(MambaBase, CustomOp):
             intermediate_size=self.intermediate_size,
             state_size=self.ssm_state_size,
             conv_kernel=self.conv_kernel_size,
-            use_v1=envs.VLLM_USE_V1,
         )
 
     @property
