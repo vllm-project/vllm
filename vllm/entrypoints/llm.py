@@ -65,13 +65,12 @@ from vllm.utils import Counter, Device, deprecate_kwargs, is_list_of
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
 
+logger = init_logger(__name__)
 elapsed = time.perf_counter() - start_init
 
-logger = init_logger(__name__)
-
 current_proc = multiprocessing.current_process()
-logger.debug("Imports in llm took: '%.4f' secs for process: '%s' pid: '%d'",
-             elapsed, current_proc.name, os.getpid())
+logger.debug("Imports in llm took: %.4f secs for process: %s pid: %d", elapsed,
+             current_proc.name, os.getpid())
 
 _R = TypeVar("_R", default=Any)
 
