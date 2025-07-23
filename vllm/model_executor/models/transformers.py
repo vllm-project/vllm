@@ -315,16 +315,16 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         Apply HF Processor on prompt text and multi-modal data together,
         outputting token IDs and processed tensors.
         """
-        if return_mm_hashes:
-            raise ValueError(
-                "TransformersForMultimodalLM doesn't support mm hashing yet! "
-                "Probably you didn't set `disable_mm_preprocessor_cache=True`")
-
         if tokenization_kwargs is None:
             tokenization_kwargs = {}
 
         mm_items = self._to_mm_items(mm_data)
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        if not isinstance(prompt, str):
+            # the prompt is the tokenized ids which is not supported
+            # by the hf_processor, which is why we would need to decode the ids
+            # into string
+            prompt = hf_processor.decode(prompt)
 
         (prompt_ids, processed_data,
          mm_token_type_ids) = self._apply_hf_processor_text_mm(
@@ -375,12 +375,14 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                                        num_image_patches),
         )
 
+        mm_hashes = self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
+                                        tokenization_kwargs)
         return MultiModalInputs(
             type="multimodal",
             prompt=prompt,
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
-            mm_hashes=None,
+            mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholders,
         )
 
