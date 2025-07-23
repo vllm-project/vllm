@@ -22,9 +22,11 @@ sentence-transformers # required for embedding tests
 soundfile # required for audio tests
 jiwer # required for audio tests
 timm # required for internvl test
-torch==2.7.1
-torchaudio==2.7.1
-torchvision==0.22.1
+--extra-index-url https://download.pytorch.org/whl/test/cu128
+torch==2.8.0
+torchaudio==2.8.0
+torchvision==0.23.0
+nvidia-cudnn-cu12==9.5.1.17
 transformers_stream_generator # required for qwen-vl test
 mamba_ssm # required for plamo2 test
 matplotlib # required for qwen-vl test

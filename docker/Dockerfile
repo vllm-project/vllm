@@ -50,7 +50,7 @@ ARG UV_INDEX_URL=${PIP_INDEX_URL}
 ARG UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 
 # PyTorch provides its own indexes for standard and nightly builds
-ARG PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
+ARG PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl/test
 ARG PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL=https://download.pytorch.org/whl/nightly
 
 # PIP supports multiple authentication schemes, including keyring
@@ -157,6 +157,8 @@ COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/cuda.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system nvidia-cudnn-cu12==9.5.1.17 --force-reinstall
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
@@ -376,6 +378,16 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     uv pip install --system dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
+# TODO (huydhn): Remove this once xformers is released for 2.8.0
+# https://pytorch.s3.us-east-1.amazonaws.com/whl/test/cu128/xformers/xformers-0.0.30%2B4cf69f09.d20250708-cp312-cp312-linux_x86_64.whl
+RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
+    . /etc/environment
+    export TORCH_CUDA_ARCH_LIST='7.0 7.5 8.0 8.9 9.0 10.0 12.0'
+    uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.30"
+    # DEBUG
+    python3 -m xformers.info
+BASH
+
 # If we need to build FlashInfer wheel before its release:
 # $ # Note we remove 7.0 from the arch list compared to the list below, since FlashInfer only supports sm75+
 # $ export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0a 10.0a 12.0'
@@ -388,6 +400,9 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 # -rw-rw-r-- 1 mgoin mgoin 205M Jun  9 18:03 flashinfer_python-0.2.6.post1-cp39-abi3-linux_x86_64.whl
 # $ # upload the wheel to a public location, e.g. https://wheels.vllm.ai/flashinfer/v0.2.6.post1/flashinfer_python-0.2.6.post1-cp39-abi3-linux_x86_64.whl
 
+# Allow specifying a version, Git revision or local .whl file
+ARG FLASHINFER_CUDA128_INDEX_URL="https://download.pytorch.org/whl/test/cu128/flashinfer"
+ARG FLASHINFER_CUDA128_WHEEL="flashinfer_python-0.2.6.post1%2Bcu128torch2.8-cp39-abi3-linux_x86_64.whl"
 # Install FlashInfer from source
 ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
 ARG FLASHINFER_GIT_REF="v0.2.8rc1"
