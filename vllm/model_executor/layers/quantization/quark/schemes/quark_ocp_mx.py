@@ -99,7 +99,7 @@ class QuarkOCP_MX(QuarkScheme):
             input_dim=1,
             output_dim=0,
             packed_dim=1,
-            packed_factor=self.packed_factor,  # TODO: verify if correct.
+            packed_factor=self.packed_factor,
             weight_loader=weight_loader,
         )
         layer.register_parameter("weight", weight)

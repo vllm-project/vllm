@@ -1373,7 +1373,6 @@ def fused_experts_impl(
             # 16bit activation and fp4x2 packed weight
             assert hidden_states.size(1) == w1.size(2) * 2, "hidden size mismatch"
         elif ocp_mx_scheme in {"w_fp6_e3m2_a_fp6_e3m2", "w_fp6_e2m3_a_fp6_e2m3"}:
-            assert (w1.size(2) * 4) % 3 == 0  # TODO: remove this line.
             assert hidden_states.size(1) == (w1.size(2) * 4) // 3, "hidden size mismatch"
     else:
         assert hidden_states.size(1) == w1.size(2), (
