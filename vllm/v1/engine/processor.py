@@ -380,7 +380,6 @@ class Processor:
         prompt_type: Literal["encoder", "decoder"],
     ):
         model_config = self.model_config
-        tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
 
         prompt_ids = prompt_inputs["prompt_token_ids"]
         if not prompt_ids:
@@ -389,9 +388,14 @@ class Processor:
             else:
                 raise ValueError(f"The {prompt_type} prompt cannot be empty")
 
-        max_input_id = max(prompt_ids, default=0)
-        if max_input_id > tokenizer.max_token_id:
-            raise ValueError(f"Token id {max_input_id} is out of vocabulary")
+        if self.model_config.skip_tokenizer_init:
+            tokenizer = None
+        else:
+            tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
+            max_input_id = max(prompt_ids, default=0)
+            if max_input_id > tokenizer.max_token_id:
+                raise ValueError(
+                    f"Token id {max_input_id} is out of vocabulary")
 
         max_prompt_len = self.model_config.max_model_len
         if len(prompt_ids) > max_prompt_len:

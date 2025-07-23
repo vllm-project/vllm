@@ -127,6 +127,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.is_multimodal_model = model_config.is_multimodal_model
         self.is_pooling_model = model_config.pooler_config is not None
+        self.model_supports_multimodal_raw_input = (
+            model_config.model_supports_multimodal_raw_input)
         self.max_model_len = model_config.max_model_len
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
@@ -329,6 +331,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         Args:
             scheduler_output: The scheduler output.
         """
+        # Attention free models have zero kv_cache_goups, however models
+        # like Mamba are also attention free but use the kv_cache for
+        # keeping its internal state. This is why we check the number
+        # of kv_cache groups instead of solely checking
+        # for self.model_config.is_attention_free.
+        if len(self.kv_cache_config.kv_cache_groups) == 0:
+            return
+
         self.attn_metadata_builders[0].reorder_batch(self.input_batch,
                                                      scheduler_output)
 
@@ -565,6 +575,38 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self._may_reorder_batch(scheduler_output)
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
+
+    def _init_model_kwargs_for_multimodal_model(
+        self,
+        scheduler_output: Optional["SchedulerOutput"] = None,
+        num_reqs: int = -1,
+    ) -> dict[str, Any]:
+
+        model_kwargs: dict[str, Any] = {}
+        if self.model_supports_multimodal_raw_input:
+            # This model requires the raw multimodal data in input.
+            if scheduler_output:
+                multi_modal_kwargs_list = []
+                for req in scheduler_output.scheduled_new_reqs:
+                    req_mm_inputs = req.mm_inputs
+                    if not isinstance(req_mm_inputs, list):
+                        req_mm_inputs = list(req_mm_inputs)
+                    multi_modal_kwargs_list.extend(req_mm_inputs)
+                multi_modal_kwargs = MultiModalKwargs.batch(
+                    multi_modal_kwargs_list)
+            else:
+                # The only case where SchedulerOutput is None is for
+                # a dummy run let's get some dummy data.
+                dummy_data = [
+                    self.mm_registry.get_decoder_dummy_data(
+                        model_config=self.model_config,
+                        seq_len=1).multi_modal_data for i in range(num_reqs)
+                ]
+                multi_modal_kwargs = MultiModalKwargs.batch(dummy_data)
+
+            model_kwargs.update(multi_modal_kwargs)
+
+        return model_kwargs
 
     def _get_cumsum_and_arange(
         self,
@@ -1360,10 +1402,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             input_ids = self.input_ids[:num_scheduled_tokens]
+
+            model_kwargs = self._init_model_kwargs_for_multimodal_model(
+                scheduler_output=scheduler_output)
             inputs_embeds = self.model.get_input_embeddings(
                 input_ids=input_ids,
                 multimodal_embeddings=mm_embeds or None,
             )
+
             # TODO(woosuk): Avoid the copy. Optimize.
             self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
@@ -1375,6 +1421,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # then the embedding layer is not included in the CUDA graph.
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
+            model_kwargs = {}
         if self.uses_mrope:
             positions = self.mrope_positions[:, :num_input_tokens]
         else:
@@ -1407,6 +1454,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
+                **MultiModalKwargs.as_kwargs(
+                    model_kwargs,
+                    device=self.device,
+                ),
             )
 
             self.maybe_wait_for_kv_save()
@@ -2085,11 +2136,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                             num_scheduled_tokens):
             model = self.model
             if self.is_multimodal_model:
+                model_kwargs = self._init_model_kwargs_for_multimodal_model(
+                    num_reqs=num_reqs)
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
             else:
                 input_ids = self.input_ids[:num_tokens]
                 inputs_embeds = None
+                model_kwargs = {}
+
             if self.uses_mrope:
                 positions = self.mrope_positions[:, :num_tokens]
             else:
@@ -2118,7 +2173,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
+                    **MultiModalKwargs.as_kwargs(
+                        model_kwargs,
+                        device=self.device,
+                    ),
                 )
+
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
             else:
