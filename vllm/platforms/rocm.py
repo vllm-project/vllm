@@ -43,9 +43,9 @@ except ImportError as e:
 _BACKEND_NAME_TO_QUALIFIED_NAME_MAPPING: dict[str, str] = {
     "ROCM_AITER_FLASH_ATTENTION_V1":
     "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend",
-    "ROCM_TRITON_SPLIT_PREFILL_DECODE_ATTENTION_V1":
+    "TRITON_SPLIT_PREFILL_DECODE_ATTENTION_V1":
     "vllm.v1.attention.backends.triton_attn.TritonSplitPrefillDecodeAttentionBackend",
-    "ROCM_TRITON_UNIFIED_ATTENTION_V1":
+    "TRITON_UNIFIED_ATTENTION_V1":
     "vllm.v1.attention.backends.triton_attn.TritonUnifiedAttentionBackend",
 }
 

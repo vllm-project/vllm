@@ -27,7 +27,7 @@ def test_selector(monkeypatch: pytest.MonkeyPatch):
         # Test standard ROCm attention
         backend = get_attn_backend(16, torch.float16, torch.float16, 16, False)
         assert (backend.get_name() == "ROCM_FLASH"
-                or backend.get_name() == "TRITON_ATTN_VLLM_V1")
+                or backend.get_name() == "TRITON_UNIFIED_ATTENTION_V1")
 
         # MLA test for deepseek related
 

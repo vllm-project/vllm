@@ -170,10 +170,6 @@ class TritonAttentionBackend(AttentionBackend):
                 f"For {attn_type}, block size must be a multiple of 16")
 
     @staticmethod
-    def get_name() -> str:
-        return "TRITON_ATTN_VLLM_V1"
-
-    @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
         return TritonAttentionMetadata
 
@@ -203,12 +199,20 @@ class TritonUnifiedAttentionBackend(TritonAttentionBackend):
     def get_impl_cls() -> type["TritonUnifiedAttentionImpl"]:
         return TritonUnifiedAttentionImpl
 
+    @staticmethod
+    def get_name() -> str:
+        return "TRITON_UNIFIED_ATTENTION_V1"
+
 
 class TritonSplitPrefillDecodeAttentionBackend(TritonAttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> type["TritonSplitPrefillDecodeAttentionImpl"]:
         return TritonSplitPrefillDecodeAttentionImpl
+
+    @staticmethod
+    def get_name() -> str:
+        return "TRITON_SPLIT_PREFILL_DECODE_ATTENTION_V1"
 
 
 class TritonAttentionImpl(AttentionImpl):
