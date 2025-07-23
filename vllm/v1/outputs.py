@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, Union
 
 import torch
 
 
 class AdditionalHeadOutputsPerRequest(NamedTuple):
     # num_additional_head_outputs
-    additional_head_outputs: list[float]
+    additional_head_outputs: Union[list[float], dict[str, float]]
 
 
 class AdditionalHeadOutputs(NamedTuple):

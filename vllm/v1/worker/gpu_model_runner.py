@@ -1444,9 +1444,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             additional_heads_tensor = self.model.compute_additional_head(
                 sample_hidden_states, additional_heads_data)
 
-            # Should be num_decode_tokens x additional_head_size
-            assert len(additional_heads_tensor.shape) == 2
-
             # Don't return the additional head outputs where they aren't needed.
             additional_head_outputs = AdditionalHeadOutputs(
                 additional_head_outputs=[
