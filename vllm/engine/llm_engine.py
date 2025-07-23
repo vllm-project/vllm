@@ -238,14 +238,14 @@ class LLMEngine:
         self.log_stats = log_stats
         self.use_cached_outputs = use_cached_outputs
 
-        if not self.model_config.skip_tokenizer_init:
-            self.tokenizer = self._init_tokenizer()
-            self.detokenizer = Detokenizer(self.tokenizer)
-            tokenizer_group = self.get_tokenizer_group()
-        else:
+        if self.model_config.skip_tokenizer_init:
             self.tokenizer = None
             self.detokenizer = None
             tokenizer_group = None
+        else:
+            self.tokenizer = self._init_tokenizer()
+            self.detokenizer = Detokenizer(self.tokenizer)
+            tokenizer_group = self.get_tokenizer_group()
 
         # Ensure that the function doesn't contain a reference to self,
         # to avoid engine GC issues

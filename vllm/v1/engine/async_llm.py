@@ -94,11 +94,14 @@ class AsyncLLM(EngineClient):
         self.log_requests = log_requests
         self.log_stats = log_stats
 
-        # Tokenizer (+ ensure liveness if running in another process).
-        self.tokenizer = init_tokenizer_from_configs(
-            model_config=vllm_config.model_config,
-            scheduler_config=vllm_config.scheduler_config,
-            lora_config=vllm_config.lora_config)
+        if self.model_config.skip_tokenizer_init:
+            self.tokenizer = None
+        else:
+            # Tokenizer (+ ensure liveness if running in another process).
+            self.tokenizer = init_tokenizer_from_configs(
+                model_config=vllm_config.model_config,
+                scheduler_config=vllm_config.scheduler_config,
+                lora_config=vllm_config.lora_config)
 
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(
@@ -525,6 +528,10 @@ class AsyncLLM(EngineClient):
         self,
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
+        if self.tokenizer is None:
+            raise ValueError("Unable to get tokenizer because "
+                             "skip_tokenizer_init is True")
+
         return self.tokenizer.get_lora_tokenizer(lora_request)
 
     async def is_tracing_enabled(self) -> bool:

@@ -54,3 +54,4 @@ runai-model-streamer==0.11.0
 runai-model-streamer-s3==0.11.0
 fastsafetensors>=0.1.10
 pydantic>=2.10 # 2.9 leads to error on python 3.10
+terratorch==1.1rc2 # required for PrithviMAE test
