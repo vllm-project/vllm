@@ -26,13 +26,13 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          DetailedTraceModules, Device, DeviceConfig,
                          DistributedExecutorBackend, GuidedDecodingBackend,
                          GuidedDecodingBackendV1, HfOverrides, KVEventsConfig,
-                         KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ModelDType, ModelImpl, MultiModalConfig,
-                         ObservabilityConfig, ParallelConfig, PoolerConfig,
-                         PrefixCachingHashAlgo, PromptAdapterConfig,
-                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         TaskOption, TokenizerMode, VllmConfig, get_attr_docs,
-                         get_field)
+                         KVTransferConfig, LoadConfig, LoadFormat,
+                         LogprobsMode, LoRAConfig, ModelConfig, ModelDType,
+                         ModelImpl, MultiModalConfig, ObservabilityConfig,
+                         ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
+                         PromptAdapterConfig, SchedulerConfig, SchedulerPolicy,
+                         SpeculativeConfig, TaskOption, TokenizerMode,
+                         VllmConfig, get_attr_docs, get_field)
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -324,6 +324,7 @@ class EngineArgs:
         SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: Optional[int] = SchedulerConfig.max_num_seqs
     max_logprobs: int = ModelConfig.max_logprobs
+    logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     disable_log_stats: bool = False
     revision: Optional[str] = ModelConfig.revision
     code_revision: Optional[str] = ModelConfig.code_revision
@@ -490,6 +491,8 @@ class EngineArgs:
                                  **model_kwargs["max_seq_len_to_capture"])
         model_group.add_argument("--max-logprobs",
                                  **model_kwargs["max_logprobs"])
+        model_group.add_argument("--logprobs-mode",
+                                 **model_kwargs["logprobs_mode"])
         model_group.add_argument("--disable-sliding-window",
                                  **model_kwargs["disable_sliding_window"])
         model_group.add_argument("--disable-cascade-attn",
@@ -892,6 +895,7 @@ class EngineArgs:
             enforce_eager=self.enforce_eager,
             max_seq_len_to_capture=self.max_seq_len_to_capture,
             max_logprobs=self.max_logprobs,
+            logprobs_mode=self.logprobs_mode,
             disable_sliding_window=self.disable_sliding_window,
             disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,
