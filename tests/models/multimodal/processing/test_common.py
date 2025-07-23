@@ -6,7 +6,6 @@ from typing import Optional, Union
 
 import numpy as np
 import pytest
-import torch
 from mistral_common.protocol.instruct.messages import (ImageChunk, TextChunk,
                                                        UserMessage)
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
@@ -46,7 +45,6 @@ def _test_processing_correctness(
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
-    ignore_mm_keys: Optional[set[str]] = None,
 ):
     if model_id_or_arch in HF_EXAMPLE_MODELS.get_supported_archs():
         # Use model architecture to get the default model id
@@ -329,22 +327,18 @@ def test_processing_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
-    ignore_mm_keys = None
-    if 'ultravox' in model_id:
-        # In Ultravox, the audio_features can be different depending on padding
-        # The slight difference should not be a problem though, since
-        # attention_mask lets us ignore the difference.
-        ignore_mm_keys = {"audio_features"}
-
     _test_processing_correctness(
         model_id,
         hit_rate=hit_rate,
         num_batches=num_batches,
         simplify_rate=simplify_rate,
-        ignore_mm_keys=ignore_mm_keys,
     )
 
 
+# Phi4MultimodalForCausalLM share same model repo with original format
+# Phi4MMForCausalLM, so we add it as a separate test case
+# Remove this test after conversion PR merged:
+# https://huggingface.co/microsoft/Phi-4-multimodal-instruct/discussions/70
 @pytest.mark.parametrize("model_arch", ["Phi4MultimodalForCausalLM"])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])

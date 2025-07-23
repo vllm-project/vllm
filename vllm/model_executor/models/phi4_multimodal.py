@@ -915,6 +915,9 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         return num_frames
 
     def _compute_audio_embed_size(self, audio_frames: int) -> int:
+        """
+        Compute the size of audio embeddings from the number of audio frames.
+        """
         # `_compute_audio_embed_size` in audio_processor use torch for
         # computation, therefore we re-implement it to use pythonic
         # numeric computation to avoid extra tensor conversion.
@@ -987,8 +990,8 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
-        # sr = self.info.get_feature_extractor().sampling_rate
-        if (audio_data := mm_data.pop("audios", [])):
+        audio_data = mm_data.pop("audios", [])
+        if audio_data:
             mm_data['audio'] = audio_data
 
         processed_outputs = super()._call_hf_processor(prompt, mm_data,
