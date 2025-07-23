@@ -21,7 +21,9 @@ trap remove_docker_container EXIT
 # Run the image and test offline inference/tensor parallel
 docker run \
     --device /dev/dri \
+    -v /datadisk/share/huggingface:/root/.cache/huggingface/hub/
     -v /dev/dri/by-path:/dev/dri/by-path \
+    -e HF_HOME=/root/.cache/huggingface/hub/ \
     --entrypoint="" \
     --name "${container_name}" \
     "${image_name}" \
