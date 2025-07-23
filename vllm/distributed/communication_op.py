@@ -44,23 +44,8 @@ def broadcast_tensor_dict(tensor_dict: Optional[dict[Any, Union[torch.Tensor,
         return tensor_dict
     return get_tp_group().broadcast_tensor_dict(tensor_dict, src)
 
-def tensor_model_parallel_mempool_ctx():
-    # TODO(asamani): check arg for enabling this feature
-    return torch.cuda.use_mem_pool(get_nccl_mem_pool())
-
-
-def tensor_model_parallel_register_window(tensor: torch.Tensor):
-    return get_tp_group().pynccl_comm.register_comm_window(tensor)
-
-
-def tensor_model_parallel_deregister_window(window):
-    get_tp_group().pynccl_comm.deregister_comm_window(window)
-
-
-def tensor_model_parallel_maybe_get_symm_buffer(shape, dtype):
-    # in case symm memory is available for this process group, we return a
-    # tensor in symm memory, otherwise we return a regular torch tensor.
-    return get_tp_group().maybe_get_symm_buffer(shape, dtype)
 
 def tensor_model_parallel_use_symmetric_memory():
+    if torch.compiler.is_compiling():
+        return nullcontext()
     return use_symmetric_memory(get_tp_group())
