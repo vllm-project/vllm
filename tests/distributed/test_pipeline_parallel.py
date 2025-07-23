@@ -177,7 +177,7 @@ TEXT_GENERATION_MODELS = {
     "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
     "meta-llama/Llama-3.2-1B-Instruct": PPTestSettings.detailed(),
     # Tests TransformersForCausalLM
-    "ArthurZ/Ilama-3.2-1B": PPTestSettings.fast(),
+    "hmellor/Ilama-3.2-1B": PPTestSettings.fast(),
     "openbmb/MiniCPM-2B-sft-bf16": PPTestSettings.fast(),
     "openbmb/MiniCPM3-4B": PPTestSettings.fast(),
     # Uses Llama
@@ -249,7 +249,7 @@ TEST_MODELS = [
     # [LANGUAGE GENERATION]
     "microsoft/Phi-3.5-MoE-instruct",
     "meta-llama/Llama-3.2-1B-Instruct",
-    "ArthurZ/Ilama-3.2-1B",
+    "hmellor/Ilama-3.2-1B",
     "ibm/PowerLM-3b",
     "deepseek-ai/DeepSeek-V2-Lite-Chat",
     # [LANGUAGE EMBEDDING]
