@@ -264,10 +264,11 @@ def get_model_architecture(
 
     if any(arch in _PREVIOUSLY_SUPPORTED_MODELS for arch in architectures):
         previous_version = _PREVIOUSLY_SUPPORTED_MODELS[architectures[0]]
-        raise ValueError("Model architecture was supported in vLLM until "
-                         f" version {previous_version}, and is not supported"
-                         " anymore. Please use an older version of vLLM "
-                         "if you want to use this model architecture.")
+        raise ValueError(
+            f"Model architecture {architectures[0]} was supported"
+            f" in vLLM until version {previous_version}, and is "
+            "not supported anymore. Please use an older version"
+            " of vLLM if you want to use this model architecture.")
 
     if (model_config.model_impl == ModelImpl.TRANSFORMERS or
             model_config.model_impl == ModelImpl.AUTO and vllm_not_supported):
