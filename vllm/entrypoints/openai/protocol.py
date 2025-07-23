@@ -841,7 +841,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             return data
 
         # if "tool_choice" is specified -- validation
-        if "tool_choice" in data:
+        if "tool_choice" in data and data["tool_choice"] is not None:
 
             # ensure that if "tool choice" is specified, tools are present
             if "tools" not in data or data["tools"] is None:
@@ -853,7 +853,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             if data["tool_choice"] not in [
                     "auto", "required"
             ] and not isinstance(data["tool_choice"], dict):
-                raise NotImplementedError(
+                raise ValueError(
                     f'Invalid value for `tool_choice`: {data["tool_choice"]}! '\
                     'Only named tools, "none", "auto" or "required" '\
                     'are supported.'
