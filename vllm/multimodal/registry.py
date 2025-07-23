@@ -266,7 +266,7 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             raise ValueError(f"{model_config.model} is not a multimodal model")
 
-        if tokenizer is None:
+        if tokenizer is None and not model_config.skip_tokenizer_init:
             tokenizer = cached_tokenizer_from_config(model_config)
         if disable_cache is None:
             mm_config = model_config.get_multimodal_config()
