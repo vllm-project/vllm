@@ -145,6 +145,21 @@ def find_tokenizer_file(files: list[str]):
     return matched_files[0]
 
 
+def _aggregate_content(content: list) -> list[dict[str, Any]]:
+    aggregated_content: list[dict[str, Any]] = []
+    for chunk in content:
+        if chunk.get("type"
+                     ) == "text" and aggregated_content and aggregated_content[
+                         -1].get("type") == "text":
+            aggregated_content[-1]["text"] += "\n\n" + chunk.get("text")
+        else:
+            aggregated_content.append(chunk)
+    if len(aggregated_content) == 1 and aggregated_content[0].get(
+            "type") == "text":
+        content = aggregated_content[0]["text"]
+    return content
+
+
 def make_mistral_chat_completion_request(
         messages: list["ChatCompletionMessageParam"],
         tools: Optional[list[dict[str,
@@ -164,20 +179,8 @@ def make_mistral_chat_completion_request(
         if message.get("role") in ("assistant", "tool"):
             content = message.get("content")
             if isinstance(content, list):
-                aggregated_content: list[dict[str, Any]] = []
-                for chunk in content:
-                    if chunk.get(
-                            "type"
-                    ) == "text" and aggregated_content and aggregated_content[
-                            -1].get("type") == "text":
-                        aggregated_content[-1]["text"] += "\n\n" + chunk.get(
-                            "text")
-                    else:
-                        aggregated_content.append(chunk)
-                if len(aggregated_content) == 1 and aggregated_content[0].get(
-                        "type") == "text":
-                    content = aggregated_content[0]["text"]
-                message["content"] = content
+                content = _aggregate_content(content)
+            message["content"] = content
 
     # The Mistral client, in comparison to the OpenAI client, requires the
     # "parameters" dict to be present, even if it's empty.
@@ -486,7 +489,7 @@ class MistralTokenizer(TokenizerBase):
         assert self.is_tekken or self.is_spm, type(self.tokenizer)
 
         if self.is_tekken:
-            # skip special tokens except tool call
+            # skip special tokens except tool call and think tokens
             ids = [
                 i for i in ids
                 if i > self.tokenizer.num_special_tokens or i in [

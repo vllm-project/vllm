@@ -35,7 +35,7 @@ class StreamingReasoningReconstructor:
 
 def run_reasoning_extraction(
     reasoning_parser: ReasoningParser,
-    model_output: list[str] | list[int],
+    model_output: Union[list[str], list[int]],
     request: Union[ChatCompletionRequest, None] = None,
     streaming: bool = False,
 ) -> tuple[Optional[str], Optional[str]]:
@@ -57,7 +57,7 @@ def run_reasoning_extraction(
 
 def run_reasoning_extraction_nonstreaming(
     reasoning_parser: ReasoningParser,
-    model_output: list[str] | list[int],
+    model_output: Union[list[str], list[int]],
     request: Union[ChatCompletionRequest, None] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     request = request or ChatCompletionRequest(messages=[], model="test-model")
@@ -73,7 +73,7 @@ def run_reasoning_extraction_nonstreaming(
 
 def run_reasoning_extraction_streaming(
     reasoning_parser: ReasoningParser,
-    model_deltas: list[str] | list[int],
+    model_deltas: Union[list[str], list[int]],
     request: Union[ChatCompletionRequest, None] = None,
 ) -> StreamingReasoningReconstructor:
     request = request or ChatCompletionRequest(messages=[], model="test-model")

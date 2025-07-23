@@ -4,6 +4,7 @@
 from collections.abc import Sequence
 from typing import Optional, Union
 
+from mistral_common.tokens.tokenizers.base import SpecialTokens
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -155,8 +156,8 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         # Check if the start token is present in the model output, remove it
         # if it is present.
         model_output_parts = model_output.partition(self.start_token)
-        model_output = (model_output_parts[2]
-                        if model_output_parts[1] else model_output_parts[0])
+        model_output = model_output = model_output_parts[
+            2] if model_output_parts[1] else model_output_parts[0]
 
         # DeepSeek R1 doesn't generate <think> now.
         # Thus we assume the reasoning content is always at the start.
@@ -191,8 +192,6 @@ class MistralReasoningParser(DeepSeekR1ReasoningParser):
             raise ValueError(
                 "The model tokenizer must be passed to the ReasoningParser "
                 "constructor during construction.")
-
-        from mistral_common.tokens.tokenizers.base import SpecialTokens
 
         self.start_token = SpecialTokens.begin_think
         self.end_token = SpecialTokens.end_think
