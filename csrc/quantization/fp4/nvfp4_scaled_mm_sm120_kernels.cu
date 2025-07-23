@@ -218,13 +218,13 @@ void cutlass_fp4_bf16_gemm_dispatch(torch::Tensor& D,
 }
 
 void cutlass_fp4_f16_gemm_dispatch(torch::Tensor& D,
-                               torch::Tensor const& A,
-                               torch::Tensor const& B,
-                               torch::Tensor const& A_sf,
-                               torch::Tensor const& B_sf,
-                               torch::Tensor const& alpha,
-                               int m, int n, int k,
-                               cudaStream_t stream) {
+                                   torch::Tensor const& A,
+                                   torch::Tensor const& B,
+                                   torch::Tensor const& A_sf,
+                                   torch::Tensor const& B_sf,
+                                   torch::Tensor const& alpha,
+                                   int m, int n, int k,
+                                   cudaStream_t stream) {
   uint32_t const mp2 = std::max(static_cast<uint32_t>(16), next_pow_2(m));
   if (mp2 <= 256) {
     runGemm<Fp4GemmSm120<sm120_fp4_config_M256, cutlass::half_t>::Gemm>(
@@ -293,10 +293,6 @@ void cutlass_scaled_fp4_mm_sm120a(torch::Tensor& D,
     auto out_dtype = D.dtype();
     const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream(A.get_device());
-
-    using ClusterShape       = Shape<_1,_1,_1>;
-    using MmaTileShape       = Shape<_128,_128,_128>;
-    using PerSmTileShape_MNK = Shape<_128,_128,_128>;
 
     if (out_dtype == at::ScalarType::Half) {
         return cutlass_fp4_bf16_gemm_dispatch(D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
