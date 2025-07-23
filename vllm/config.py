@@ -94,7 +94,7 @@ ConfigT = TypeVar("ConfigT", bound=ConfigType)
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
                      "score", "reward", "transcription", "draft"]
 
-_ResolvedTask = Literal["generate", "transcription", "pooling", "embed",
+_ResolvedTask = Literal["generate", "transcription", "encode", "embed",
                         "classify", "reward", "draft"]
 
 RunnerOption = Literal["auto", "generate", "pooling", "draft"]
@@ -103,7 +103,7 @@ RunnerType = Literal["generate", "pooling", "draft"]
 
 _RUNNER_TASKS: dict[RunnerType, list[_ResolvedTask]] = {
     "generate": ["generate", "transcription"],
-    "pooling": ["pooling", "embed", "classify", "reward"],
+    "pooling": ["encode", "embed", "classify", "reward"],
     "draft": [],
 }
 
@@ -219,6 +219,8 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
+LogprobsMode = Literal["raw_logprobs", "raw_logits", "processed_logprobs",
+                       "processed_logits"]
 
 
 @config
@@ -316,6 +318,13 @@ class ModelConfig:
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
     OpenAI Chat Completions API."""
+    logprobs_mode: LogprobsMode = "raw_logprobs"
+    """Indicates the content returned in the logprobs and prompt_logprobs.
+    Supported mode:
+    1) raw_logprobs, 2) processed_logprobs, 3) raw_logits, 4) processed_logits.
+    Raw means the values before applying logit processors, like bad words.
+    Processed means the values after applying such processors.
+    """
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
@@ -346,11 +355,11 @@ class ModelConfig:
     """Maximum number of data items per modality per prompt. Only applicable
     for multimodal models."""
     interleave_mm_strings: bool = False
-    """Enable fully interleaved support for multimodal prompts, while using 
+    """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string. Defaults to False."""
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    """Additional args passed to process media inputs, keyed by modalities. 
-    For example, to set num_frames for video, set 
+    """Additional args passed to process media inputs, keyed by modalities.
+    For example, to set num_frames for video, set
     `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
     use_async_output_proc: bool = True
     """Whether to use async output processor."""
@@ -562,6 +571,10 @@ class ModelConfig:
 
             self.task = "embed"
 
+        model_info, arch = self.registry.inspect_model_cls(self.architectures)
+        self._model_info = model_info
+        self._architecture = arch
+
         all_supported_tasks = self._get_supported_tasks(self.task)
         logger.debug("Tasks supported by runner type: %s", all_supported_tasks)
         supported_runner_types = self._get_supported_runner_types(
@@ -575,7 +588,7 @@ class ModelConfig:
         # user-selected task
         if runner_type == "pooling" and self.task == "auto":
             selected_task = all_supported_tasks[runner_type][-1]
-            assert selected_task != "pooling"
+            assert selected_task != "encode"
             self.task = selected_task
         self.supported_runner_types = supported_runner_types
         self.runner_type = runner_type
@@ -586,10 +599,6 @@ class ModelConfig:
             self.truncation_side = "left"
         else:
             self.truncation_side = "right"
-
-        model_info, arch = self.registry.inspect_model_cls(self.architectures)
-        self._model_info = model_info
-        self._architecture = arch
 
         self.pooler_config = self._init_pooler_config()
 
@@ -674,6 +683,16 @@ class ModelConfig:
                 "max_model_len must be an integer after __post_init__.")
         return self
 
+    def _get_transformers_backend_cls(self) -> str:
+        """Determine which Transformers backend class will be used if
+        `model_impl` is set to `transformers` or `auto`."""
+        if self.hf_config != self.hf_text_config:
+            # If 'hf_text_config' is the same as 'hf_config'. If not, it is
+            # probably a composite config, i.e. multimodal
+            return "TransformersForMultimodalLM"
+        else:
+            return "TransformersForCausalLM"
+
     @property
     def registry(self):
         return me_models.ModelRegistry
@@ -681,7 +700,19 @@ class ModelConfig:
     @property
     def architectures(self) -> list[str]:
         # architectures in the model config.
-        return getattr(self.hf_config, "architectures", [])
+        architectures = getattr(self.hf_config, "architectures", [])
+        # The registry assumes that it can always inspect the vLLM model class
+        # for a given architecture. This assumption breaks down for the
+        # Transformers backend, which may use a different class depending on
+        # the model type. To work around this, we add the correct Transformers
+        # backend class to the architectures list. We must do this here because
+        # we need access to the `hf_config` to determine the backend class.
+        transformers_backend_cls = self._get_transformers_backend_cls()
+        if (self.model_impl != ModelImpl.VLLM.value
+                and all(arch != transformers_backend_cls
+                        for arch in architectures)):
+            architectures.append(transformers_backend_cls)
+        return architectures
 
     @property
     def architecture(self) -> str:
@@ -827,10 +858,9 @@ class ModelConfig:
             ("EmbeddingModel", "embed"),
             ("RewardModel", "reward"),
         ]
-        _, arch = self.registry.inspect_model_cls(architectures)
 
         for suffix, pref_task in suffix_to_preferred_task:
-            if arch.endswith(suffix):
+            if self.architecture.endswith(suffix):
                 return pref_task
 
         return "embed"
@@ -863,7 +893,7 @@ class ModelConfig:
 
         supported_tasks = list[_ResolvedTask]()
         if registry.is_pooling_model(architectures):
-            supported_tasks.append("pooling")
+            supported_tasks.append("encode")
 
             # For now, users must specify the task (other than "pooling")
             # to use for pooling models
@@ -944,10 +974,10 @@ class ModelConfig:
             ("EmbeddingModel", "pooling"),
             ("RewardModel", "pooling"),
         ]
-        _, arch = self.registry.inspect_model_cls(self.architectures)
 
         for suffix, pref_runner in suffix_to_preferred_runner:
-            if arch.endswith(suffix) and pref_runner in supported_runner_types:
+            if self.architecture.endswith(
+                    suffix) and pref_runner in supported_runner_types:
                 return pref_runner
 
         if "generate" in supported_runner_types:
@@ -979,9 +1009,13 @@ class ModelConfig:
         quant_cfg = self._parse_quant_hf_config()
 
         if quant_cfg is not None:
+            # Use the community standard 'quant_method'
             quant_method = quant_cfg.get("quant_method", "").lower()
+
+            # Normalize library names
             quant_method = quant_method.replace("compressed_tensors",
                                                 "compressed-tensors")
+
             quant_cfg["quant_method"] = quant_method
 
             # Quantization methods which are overrides (i.e. they have a
@@ -996,6 +1030,8 @@ class ModelConfig:
                 "awq_marlin",
                 "ipex",
                 "moe_wna16",
+                "modelopt",
+                "modelopt_fp4",
             ]
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
@@ -2081,6 +2117,15 @@ class ParallelConfig:
                 raise ValueError(
                     "num_redundant_experts must be non-negative, but got "
                     f"{self.num_redundant_experts}.")
+            if not self.enable_expert_parallel:
+                raise ValueError(
+                    "enable_expert_parallel must be True to use EPLB.")
+            if self.tensor_parallel_size * self.data_parallel_size <= 1:
+                raise ValueError(
+                    "EPLB requires tensor_parallel_size or data_parallel_size "
+                    f"to be greater than 1, but got "
+                    f"TP={self.tensor_parallel_size},DP={self.data_parallel_size}."
+                )
         else:
             if self.num_redundant_experts != 0:
                 raise ValueError(
@@ -2101,10 +2146,11 @@ class ParallelConfig:
             elif (current_platform.is_cuda()
                   and cuda_device_count_stateless() < self.world_size):
                 if not ray_found:
-                    raise ValueError("Unable to load Ray which is "
+                    raise ValueError("Unable to load Ray: "
+                                     f"{ray_utils.ray_import_err}. Ray is "
                                      "required for multi-node inference, "
                                      "please install Ray with `pip install "
-                                     "ray`.") from ray_utils.ray_import_err
+                                     "ray`.")
                 backend = "ray"
             elif self.data_parallel_backend == "ray":
                 logger.info("Using ray distributed inference because "
@@ -3164,8 +3210,8 @@ class MultiModalConfig:
     """
 
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
-    """Additional args passed to process media inputs, keyed by modalities. 
-    For example, to set num_frames for video, set 
+    """Additional args passed to process media inputs, keyed by modalities.
+    For example, to set num_frames for video, set
     `--media-io-kwargs '{"video": {"num_frames": 40} }'` """
 
     mm_processor_kwargs: Optional[dict[str, object]] = None
@@ -4080,7 +4126,7 @@ class CompilationConfig:
     - True: inductor compilation is used (custom_ops disabled by default).
         One graph for symbolic shape and one graph per size in compile_sizes
         are compiled using configurations in inductor_compile_config.
-        
+
     This setting is ignored if level<PIECEWISE."""
     compile_sizes: Optional[list[Union[int, str]]] = None
     """Sizes to compile for inductor. In addition
@@ -4442,7 +4488,7 @@ class VllmConfig:
 
     As a shorthand, `-O<n>` can be used to directly specify the compilation
     level `n`: `-O3` is equivalent to `-O.level=3` (same as `-O='{"level":3}'`).
-    Currently, -O <n> and -O=<n> are supported as well but this will likely be 
+    Currently, -O <n> and -O=<n> are supported as well but this will likely be
     removed in favor of clearer -O<n> syntax in the future.
 
     NOTE: level 0 is the default level without any optimization. level 1 and 2

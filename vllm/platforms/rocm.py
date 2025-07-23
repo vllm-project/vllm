@@ -454,3 +454,7 @@ class RocmPlatform(Platform):
     @classmethod
     def device_count(cls) -> int:
         return cuda_device_count_stateless()
+
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+        return True
