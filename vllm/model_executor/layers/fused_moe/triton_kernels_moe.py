@@ -111,7 +111,7 @@ def triton_kernel_fused_experts(
 
     act = FusedActivation(
         FnSpecs("swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit")),
-        (1.702, None), 2)
+        (1.702, 7), 2)
 
     intermediate_cache1 = matmul_ogs(hidden_states,
                                      w1,
