@@ -141,6 +141,12 @@ class KVCacheManager:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
         """
+                # Request already has blocks from async load via KVConnector.
+        # num_existing_blocks = len(
+        #     self.req_to_blocks[request.request_id])
+        # if num_existing_blocks > 0:
+        #     return KVCacheBlocks.create_empty(), request.num_computed_tokens
+
         # Prefix caching is disabled or
         # When the request requires prompt logprobs, we skip prefix caching.
         if (not self.enable_caching
