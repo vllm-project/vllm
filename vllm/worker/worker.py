@@ -102,9 +102,6 @@ class Worker(LocalOrDistributedWorkerBase):
         self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
         self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
 
-        # Buffers saved before sleep
-        self._sleep_saved_buffers: Dict[str, torch.Tensor] = {}
-
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
@@ -137,16 +134,16 @@ class Worker(LocalOrDistributedWorkerBase):
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
 
-        # Save the buffers before level 2 sleep
+        default_tags = ("weights", )
+        allocator = CuMemAllocator.get_instance()
         if level == 2:
             model = self.model_runner.model
-            self._sleep_saved_buffers = {
-                name: buffer.cpu().clone()
-                for name, buffer in model.named_buffers()
-            }
+            allocator.backup_memory_except(
+                list(model.named_parameters()),
+                tags=default_tags,
+            )
 
-        allocator = CuMemAllocator.get_instance()
-        allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
+        allocator.sleep(offload_tags=default_tags if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
@@ -159,14 +156,6 @@ class Worker(LocalOrDistributedWorkerBase):
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
         allocator = CuMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
-
-        # Restore the buffers after level 2 sleep
-        if len(self._sleep_saved_buffers):
-            model = self.model_runner.model
-            for name, buffer in model.named_buffers():
-                if name in self._sleep_saved_buffers:
-                    buffer.data.copy_(self._sleep_saved_buffers[name].data)
-            self._sleep_saved_buffers = {}
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
