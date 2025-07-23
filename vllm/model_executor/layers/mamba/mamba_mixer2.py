@@ -478,6 +478,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 seq_idx_p = attn_metadata.seq_idx
                 chunk_indices_p = attn_metadata.chunk_indices
                 chunk_offsets_p = attn_metadata.chunk_offsets
+                query_start_loc_p = attn_metadata.query_start_loc_p
         else:
             conv_state = mamba_cache_params.conv_state
             ssm_state = mamba_cache_params.ssm_state
@@ -488,6 +489,7 @@ class MambaMixer2(MambaBase, CustomOp):
             seq_idx_p = mamba2_metadata.seq_idx
             chunk_indices_p = mamba2_metadata.chunk_indices
             chunk_offsets_p = mamba2_metadata.chunk_offsets
+            query_start_loc_p = mamba2_metadata.query_start_loc_p
 
         groups_time_state_size = self.n_groups * self.ssm_state_size
 
@@ -558,9 +560,6 @@ class MambaMixer2(MambaBase, CustomOp):
                 [num_decodes, num_prefills],
                 dim=0,
             )
-            query_start_loc_p = (
-                attn_metadata.query_start_loc[-num_prefills - 1:] -
-                num_decodes if has_prefill else None)
         else:
             hidden_states_B_C_p, hidden_states_B_C_d = torch.split(
                 hidden_states_B_C,
@@ -578,9 +577,6 @@ class MambaMixer2(MambaBase, CustomOp):
                 [num_prefills, num_decodes],
                 dim=0,
             )
-            query_start_loc_p = (attn_metadata.query_start_loc[:num_prefills +
-                                                               1]
-                                 if has_prefill else None)
 
         ssd_output_list = []
 
@@ -592,8 +588,7 @@ class MambaMixer2(MambaBase, CustomOp):
             x = hidden_states_B_C_p.transpose(
                 0, 1)  # this is the form that causal-conv see
             if mamba2_metadata.cu_seqlen is None:
-                mamba2_metadata = update_metadata(x, query_start_loc_p,
-                                                  mamba2_metadata)
+                mamba2_metadata = update_metadata(x, mamba2_metadata)
             hidden_states_B_C_p = causal_conv1d_fn(
                 x,
                 conv_weights,
@@ -689,16 +684,13 @@ class MambaMixer2(MambaBase, CustomOp):
                 dt_softplus=True,
                 state_batch_indices=state_indices_tensor_d,
             )
-
+            hidden_states_d = \
+                hidden_states_d.view(-1, (self.num_heads // self.tp_size) *
+                                          self.head_dim)
             if envs.VLLM_USE_V1:
-                ssd_output_list.insert(
-                    0,
-                    hidden_states_d.view(-1, (self.num_heads // self.tp_size) *
-                                         self.head_dim))
+                ssd_output_list.insert(0, hidden_states_d)
             else:
-                ssd_output_list.append(
-                    hidden_states_d.view(-1, (self.num_heads // self.tp_size) *
-                                         self.head_dim))
+                ssd_output_list.append(hidden_states_d)
 
         # Merge prefill and decode outputs before passing to gated MLP
         hidden_states = torch.vstack(ssd_output_list)

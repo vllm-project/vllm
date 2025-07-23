@@ -25,6 +25,7 @@ class Mamba2Metadata:
     seq_idx: torch.Tensor
     chunk_indices: torch.Tensor
     chunk_offsets: torch.Tensor
+    query_start_loc_p: torch.Tensor
     """
     With continuous batching layout of `x` in vLLM, to enable a Triton program
     to handle a request in parallel, two supporting tensors are used
@@ -81,7 +82,7 @@ def prepare_mamba2_metadata(
     # currently we really only support the FlashAttention backend
     has_initial_states = None
     prep_initial_states = False
-
+    query_start_loc_p = None
     # Compute seq_idx, chunk_indices and chunk_offsets for prefill only
     if num_prefills > 0:
         attn_metadata_instances = get_platform_metadata_classes()
@@ -93,10 +94,10 @@ def prepare_mamba2_metadata(
             has_initial_states = \
                 attn_metadata.context_lens_tensor[:num_prefills] > 0
             prep_initial_states = torch.any(has_initial_states).item()
-        query_start_loc = attn_metadata.query_start_loc[:num_prefills + 1]
+        query_start_loc_p = attn_metadata.query_start_loc[:num_prefills + 1]
         seq_idx = torch.repeat_interleave(torch.arange(
-            num_prefills, dtype=torch.int32, device=query_start_loc.device),
-                                          query_start_loc.diff(),
+            num_prefills, dtype=torch.int32, device=query_start_loc_p.device),
+                                          query_start_loc_p.diff(),
                                           output_size=num_prefill_tokens)
 
         # We compute metadata for chunked prefill once at the top level model
@@ -105,17 +106,18 @@ def prepare_mamba2_metadata(
         if prep_initial_states:
             chunk_indices, chunk_offsets = \
                 _query_start_loc_to_chunk_indices_offsets(
-                query_start_loc, chunk_size, num_prefill_tokens)
+                query_start_loc_p, chunk_size, num_prefill_tokens)
 
     return Mamba2Metadata(has_initial_states=has_initial_states,
                           prep_initial_states=prep_initial_states,
                           chunk_size=chunk_size,
+                          query_start_loc_p=query_start_loc_p,
                           seq_idx=seq_idx,
                           chunk_indices=chunk_indices,
                           chunk_offsets=chunk_offsets)
 
 
-def update_metadata(x: torch.Tensor, query_start_loc: torch.Tensor,
+def update_metadata(x: torch.Tensor,
                     mamba2_metadata: Union[Mamba2Metadata,
                                            Mamba2AttentionMetadata]):
     """
@@ -123,7 +125,7 @@ def update_metadata(x: torch.Tensor, query_start_loc: torch.Tensor,
     """
     dim, cu_seqlen = x.shape
     mamba2_metadata.cu_seqlen = cu_seqlen
-    seqlens = np.diff(query_start_loc.to('cpu'))
+    seqlens = np.diff(mamba2_metadata.query_start_loc_p.to('cpu'))
     nums_dict = {}  # type: ignore
     for BLOCK_M in [8]:  # cover all BLOCK_M values
         nums = -(-seqlens // BLOCK_M)
