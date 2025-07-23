@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 from vllm.logger import init_logger
-from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
+from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS, count_cpus_in_string
 
 from .interface import CpuArchEnum, Platform, PlatformEnum, _Backend
 
@@ -135,6 +135,8 @@ class CpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        import vllm.envs as envs
+
         model_config = vllm_config.model_config
 
         if model_config is not None:
@@ -235,7 +237,16 @@ class CpuPlatform(Platform):
         os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
 
         # Set default threads num for OpenMP parallel
-        os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
+        # - to #CPUs if VLLM_CPU_OMP_THREADS_BIND is set for UniProcExecutor
+        # - to torch.get_num_threads() otherwise
+        omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
+        omp_num_threads = torch.get_num_threads()
+        if omp_cpuids != 'auto' and '|' not in omp_cpuids:
+            omp_num_threads_desired = count_cpus_in_string(omp_cpuids)
+            if omp_num_threads_desired > 0:
+                omp_num_threads = omp_num_threads_desired
+        os.environ["OMP_NUM_THREADS"] = str(omp_num_threads)
+        logger.info("Set OMP_NUM_THREADS to %d", omp_num_threads)
 
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"

@@ -3346,3 +3346,19 @@ def decorate_logs(process_name: Optional[str] = None) -> None:
     pid = os.getpid()
     _add_prefix(sys.stdout, process_name, pid)
     _add_prefix(sys.stderr, process_name, pid)
+
+
+# Count number of CPUs in a string (e.g., 14 for "1-8,10,17-21")
+# NOTE: may return negative number for wrong string like "8-1"
+def count_cpus_in_string(cpulist: str) -> int:
+    if not cpulist or cpulist.strip() == '':
+        return 0
+    count = 0
+    for part in cpulist.split(','):
+        part = part.strip()
+        if '-' in part:
+            start, end = map(int, part.split('-'))
+            count += end - start + 1
+        else:
+            count += 1
+    return count

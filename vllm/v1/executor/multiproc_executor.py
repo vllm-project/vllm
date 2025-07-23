@@ -29,9 +29,9 @@ from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.executor.multiproc_worker_utils import (
     set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
-from vllm.utils import (decorate_logs, get_distributed_init_method,
-                        get_loopback_ip, get_mp_context, get_open_port,
-                        set_process_title)
+from vllm.utils import (count_cpus_in_string, decorate_logs,
+                        get_distributed_init_method, get_loopback_ip,
+                        get_mp_context, get_open_port, set_process_title)
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -416,6 +416,18 @@ class WorkerProc:
         # Create death pipe to detect parent process exit
         death_reader, death_writer = context.Pipe(duplex=False)
 
+        # Sets OpenMP thread number for each MultiprocExecutor
+        ops_num_threads = os.environ.get("OMP_NUM_THREADS", None)
+        omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
+        if ops_num_threads and omp_cpuids != 'auto':
+            local_omp_cpuid = omp_cpuids.split("|")[rank]
+            ops_num_threads_desired = count_cpus_in_string(local_omp_cpuid)
+            if ops_num_threads_desired > 0 and ops_num_threads_desired != int(
+                    ops_num_threads):
+                os.environ["OMP_NUM_THREADS"] = str(ops_num_threads_desired)
+                logger.info("Adjusted OpenMP threads from %s to %d",
+                            ops_num_threads, ops_num_threads_desired)
+
         process_kwargs = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
@@ -433,6 +445,11 @@ class WorkerProc:
 
         proc.start()
         writer.close()
+
+        # Restore original setting
+        if ops_num_threads:
+            os.environ["OMP_NUM_THREADS"] = ops_num_threads
+
         # Keep death_writer open in parent - when parent exits,
         # death_reader in child will get EOFError
         return UnreadyWorkerProcHandle(proc, rank, reader, death_writer)
