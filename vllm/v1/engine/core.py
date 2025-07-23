@@ -404,7 +404,8 @@ class EngineCoreProc(EngineCore):
         engine_index: int = 0,
     ):
         setproctitle.setproctitle(
-                f"{envs.VLLM_PROCESS_NAME_PREFIX}::{self.__class__.__name__}_{engine_index}")
+            f"{envs.VLLM_PROCESS_NAME_PREFIX}::{self.__class__.__name__}_{engine_index}"
+        )
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
                                               bytes]]()

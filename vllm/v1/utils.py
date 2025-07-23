@@ -10,8 +10,8 @@ from multiprocessing.process import BaseProcess
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Optional, TypeVar,
                     Union, overload)
 
-import torch
 import setproctitle
+import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger

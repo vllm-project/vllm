@@ -138,7 +138,8 @@ class CoordinatorProc:
         back_publish_address: str,
         min_stats_update_interval_ms: int = 100,
     ):
-        setproctitle.setproctitle(f"{envs.VLLM_PROCESS_NAME_PREFIX}::DPCoordinator")
+        setproctitle.setproctitle(
+            f"{envs.VLLM_PROCESS_NAME_PREFIX}::DPCoordinator")
         coordinator = CoordinatorProc(
             engine_count=engine_count,
             min_stats_update_interval_ms=min_stats_update_interval_ms)
