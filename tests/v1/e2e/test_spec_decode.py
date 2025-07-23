@@ -155,12 +155,14 @@ def test_ngram_correctness(
     ])
 @pytest.mark.parametrize("attn_backend",
                          get_attn_backend_list_based_on_platform())
+@pytest.mark.parametrize("full_cuda_graph", [True, False])
 def test_eagle_correctness(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
     model_setup: tuple[str, str, str, int],
     mm_enabled: bool,
     attn_backend: str,
+    full_cuda_graph: bool,
 ):
     # Generate test prompts inside the function instead of using fixture
     test_prompts = get_test_prompts(mm_enabled)
@@ -202,6 +204,7 @@ def test_eagle_correctness(
                 "max_model_len": 2048,
             },
             max_model_len=2048,
+            compilation_config={"full_cuda_graph": full_cuda_graph},
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0

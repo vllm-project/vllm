@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
 from dataclasses import replace
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -67,10 +67,12 @@ class EagleProposer:
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and
                                not self.vllm_config.model_config.enforce_eager)
+        self.use_full_cuda_graph = (
+            self.use_cuda_graph
+            and vllm_config.compilation_config.full_cuda_graph)
         self.cudagraph_batch_sizes = list(
             reversed(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
-
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int32,
@@ -120,6 +122,8 @@ class EagleProposer:
             device=device,
             dtype=torch.int32,
         ).repeat(max_batch_size, 1)
+        # attention metadata captured in full cudagraph mode
+        self.attn_metadata_cudagraph = None
 
     def propose(
         self,
@@ -184,6 +188,18 @@ class EagleProposer:
         else:
             inputs_embeds = None
             input_ids = self.input_ids[:num_input_tokens]
+
+        if (self.use_full_cuda_graph
+                and num_tokens <= self.cudagraph_batch_sizes[-1]):
+            assert self.attn_metadata_cudagraph
+            self.attn_metadata_cudagraph.seq_lens[:batch_size] = (
+                attn_metadata.seq_lens)
+            self.attn_metadata_cudagraph.slot_mapping[:num_tokens] = (
+                attn_metadata.slot_mapping)
+            self.attn_metadata_cudagraph.query_start_loc[:batch_size + 1] = (
+                attn_metadata.query_start_loc)
+            self.attn_metadata_cudagraph.block_table[:batch_size] = (
+                attn_metadata.block_table)
 
         with set_forward_context(per_layer_attn_metadata,
                                  self.vllm_config,
@@ -304,6 +320,21 @@ class EagleProposer:
             else:
                 inputs_embeds = None
                 input_ids = self.input_ids[:input_batch_size]
+
+            if (self.use_full_cuda_graph
+                    and batch_size <= self.cudagraph_batch_sizes[-1]):
+                assert self.attn_metadata_cudagraph
+                self.attn_metadata_cudagraph.seq_lens[:batch_size] = (
+                    attn_metadata.seq_lens)
+                self.attn_metadata_cudagraph.slot_mapping[:batch_size] = (
+                    attn_metadata.slot_mapping)
+                if token_index == 0:
+                    self.attn_metadata_cudagraph.query_start_loc[:batch_size +
+                                                                 1] = (
+                                                                     attn_metadata
+                                                                     .
+                                                                     query_start_loc
+                                                                 )
 
             # Run the model.
             with set_forward_context(per_layer_attn_metadata,
@@ -642,8 +673,13 @@ class EagleProposer:
     def dummy_run(
         self,
         num_tokens: int,
+        attn_metadata: Optional[dict[str, Any]] = None,
     ) -> None:
-        with set_forward_context(None, self.vllm_config,
+        if attn_metadata is not None and self.attn_metadata_cudagraph is None:
+            self.attn_metadata_cudagraph = attn_metadata[
+                self.attn_layer_names[0]]
+        with set_forward_context(attn_metadata,
+                                 self.vllm_config,
                                  num_tokens=num_tokens):
             if self.is_multimodal_model:
                 input_ids = None

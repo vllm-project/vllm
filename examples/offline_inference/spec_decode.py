@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
@@ -68,6 +70,7 @@ def parse_args():
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
     parser.add_argument("--custom-mm-prompts", action="store_true")
+    parser.add_argument("--compilation-config", type=str, default="")
     return parser.parse_args()
 
 
@@ -132,6 +135,9 @@ def main():
         max_model_len=16384,
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
+        compilation_config=(
+            json.loads(args.compilation_config) if args.compilation_config else None
+        ),
     )
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
