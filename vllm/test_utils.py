@@ -10,7 +10,7 @@ MODELS_ON_S3 = [
     "allenai/OLMoE-1B-7B-0924-Instruct",
     "amd/Llama-3.1-8B-Instruct-FP8-KV-Quark-test",
     "AMead10/Llama-3.2-1B-Instruct-AWQ",
-    "ArthurZ/Ilama-3.2-1B",
+    "hmellor/Ilama-3.2-1B",
     "BAAI/bge-base-en-v1.5",
     "BAAI/bge-multilingual-gemma2",
     "BAAI/bge-reranker-v2-m3",
