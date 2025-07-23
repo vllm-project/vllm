@@ -1,7 +1,4 @@
----
-title: Multimodal Inputs
----
-[](){ #multimodal-inputs }
+# Multimodal Inputs
 
 This page teaches you how to pass multi-modal inputs to [multi-modal models][supported-mm-models] in vLLM.
 
@@ -20,7 +17,7 @@ To input multi-modal data, follow this schema in [vllm.inputs.PromptType][]:
 
 You can pass a single image to the `'image'` field of the multi-modal dictionary, as shown in the following examples:
 
-??? Code
+??? code
 
     ```python
     from vllm import LLM
@@ -68,7 +65,7 @@ Full example: <gh-file:examples/offline_inference/vision_language.py>
 
 To substitute multiple images inside the same text prompt, you can pass in a list of images instead:
 
-??? Code
+??? code
 
     ```python
     from vllm import LLM
@@ -101,7 +98,7 @@ To substitute multiple images inside the same text prompt, you can pass in a lis
 
 Full example: <gh-file:examples/offline_inference/vision_language_multi_image.py>
 
-If using the [LLM.chat](https://docs.vllm.ai/en/stable/models/generative_models.html#llmchat) method, you can pass images directly in the message content using various formats: image URLs, PIL Image objects, or pre-computed embeddings:
+If using the [LLM.chat](../models/generative_models.md#llmchat) method, you can pass images directly in the message content using various formats: image URLs, PIL Image objects, or pre-computed embeddings:
 
 ```python
 from vllm import LLM
@@ -146,7 +143,7 @@ for o in outputs:
 
 Multi-image input can be extended to perform video captioning. We show this with [Qwen2-VL](https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct) as it supports videos:
 
-??? Code
+??? code
 
     ```python
     from vllm import LLM
@@ -193,7 +190,7 @@ Full example: <gh-file:examples/offline_inference/audio_language.py>
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
 pass a tensor of shape `(num_items, feature_size, hidden_size of LM)` to the corresponding field of the multi-modal dictionary.
 
-??? Code
+??? code
 
     ```python
     from vllm import LLM
@@ -220,7 +217,7 @@ pass a tensor of shape `(num_items, feature_size, hidden_size of LM)` to the cor
 
 For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embeddings:
 
-??? Code
+??? code
 
     ```python
     # Construct the prompt based on your model
@@ -288,7 +285,7 @@ vllm serve microsoft/Phi-3.5-vision-instruct --task generate \
 
 Then, you can use the OpenAI client as follows:
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI
@@ -366,7 +363,7 @@ vllm serve llava-hf/llava-onevision-qwen2-0.5b-ov-hf --task generate --max-model
 
 Then, you can use the OpenAI client as follows:
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI
@@ -430,7 +427,7 @@ vllm serve fixie-ai/ultravox-v0_5-llama-3_2-1b
 
 Then, you can use the OpenAI client as follows:
 
-??? Code
+??? code
 
     ```python
     import base64
@@ -486,7 +483,7 @@ Then, you can use the OpenAI client as follows:
 
 Alternatively, you can pass `audio_url`, which is the audio counterpart of `image_url` for image input:
 
-??? Code
+??? code
 
     ```python
     chat_completion_from_url = client.chat.completions.create(
@@ -531,7 +528,7 @@ pass a tensor of shape to the corresponding field of the multi-modal dictionary.
 For image embeddings, you can pass the base64-encoded tensor to the `image_embeds` field.
 The following example demonstrates how to pass image embeddings to the OpenAI server:
 
-??? Code
+??? code
 
     ```python
     image_embedding = torch.load(...)

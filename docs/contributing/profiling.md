@@ -125,7 +125,7 @@ to manually kill the profiler and generate your `nsys-rep` report.
 
 You can view these profiles either as summaries in the CLI, using `nsys stats [profile-file]`, or in the GUI by installing Nsight [locally following the directions here](https://developer.nvidia.com/nsight-systems/get-started).
 
-??? CLI example
+??? console "CLI example"
 
     ```bash
     nsys stats report1.nsys-rep

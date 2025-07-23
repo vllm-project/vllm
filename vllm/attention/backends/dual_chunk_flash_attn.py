@@ -287,7 +287,6 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         alibi_slopes: Optional[List[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
@@ -295,7 +294,8 @@ class DualChunkFlashAttentionImpl(FlashAttentionImpl):
         dual_chunk_attention_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
-            raise NotImplementedError("KV sharing is not supported in V0.")
+            raise NotImplementedError("KV sharing is not supported in V0 "
+                                      "DUAL_CHUNK_FLASH_ATTN backend.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)

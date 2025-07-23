@@ -25,8 +25,9 @@ from torch import nn
 
 from vllm import envs
 from vllm.attention.layer import Attention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
@@ -37,8 +38,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba2_metadata import (
     Mamba2Metadata, prepare_mamba2_metadata)
-from vllm.model_executor.layers.mamba.mamba_mixer2 import (
-    MambaMixer2, extra_groups_for_head_shards)
+from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.model_executor.layers.mamba.mamba_utils import get_mamba_state_shape
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
@@ -154,7 +155,6 @@ class NemotronHMambaDecoderLayer(nn.Module):
             activation=config.mamba_hidden_act,
             quant_config=quant_config,
             prefix=f"{prefix}.mixer",
-            chunk_size=config.chunk_size,
         )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -173,9 +173,9 @@ class NemotronHMambaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.norm(hidden_states, residual)
 
-        hidden_states = self.mixer(hidden_states, mamba_cache_params,
-                                   mamba2_metadata)
-        return hidden_states, residual
+        output = torch.empty_like(hidden_states)
+        self.mixer(hidden_states, output, mamba_cache_params, mamba2_metadata)
+        return output, residual
 
 
 class NemotronHAttention(nn.Module):
@@ -293,6 +293,7 @@ ALL_DECODER_LAYER_TYPES = {
 }
 
 
+@support_torch_compile
 class NemotronHModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -460,6 +461,38 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
     }
     embedding_padding_modules = ["lm_head"]
 
+    @classmethod
+    def get_mamba_state_shape_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+        use_v1: bool = True,
+    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+        """Calculate shapes for Mamba's convolutional and state caches.
+
+        Args:
+            vllm_config: vLLM config
+            use_v1: Get shapes for V1 (or V0)
+
+        Returns:
+            Tuple containing:
+            - conv_state_shape: Shape for convolutional state cache
+            - temporal_state_shape: Shape for state space model cache
+        """
+        parallel_config = vllm_config.parallel_config
+        hf_config = vllm_config.model_config.hf_config
+        intermediate_size = hf_config.expand * hf_config.hidden_size
+
+        return get_mamba_state_shape(
+            intermediate_size=intermediate_size,
+            tp_world_size=parallel_config.tensor_parallel_size,
+            n_groups=hf_config.n_groups,
+            num_heads=hf_config.mamba_num_heads,
+            head_dim=hf_config.mamba_head_dim,
+            state_size=hf_config.ssm_state_size,
+            conv_kernel=hf_config.conv_kernel,
+            use_v1=use_v1,
+        )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
@@ -516,10 +549,13 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                         self.vllm_config.parallel_config,
                         LayerBlockType.mamba
                     )
-
-                self.mamba_cache = MambaCacheManager(
-                    self.vllm_config, self.lm_head.weight.dtype,
-                    num_mamba_layers, *self._get_mamba_cache_shape())
+                mamba_state_shape = \
+                    self.get_mamba_state_shape_from_config(
+                        self.vllm_config, use_v1=False)
+                self.mamba_cache = MambaCacheManager(self.vllm_config,
+                                                     self.lm_head.weight.dtype,
+                                                     num_mamba_layers,
+                                                     *mamba_state_shape)
 
             mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 
@@ -534,39 +570,6 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
 
     def get_seqlen_agnostic_capture_inputs(self, batch_size: int):
         return self.mamba_cache.get_seqlen_agnostic_capture_inputs(batch_size)
-
-    def _get_mamba_cache_shape(
-            self) -> tuple[tuple[int, int], tuple[int, int]]:
-        world_size = get_tensor_model_parallel_world_size()
-        hidden_size = self.config.hidden_size
-
-        conv_state_shape, temporal_state_shape = None, None
-
-        intermediate_size = self.config.expand * hidden_size
-
-        # if n_groups is not divisible by world_size, need to extend the shards
-        # to ensure all groups needed by a head is sharded along with it
-        n_groups = (
-            self.config.n_groups +
-            extra_groups_for_head_shards(self.config.n_groups, world_size))
-
-        # - heads and n_groups are TP-ed
-        conv_dim = (intermediate_size +
-                    2 * n_groups * self.config.ssm_state_size)
-        conv_state_shape = (
-            divide(conv_dim, world_size),
-            self.config.conv_kernel - 1,
-        )
-
-        # These are not TP-ed as they depend on A, dt_bias, D
-        # - they are typically small
-        #   e.g., (h_heads, d_head, d_state) = (128, 64, 128)
-        temporal_state_shape = (
-            divide(self.config.mamba_num_heads, world_size),
-            self.config.mamba_head_dim,
-            self.config.ssm_state_size,
-        )
-        return conv_state_shape, temporal_state_shape
 
     def compute_logits(
         self,
