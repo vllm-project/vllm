@@ -1441,8 +1441,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # head outputs and we could save some flops by masking.
             # In practice, this is a small number of flops and this
             # is simpler/introduces less overhead.
-            additional_heads_tensor = self.model.compute_additional_head(
-                sample_hidden_states, additional_heads_data)
+            additional_heads_output_data: Union[torch.Tensor, list[dict[
+                str, float]]] = self.model.compute_additional_head(
+                    sample_hidden_states, additional_heads_data)
+
+            if isinstance(additional_heads_output_data, torch.Tensor):
+                additional_heads_output_data = \
+                    additional_heads_output_data.detach().cpu().tolist()
 
             # Don't return the additional head outputs where they aren't needed.
             additional_head_outputs = AdditionalHeadOutputs(
@@ -1452,7 +1457,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         additional_head_outputs_per_request, )
                     if mask else None
                     for additional_head_outputs_per_request, mask in zip(
-                        additional_heads_tensor.tolist(),
+                        additional_heads_output_data,
                         additional_head_indices_mask)
                 ], )
 
