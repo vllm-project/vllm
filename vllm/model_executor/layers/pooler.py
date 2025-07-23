@@ -482,6 +482,8 @@ class LambdaPoolerActivation(PoolerActivation):
 
 
 class PoolerHead(nn.Module):
+    # embed use this class
+    # Classify & Score seems not to use this class
 
     @classmethod
     def from_config(cls, pooler_config: ResolvedPoolingConfig) -> "PoolerHead":
@@ -489,24 +491,17 @@ class PoolerHead(nn.Module):
             raise ValueError("`normalize=True` and `softmax=True` should not "
                              "be set together")
 
-        activation: PoolerActivation
-        if pooler_config.normalize:
-            activation = PoolerNormalize()
-        elif pooler_config.softmax:
-            activation = PoolerClassify()
-        else:
-            activation = PoolerIdentity()
+        return cls(pooler_config)
 
-        return cls(activation)
-
-    def __init__(self, activation: PoolerActivation) -> None:
+    def __init__(self, pooler_config: ResolvedPoolingConfig) -> None:
         super().__init__()
 
-        self.activation = activation
+        self.pooler_config = pooler_config
+        self.normalize = PoolerNormalize()
+        self.softmax = PoolerClassify()
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
-
         # Using float32 in PoolerHead
         if isinstance(pooled_data, list):
             for i in range(len(pooled_data)):
@@ -514,18 +509,22 @@ class PoolerHead(nn.Module):
         else:
             pooled_data = pooled_data.to(torch.float32)
 
-        # for matryoshka representation
         if isinstance(pooling_metadata, V0PoolingMetadata):
-            dimensions_list = [
-                pooling_param.dimensions
+            pooling_params = [
+                pooling_param
                 for _, pooling_param in pooling_metadata.seq_groups
             ]
         else:
             assert isinstance(pooled_data, list)
-            dimensions_list = [
-                pooling_param.dimensions
+            pooling_params = [
+                pooling_param
                 for pooling_param in pooling_metadata.pooling_params
             ]
+
+        # for matryoshka representation
+        dimensions_list = [
+            pooling_param.dimensions for pooling_param in pooling_params
+        ]
         if any(d is not None for d in dimensions_list):
             # change the output dimension
             assert len(pooled_data) == len(dimensions_list)
@@ -540,7 +539,38 @@ class PoolerHead(nn.Module):
                     for vecs, d in zip(pooled_data, dimensions_list)
                 ]
 
-        return self.activation(pooled_data)
+        # for normalize
+        normalize_list = [
+            pooling_param.normalize or
+            (pooling_param.normalize is None and self.pooler_config.normalize)
+            for pooling_param in pooling_params
+        ]
+
+        if len(set(normalize_list)) == 1:
+            if normalize_list[0]:
+                pooled_data = self.normalize(pooled_data)
+        else:
+            pooled_data = [
+                self.normalize(vecs) if f else vecs
+                for vecs, f in zip(pooled_data, normalize_list)
+            ]
+
+        # for softmax
+        softmax_list = [
+            pooling_param.softmax
+            or (pooling_param.softmax is None and self.pooler_config.softmax)
+            for pooling_param in pooling_params
+        ]
+
+        if len(set(softmax_list)) == 1:
+            if softmax_list[0]:
+                pooled_data = self.softmax(pooled_data)
+        else:
+            pooled_data = [
+                self.softmax(vecs) if f else vecs
+                for vecs, f in zip(pooled_data, softmax_list)
+            ]
+        return pooled_data
 
 
 class SimplePooler(Pooler):

@@ -22,9 +22,17 @@ class PoolingParams(
     Attributes:
         dimensions: Reduce the dimensions of embeddings
                     if model support matryoshka representation.
+        softmax: Whether to using softmax,
+                 None means using the model's default
+        normalize: normalize: Whether to using softmax,
+                   None means using the model's default
     """
 
     dimensions: Optional[int] = None
+
+    softmax: Optional[bool] = None
+
+    normalize: Optional[bool] = None
 
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
 
@@ -38,6 +46,8 @@ class PoolingParams(
         """Returns a deep copy of the PoolingParams instance."""
         return PoolingParams(
             dimensions=self.dimensions,
+            softmax=self.softmax,
+            normalize=self.normalize,
             task=self.task,
             requires_token_ids=self.requires_token_ids,
         )
@@ -71,10 +81,16 @@ class PoolingParams(
             elif self.dimensions < 1:
                 raise ValueError("Dimensions must be greater than 0")
 
+        if self.normalize and self.softmax:
+            raise ValueError("`normalize=True` and `softmax=True` should not "
+                             "be set together")
+
     def __repr__(self) -> str:
         return (f"PoolingParams("
                 f"dimensions={self.dimensions}, "
                 f"task={self.task}, "
+                f"softmax={self.softmax}, "
+                f"normalize={self.normalize}, "
                 f"requires_token_ids={self.requires_token_ids})")
 
     def __post_init__(self) -> None:
