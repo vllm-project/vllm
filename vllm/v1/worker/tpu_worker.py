@@ -352,7 +352,7 @@ try:
             self,
             scheduler_output: "SchedulerOutput",
         ) -> Optional[ModelRunnerOutput]:
-            return self.launch_tpu_batch(scheduler_output)
+            return super().launch_tpu_batch(scheduler_output)
 
         def initialize_cache(self, num_gpu_blocks: int,
                              num_cpu_blocks: int) -> None:
@@ -368,7 +368,7 @@ try:
             self.worker.profile(is_start)
 
         def add_lora(self, lora_request: LoRARequest) -> bool:
-            return self.add_lora(lora_request)
+            return super().add_lora(lora_request)
 
         def load_model(self) -> None:
             self.worker.load_model()
