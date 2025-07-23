@@ -8,7 +8,7 @@ from typing import Any, NamedTuple, Optional, Union
 import torch
 import torch.nn.functional as F
 
-from vllm.config import ModelConfig, TaskOption
+from vllm.config import ModelConfig, RunnerOption
 from vllm.inputs import InputContext
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 
@@ -255,7 +255,7 @@ def check_logprobs_close(
 
 def build_model_context(
     model_id: str,
-    task: TaskOption = "auto",
+    runner: RunnerOption = "auto",
     dtype: Union[str, torch.dtype] = "auto",
     model_config_kwargs: Optional[dict[str, Any]] = None,
     mm_processor_kwargs: Optional[dict[str, Any]] = None,
@@ -280,7 +280,7 @@ def build_model_context(
     model_config_kwargs = model_config_kwargs or {}
     model_config = ModelConfig(
         model_id,
-        task=task,
+        runner=runner,
         tokenizer=model_info.tokenizer or model_id,
         tokenizer_mode=model_info.tokenizer_mode,
         trust_remote_code=model_info.trust_remote_code,

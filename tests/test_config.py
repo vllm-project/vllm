@@ -74,18 +74,22 @@ def test_update_config():
         new_config3 = update_config(config3, {"a": "new_value"})
 
 
+# Can remove once --task option is fully deprecated
 @pytest.mark.parametrize(
-    ("model_id", "expected_runner_type", "expected_task"),
+    ("model_id", "expected_runner_type", "expected_convert_type",
+     "expected_task"),
     [
-        ("distilbert/distilgpt2", "generate", "generate"),
-        ("intfloat/multilingual-e5-small", "pooling", "embed"),
-        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
-        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "classify"),
-        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "reward"),
-        ("openai/whisper-small", "generate", "transcription"),
+        ("distilbert/distilgpt2", "generate", "none", "generate"),
+        ("intfloat/multilingual-e5-small", "pooling", "embed", "embed"),
+        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify", "classify"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "classify",
+         "classify"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "reward", "reward"),
+        ("openai/whisper-small", "generate", "none", "transcription"),
     ],
 )
-def test_auto_task(model_id, expected_runner_type, expected_task):
+def test_auto_task(model_id, expected_runner_type, expected_convert_type,
+                   expected_task):
     config = ModelConfig(
         model_id,
         task="auto",
@@ -97,25 +101,26 @@ def test_auto_task(model_id, expected_runner_type, expected_task):
     )
 
     assert config.runner_type == expected_runner_type
-
-    if config.runner_type == "pooling":
-        assert config.task == expected_task
-    else:
-        assert expected_task in config.supported_tasks
+    assert config.convert_type == expected_convert_type
+    assert expected_task in config.supported_tasks
 
 
+# Can remove once --task option is fully deprecated
 @pytest.mark.parametrize(
-    ("model_id", "expected_runner_type", "expected_task"),
+    ("model_id", "expected_runner_type", "expected_convert_type",
+     "expected_task"),
     [
-        ("distilbert/distilgpt2", "pooling", "embed"),
-        ("intfloat/multilingual-e5-small", "pooling", "embed"),
-        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
-        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "classify"),
-        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "embed"),
-        ("openai/whisper-small", "pooling", "embed"),
+        ("distilbert/distilgpt2", "pooling", "embed", "embed"),
+        ("intfloat/multilingual-e5-small", "pooling", "embed", "embed"),
+        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify", "classify"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "classify",
+         "classify"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "embed", "embed"),
+        ("openai/whisper-small", "pooling", "embed", "embed"),
     ],
 )
-def test_score_task(model_id, expected_runner_type, expected_task):
+def test_score_task(model_id, expected_runner_type, expected_convert_type,
+                    expected_task):
     config = ModelConfig(
         model_id,
         task="score",
@@ -127,14 +132,79 @@ def test_score_task(model_id, expected_runner_type, expected_task):
     )
 
     assert config.runner_type == expected_runner_type
-    assert config.task == expected_task
+    assert config.convert_type == expected_convert_type
+    assert expected_task in config.supported_tasks
 
 
-@pytest.mark.parametrize(("model_id", "expected_runner_type", "expected_task"),
-                         [
-                             ("Qwen/Qwen2.5-1.5B-Instruct", "draft", "auto"),
-                         ])
-def test_draft_task(model_id, expected_runner_type, expected_task):
+@pytest.mark.parametrize(
+    ("model_id", "expected_runner_type", "expected_convert_type",
+     "expected_task"),
+    [
+        ("distilbert/distilgpt2", "generate", "none", "generate"),
+        ("intfloat/multilingual-e5-small", "pooling", "embed", "embed"),
+        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify", "classify"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "classify",
+         "classify"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "reward", "reward"),
+        ("openai/whisper-small", "generate", "none", "transcription"),
+    ],
+)
+def test_auto_runner(model_id, expected_runner_type, expected_convert_type,
+                     expected_task):
+    config = ModelConfig(
+        model_id,
+        runner="auto",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+    )
+
+    assert config.runner_type == expected_runner_type
+    assert config.convert_type == expected_convert_type
+    assert expected_task in config.supported_tasks
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_runner_type", "expected_convert_type",
+     "expected_task"),
+    [
+        ("distilbert/distilgpt2", "pooling", "embed", "embed"),
+        ("intfloat/multilingual-e5-small", "pooling", "embed", "embed"),
+        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify", "classify"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "classify",
+         "classify"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "reward", "reward"),
+        ("openai/whisper-small", "pooling", "embed", "embed"),
+    ],
+)
+def test_pooling_runner(model_id, expected_runner_type, expected_convert_type,
+                        expected_task):
+    config = ModelConfig(
+        model_id,
+        runner="pooling",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+    )
+
+    assert config.runner_type == expected_runner_type
+    assert config.convert_type == expected_convert_type
+    assert expected_task in config.supported_tasks
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_runner_type", "expected_convert_type",
+     "expected_task"),
+    [
+        ("Qwen/Qwen2.5-1.5B-Instruct", "draft", "none", "draft"),
+    ],
+)
+def test_draft_runner(model_id, expected_runner_type, expected_convert_type,
+                      expected_task):
     config = ModelConfig(
         model_id,
         runner="draft",
@@ -144,7 +214,8 @@ def test_draft_task(model_id, expected_runner_type, expected_task):
     )
 
     assert config.runner_type == expected_runner_type
-    assert config.task == expected_task
+    assert config.convert_type == expected_convert_type
+    assert expected_task in config.supported_tasks
 
 
 @pytest.mark.parametrize(
@@ -166,23 +237,6 @@ def test_transcription_task(model_id, expected_runner_type, expected_task):
 
     assert config.runner_type == expected_runner_type
     assert config.task == expected_task
-
-
-@pytest.mark.parametrize(("model_id", "bad_task"), [
-    ("Qwen/Qwen2.5-Math-RM-72B", "generate"),
-    ("Qwen/Qwen3-0.6B", "transcription"),
-])
-def test_incorrect_task(model_id, bad_task):
-    with pytest.raises(ValueError, match=r"does not support task=.*"):
-        ModelConfig(
-            model_id,
-            task=bad_task,
-            tokenizer=model_id,
-            tokenizer_mode="auto",
-            trust_remote_code=False,
-            seed=0,
-            dtype="float16",
-        )
 
 
 MODEL_IDS_EXPECTED = [

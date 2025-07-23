@@ -58,7 +58,7 @@ def test_hf_model_weights_mapper(model_arch: str):
 
     model_config = ModelConfig(
         model_id,
-        task="auto",
+        runner="auto",
         tokenizer=model_info.tokenizer or model_id,
         tokenizer_mode=model_info.tokenizer_mode,
         trust_remote_code=model_info.trust_remote_code,

@@ -6,8 +6,8 @@ In vLLM, generative models implement the [VllmModelForTextGeneration][vllm.model
 Based on the final hidden states of the input, these models output log probabilities of the tokens to generate,
 which are then passed through [Sampler][vllm.model_executor.layers.Sampler] to obtain the final text.
 
-For generative models, the only supported `--task` option is `"generate"`.
-Usually, this is automatically inferred so you don't have to specify it.
+For model architectures that support both generation and pooling, you should set `--runner generate`
+to use the model as a generative model.
 
 ## Offline Inference
 

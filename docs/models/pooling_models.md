@@ -3,7 +3,7 @@
 vLLM also supports pooling models, including embedding, reranking and reward models.
 
 In vLLM, pooling models implement the [VllmModelForPooling][vllm.model_executor.models.VllmModelForPooling] interface.
-These models use a [Pooler][vllm.model_executor.layers.Pooler] to extract the final hidden states of the input
+These models use a [Pooler][vllm.model_executor.layers.pooling.Pooler] to extract the final hidden states of the input
 before returning them.
 
 !!! note
@@ -11,14 +11,17 @@ before returning them.
     As shown in the [Compatibility Matrix](../features/compatibility_matrix.md), most vLLM features are not applicable to
     pooling models as they only work on the generation or decode stage, so performance may not improve as much.
 
-If the model doesn't implement this interface, you can set `--task` which tells vLLM
+If the model doesn't implement this interface, you can set `--convert` which tells vLLM
 to convert the model into a pooling model.
 
-| `--task`   | Model type           | Supported pooling tasks       |
-|------------|----------------------|-------------------------------|
-| `embed`    | Embedding model      | `encode`, `embed`             |
-| `classify` | Classification model | `encode`, `classify`, `score` |
-| `reward`   | Reward model         | `encode`                      |
+| `--convert` | Model type           | Supported pooling tasks       |
+|-------------|----------------------|-------------------------------|
+| `embed`     | Embedding model      | `encode`, `embed`             |
+| `classify`  | Classification model | `encode`, `classify`, `score` |
+| `reward`    | Reward model         | `encode`                      |
+
+For model architectures that support both generation and pooling, you should set `--runner pooling`
+to use the model as a pooling model.
 
 ## Pooling Tasks
 
@@ -33,7 +36,7 @@ In vLLM, we define the following pooling tasks and corresponding APIs:
 
 \*The `score` API falls back to `embed` task if the model does not support `score` task.
 
-Each pooling model in vLLM supports one or more of these tasks according to [Pooler.get_supported_tasks][vllm.model_executor.layers.Pooler.get_supported_tasks].
+Each pooling model in vLLM supports one or more of these tasks according to [Pooler.get_supported_tasks][vllm.model_executor.layers.pooling.Pooler.get_supported_tasks].
 
 By default, the pooler assigned to each task has the following attributes:
 
@@ -70,7 +73,7 @@ It returns the extracted hidden states directly, which is useful for reward mode
 ```python
 from vllm import LLM
 
-llm = LLM(model="Qwen/Qwen2.5-Math-RM-72B", task="reward")
+llm = LLM(model="Qwen/Qwen2.5-Math-RM-72B", runner="pooling")
 (output,) = llm.encode("Hello, my name is")
 
 data = output.outputs.data
@@ -85,7 +88,7 @@ It is primarily designed for embedding models.
 ```python
 from vllm import LLM
 
-llm = LLM(model="intfloat/e5-mistral-7b-instruct", task="embed")
+llm = LLM(model="intfloat/e5-mistral-7b-instruct", runner="pooling")
 (output,) = llm.embed("Hello, my name is")
 
 embeds = output.outputs.embedding
@@ -102,7 +105,7 @@ It is primarily designed for classification models.
 ```python
 from vllm import LLM
 
-llm = LLM(model="jason9693/Qwen2.5-1.5B-apeach", task="classify")
+llm = LLM(model="jason9693/Qwen2.5-1.5B-apeach", runner="pooling")
 (output,) = llm.classify("Hello, my name is")
 
 probs = output.outputs.probs
@@ -123,7 +126,7 @@ It is designed for embedding models and cross encoder models. Embedding models u
 ```python
 from vllm import LLM
 
-llm = LLM(model="BAAI/bge-reranker-v2-m3", task="score")
+llm = LLM(model="BAAI/bge-reranker-v2-m3", runner="pooling")
 (output,) = llm.score("What is the capital of France?",
                       "The capital of Brazil is Brasilia.")
 
@@ -175,7 +178,7 @@ You can change the output dimensions of embedding models that support Matryoshka
 from vllm import LLM, PoolingParams
 
 llm = LLM(model="jinaai/jina-embeddings-v3",
-          task="embed",
+          runner="pooling",
           trust_remote_code=True)
 outputs = llm.embed(["Follow the white rabbit."],
                     pooling_params=PoolingParams(dimensions=32))

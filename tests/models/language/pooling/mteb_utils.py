@@ -172,7 +172,7 @@ def mteb_test_embed_models(hf_runner,
     vllm_extra_kwargs["dtype"] = model_info.dtype
 
     with vllm_runner(model_info.name,
-                     task="embed",
+                     runner="pooling",
                      max_model_len=None,
                      **vllm_extra_kwargs) as vllm_model:
 
@@ -279,7 +279,7 @@ def mteb_test_rerank_models(hf_runner,
     vllm_extra_kwargs["dtype"] = model_info.dtype
 
     with vllm_runner(model_info.name,
-                     task="score",
+                     runner="pooling",
                      max_model_len=None,
                      max_num_seqs=8,
                      **vllm_extra_kwargs) as vllm_model:

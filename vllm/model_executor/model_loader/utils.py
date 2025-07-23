@@ -12,6 +12,7 @@ import torch
 import transformers
 from torch import nn
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
+from typing_extensions import assert_never
 
 from vllm.attention import Attention
 from vllm.config import (ModelConfig, ModelImpl, VllmConfig,
@@ -280,15 +281,21 @@ def get_model_architecture(
         architectures = ["QuantMixtralForCausalLM"]
 
     model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
-    if model_config.task == "embed":
-        logger.debug_once("Automatic conversion using `as_embedding_model`.")
+
+    convert_type = model_config.convert_type
+    if convert_type == "none":
+        pass
+    elif convert_type == "embed":
+        logger.debug_once("Converting to embedding model.")
         model_cls = as_embedding_model(model_cls)
-    elif model_config.task == "classify":
-        logger.debug_once("Automatic conversion using `as_seq_cls_model`.")
+    elif convert_type == "classify":
+        logger.debug_once("Converting to sequence classification model.")
         model_cls = as_seq_cls_model(model_cls)
-    elif model_config.task == "reward":
-        logger.debug_once("Automatic conversion using `as_reward_model`.")
+    elif convert_type == "reward":
+        logger.debug_once("Converting to reward model.")
         model_cls = as_reward_model(model_cls)
+    else:
+        assert_never(convert_type)
 
     return model_cls, arch
 

@@ -19,8 +19,8 @@ from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               create_sort_beams_key_function)
 from vllm.config import (CompilationConfig, ModelDType, TokenizerMode,
                          is_init_field)
-from vllm.engine.arg_utils import (EngineArgs, HfOverrides, PoolerConfig,
-                                   TaskOption)
+from vllm.engine.arg_utils import (ConvertOption, EngineArgs, HfOverrides,
+                                   PoolerConfig, RunnerOption)
 from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption,
@@ -169,7 +169,8 @@ class LLM:
         self,
         model: str,
         *,
-        task: TaskOption = "auto",
+        runner: RunnerOption = "auto",
+        convert: ConvertOption = "auto",
         tokenizer: Optional[str] = None,
         tokenizer_mode: TokenizerMode = "auto",
         skip_tokenizer_init: bool = False,
@@ -243,7 +244,8 @@ class LLM:
 
         engine_args = EngineArgs(
             model=model,
-            task=task,
+            runner=runner,
+            convert=convert,
             tokenizer=tokenizer,
             tokenizer_mode=tokenizer_mode,
             skip_tokenizer_init=skip_tokenizer_init,
@@ -457,18 +459,10 @@ class LLM:
         model_config = self.llm_engine.model_config
         runner_type = model_config.runner_type
         if runner_type != "generate":
-            messages = [
-                "LLM.generate() is only supported for generative models."
-            ]
-
-            if "generate" in model_config.supported_runner_types:
-                messages.append(
-                    "Your model supports the 'generate' runner, but is "
-                    f"currently initialized for the '{runner_type}' runner. "
-                    "Please initialize vLLM using `--task generate` or "
-                    "`--task transcription`.")
-
-            raise ValueError(" ".join(messages))
+            raise ValueError(
+                "LLM.generate() is only supported for generative models. "
+                "Try passing `--runner generate` to use the model as a "
+                "generative model.")
 
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
@@ -1108,16 +1102,10 @@ class LLM:
         model_config = self.llm_engine.model_config
         runner_type = model_config.runner_type
         if runner_type != "pooling":
-            messages = ["LLM.encode() is only supported for pooling models."]
-
-            if "pooling" in model_config.supported_runner_types:
-                messages.append(
-                    "Your model supports the 'pooling' runner, but is "
-                    f"currently initialized for the '{runner_type}' runner. "
-                    "Please initialize vLLM using `--task embed`, "
-                    "`--task classify`, `--task score` etc.")
-
-            raise ValueError(" ".join(messages))
+            raise ValueError(
+                "LLM.encode() is only supported for pooling models. "
+                "Try passing `--runner pooling` to use the model as a "
+                "pooling model.")
 
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
@@ -1196,8 +1184,9 @@ class LLM:
         """
         model_config = self.llm_engine.model_config
         if "embed" not in model_config.supported_tasks:
-            raise ValueError("Embedding API is not supported by this model. "
-                             "Please set `--task embed`.")
+            raise ValueError(
+                "Embedding API is not supported by this model. "
+                "Try converting the model using `--convert embed`.")
 
         items = self.encode(
             prompts,
@@ -1247,7 +1236,7 @@ class LLM:
         if "classify" not in model_config.supported_tasks:
             raise ValueError(
                 "Classification API is not supported by this model. "
-                "Please set `--task classify`.")
+                "Try converting the model using `--convert classify`.")
 
         items = self.encode(
             prompts,
@@ -1305,10 +1294,9 @@ class LLM:
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[ScoringRequestOutput]:
-
         if isinstance(tokenizer, MistralTokenizer):
             raise ValueError(
-                "Score API is only enabled for `--task embed or score`")
+                "Score API is not supported for Mistral tokenizer")
 
         if len(data_1) == 1:
             data_1 = data_1 * len(data_2)
@@ -1422,21 +1410,16 @@ class LLM:
         model_config = self.llm_engine.model_config
         runner_type = model_config.runner_type
         if runner_type != "pooling":
-            messages = ["LLM.score() is only supported for pooling models."]
-
-            if "pooling" in model_config.supported_runner_types:
-                messages.append(
-                    "Your model supports the 'pooling' runner, but is "
-                    f"currently initialized for the '{runner_type}' runner. "
-                    "Please initialize vLLM using `--task embed`, "
-                    "`--task classify`, `--task score` etc.")
-
-            raise ValueError(" ".join(messages))
+            raise ValueError(
+                "LLM.score() is only supported for pooling models. "
+                "Try passing `--runner pooling` to use the model as a "
+                "pooling model.")
 
         if all(t not in model_config.supported_tasks
                for t in ("embed", "classify")):
             raise ValueError("Score API is not supported by this model. "
-                             "Please set `--task embed` or `--task classify`.")
+                             "Try converting the model using "
+                             "`--convert embed` or `--convert classify`.")
 
         if (model_config.task == "classify"
                 and getattr(model_config.hf_config, "num_labels", 0) != 1):

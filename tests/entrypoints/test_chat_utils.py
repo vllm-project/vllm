@@ -42,12 +42,8 @@ MISTRAL_MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 @pytest.fixture(scope="function")
 def phi3v_model_config():
     return ModelConfig(PHI3V_MODEL_ID,
-                       task="generate",
-                       tokenizer=PHI3V_MODEL_ID,
-                       tokenizer_mode="auto",
+                       runner="generate",
                        trust_remote_code=True,
-                       dtype="auto",
-                       seed=0,
                        limit_mm_per_prompt={
                            "image": 2,
                        })
@@ -56,12 +52,8 @@ def phi3v_model_config():
 @pytest.fixture(scope="function")
 def phi3v_model_config_mm_interleaved():
     return ModelConfig(PHI3V_MODEL_ID,
-                       task="generate",
+                       runner="generate",
                        tokenizer=PHI3V_MODEL_ID,
-                       tokenizer_mode="auto",
-                       trust_remote_code=True,
-                       dtype="auto",
-                       seed=0,
                        interleave_mm_strings=True,
                        limit_mm_per_prompt={
                            "image": 2,
@@ -81,11 +73,7 @@ def phi3v_tokenizer():
 @pytest.fixture(scope="function")
 def qwen25omni_model_config_mm_interleaved():
     return ModelConfig(QWEN25OMNI_MODEL_ID,
-                       task="generate",
-                       tokenizer=QWEN25OMNI_MODEL_ID,
-                       tokenizer_mode="auto",
-                       dtype="auto",
-                       seed=0,
+                       runner="generate",
                        interleave_mm_strings=True,
                        limit_mm_per_prompt={
                            "image": 2,
@@ -107,12 +95,7 @@ def qwen25omni_tokenizer():
 @pytest.fixture(scope="module")
 def mllama_model_config():
     return ModelConfig(MLLAMA_MODEL_ID,
-                       task="generate",
-                       tokenizer=MLLAMA_MODEL_ID,
-                       tokenizer_mode="auto",
-                       trust_remote_code=True,
-                       dtype="auto",
-                       seed=0,
+                       runner="generate",
                        limit_mm_per_prompt={
                            "image": 2,
                        })
@@ -131,12 +114,7 @@ def mllama_tokenizer():
 @pytest.fixture(scope="function")
 def mistral_model_config():
     return ModelConfig(MISTRAL_MODEL_ID,
-                       task="generate",
-                       tokenizer=MISTRAL_MODEL_ID,
-                       tokenizer_mode="auto",
-                       trust_remote_code=True,
-                       dtype="auto",
-                       seed=0,
+                       runner="generate",
                        limit_mm_per_prompt={
                            "image": 2,
                        })
@@ -1100,12 +1078,7 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
 
     # Build a config for the model
     model_config = ModelConfig(model,
-                               task="generate",
-                               tokenizer=model,
-                               tokenizer_mode="auto",
-                               trust_remote_code=True,
-                               dtype="auto",
-                               seed=0,
+                               runner="generate",
                                limit_mm_per_prompt={
                                    "image": 2,
                                })

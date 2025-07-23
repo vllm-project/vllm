@@ -24,7 +24,7 @@ from .interfaces import (has_inner_state, has_noops, is_attention_free,
                          is_hybrid, supports_cross_encoding,
                          supports_multimodal, supports_pp,
                          supports_transcription, supports_v0_only)
-from .interfaces_base import is_text_generation_model
+from .interfaces_base import is_pooling_model, is_text_generation_model
 
 logger = init_logger(__name__)
 
@@ -301,7 +301,7 @@ class _ModelInfo:
         return _ModelInfo(
             architecture=model.__name__,
             is_text_generation_model=is_text_generation_model(model),
-            is_pooling_model=True,  # Can convert any model into a pooling model
+            is_pooling_model=is_pooling_model(model),
             supports_cross_encoding=supports_cross_encoding(model),
             supports_multimodal=supports_multimodal(model),
             supports_pp=supports_pp(model),
