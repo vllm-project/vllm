@@ -283,7 +283,7 @@ class TritonAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        ...
+        raise NotImplementedError
 
 
 class TritonUnifiedAttentionImpl(TritonAttentionImpl):

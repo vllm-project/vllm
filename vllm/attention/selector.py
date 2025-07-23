@@ -300,8 +300,7 @@ def choose_attention_backend(
                                          block_size,
                                          allow_import_error=False):
                 message = f"{maybe_forced_backend} has been forced. " \
-                          f"Remove {maybe_forced_backend} from " \
-                           "VLLM_ATTENTION_BACKEND to enable " \
+                          f"Unset VLLM_ATTENTION_BACKEND to enable " \
                            "auto-selection."
 
                 logger.warning(message)

@@ -280,7 +280,8 @@ class CudaPlatformBase(Platform):
             # Prefer FlashInfer for Blackwell GPUs if installed
             if cls.is_device_capability(100):
                 if is_default_backend_supported := is_attn_backend_supported(
-                        FLASHINFER_V1, head_size, dtype):
+                        FLASHINFER_V1, head_size, dtype, kv_cache_dtype,
+                        block_size):
                     from vllm.v1.attention.backends.utils import (
                         set_kv_cache_layout)
 
@@ -300,7 +301,11 @@ class CudaPlatformBase(Platform):
             # FlashAttention is the default for SM 8.0+ GPUs
             if cls.has_device_capability(80):
                 if is_default_backend_supported := is_attn_backend_supported(
-                        FLASH_ATTN_V1, head_size, dtype,
+                        FLASH_ATTN_V1,
+                        head_size,
+                        dtype,
+                        kv_cache_dtype,
+                        block_size,
                         allow_import_error=False):
                     logger.info_once("Using Flash Attention backend on "
                                      "V1 engine.")
