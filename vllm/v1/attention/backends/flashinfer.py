@@ -7,12 +7,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 import torch
+
+import vllm.envs as envs
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache
-
-import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
 from vllm.config import VllmConfig
@@ -672,7 +672,6 @@ class FlashInferImpl(AttentionImpl):
                     assert kv_cache_permute.is_contiguous()
                     assert block_tables_decode.is_contiguous()
                     assert seq_lens_decode.is_contiguous()
-
 
                     output[:num_decode_tokens] = (
                         trtllm_batch_decode_with_kv_cache(
