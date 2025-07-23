@@ -276,6 +276,8 @@ _SUBPROCESS_COMMAND = [
     sys.executable, "-m", "vllm.model_executor.models.registry"
 ]
 
+_PREVIOUSLY_SUPPORTED_MODELS = {"Phi3SmallForCausalLM": "0.9.2"}
+
 
 @dataclass(frozen=True)
 class _ModelInfo:
@@ -450,6 +452,14 @@ class _ModelRegistry:
             raise ValueError(
                 f"Model architectures {architectures} failed "
                 "to be inspected. Please check the logs for more details.")
+
+        if any(arch in _PREVIOUSLY_SUPPORTED_MODELS for arch in architectures):
+            previous_version = _PREVIOUSLY_SUPPORTED_MODELS[architectures[0]]
+            raise ValueError(
+                "Model architecture was supported in vLLM until "
+                f" version {previous_version}, and is not supported"
+                " anymore. Please use an older version of vLLM "
+                "if you want to use this model architecture.")
 
         raise ValueError(
             f"Model architectures {architectures} are not supported for now. "
