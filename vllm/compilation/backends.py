@@ -13,6 +13,9 @@ from typing import Any, Callable, Optional
 import torch
 import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
+from torch._dynamo.utils import lazy_format_graph_code
+from torch.fx.experimental.symbolic_shapes import is_symbolic
+from torch.utils._sympy.value_ranges import ValueRanges
 
 import vllm.envs as envs
 from vllm.config import CompilationConfig, VllmConfig
@@ -115,6 +118,7 @@ class CompilerManager:
              example_inputs: list[Any],
              graph_index: int,
              runtime_shape: Optional[int] = None) -> Optional[Callable]:
+
         if (runtime_shape, graph_index, self.compiler.name) not in self.cache:
             return None
         handle = self.cache[(runtime_shape, graph_index, self.compiler.name)]
@@ -145,8 +149,6 @@ class CompilerManager:
             compilation_start_time = time.time()
 
         compilation_counter.num_backend_compilations += 1
-
-        compiled_graph = None
 
         # try to load from the cache
         compiled_graph = self.load(graph, example_inputs, graph_index,
@@ -455,7 +457,6 @@ class VllmBackend:
         inductor_config[PASS_KEY] = self.post_grad_pass_manager
 
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
-
         vllm_config = self.vllm_config
         if not self.compilation_config.cache_dir:
             # no provided cache dir, generate one based on the known factors
@@ -541,7 +542,7 @@ class VllmBackend:
         self.compilation_config.compilation_time += dynamo_time
 
         # we control the compilation process, each instance can only be
-        # called once
+        # called only once.
         assert not self._called, "VllmBackend can only be called once"
 
         self.graph = graph
@@ -549,8 +550,6 @@ class VllmBackend:
 
         self.split_gm, self.piecewise_graphs = split_graph(
             graph, self.compilation_config.splitting_ops)
-
-        from torch._dynamo.utils import lazy_format_graph_code
 
         # depyf will hook lazy_format_graph_code and dump the graph
         # for debugging, no need to print the graph here
@@ -584,13 +583,30 @@ class VllmBackend:
 
         self._called = True
 
-        if not self.compilation_config.use_cudagraph or \
-            not self.compilation_config.cudagraph_copy_inputs:
+        from torch._guards import detect_fake_mode
+        fake_mode = detect_fake_mode()
+
+        if self.compilation_config.eval_shape_guards:
+            # Drop counter-0/1 specializations guards.
+            # For backed sizes, torch compile will specialize for 0/1 inputs
+            # or otherwise guards that size is >= 2. This is because it's
+            # really hard not to hit a check against 0/1. When we evaluate
+            # shape guards, we exclude checking this guard (We would fail
+            # otherwise).
+
+            # We avoid that by updating the ranges of backed sizes if the
+            # min is 2 for any, assume it's 0. Long-term, once we move to
+            # use unbacked symbols, we should not need this.
+            for s, r in fake_mode.shape_env.var_to_range.items():
+                if r.lower == 2:
+                    fake_mode.shape_env.var_to_range[s] = ValueRanges(
+                        0, r.upper)
+
+        if (not self.compilation_config.use_cudagraph
+                or not self.compilation_config.cudagraph_copy_inputs):
             return self.split_gm
 
         # if we need to copy input buffers for cudagraph
-        from torch._guards import detect_fake_mode
-        fake_mode = detect_fake_mode()
         fake_args = [
             fake_mode.from_tensor(t) if isinstance(t, torch.Tensor) else t
             for t in example_inputs
@@ -599,7 +615,6 @@ class VllmBackend:
         # index of tensors that have symbolic shapes (batch size)
         # for weights and static buffers, they will have concrete shapes.
         # symbolic shape only happens for input tensors.
-        from torch.fx.experimental.symbolic_shapes import is_symbolic
         self.sym_tensor_indices = [
             i for i, x in enumerate(fake_args)
             if isinstance(x, torch._subclasses.fake_tensor.FakeTensor) and \

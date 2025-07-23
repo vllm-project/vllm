@@ -4067,6 +4067,14 @@ class CompilationConfig:
     """A list of ops to split the full graph into subgraphs, used in piecewise
     compilation."""
 
+    eval_shape_guards: bool = False
+    """
+    When enabled, TorchCompileWrapperWithCustomDispatcher evaluates shape 
+    guards on each incoming batch, while skipping other guards, excluding 
+    counter 0/1 guards (gaurds that sizes are >= 2). This functionality 
+    requires Torch version 2.8 or later.
+    """
+
     # Inductor capture
     use_inductor: bool = True
     """Whether to use inductor compilation:
