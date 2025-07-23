@@ -7,12 +7,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 import torch
+
+import vllm.envs as envs
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache
-
-import vllm.envs as envs
+from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
 from vllm.config import VllmConfig
@@ -34,6 +35,14 @@ if TYPE_CHECKING:
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 
 logger = init_logger(__name__)
+
+CUDNN_SUPPORTED_HEAD_SIZES = [128]
+
+
+def is_cudnn_supported(head_dim: int):
+    return head_dim in CUDNN_SUPPORTED_HEAD_SIZES \
+        and current_platform.is_device_capability(100) \
+            and envs.VLLM_USE_CUDNN_PREFILL
 
 
 class FlashInferBackend(AttentionBackend):
@@ -202,6 +211,10 @@ class FlashInferMetadata:
     num_prefills: int
     num_prefill_tokens: int
 
+    # For cudnn prefill
+    max_query_len: int
+    actual_seq_lens_q: torch.Tensor
+
     # For cascade attention (CPU for planning).
     use_cascade: bool
     shared_qo_indptr_cpu: Optional[torch.Tensor] = None
@@ -249,9 +262,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
+            if is_cudnn_supported(self.kv_cache_spec.head_size):
+                dtype = torch.int8
+            else:
+                dtype = torch.uint8
             self._workspace_buffer = torch.empty(
                 FLASHINFER_WORKSPACE_BUFFER_SIZE,
-                dtype=torch.uint8,
+                dtype=dtype,
                 device=self.device)
         return self._workspace_buffer
 
@@ -322,7 +339,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # Regular attention (common case).
             # Decodes are at the front and prefills are at the back,
             # according to reorder_batch()
-            if num_prefills > 0:
+            if num_prefills > 0 and not is_cudnn_supported(
+                    attn_metadata.head_dim):
                 # Decodes are first so prefills start after the last decode
                 prefill_start = num_decodes
                 attn_metadata.prefill_wrapper = self._get_prefill_wrapper()
@@ -447,6 +465,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 cache_dtype)
         else:
             kv_cache_dtype = self.kv_cache_spec.dtype
+
+        if is_cudnn_supported(self.kv_cache_spec.head_size):
+            self._get_workspace_buffer()
+            assert self._workspace_buffer is not None, \
+                "workspace_buffer is not set"
+
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
             qo_indptr_cpu=common_attn_metadata.query_start_loc_cpu,
@@ -471,9 +495,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             shared_kv_page_indices_cpu=shared_kv_page_indices_cpu,
             shared_kv_last_page_len_cpu=shared_kv_last_page_len_cpu,
             max_seq_len=max_seq_len,
+            max_query_len=common_attn_metadata.max_query_len,
             seq_lens=seq_lens,
             block_table_tensor=block_table_tensor,
             workspace_buffer=self._get_workspace_buffer(),
+            actual_seq_lens_q=qo_indptr[1:] - qo_indptr[:-1],
         )
 
         self._plan(num_prefills, num_decodes, attn_metadata)
@@ -631,6 +657,7 @@ class FlashInferImpl(AttentionImpl):
             assert prefill_wrapper._logits_soft_cap == (self.logits_soft_cap
                                                         or 0.0)
             assert prefill_wrapper._sm_scale == self.scale
+
             prefill_wrapper.run(
                 prefill_query,
                 kv_cache_permute,
@@ -638,6 +665,48 @@ class FlashInferImpl(AttentionImpl):
                 v_scale=layer._v_scale_float,
                 out=output[num_decode_tokens:],
             )
+        elif num_prefill_tokens > 0 and is_cudnn_supported(
+                attn_metadata.head_dim):
+            (total_num_pages, _, page_size, num_kv_heads,
+             head_dim) = kv_cache.shape
+
+            # Validate dimensions match expected head_dim
+            assert head_dim == self.head_size, (
+                f"KV cache head_dim {head_dim} != expected {self.head_size}")
+
+            k_cache = kv_cache[:, 0].as_strided(
+                (total_num_pages, num_kv_heads, page_size, head_dim), (
+                    kv_cache.stride(0),
+                    head_dim,
+                    num_kv_heads * head_dim,
+                    1,
+                ))
+            v_cache = kv_cache[:, 1].as_strided(
+                (total_num_pages, num_kv_heads, page_size, head_dim), (
+                    kv_cache.stride(0),
+                    head_dim,
+                    num_kv_heads * head_dim,
+                    1,
+                ))
+            output[num_decode_tokens:], _ = cudnn_batch_prefill_with_kv_cache(
+                q=query[num_decode_tokens:],
+                k_cache=k_cache,
+                v_cache=v_cache,
+                scale=self.scale,
+                workspace_buffer=attn_metadata.workspace_buffer,
+                max_token_per_sequence=attn_metadata.max_query_len,
+                max_sequence_kv=attn_metadata.max_seq_len,
+                block_tables=attn_metadata.
+                block_table_tensor[num_decode_tokens:],
+                actual_seq_lens_q=attn_metadata.
+                actual_seq_lens_q[num_decode_tokens:].view(-1, 1, 1, 1),
+                actual_seq_lens_kv=attn_metadata.seq_lens[num_decode_tokens:].
+                view(-1, 1, 1, 1),
+                causal=True,
+                return_lse=True,
+                is_cuda_graph_compatible=True,
+            )
+
         if decode_wrapper := attn_metadata.decode_wrapper:
             decode_query = query[:num_decode_tokens]
             assert decode_query.shape[0] == num_decode_tokens
