@@ -1053,11 +1053,6 @@ class DPEngineCoreActor(DPEngineCoreProc):
         vllm_config.parallel_config.data_parallel_rank_local = \
             local_dp_rank
 
-        # Ray sets CUDA_VISIBLE_DEVICES to empty string,
-        # we clean this up to be able to properly initialize
-        # data parallel groups.
-        del os.environ['CUDA_VISIBLE_DEVICES']
-
         super().__init__(vllm_config, local_client, "", executor_class,
                          log_stats)
 

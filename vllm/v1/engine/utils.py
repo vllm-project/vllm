@@ -257,6 +257,7 @@ class CoreEngineActorManager:
             if dp_size > 1:
                 with (set_device_control_env_var(vllm_config, local_index)):
                     runtime_env_vars = self.env_vars_dict | {
+                        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
                         device_env_var: os.environ[device_env_var]
                     }
             else:
@@ -305,7 +306,6 @@ class CoreEngineActorManager:
         local_engine_count = \
             vllm_config.parallel_config.data_parallel_size_local
 
-        nodes = list_nodes()
         nodes = sorted(list_nodes(),
                        key=lambda node: node.node_ip != dp_master_ip)
         assert nodes[0].node_ip == dp_master_ip, (
@@ -486,6 +486,7 @@ class CoreEngineActorManager:
 
             with set_device_control_env_var(cur_vllm_config, local_rank):
                 rank_runtime_env_vars = runtime_env_vars | {
+                    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
                     device_env_var: os.environ[device_env_var]
                 }
                 runtime_env = RuntimeEnv(env_vars=rank_runtime_env_vars)
