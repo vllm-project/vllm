@@ -21,13 +21,11 @@ class ModelCase:
 
 
 @pytest.mark.parametrize('model_case', [
-    ModelCase("fxmarty/qwen_1.5-moe-a2.7b-mxfp4", tp=1),
+    ModelCase("fxmarty/qwen_1.5-moe-a2.7b-mxfp4", tp=2),
     ModelCase("fxmarty/deepseek_r1_3_layers_mxfp4", tp=8),
     ModelCase("fxmarty/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1),
     ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=1),
-    ModelCase("fxmarty/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3", tp=1),
-    ModelCase("fxmarty/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3", tp=1),
-    ModelCase("fxmarty/fxmarty/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2", tp=1),
+    ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=4),
 ])
 @pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE,
                     reason="amd-quark>=0.9 is not available")
@@ -36,12 +34,14 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
         pytest.skip(f"This test requires >={model_case.tp} gpus, got only "
                     f"{torch.cuda.device_count()}")
 
+    # `cuda_graph_sizes=[16]` to reduce load time.
     with vllm_runner(model_case.model_id,
                      tensor_parallel_size=model_case.tp,
-                     load_format="dummy") as llm:
+                     load_format="dummy",
+                     cuda_graph_sizes=[16]) as llm:
 
         # TODO: llm.apply_model(check_model) currently relies on V0 internals.
-        # Re-enable this later.
+        # Re-enable once https://github.com/vllm-project/vllm/pull/18465 is merged.
         # def check_model(model):
         #     layer = model.model.layers[0]
 

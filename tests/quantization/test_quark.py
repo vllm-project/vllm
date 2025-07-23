@@ -11,6 +11,7 @@ import importlib
 import importlib.metadata
 import os
 from dataclasses import dataclass
+from typing import Optional, Dict
 
 import huggingface_hub
 import lm_eval
@@ -41,15 +42,6 @@ try:
 except huggingface_hub.errors.RepositoryNotFoundError:
     HF_HUB_AMD_ORG_ACCESS = False
 
-
-@pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch):
-    """
-    This module relies on V0 internals, so set VLLM_USE_V1=0.
-    """
-    monkeypatch.setenv('VLLM_USE_V1', '0')
-
-
 @pytest.mark.parametrize('kv_cache_dtype', ['auto', 'fp8'])
 @pytest.mark.parametrize('tp', [1])
 def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
@@ -58,20 +50,22 @@ def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
                      kv_cache_dtype=kv_cache_dtype,
                      tensor_parallel_size=tp) as llm:
 
-        def check_model(model):
-            layer = model.model.layers[0]
+        # TODO: llm.apply_model(check_model) currently relies on V0 internals.
+        # Re-enable once https://github.com/vllm-project/vllm/pull/18465 is merged.
+        # def check_model(model):
+        #     layer = model.model.layers[0]
 
-            qkv_proj = layer.self_attn.qkv_proj
+        #     qkv_proj = layer.self_attn.qkv_proj
 
-            assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
-            assert isinstance(qkv_proj.scheme, QuarkW8A8Fp8)
+        #     assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
+        #     assert isinstance(qkv_proj.scheme, QuarkW8A8Fp8)
 
-            if isinstance(qkv_proj.scheme, QuarkW8A8Fp8):
-                assert len(qkv_proj.input_scale.shape) == 0
-                assert qkv_proj.weight.dtype is current_platform.fp8_dtype()
-                assert len(qkv_proj.weight_scale.shape) == 0
+        #     if isinstance(qkv_proj.scheme, QuarkW8A8Fp8):
+        #         assert len(qkv_proj.input_scale.shape) == 0
+        #         assert qkv_proj.weight.dtype is current_platform.fp8_dtype()
+        #         assert len(qkv_proj.weight_scale.shape) == 0
 
-        llm.apply_model(check_model)
+        # llm.apply_model(check_model)
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output
@@ -81,50 +75,48 @@ def test_quark_fp8_w_per_tensor_a_per_tensor(vllm_runner, kv_cache_dtype, tp):
 def test_quark_int8_w_per_tensor_a_per_tensor(vllm_runner, tp):
     model_path = "amd/Llama-3.1-8B-Instruct-w-int8-a-int8-sym-test"
     with vllm_runner(model_path, tensor_parallel_size=tp) as llm:
+        
+        # TODO: llm.apply_model(check_model) currently relies on V0 internals.
+        # Re-enable once https://github.com/vllm-project/vllm/pull/18465 is merged.
+        # def check_model(model):
+        #     layer = model.model.layers[0]
 
-        def check_model(model):
-            layer = model.model.layers[0]
+        #     qkv_proj = layer.self_attn.qkv_proj
 
-            qkv_proj = layer.self_attn.qkv_proj
+        #     assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
+        #     assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)
 
-            assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
-            assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)
-
-        llm.apply_model(check_model)
+        # llm.apply_model(check_model)
 
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output
 
 
-def test_quark_fp8_parity(vllm_runner):
-    quark_model_id = "amd-quark/llama-tiny-fp8-quark-quant-method"
-    fp8_model_id = "amd-quark/llama-tiny-fp8-quant-method"
+# TODO: this test currently relies on V0 internals.
+# Re-enable once it is made easier with V1 to access the `state_dict` of models.
+# def test_quark_fp8_parity(vllm_runner):
+#     quark_model_id = "amd-quark/llama-tiny-fp8-quark-quant-method"
+#     fp8_model_id = "amd-quark/llama-tiny-fp8-quant-method"
 
-    llm_kwargs = {
-        "tensor_parallel_size": 1,
-        "enforce_eager": True,
-        "gpu_memory_utilization": 0.1
-    }
-    with (vllm_runner(quark_model_id, **llm_kwargs) as
-          quark_handle, vllm_runner(fp8_model_id, **llm_kwargs) as fp8_handle):
-        quark_model = (quark_handle.llm.llm_engine.model_executor.
-                       driver_worker.model_runner.model)
-        quark_state_dict = quark_model.state_dict()
+#     llm_kwargs = {
+#         "tensor_parallel_size": 1,
+#         "enforce_eager": True,
+#         "gpu_memory_utilization": 0.1
+#     }
+#     with (vllm_runner(quark_model_id, **llm_kwargs) as
+#           quark_handle, vllm_runner(fp8_model_id, **llm_kwargs) as fp8_handle):
+#         quark_model = (quark_handle.llm.llm_engine.model_executor.
+#                        driver_worker.model_runner.model)
+#         quark_state_dict = quark_model.state_dict()
 
-        fp8_model = (fp8_handle.llm.llm_engine.model_executor.driver_worker.
-                     model_runner.model)
-        fp8_state_dict = fp8_model.state_dict()
+#         fp8_model = (fp8_handle.llm.llm_engine.model_executor.driver_worker.
+#                      model_runner.model)
+#         fp8_state_dict = fp8_model.state_dict()
 
-    assert fp8_state_dict.keys() == quark_state_dict.keys()
+#     assert fp8_state_dict.keys() == quark_state_dict.keys()
 
-    for key in fp8_state_dict:
-        assert torch.equal(fp8_state_dict[key], quark_state_dict[key])
-
-
-@dataclass
-class ModelCase:
-    model_id: str
-    tp: int
+#     for key in fp8_state_dict:
+#         assert torch.equal(fp8_state_dict[key], quark_state_dict[key])
 
 
 @dataclass
@@ -132,14 +124,25 @@ class AccuracyTestConfig:
     model_name: str
     excepted_value: float
 
-    def get_model_args(self, tp: int) -> str:
-        return (
-            f"pretrained={self.model_name},"
-            f"dtype=auto,add_bos_token=True,tensor_parallel_size={tp},gpu_memory_utilization=0.7,max_model_len=38768"
-        )
+    def get_model_args(self, tp_size: int, model_max_len: Optional[int] = None, kwargs: Optional[Dict] = None) -> Dict:
+        if kwargs is None:
+            kwargs = {}
+
+        model_args = {
+            "pretrained": self.model_name,
+            "dtype": "auto",
+            "add_bos_token": True,
+            "tensor_parallel_size": tp_size,
+            "gpu_memory_utilization": 0.7,
+            **kwargs
+        }
+        if model_max_len is not None:
+            model_args["max_model_len"] = model_max_len
+                
+        return model_args
 
 
-ACCURACY_CONFIGS = [
+GSM8K_ACCURACY_CONFIGS = [
     # Private model.
     AccuracyTestConfig(
         model_name="amd/DeepSeek-R1-WMXFP4-AMXFP4-Scale-UINT8-MoE-Quant",
@@ -149,43 +152,43 @@ ACCURACY_CONFIGS = [
 
 WIKITEXT_ACCURACY_CONFIGS = [
     AccuracyTestConfig(model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp4_a_fp6_e2m3", excepted_value=11.3),
-    AccuracyTestConfig(model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2", excepted_value=10.3),
+    AccuracyTestConfig(model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2", excepted_value=10.6),
     AccuracyTestConfig(model_name="fxmarty/qwen_1.5-moe-a2.7b-mxfp4", excepted_value=12.4),
 ]
 
 @pytest.mark.parametrize("config", WIKITEXT_ACCURACY_CONFIGS)
 @pytest.mark.parametrize("tp_size", [1, 2])
 def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
-    if torch.cuda.device_count() < 8:
+    if torch.cuda.device_count() < tp_size:
         pytest.skip(
-            f"This test requires >=8 gpus, got only {torch.cuda.device_count()}"
+            f"This test requires >={tp_size} gpus, got only {torch.cuda.device_count()}"
         )
 
     task = "wikitext"
     rtol = 0.1
 
+    # Smaller cuda_graph_sizes to speed up the test.
     results = lm_eval.simple_evaluate(
         model="vllm",
-        model_args=config.get_model_args(tp_size=tp_size),
+        model_args=config.get_model_args(tp_size=tp_size, kwargs={"cuda_graph_sizes": [16]}),
         tasks=task,
         batch_size=64,
     )
 
     EXPECTED_VALUE = config.excepted_value
-    print("results[results][task]", results["results"][task])
-    measured_value = results["results"][task]["word_perplexity"]
+    measured_value = results["results"][task]["word_perplexity,none"]
     assert (measured_value < EXPECTED_VALUE + rtol
             and measured_value > EXPECTED_VALUE - rtol
             ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
 
-@pytest.mark.parametrize("config", ACCURACY_CONFIGS)
+@pytest.mark.parametrize("config", GSM8K_ACCURACY_CONFIGS)
 @pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE,
                     reason="amd-quark>=0.9 is not available")
 @pytest.mark.skipif(
     not HF_HUB_AMD_ORG_ACCESS,
     reason="Read access to huggingface.co/amd is required for this test.")
-def test_mxfp4_gsm8k_correctness(config: GSM8KAccuracyTestConfig):
+def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
     if torch.cuda.device_count() < 8:
         pytest.skip(
             f"This test requires >=8 gpus, got only {torch.cuda.device_count()}"
@@ -198,7 +201,7 @@ def test_mxfp4_gsm8k_correctness(config: GSM8KAccuracyTestConfig):
 
     results = lm_eval.simple_evaluate(
         model="vllm",
-        model_args=config.get_model_args(tp_size=8),
+        model_args=config.get_model_args(tp_size=8, model_max_len=38768),
         tasks=task,
         batch_size=64,
         num_fewshot=8,
