@@ -177,7 +177,7 @@ def make_mistral_chat_completion_request(
 
         # Convert list text content to string
         if message.get("role") in ("assistant", "tool"):
-            content = message.get("content")
+            content: Any = message.get("content")
             if isinstance(content, list):
                 content = _aggregate_content(content)
             message["content"] = content
