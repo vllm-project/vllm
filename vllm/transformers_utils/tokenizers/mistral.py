@@ -166,12 +166,11 @@ def make_mistral_chat_completion_request(
             if isinstance(content, list):
                 aggregated_content: list[dict[str, Any]] = []
                 for chunk in content:
-                    if chunk.get("type") == "text" and len(
-                            aggregated_content
-                    ) > 0 and aggregated_content[-1].get("type") == "text":
-
--                         aggregated_content[-1]["text"] += "\n\n" + chunk.get(
-
+                    if chunk.get(
+                            "type"
+                    ) == "text" and aggregated_content and aggregated_content[
+                            -1].get("type") == "text":
+                        aggregated_content[-1]["text"] += "\n\n" + chunk.get(
                             "text")
                     else:
                         aggregated_content.append(chunk)

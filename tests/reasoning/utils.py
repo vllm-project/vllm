@@ -62,11 +62,13 @@ def run_reasoning_extraction_nonstreaming(
 ) -> tuple[Optional[str], Optional[str]]:
     request = request or ChatCompletionRequest(messages=[], model="test-model")
     if model_output and isinstance(model_output[0], int):
+        model_output = [int(o) for o in model_output]
         assert isinstance(reasoning_parser.model_tokenizer, MistralTokenizer)
-        model_output = reasoning_parser.model_tokenizer.convert_ids_to_tokens(
+        str_output = reasoning_parser.model_tokenizer.convert_ids_to_tokens(
             model_output)
+    str_output = [str(o) for o in model_output]
     return reasoning_parser.extract_reasoning_content(
-        model_output=''.join(model_output), request=request)
+        model_output=''.join(str_output), request=request)
 
 
 def run_reasoning_extraction_streaming(
@@ -78,19 +80,20 @@ def run_reasoning_extraction_streaming(
     reconstructor = StreamingReasoningReconstructor()
     previous_text = ""
     previous_tokens: list[int] = []
-    for delta in model_deltas:
-        if isinstance(delta, int):
+    for model_delta in model_deltas:
+        if isinstance(model_delta, int):
             assert isinstance(reasoning_parser.model_tokenizer,
                               MistralTokenizer)
-            token_delta = [delta]
+            token_delta = [model_delta]
             delta = reasoning_parser.model_tokenizer.convert_ids_to_tokens(
-                [delta])[0]
+                [model_delta])[0]
         else:
             token_delta = [
-                reasoning_parser.vocab.get(token)
-                for token in reasoning_parser.model_tokenizer.tokenize(delta)
+                reasoning_parser.vocab.get(token) for token in
+                reasoning_parser.model_tokenizer.tokenize(model_delta)
                 if token in reasoning_parser.vocab
             ]
+            delta = model_delta
         current_text = previous_text + delta
         current_tokens = previous_tokens + token_delta
         delta_message = reasoning_parser.extract_reasoning_content_streaming(
