@@ -1863,67 +1863,18 @@ class HPUModelRunner:
                                                        self.device)
         # Dummy run.
         htorch.core.mark_step()
-        logits = self._execute_model_generic(input_ids_device,
-                                             position_ids_device,
-                                             attn_metadata,
-                                             logits_indices_device, kv_caches,
-                                             True)
+        _ = self._execute_model_generic(input_ids_device, position_ids_device,
+                                        attn_metadata, logits_indices_device,
+                                        kv_caches, True)
         # TODO: do sampling on logits, warmup sampler and prefill joiner
         htorch.core.mark_step()
         temperature = torch.ones(batch_size, dtype=torch.float32, device='cpu')
         top_p = torch.ones(batch_size, dtype=torch.float32, device='cpu')
         top_k = torch.ones(batch_size, dtype=torch.float32, device='cpu')
-        temperature_device = _async_h2d_tensor_copy(temperature, self.device)
-        top_p_device = _async_h2d_tensor_copy(top_p, self.device)
-        top_k_device = _async_h2d_tensor_copy(top_k, self.device)
-        generators = {
-            i: None
-            for i in range(batch_size)
-        }  # NOTE(kzawora): idk what to set here
-        max_num_logprobs = 0  # NOTE(kzawora): idk what to set here
-        # NOTE(kzawora: do this in a smarter way)
+        _ = _async_h2d_tensor_copy(temperature, self.device)
+        _ = _async_h2d_tensor_copy(top_p, self.device)
+        _ = _async_h2d_tensor_copy(top_k, self.device)
         return None
-        htorch.core.mark_step()
-        sampling_metadata = SamplingMetadata(
-            temperature=temperature_device,
-            all_greedy=False,  # hacky
-            all_random=True,  # hacky
-            top_p=top_p_device,
-            top_k=top_k_device,
-            no_top_p=True,
-            no_top_k=True,
-            generators=generators,
-            max_num_logprobs=max_num_logprobs,
-        )
-        tokens_all_random = self.sampler(logits, sampling_metadata)
-        htorch.core.mark_step()
-        sampling_metadata = SamplingMetadata(
-            temperature=temperature_device,
-            all_greedy=True,  # hacky
-            all_random=False,  # hacky
-            top_p=top_p_device,
-            top_k=top_k_device,
-            no_top_p=True,
-            no_top_k=True,
-            generators=generators,
-            max_num_logprobs=max_num_logprobs,
-        )
-        tokens_all_greedy = self.sampler(logits, sampling_metadata)
-        htorch.core.mark_step()
-        sampling_metadata = SamplingMetadata(
-            temperature=temperature_device,
-            all_greedy=False,  # hacky
-            all_random=False,  # hacky
-            top_p=top_p_device,
-            top_k=top_k_device,
-            no_top_p=True,
-            no_top_k=True,
-            generators=generators,
-            max_num_logprobs=max_num_logprobs,
-        )
-        tokens_mixed = self.sampler(logits, sampling_metadata)
-        htorch.core.mark_step()
-        return tokens_all_random, tokens_all_greedy, tokens_mixed
 
     def log_warmup(self, phase, i, max_i, batch_size, seq_len, num_blocks):
         free_mem = format_bytes(
@@ -2207,30 +2158,6 @@ class HPUModelRunner:
     @torch.inference_mode()
     def profile_run(self) -> None:
         return
-        """Profile to measure peak memory during forward pass."""
-
-        # use an empty tensor instead of `None`` to force Dynamo to pass
-        # it by reference, rather by specializing on the value `None`.
-        # the `dtype` argument does not matter, and we use `float32` as
-        # a placeholder (it has wide hardware support).
-        # it is important to create tensors inside the loop, rather than
-        # multiplying the list, to avoid Dynamo from treating them as
-        # tensor aliasing.
-        num_layers = self.model_config.get_num_layers(self.parallel_config)
-        kv_caches = [None] * num_layers
-
-        # Run empty prefill forwards - prefill max batch and prefill max seq
-        self.warmup_scenario(batch_size=1,
-                             seq_or_block=self.max_model_len,
-                             is_prompt=True,
-                             kv_caches=kv_caches)
-        max_seq_len = math.ceil(
-            (self.max_num_tokens // self.max_prefill_batch_size) /
-            self.block_size) * self.block_size
-        self.warmup_scenario(batch_size=self.max_prefill_batch_size,
-                             seq_or_block=max_seq_len,
-                             is_prompt=True,
-                             kv_caches=kv_caches)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
