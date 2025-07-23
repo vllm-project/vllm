@@ -582,6 +582,7 @@ def test_dummy_maverick(
     force_recreate: bool = True,
     profile: bool = False,
 ) -> None:
+    # Disable multiprocessing allows us to access model executor from LLM engine
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
     model_path, rope_layers = create_reduced_maverick_model(
