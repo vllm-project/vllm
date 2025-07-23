@@ -9,13 +9,14 @@ import torch
 import torch.nn.functional as F
 
 from vllm.logger import init_logger
-from .quark_scheme import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE, OCP_MX_Scheme, dequant_mxfp4, dequant_mxfp6,
     quant_dequant_mxfp4, quant_dequant_mxfp6)
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
 from vllm.platforms import current_platform
+
+from .quark_scheme import QuarkScheme
 
 logger = init_logger(__name__)
 

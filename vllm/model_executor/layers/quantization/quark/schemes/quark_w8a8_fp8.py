@@ -6,7 +6,6 @@ from typing import Any, Callable, Optional, cast
 import torch
 from torch.nn import Parameter
 
-from .quark_scheme import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -15,6 +14,8 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
 from vllm.platforms import current_platform
+
+from .quark_scheme import QuarkScheme
 
 __all__ = ["QuarkW8A8Fp8"]
 

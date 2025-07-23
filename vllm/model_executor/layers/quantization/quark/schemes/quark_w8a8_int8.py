@@ -8,11 +8,12 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     ScaledMMLinearLayerConfig, choose_scaled_mm_linear_kernel)
-from .quark_scheme import QuarkScheme
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            ChannelQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
+
+from .quark_scheme import QuarkScheme
 
 logger = init_logger(__name__)
 
