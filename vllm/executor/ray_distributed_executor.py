@@ -123,6 +123,17 @@ class RayDistributedExecutor(DistributedExecutorBase):
             self.driver_exec_method = make_async(
                 self.driver_worker.execute_method)
 
+    def unload_model(self):
+        """RPC: unload model to meta across all Ray workers."""
+        ray.get([w.unload_to_meta.remote() for w in self.workers])
+
+    def reload_model_from_shared(self, tensor_dict):
+        """RPC: reload model weights from shared/pinned memory."""
+        # Broadcast tensor dict to all workers
+        obj_ref = ray.put(tensor_dict)
+        ray.get([w.reload_from_pinned.remote(obj_ref) for w in self.workers])
+
+
     def shutdown(self) -> None:
         logger.info(
             "Shutting down Ray distributed executor. If you see error log "

@@ -247,6 +247,14 @@ class LLM:
         self.request_counter = Counter()
         self.default_sampling_params: Union[dict[str, Any], None] = None
 
+    def unload_model(self):
+        """Unload current model weights to free GPU memory."""
+        return self.llm_engine.model_executor.unload_model()
+
+    def reload_model_from_shared(self, tensor_dict):
+        """Reload model weights from a shared/pinned memory tensor dictionary."""
+        return self.llm_engine.model_executor.reload_model_from_shared(tensor_dict)
+
     def get_tokenizer(self) -> AnyTokenizer:
         return self.llm_engine.get_tokenizer_group(TokenizerGroup).tokenizer
 

@@ -61,6 +61,14 @@ class UniProcExecutor(ExecutorBase):
         # it's running.
         return
 
+    def unload_model(self):
+        """RPC call to unload model to meta."""
+        return self.collective_rpc("unload_to_meta")
+
+    def reload_model_from_shared(self, tensor_dict):
+        """RPC call to reload model weights from shared memory."""
+        return self.collective_rpc("reload_from_pinned", args=(tensor_dict,))
+
 
 UniProcExecutorAsync = UniProcExecutor
 
