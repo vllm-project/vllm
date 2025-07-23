@@ -141,7 +141,6 @@ class Mamba2AttentionMetadataBuilder(
                 device=query_start_loc_p.device),
                                               query_start_loc_p.diff(),
                                               output_size=num_prefill_tokens)
-            seq_idx.unsqueeze_(0)
 
             # We compute metadata for chunked prefill once at the top level
             # model forward and reuse them in mamba layers. If not needed,
