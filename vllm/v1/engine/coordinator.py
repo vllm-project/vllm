@@ -80,7 +80,7 @@ class DPCoordinator:
 
         context = get_mp_context()
         self.proc: multiprocessing.Process = context.Process(
-            target=CoordinatorProc.run_coordinator,
+            target=DPCoordinatorProc.run_coordinator,
             name="VLLM_DP_Coordinator",
             kwargs={
                 "engine_count": parallel_config.data_parallel_size,
@@ -114,12 +114,13 @@ class EngineState:
         self.request_counts = [0, 0]  # [waiting, running]
 
 
-class CoordinatorProc:
+class DPCoordinatorProc:
 
     def __init__(self,
                  engine_count: int,
                  min_stats_update_interval_ms: int = 100):
-
+        setproctitle.setproctitle(
+            f"{envs.VLLM_PROCESS_NAME_PREFIX}::{self.__class__.__name__}")
         self.ctx = zmq.Context()
 
         self.engines = [EngineState() for _ in range(engine_count)]
@@ -138,9 +139,7 @@ class CoordinatorProc:
         back_publish_address: str,
         min_stats_update_interval_ms: int = 100,
     ):
-        setproctitle.setproctitle(
-            f"{envs.VLLM_PROCESS_NAME_PREFIX}::DPCoordinator")
-        coordinator = CoordinatorProc(
+        coordinator = DPCoordinatorProc(
             engine_count=engine_count,
             min_stats_update_interval_ms=min_stats_update_interval_ms)
         try:
