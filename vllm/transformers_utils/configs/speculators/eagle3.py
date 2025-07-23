@@ -2,13 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from vllm.transformers_utils.configs.speculators import SpeculatorsConfig
+from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
 
 
 class Eagle3SpeculatorsConfig(SpeculatorsConfig):
 
-    def update_defaults(self, transformer_config: dict[str, Any],
-                        vllm_config: dict[str, Any]) -> None:
+    def update_defaults(self, vllm_config: dict[str, Any]) -> None:
         """
         Apply Eagle-3 specific configuration transformations.
         
@@ -29,12 +28,12 @@ class Eagle3SpeculatorsConfig(SpeculatorsConfig):
         else:
             # Default to the draft model's hidden size
             # In practice, this should match the target model's hidden size
-            vllm_config["target_hidden_size"] = transformer_config.get(
+            vllm_config["target_hidden_size"] = vllm_config["model"].get(
                 "hidden_size")
 
         if "norm_before_residual" in self.config:
             # Add to transformer config which becomes the model config
-            transformer_config["norm_before_residual"] = self.config[
+            vllm_config["model"]["norm_before_residual"] = self.config[
                 "norm_before_residual"]
 
         # Eagle-3 uses a different architecture
