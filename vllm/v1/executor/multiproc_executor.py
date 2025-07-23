@@ -9,7 +9,6 @@ import threading
 import time
 import traceback
 import weakref
-import setproctitle
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -20,6 +19,7 @@ from threading import Thread
 from typing import Any, Callable, Optional, Union, cast
 
 import cloudpickle
+import setproctitle
 
 import vllm.envs as envs
 from vllm.config import VllmConfig

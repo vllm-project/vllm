@@ -9,7 +9,6 @@ import inspect
 import json
 import multiprocessing
 import os
-import setproctitle
 import signal
 import socket
 import tempfile
@@ -24,6 +23,7 @@ from typing import Annotated, Any, Callable, Optional
 import prometheus_client
 import pydantic
 import regex as re
+import setproctitle
 import uvloop
 from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError

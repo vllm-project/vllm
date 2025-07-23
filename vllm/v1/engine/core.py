@@ -6,7 +6,6 @@ import signal
 import sys
 import threading
 import time
-import setproctitle
 from collections import deque
 from collections.abc import Generator
 from concurrent.futures import Future
@@ -16,6 +15,7 @@ from logging import DEBUG
 from typing import Any, Callable, Optional, TypeVar, Union
 
 import msgspec
+import setproctitle
 import zmq
 
 import vllm.envs as envs
