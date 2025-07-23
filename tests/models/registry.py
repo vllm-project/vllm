@@ -502,7 +502,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
 }
 
 _TRANSFORMERS_MODELS = {
-    "TransformersForCausalLM": _HfExamplesInfo("ArthurZ/Ilama-3.2-1B", trust_remote_code=True),  # noqa: E501
+    "TransformersForCausalLM": _HfExamplesInfo("hmellor/Ilama-3.2-1B", trust_remote_code=True),  # noqa: E501
     "TransformersForMultimodalLM": _HfExamplesInfo("OpenGVLab/InternVL3-1B-hf"),
 }
 
