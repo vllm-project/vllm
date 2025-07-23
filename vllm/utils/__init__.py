@@ -3286,14 +3286,14 @@ def has_deep_gemm() -> bool:
     return _has_module("deep_gemm")
 
 
-def bind_process_name(name: str, suffixe: str = "") -> None:
+def bind_process_name(name: str, suffix: str = "") -> None:
     """Bind the process name to a specific name with an optional suffix.
 
     Args:
         name: The base name to bind the process to.
-        suffixe: An optional suffix to append to the base name.
+        suffix: An optional suffix to append to the base name.
     """
     name = f"{envs.VLLM_PROCESS_NAME_PREFIX}::{name}"
-    if suffixe:
-        name = f"{name}_{suffixe}"
+    if suffix:
+        name = f"{name}_{suffix}"
     setproctitle.setproctitle(name)
