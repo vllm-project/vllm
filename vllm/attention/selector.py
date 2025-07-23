@@ -272,3 +272,64 @@ def global_force_attn_backend_context_manager(
     finally:
         # Revert the original global backend override, if any
         global_force_attn_backend(original_value)
+
+
+def choose_attention_backend(
+    backend_to_qualname: dict[str, str],
+    head_size: int,
+    dtype: torch.dtype,
+    kv_cache_dtype: str,
+    block_size: int,
+) -> str:
+
+    maybe_forced_backend = envs.VLLM_ATTENTION_BACKEND
+    if maybe_forced_backend:
+        if maybe_forced_backend not in backend_to_qualname:
+            message = f"VLLM_ATTENTION_BACKEND is set, but " \
+                      f"{maybe_forced_backend} is not a valid " \
+                       "attention backend. Reverting back to " \
+                       "auto-selection."
+
+            logger.warning(message)
+        else:
+            qualified_name = backend_to_qualname[maybe_forced_backend]
+            if is_attn_backend_supported(qualified_name,
+                                         head_size,
+                                         dtype,
+                                         kv_cache_dtype,
+                                         block_size,
+                                         allow_import_error=False):
+                message = f"{maybe_forced_backend} has been forced. " \
+                          f"Remove {maybe_forced_backend} from " \
+                           "VLLM_ATTENTION_BACKEND to enable " \
+                           "auto-selection."
+
+                logger.warning(message)
+                return qualified_name
+
+            else:
+                message =  f"Tried to force {maybe_forced_backend}, " \
+                            "but it is not supported with the given " \
+                            "configuration. Reverting back to " \
+                            "auto-selection."
+
+                logger.warning(message)
+
+    qualname_list = backend_to_qualname.values()
+    for qualname in qualname_list:
+        backend_obj_name = qualname.rsplit(".", 1)[1].removesuffix("Backend")
+
+        if is_attn_backend_supported(qualname,
+                                     head_size,
+                                     dtype,
+                                     kv_cache_dtype,
+                                     block_size,
+                                     allow_import_error=False):
+
+            message = f"Using {backend_obj_name}"
+            logger.info(message)
+
+            return qualname
+
+    raise ValueError(
+        "No attention backend supports the current configuration.")

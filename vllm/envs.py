@@ -81,7 +81,6 @@ if TYPE_CHECKING:
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
-    VLLM_DISABLED_BACKENDS: list[str] = []
     VLLM_USE_V1: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
@@ -628,14 +627,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLED_KERNELS":
     lambda: [] if "VLLM_DISABLED_KERNELS" not in os.environ else os.environ[
         "VLLM_DISABLED_KERNELS"].split(","),
-
-    # List of attention backends that should be disabled, used for testing
-    # and performance comparisons. Currently only affects attentions backends
-    # that run on ROCm (backends: AiterFlashAttentionBackend,
-    # TritonSplitPrefillDecodeAttentionBackend, TritonUnifiedAttentionBackend)
-    "VLLM_DISABLED_BACKENDS":
-    lambda: [] if "VLLM_DISABLED_BACKENDS" not in os.environ else os.environ[
-        "VLLM_DISABLED_BACKENDS"].split(","),
 
     # If set, use the V1 code path.
     "VLLM_USE_V1":

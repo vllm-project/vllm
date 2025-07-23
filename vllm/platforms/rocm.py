@@ -13,7 +13,6 @@ from torch.distributed.distributed_c10d import is_nccl_available
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils import cuda_device_count_stateless
-from vllm.v1.attention.backends import choose_attention_backend
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
@@ -39,6 +38,16 @@ try:
     import vllm._rocm_C  # noqa: F401
 except ImportError as e:
     logger.warning("Failed to import from vllm._rocm_C with %r", e)
+
+# V1 Backends in priority/performance order (when available)
+_BACKEND_NAME_TO_QUALIFIED_NAME_MAPPING: dict[str, str] = {
+    "ROCM_AITER_FLASH_ATTENTION_V1":
+    "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend",
+    "ROCM_TRITON_SPLIT_PREFILL_DECODE_ATTENTION_V1":
+    "vllm.v1.attention.backends.triton_attn.TritonSplitPrefillDecodeAttentionBackend",
+    "ROCM_TRITON_UNIFIED_ATTENTION_V1":
+    "vllm.v1.attention.backends.triton_attn.TritonUnifiedAttentionBackend",
+}
 
 # Models not supported by ROCm.
 _ROCM_UNSUPPORTED_MODELS: list[str] = []
@@ -224,8 +233,11 @@ class RocmPlatform(Platform):
             selected_backend = _Backend.ROCM_FLASH
 
         if envs.VLLM_USE_V1:
-            return choose_attention_backend(head_size, dtype, kv_cache_dtype,
-                                            block_size)
+            from vllm.attention.selector import choose_attention_backend
+
+            return choose_attention_backend(
+                _BACKEND_NAME_TO_QUALIFIED_NAME_MAPPING, head_size, dtype,
+                kv_cache_dtype, block_size)
 
         if selected_backend == _Backend.ROCM_FLASH:
             if not cls.has_device_capability(90):
