@@ -128,10 +128,6 @@ STR_NOT_IMPL_ENC_DEC_BACKEND = ("XFormers and Flash-Attention are the only "
                                 "backends currently supported with encoder/"
                                 "decoder models.")
 
-STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER = ("Prompt adapters are not "
-                                       "currently supported with encoder/"
-                                       "decoder models.")
-
 # Efficiently import all enc/dec error strings
 # rather than having to import all of the above
 STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
@@ -145,7 +141,6 @@ STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
     "STR_NOT_IMPL_ENC_DEC_MM": STR_NOT_IMPL_ENC_DEC_MM,
     "STR_NOT_IMPL_ENC_DEC_SPEC_DEC": STR_NOT_IMPL_ENC_DEC_SPEC_DEC,
     "STR_NOT_IMPL_ENC_DEC_BACKEND": STR_NOT_IMPL_ENC_DEC_BACKEND,
-    "STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER": STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER,
 }
 
 # Constants related to forcing the attention backend selection

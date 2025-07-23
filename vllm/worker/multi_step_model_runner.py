@@ -288,9 +288,6 @@ class StatefulModelInput(BroadcastableModelInput):
         assert fmi.lora_requests is not None
         assert len(fmi.lora_requests) == 0
         assert fmi.attn_metadata is not None
-        assert fmi.prompt_adapter_mapping is None
-        assert fmi.prompt_adapter_requests is not None
-        assert len(fmi.prompt_adapter_requests) == 0
         assert fmi.multi_modal_kwargs is not None
         assert len(fmi.multi_modal_kwargs) == 0
 

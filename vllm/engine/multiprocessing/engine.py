@@ -304,14 +304,12 @@ class MQLLMEngine:
             self._send_outputs(rpc_err)
 
         try:
-            self.engine.add_request(
-                request_id=request_id,
-                prompt=request.prompt,
-                params=request.params,
-                lora_request=request.lora_request,
-                trace_headers=request.trace_headers,
-                prompt_adapter_request=request.prompt_adapter_request,
-                priority=request.priority)
+            self.engine.add_request(request_id=request_id,
+                                    prompt=request.prompt,
+                                    params=request.params,
+                                    lora_request=request.lora_request,
+                                    trace_headers=request.trace_headers,
+                                    priority=request.priority)
 
             if self.log_requests:
                 logger.info("Added request %s.", request.request_id)
