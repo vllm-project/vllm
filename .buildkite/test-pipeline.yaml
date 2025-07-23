@@ -434,7 +434,6 @@ steps:
 
 - label: Model Executor Test
   mirror_hardwares: [amdexperimental, amdproduction]
-  soft_fail: true
   source_file_dependencies:
   - vllm/model_executor
   - tests/model_executor
