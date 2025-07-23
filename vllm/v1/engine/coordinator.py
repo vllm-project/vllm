@@ -8,7 +8,6 @@ from typing import Optional
 import msgspec.msgpack
 import zmq
 
-import vllm.envs as envs
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import get_mp_context, make_zmq_socket

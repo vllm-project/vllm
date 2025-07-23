@@ -101,7 +101,7 @@ from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (bind_process_name, Device, FlexibleArgumentParser,
+from vllm.utils import (Device, FlexibleArgumentParser, bind_process_name,
                         get_open_zmq_ipc_path, is_valid_ipv6_address,
                         set_ulimit)
 from vllm.v1.metrics.prometheus import get_prometheus_registry

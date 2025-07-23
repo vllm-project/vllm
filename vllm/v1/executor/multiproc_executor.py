@@ -367,7 +367,8 @@ class WorkerProc:
         self.worker = wrapper
         bind_process_name(
             self.worker.worker.__class__.__name__, 
-            f"TP{self.rank}_DP{vllm_config.parallel_config.data_parallel_rank}")
+            f"TP{self.rank}_DP{vllm_config.parallel_config.data_parallel_rank}"
+        )
         pid = os.getpid()
         _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)
         _add_prefix(sys.stderr, f"VllmWorker rank={rank}", pid)

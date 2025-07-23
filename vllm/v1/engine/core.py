@@ -402,8 +402,7 @@ class EngineCoreProc(EngineCore):
         client_handshake_address: Optional[str] = None,
         engine_index: int = 0,
     ):
-        bind_process_name(
-            self.__class__.__name__, f"{engine_index}")
+        bind_process_name(self.__class__.__name__, f"{engine_index}")
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
                                               bytes]]()
