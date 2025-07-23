@@ -464,10 +464,11 @@ class FusedMoEConfig:
                 )
             else:
                 _quant_config = FusedMoEQuantConfig()
-                logger.warning_once("MoE DP setup unable to determine "
-                                    "quantization scheme or unsupported "
-                                    "quantization type. This model will "
-                                    "not run with DP enabled.")
+                if moe_parallel_config.dp_size > 1:
+                    logger.warning_once("MoE DP setup unable to determine "
+                                        "quantization scheme or unsupported "
+                                        "quantization type. This model will "
+                                        "not run with DP enabled.")
         else:
             _quant_config = quant_config
 
