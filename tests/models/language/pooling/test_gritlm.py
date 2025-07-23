@@ -120,7 +120,7 @@ def test_gritlm_offline_embedding(vllm_runner):
             task="embed",
             max_model_len=MAX_MODEL_LEN,
     ) as vllm_model:
-        llm = vllm_model.model
+        llm = vllm_model.llm
 
         d_rep = run_llm_encode(
             llm,
@@ -167,7 +167,7 @@ def test_gritlm_offline_generate(monkeypatch: pytest.MonkeyPatch, vllm_runner):
             task="generate",
             max_model_len=MAX_MODEL_LEN,
     ) as vllm_model:
-        llm = vllm_model.model
+        llm = vllm_model.llm
 
         sampling_params = SamplingParams(temperature=0.0, max_tokens=256)
         outputs = llm.generate(input, sampling_params=sampling_params)
