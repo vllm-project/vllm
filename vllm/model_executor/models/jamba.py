@@ -522,7 +522,7 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                 num_layers = self.model_config.get_num_layers_by_block_type(
                     self.vllm_config.parallel_config, LayerBlockType.mamba)
                 state_shape = self.get_mamba_state_shape_from_config(
-                    self.vllm_config, use_v1=False)
+                    self.vllm_config)
                 self.mamba_cache = MambaCacheManager(self.vllm_config,
                                                      self.lm_head.weight.dtype,
                                                      num_layers, *state_shape)

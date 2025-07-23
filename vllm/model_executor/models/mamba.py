@@ -241,12 +241,8 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
             if self.mamba_cache is None:
                 num_layers = self.model_config.get_num_layers_by_block_type(
                     self.vllm_config.parallel_config, LayerBlockType.mamba)
-                state_shape = MambaStateShapeCalculator.mamba1_state_shape(
-                    tp_world_size=self.vllm_config.parallel_config.
-                    tensor_parallel_size,
-                    intermediate_size=self.config.intermediate_size,
-                    state_size=self.config.state_size,
-                    conv_kernel=self.config.conv_kernel)
+                state_shape = self.get_mamba_state_shape_from_config(
+                    self.vllm_config)
                 self.mamba_cache = MambaCacheManager(self.vllm_config,
                                                      self.lm_head.weight.dtype,
                                                      num_layers, *state_shape)
@@ -257,6 +253,20 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
                                       intermediate_tensors, inputs_embeds)
 
         return hidden_states
+    
+    @classmethod
+    def get_mamba_state_shape_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        parallel_config = vllm_config.parallel_config
+        hf_config = vllm_config.model_config.hf_config
+
+        return MambaStateShapeCalculator.mamba1_state_shape(
+                    tp_world_size=parallel_config.tensor_parallel_size,
+                    intermediate_size=hf_config.intermediate_size,
+                    state_size=hf_config.state_size,
+                    conv_kernel=hf_config.conv_kernel)
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         return self.mamba_cache.copy_inputs_before_cuda_graphs(

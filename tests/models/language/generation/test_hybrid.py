@@ -53,6 +53,7 @@ HF_UNSUPPORTED_MODELS = [
 ]
 
 V1_SUPPORTED_MODELS = [
+    "state-spaces/mamba-130m-hf",
     "mistralai/Mamba-Codestral-7B-v0.1",
     "ibm-ai-platform/Bamba-9B-v1",
     "Zyphra/Zamba2-1.2B-instruct",
@@ -97,14 +98,19 @@ def test_models(
             example_prompts, max_tokens, num_logprobs)
 
     if model in V1_SUPPORTED_MODELS:
+        enforce_eager = False
         with monkeypatch.context() as m:
             m.setenv("VLLM_USE_V1", "1")
-            if model in HYBRID_MODELS:
-                # required due to reorder_batch behaviour
+            if model in HYBRID_MODELS + SSM_MODELS:
                 m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
+            if model in SSM_MODELS:
+                # Set to True until support in CUDA Graphs
+                enforce_eager = True
+
             with vllm_runner(model,
                              max_num_seqs=MAX_NUM_SEQS,
-                             enable_prefix_caching=False) as vllm_model:
+                             enable_prefix_caching=False,
+                             enforce_eager=enforce_eager) as vllm_model:
                 vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
                     example_prompts, max_tokens, num_logprobs)
     else:
@@ -371,13 +377,18 @@ def test_distributed_correctness(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    with vllm_runner(model, tensor_parallel_size=1,
-                     max_num_seqs=2) as vllm_model:
+    # Set enforce_eager=True until support in CUDA Graphs
+    with vllm_runner(model,
+                     tensor_parallel_size=1,
+                     max_num_seqs=2,
+                     enforce_eager=True) as vllm_model:
         vllm_outputs_tp_1 = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
-    with vllm_runner(model, tensor_parallel_size=2,
-                     max_num_seqs=2) as vllm_model:
+    with vllm_runner(model,
+                     tensor_parallel_size=2,
+                     max_num_seqs=2,
+                     enforce_eager=True) as vllm_model:
         vllm_outputs_tp_2 = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
