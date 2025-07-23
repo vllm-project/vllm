@@ -22,7 +22,6 @@ from vllm.model_executor import set_random_seed
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.platforms import current_platform
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
 from vllm.utils import (GiB_bytes, MemorySnapshot, bind_kv_cache,
@@ -512,19 +511,6 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def list_loras(self) -> Set[int]:
         return self.model_runner.list_loras()
-
-    def add_prompt_adapter(
-            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
-        return self.model_runner.add_prompt_adapter(prompt_adapter_request)
-
-    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        return self.model_runner.remove_lora(prompt_adapter_id)
-
-    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        return self.model_runner.pin_prompt_adapter(prompt_adapter_id)
-
-    def list_prompt_adapters(self) -> Set[int]:
-        return self.model_runner.list_prompt_adapters()
 
     @property
     def max_model_len(self) -> int:
