@@ -137,6 +137,40 @@ def supports_multimodal(
 
 
 @runtime_checkable
+class SupportsMultiModalWithRawInput(SupportsMultiModal, Protocol):
+    """The interface required for all multi-modal models."""
+
+    supports_multimodal_raw_input: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports multi-modal inputs and processes
+    them in their raw form and not embeddings.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+
+@overload
+def supports_multimodal_raw_input(
+        model: object) -> TypeIs[SupportsMultiModalWithRawInput]:
+    ...
+
+
+@overload
+def supports_multimodal_raw_input(
+        model: type[object]) -> TypeIs[type[SupportsMultiModalWithRawInput]]:
+    ...
+
+
+def supports_multimodal_raw_input(
+    model: Union[type[object], object]
+) -> Union[TypeIs[type[SupportsMultiModalWithRawInput]],
+           TypeIs[SupportsMultiModalWithRawInput]]:
+    return getattr(model, "supports_multimodal_raw_input", False)
+
+
+@runtime_checkable
 class SupportsScoreTemplate(Protocol):
     """The interface required for all models that support score template."""
 
