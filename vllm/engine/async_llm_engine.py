@@ -29,7 +29,6 @@ from vllm.model_executor.guided_decoding import (
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -435,7 +434,6 @@ class _AsyncLLMEngine(LLMEngine):
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
@@ -468,7 +466,6 @@ class _AsyncLLMEngine(LLMEngine):
         processed_inputs = await self.input_preprocessor.preprocess_async(
             prompt,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
             tokenization_kwargs=tokenization_kwargs,
         )
 
@@ -491,7 +488,6 @@ class _AsyncLLMEngine(LLMEngine):
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
             priority=priority,
         )
@@ -861,7 +857,6 @@ class AsyncLLMEngine(EngineClient):
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
@@ -889,7 +884,6 @@ class AsyncLLMEngine(EngineClient):
             arrival_time=arrival_time or time.time(),
             lora_request=lora_request,
             trace_headers=trace_headers,
-            prompt_adapter_request=prompt_adapter_request,
             priority=priority,
             data_parallel_rank=data_parallel_rank,
             tokenization_kwargs=tokenization_kwargs,
@@ -904,7 +898,6 @@ class AsyncLLMEngine(EngineClient):
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
@@ -922,8 +915,6 @@ class AsyncLLMEngine(EngineClient):
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
             trace_headers: OpenTelemetry trace headers.
-            prompt_adapter_request: Prompt Adapter request to use
-                                            for generation, if any.
             priority: The priority of the request.
                 Only applicable with priority scheduling.
             data_parallel_rank: The (global) data parallel rank that must
@@ -983,7 +974,6 @@ class AsyncLLMEngine(EngineClient):
                     sampling_params,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    prompt_adapter_request=prompt_adapter_request,
                     priority=priority,
                     data_parallel_rank=data_parallel_rank,
             ):

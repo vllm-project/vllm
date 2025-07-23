@@ -147,11 +147,8 @@ class OpenAIServingChat(OpenAIServing):
             raise self.engine_client.dead_error
 
         try:
-            (
-                lora_request,
-                prompt_adapter_request,
-            ) = self._maybe_get_adapters(request,
-                                         supports_default_mm_loras=True)
+            lora_request = self._maybe_get_adapters(
+                request, supports_default_mm_loras=True)
 
             model_name = self._get_model_name(request.model, lora_request)
 
@@ -239,8 +236,7 @@ class OpenAIServingChat(OpenAIServing):
                 self._log_inputs(request_id,
                                  request_prompts[i],
                                  params=sampling_params,
-                                 lora_request=lora_request,
-                                 prompt_adapter_request=prompt_adapter_request)
+                                 lora_request=lora_request)
 
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
@@ -259,7 +255,6 @@ class OpenAIServingChat(OpenAIServing):
                         request_id,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
-                        prompt_adapter_request=prompt_adapter_request,
                         priority=request.priority,
                     )
 

@@ -20,8 +20,7 @@ from vllm.config import config
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          validate_chat_template)
-from vllm.entrypoints.openai.serving_models import (LoRAModulePath,
-                                                    PromptAdapterPath)
+from vllm.entrypoints.openai.serving_models import LoRAModulePath
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.logger import init_logger
 from vllm.utils import FlexibleArgumentParser
@@ -65,27 +64,6 @@ class LoRAParserAction(argparse.Action):
         setattr(namespace, self.dest, lora_list)
 
 
-class PromptAdapterParserAction(argparse.Action):
-
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: Optional[Union[str, Sequence[str]]],
-        option_string: Optional[str] = None,
-    ):
-        if values is None:
-            values = []
-        if isinstance(values, str):
-            raise TypeError("Expected values to be a list")
-
-        adapter_list: list[PromptAdapterPath] = []
-        for item in values:
-            name, path = item.split('=')
-            adapter_list.append(PromptAdapterPath(name, path))
-        setattr(namespace, self.dest, adapter_list)
-
-
 @config
 @dataclass
 class FrontendArgs:
@@ -115,9 +93,6 @@ class FrontendArgs:
     or JSON list format. Example (old format): `'name=path'` Example (new 
     format): `{\"name\": \"name\", \"path\": \"lora_path\", 
     \"base_model_name\": \"id\"}`"""
-    prompt_adapters: Optional[list[PromptAdapterPath]] = None
-    """Prompt adapter configurations in the format name=path. Multiple adapters 
-    can be specified."""
     chat_template: Optional[str] = None
     """The file path to the chat template, or the template in single-line form 
     for the specified model."""
@@ -207,12 +182,6 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
         frontend_kwargs["lora_modules"]["type"] = optional_type(str)
         frontend_kwargs["lora_modules"]["action"] = LoRAParserAction
 
-        # Special case: Prompt adapters need custom parser action and
-        # optional_type(str)
-        frontend_kwargs["prompt_adapters"]["type"] = optional_type(str)
-        frontend_kwargs["prompt_adapters"][
-            "action"] = PromptAdapterParserAction
-
         # Special case: Middleware needs append action
         frontend_kwargs["middleware"]["action"] = "append"
         frontend_kwargs["middleware"]["type"] = str
@@ -288,9 +257,6 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_auto_tool_choice and not args.tool_call_parser:
         raise TypeError("Error: --enable-auto-tool-choice requires "
                         "--tool-call-parser")
-    if args.enable_prompt_embeds and args.enable_prompt_adapter:
-        raise ValueError(
-            "Cannot use prompt embeds and prompt adapter at the same time.")
 
 
 def log_non_default_args(args: argparse.Namespace):

@@ -17,7 +17,6 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.pooling_params import PoolingTask
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest, PoolerOutput
 from vllm.utils import make_async
 from vllm.worker.worker_base import WorkerBase
@@ -50,7 +49,6 @@ class ExecutorBase(ABC):
         self.scheduler_config = vllm_config.scheduler_config
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
         self._init_executor()
         self.is_sleeping = False
@@ -169,35 +167,6 @@ class ExecutorBase(ABC):
         sets = self.collective_rpc("list_loras")
         for s in sets:
             assert s == sets[0], "All workers should have the same LORAs."
-        return sets[0]
-
-    def add_prompt_adapter(
-            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
-        assert prompt_adapter_request.prompt_adapter_id > 0, \
-            "prompt_adapter_id must be greater than 0."
-        return all(
-            self.collective_rpc("add_prompt_adapter",
-                                args=(prompt_adapter_request, )))
-
-    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        assert prompt_adapter_id > 0, \
-            "prompt_adapter_id must be greater than 0."
-        return all(
-            self.collective_rpc("remove_prompt_adapter",
-                                args=(prompt_adapter_id, )))
-
-    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        assert prompt_adapter_id > 0, \
-            "prompt_adapter_id must be greater than 0."
-        return all(
-            self.collective_rpc("pin_prompt_adapter",
-                                args=(prompt_adapter_id, )))
-
-    def list_prompt_adapters(self) -> Set[int]:
-        sets = self.collective_rpc("list_prompt_adapters")
-        for s in sets:
-            assert (s == sets[0]
-                    ), "All workers should have the same prompt adapters."
         return sets[0]
 
     def start_profile(self) -> None:
