@@ -453,15 +453,6 @@ class _ModelRegistry:
                 f"Model architectures {architectures} failed "
                 "to be inspected. Please check the logs for more details.")
 
-        if any(arch in _PREVIOUSLY_SUPPORTED_MODELS for arch in architectures):
-            assert len(architectures) == 1 # should only have one architecture?
-            previous_version = _PREVIOUSLY_SUPPORTED_MODELS[architectures[0]]
-            raise ValueError(
-                "Model architecture was supported in vLLM until "
-                f" version {previous_version}, and is not supported"
-                " anymore. Please use an older version of vLLM "
-                "if you want to use this model architecture.")
-
         raise ValueError(
             f"Model architectures {architectures} are not supported for now. "
             f"Supported architectures: {all_supported_archs}")
