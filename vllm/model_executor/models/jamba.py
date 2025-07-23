@@ -25,7 +25,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.llama import LlamaMLP
+from vllm.model_executor.models.llama import LlamaMLP as JambaMLP
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -123,8 +123,7 @@ class JambaMambaDecoderLayer(nn.Module):
                 prefix=f"{prefix}.feed_forward",
             )
         else:
-            # JambaMLP is same as LlamaMLP
-            self.feed_forward = LlamaMLP(
+            self.feed_forward = JambaMLP(
                 config.hidden_size,
                 config.intermediate_size,
                 config.hidden_act,
@@ -218,8 +217,7 @@ class JambaAttentionDecoderLayer(nn.Module):
                 prefix=f"{prefix}.feed_forward",
             )
         else:
-            # JambaMLP is same as LlamaMLP
-            self.feed_forward = LlamaMLP(
+            self.feed_forward = JambaMLP(
                 config.hidden_size,
                 config.intermediate_size,
                 config.hidden_act,
