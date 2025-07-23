@@ -854,7 +854,12 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.use_int8_w8a8 = use_int8_w8a8
         self.use_int4_w4a16 = use_int4_w4a16
         self.use_int8_w8a16 = use_int8_w8a16
-        self.ocp_mx_scheme = ocp_mx_scheme
+
+        if ocp_mx_scheme is not None:
+            self.ocp_mx_scheme = ocp_mx_scheme.value
+        else:
+            self.ocp_mx_scheme = ocp_mx_scheme
+
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -934,12 +939,11 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert w1.size(0) == E
         assert w2.size(0) == E
 
-        config_dtype = get_config_dtype_str(
-            use_fp8_w8a8=self.use_fp8_w8a8,
-            use_int8_w8a16=self.use_int8_w8a16,
-            use_int4_w4a16=self.use_int4_w4a16,
-            ocp_mx_scheme=self.ocp_mx_scheme.value,
-            dtype=hidden_states.dtype)
+        config_dtype = get_config_dtype_str(use_fp8_w8a8=self.use_fp8_w8a8,
+                                            use_int8_w8a16=self.use_int8_w8a16,
+                                            use_int4_w4a16=self.use_int4_w4a16,
+                                            ocp_mx_scheme=self.ocp_mx_scheme,
+                                            dtype=hidden_states.dtype)
 
         config = try_get_optimal_moe_config(
             w1.size(),

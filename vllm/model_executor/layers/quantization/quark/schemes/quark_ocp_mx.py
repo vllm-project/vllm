@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from fractions import Fraction
 from functools import partial
 from typing import Any, Callable, Optional
 
@@ -40,7 +41,7 @@ class QuarkOCP_MX(QuarkScheme):
             self.packed_factor = 2
             self.dequant_func = dequant_mxfp4
         else:
-            self.packed_factor = 8 / 6
+            self.packed_factor = Fraction(numerator=8, denominator=6)
             self.dequant_func = partial(dequant_mxfp6,
                                         quant_dtype=self.weight_dtype)
 
