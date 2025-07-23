@@ -885,13 +885,16 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
                 if (("mlp.experts." in name) and name not in params_dict):
                     continue
-                name = name.replace(weight_name, param_name)
+                name_mapped = name.replace(weight_name, param_name)
 
                 # QKV fusion is optional, fall back to normal
                 # weight loading if it's not enabled
+                # if go with fusion option, then update name
                 if ((param_name == "fused_qkv_a_proj")
-                        and name not in params_dict):
+                        and name_mapped not in params_dict):
                     continue
+                else:
+                    name = name_mapped
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
