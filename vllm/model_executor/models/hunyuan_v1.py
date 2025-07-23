@@ -61,6 +61,19 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_layers)
 
 
+def _is_moe(config: PretrainedConfig) -> bool:
+    num_experts = getattr(config, "num_experts", None)
+    if isinstance(num_experts, int):
+        return num_experts > 1
+    if isinstance(num_experts, list) and num_experts:
+        # Ensure all elements are integers before calling max.
+        if all(isinstance(e, int) for e in num_experts):
+            return max(num_experts) > 1
+        else:
+            return False
+    return False
+
+
 def _get_cla_factor(config: PretrainedConfig) -> int:
     if not getattr(config, "use_cla", False):
         return 1
@@ -140,8 +153,8 @@ class HunYuanAttention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        # MistralConfig has an optional head_dim introduced by Mistral-Nemo
-        if hasattr(config, "head_dim"):
+
+        if hasattr(config, "head_dim") and config.head_dim:
             self.head_dim = config.head_dim
         elif hasattr(config, "attention_head_dim"):
             self.head_dim = config.attention_head_dim
@@ -490,12 +503,23 @@ class HunYuanDecoderLayer(nn.Module):
         else:
             raise RuntimeError(f"Unsupported attention type: {attention_type}")
 
-        self.mlp = HunYuanSparseMoeBlock(
-            config=config,
-            quant_config=quant_config,
-            layer_id=layer_id,
-            prefix=f"{prefix}.mlp",
-        )
+        if _is_moe(config):
+            self.mlp = HunYuanSparseMoeBlock(
+                config=config,
+                quant_config=quant_config,
+                layer_id=layer_id,
+                prefix=f"{prefix}.mlp",
+            )
+        else:
+            self.mlp = HunYuanMLP(
+                hidden_size=self.hidden_size,
+                intermediate_size=self.intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                bias=getattr(config, "mlp_bias", False),
+                prefix=f"{prefix}.mlp",
+            )
+
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
@@ -642,15 +666,17 @@ class HunYuanModel(nn.Module):
         return torch.concat((q, k, v))
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
-        )
+        if _is_moe(self.config):
+            # Params for weights, fp8 weight scales, fp8 activation scales
+            # (param_name, weight_name, expert_id, shard_id)
+            return FusedMoE.make_expert_params_mapping(
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.config.num_experts,
+            )
+        else:
+            return []
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         cla_factor = _get_cla_factor(self.config)
@@ -815,7 +841,7 @@ class HunYuanModel(nn.Module):
         return loaded_params
 
 
-class HunYuanMoEV1ForCausalLM(nn.Module, SupportsLoRA):
+class HunYuanV1Base(nn.Module, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -901,3 +927,11 @@ class HunYuanMoEV1ForCausalLM(nn.Module, SupportsLoRA):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
+
+
+class HunYuanDenseV1ForCausalLM(HunYuanV1Base):
+    pass
+
+
+class HunYuanMoEV1ForCausalLM(HunYuanV1Base):
+    pass
