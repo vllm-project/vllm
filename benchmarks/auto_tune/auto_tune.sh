@@ -126,11 +126,12 @@ run_benchmark() {
     # get a basic qps by using request-rate inf
     bm_log="$LOG_FOLDER/bm_log_${max_num_seqs}_${max_num_batched_tokens}_requestrate_inf.txt"
     prefix_len=$(( INPUT_LEN * MIN_CACHE_HIT_PCT / 100 ))
-    python benchmarks/benchmark_serving.py \
+adjusted_input_len=$(( INPUT_LEN - prefix_len ))
+    python3 benchmarks/benchmark_serving.py \
         --backend vllm \
         --model $MODEL  \
         --dataset-name random \
-        --random-input-len $INPUT_LEN \
+        --random-input-len $adjusted_input_len \
         --random-output-len $OUTPUT_LEN \
         --ignore-eos \
         --disable-tqdm \
@@ -159,11 +160,11 @@ run_benchmark() {
             curl -X POST http://0.0.0.0:8004/reset_prefix_cache
             sleep 5
             bm_log="$LOG_FOLDER/bm_log_${max_num_seqs}_${max_num_batched_tokens}_requestrate_${request_rate}.txt"
-            python benchmarks/benchmark_serving.py \
+            python3 benchmarks/benchmark_serving.py \
                 --backend vllm \
                 --model $MODEL  \
                 --dataset-name random \
-                --random-input-len $INPUT_LEN \
+                --random-input-len $adjusted_input_len \
                 --random-output-len $OUTPUT_LEN \
                 --ignore-eos \
                 --disable-tqdm \
