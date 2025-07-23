@@ -22,6 +22,9 @@ from transformers import (AutoConfig, AutoProcessor, AutoTokenizer,
                           GenerationConfig)
 
 from vllm import LLM, SamplingParams
+from vllm.v1.executor.abstract import Executor
+from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
+                                        FullAttentionSpec)
 
 from ....utils import multi_gpu_test
 
@@ -77,7 +80,7 @@ def create_reduced_maverick_model(
     num_experts: int = 4,
     vision_layers: int = 2,
     force_recreate: bool = False,
-) -> str:
+) -> tuple[str, list[int]]:
     """
     Create a reduced-layer version of the Maverick model.
 
@@ -90,12 +93,21 @@ def create_reduced_maverick_model(
         force_recreate: Whether to recreate if output_dir already exists
 
     Returns:
-        Path to the created reduced model directory
+        Tuple of:
+        - Path to the created reduced model directory
+        - List of 0 or 1 indicating whether each layer uses RoPE and local attn
+          0 indicates that RoPE is not used while 1 indicates that RoPE is used.
     """
 
     print(
         f"Creating reduced Maverick model with {text_layers} text layers and "
         f"{vision_layers} vision layers...")
+
+    print("Loading original model configuration...")
+    original_config = AutoConfig.from_pretrained(original_model_name,
+                                                 trust_remote_code=True)
+    text_config = original_config.to_dict()["text_config"]
+    no_rope_layers = text_config["no_rope_layers"]
 
     # Create output directory
     output_path = Path(output_dir)
@@ -105,15 +117,11 @@ def create_reduced_maverick_model(
         else:
             print(f"Output directory {output_dir} already exists. "
                   "Use --force-recreate to overwrite.")
-            return str(output_path)
+            return str(output_path), no_rope_layers
 
     output_path.mkdir(parents=True, exist_ok=True)
 
     try:
-        print("Loading original model configuration...")
-        original_config = AutoConfig.from_pretrained(original_model_name,
-                                                     trust_remote_code=True)
-
         print("Creating reduced configuration...")
         reduced_config = create_reduced_config(original_config, text_layers,
                                                num_experts, vision_layers)
@@ -141,7 +149,7 @@ def create_reduced_maverick_model(
             print(f"Could not copy generation config: {e}")
 
         print(f"Successfully created reduced Maverick model at {output_path}")
-        return str(output_path)
+        return str(output_path), no_rope_layers
 
     except Exception as e:
         print(f"Error creating reduced model: {e}")
@@ -510,21 +518,32 @@ def save_weights_to_safetensors(weights: dict[str, torch.Tensor],
           f"{index_data['metadata']['total_size'] / (1024**3):.2f} GB")
 
 
-def run_reduced_model(model_path: str,
-                      should_profile: bool = False,
-                      **kwargs) -> None:
-    """Test the created reduced model with vLLM."""
-
-    print(f"\nTesting reduced model at {model_path}...")
-
-    llm = LLM(
-        model=model_path,
-        trust_remote_code=True,
-        max_model_len=512,  # Small context for testing
-        gpu_memory_utilization=0.3,  # Conservative memory usage
-        **kwargs,
+def check_attention_spec_interleaved_rope(
+    llm: LLM,
+    num_attention_layers: int,
+    num_ranks: int,
+    rope_layers: list[int],
+):
+    """Check that the attention spec is correct."""
+    assert isinstance(llm.llm_engine.model_executor, Executor)
+    kv_cache_specs_per_rank = llm.llm_engine.model_executor.get_kv_cache_specs(
     )
+    for rank in range(num_ranks):
+        kv_cache_specs = kv_cache_specs_per_rank[rank]
+        assert len(kv_cache_specs.keys()) == num_attention_layers
+        for i in range(num_attention_layers):
+            if rope_layers[i] == 0:
+                expected_spec = FullAttentionSpec
+            else:
+                expected_spec = ChunkedLocalAttentionSpec
+            assert isinstance(
+                kv_cache_specs[
+                    f"language_model.model.layers.{i}.self_attn.attn"],
+                expected_spec)
 
+
+def run_reduced_model(llm: LLM, should_profile: bool = False) -> None:
+    """Test the created reduced model with vLLM."""
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
                                      max_tokens=50)
@@ -551,6 +570,7 @@ def run_reduced_model(model_path: str,
 @pytest.mark.parametrize("tp,ep", [(2, True)])
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_dummy_maverick(
+    monkeypatch,
     original_model_name: str,
     text_layers: int,
     num_experts: int,
@@ -562,7 +582,9 @@ def test_dummy_maverick(
     force_recreate: bool = True,
     profile: bool = False,
 ) -> None:
-    model_path = create_reduced_maverick_model(
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    model_path, rope_layers = create_reduced_maverick_model(
         original_model_name=original_model_name,
         output_dir=output_dir,
         text_layers=text_layers,
@@ -573,11 +595,25 @@ def test_dummy_maverick(
 
     print(f"\nReduced model created successfully at: {model_path}")
 
-    run_reduced_model(model_path=model_path,
-                      should_profile=profile,
-                      enforce_eager=enforce_eager,
-                      tensor_parallel_size=tp,
-                      enable_expert_parallel=ep)
+    llm = LLM(
+        model=model_path,
+        trust_remote_code=True,
+        max_model_len=512,  # Small context for testing
+        gpu_memory_utilization=0.3,  # Conservative memory usage
+        enforce_eager=enforce_eager,
+        tensor_parallel_size=tp,
+        enable_expert_parallel=ep,
+    )
+
+    check_attention_spec_interleaved_rope(
+        llm,
+        text_layers,
+        tp,
+        rope_layers,
+    )
+
+    print(f"\nTesting reduced model at {model_path}...")
+    run_reduced_model(llm=llm, should_profile=profile)
 
 
 def main():
