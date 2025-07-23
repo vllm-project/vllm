@@ -152,7 +152,7 @@ class LLMEngine:
 
     @staticmethod
     def _get_multiprocessing_mode() -> bool:
-        if envs.VLLM_USING_PATHWAYS:
+        if envs.VLLM_TPU_USING_PATHWAYS:
             logger.info("Disabling multiprocessing when using Pathways "
                         "(JAX_PLATFORMS=proxy)")
             return False

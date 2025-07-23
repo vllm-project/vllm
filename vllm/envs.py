@@ -118,6 +118,7 @@ if TYPE_CHECKING:
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: Optional[int] = None
+    VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
@@ -141,7 +142,6 @@ if TYPE_CHECKING:
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 120
     VLLM_USE_CUDNN_PREFILL: bool = False
     VLLM_LOOPBACK_IP: str = ""
-    VLLM_USING_PATHWAYS: bool = False
 
 
 def get_default_cache_root():
@@ -854,6 +854,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TPU_MOST_MODEL_LEN":
     lambda: maybe_convert_int(os.environ.get("VLLM_TPU_MOST_MODEL_LEN", None)),
 
+    # Whether using Pathways
+    "VLLM_TPU_USING_PATHWAYS":
+    lambda: bool("proxy" in os.getenv("JAX_PLATFORMS", "").lower()),
+
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM":
     lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "0"))),
@@ -972,10 +976,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Used to force set up loopback IP
     "VLLM_LOOPBACK_IP":
     lambda: os.getenv("VLLM_LOOPBACK_IP", ""),
-
-    # Whether using Pathways
-    "VLLM_USING_PATHWAYS":
-    lambda: bool("proxy" in os.getenv("JAX_PLATFORMS", "").lower()),
 }
 
 # --8<-- [end:env-vars-definition]
