@@ -2369,7 +2369,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # can reuse the memory pool allocated for the large shapes.
         with graph_capture(device=self.device):
             full_cg = self.full_cuda_graph
-
             # Only rank 0 should print progress bar during capture
             compilation_cases = reversed(self.cudagraph_batch_sizes)
             if is_global_first_rank():

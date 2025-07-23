@@ -292,8 +292,9 @@ class Worker(WorkerBase):
                                self.scheduler_config.max_num_batched_tokens)
 
             # We skip EPLB here since we don't want to record dummy metrics
-            # Always activate creating attn_cudagraphs for dummy run to avoid
-            # illegal memory access for full cudagraph.
+            # Always activate building attn_metadata for dummy run to avoid
+            # potential illegal memory access for full cudagraph relay. This
+            # is also harmless for piecewise cudagraph.
             hidden_states, last_hidden_states = \
                 self.model_runner._dummy_run(
                     num_tokens=max_num_reqs,

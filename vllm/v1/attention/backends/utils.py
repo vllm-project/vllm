@@ -72,8 +72,8 @@ class AttentionCGSupport(enum.Enum):
     NEVER = 0
     """NO cudagraph support"""
     PURE_DECODE_ONLY = 1
-    """Cudagraph supported for pure decode, need to use piecewise
-    cudagraph or no cudagraph for mixed prefill-decode batches"""
+    """Cudagraph supported for pure decode, need to run without
+    cudagraph for mixed prefill-decode batches"""
     ALWAYS = 2
     """Cudagraph always supported"""
 

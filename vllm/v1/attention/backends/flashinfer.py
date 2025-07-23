@@ -410,8 +410,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if num_decodes > 0:
                 pure_decode = num_prefills == 0
                 # possible required padding for cudagraph replay
-                use_cudagraph = (self.enable_cuda_graph and pure_decode and \
-                        num_decodes <= self._decode_cudagraph_max_bs)
+                use_cudagraph = (self.enable_cuda_graph and pure_decode and
+                                 num_decodes <= self._decode_cudagraph_max_bs)
                 if use_cudagraph:
                     num_input_tokens_decode = (
                         self.vllm_config.pad_for_cudagraph(num_decodes))
