@@ -1174,16 +1174,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                         mesh=self.mesh)
                 else:
                     model_loader = get_model_loader(self.load_config)
-                    if not hasattr(self, "model"):
-                        logger.info("Loading model from scratch...")
-                        model = model_loader.load_model(
-                            vllm_config=self.vllm_config,
-                            model_config=self.model_config)
-                    else:
-                        logger.info("Model was already initialized. \
-                                Loading weights inplace...")
-                        model_loader.load_weights(
-                            self.model, model_config=self.model_config)
+                    logger.info("Loading model from scratch...")
+                    model = model_loader.load_model(
+                        vllm_config=self.vllm_config,
+                        model_config=self.model_config)
             except RuntimeError as e:
                 raise RuntimeError(
                     f"Unable to load model, a likely reason is the model is "
@@ -1204,6 +1198,13 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         if not hasattr(self, "model"):
             self.model = model
         self.sampler = TPUSampler()
+
+    def reload_weights(self) -> None:
+        assert getattr(self, "model", None) is not None, \
+            "Cannot reload weights before model is loaded."
+        model_loader = get_model_loader(self.load_config)
+        logger.info("Reloading weights inplace...")
+        model_loader.load_weights(self.model, model_config=self.model_config)
 
     @torch.no_grad()
     def _dummy_run(self, num_tokens: int, num_reqs: int,
