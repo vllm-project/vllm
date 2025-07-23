@@ -969,6 +969,7 @@ class LLM:
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         pooling_task: PoolingTask = "encode",
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[PoolingRequestOutput]:
         ...
 
@@ -985,6 +986,7 @@ class LLM:
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         pooling_task: PoolingTask = "encode",
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[PoolingRequestOutput]:
         ...
 
@@ -1001,6 +1003,7 @@ class LLM:
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         pooling_task: PoolingTask = "encode",
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[PoolingRequestOutput]:
         ...
 
@@ -1018,6 +1021,7 @@ class LLM:
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         pooling_task: PoolingTask = "encode",
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[PoolingRequestOutput]:
         ...
 
@@ -1035,6 +1039,7 @@ class LLM:
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         pooling_task: PoolingTask = "encode",
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[PoolingRequestOutput]:
         ...
 
@@ -1050,6 +1055,7 @@ class LLM:
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         pooling_task: PoolingTask = "encode",
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[PoolingRequestOutput]:
         ...
 
@@ -1070,6 +1076,7 @@ class LLM:
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         pooling_task: PoolingTask = "encode",
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[PoolingRequestOutput]:
         """Apply pooling to the hidden states corresponding to the input
         prompts.
@@ -1135,9 +1142,11 @@ class LLM:
             for pooling_param in pooling_params:
                 pooling_param.verify(pooling_task, model_config)
 
-        tokenization_kwargs = dict[str, Any]()
-        _validate_truncation_size(model_config.max_model_len,
-                                  truncate_prompt_tokens, tokenization_kwargs)
+        if tokenization_kwargs is None:
+            tokenization_kwargs = dict[str, Any]()
+            _validate_truncation_size(model_config.max_model_len,
+                                      truncate_prompt_tokens,
+                                      tokenization_kwargs)
 
         self._validate_and_add_requests(
             prompts=parsed_prompts,
