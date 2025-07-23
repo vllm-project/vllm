@@ -293,7 +293,7 @@ class InductorAdaptor(CompilerInterface):
             current_config.update(compiler_config)
 
         # disable remote cache
-        current_config["fx_graph_cache"] = True
+        current_config["fx_graph_cache"] = not envs.VLLM_DISABLE_COMPILE_CACHE
         current_config["fx_graph_remote_cache"] = False
 
         set_inductor_config(current_config, runtime_shape)
