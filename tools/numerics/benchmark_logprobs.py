@@ -2,11 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import gc
 import math
+from argparse import Namespace
 from statistics import mean, median, stdev
+from typing import Any
 
 import torch
 import torch.nn.functional as F
+from tabulate import tabulate
 from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
@@ -17,127 +21,181 @@ PROMPTS = [
     "One of the most important things in life is to",
     "The answer to 1 + 1 is",
 ]
-vllm_logits_processor_outputs = []
+
+# (model, logprobs_mode) -> (vllm_errs, vllm_prob_errs)
+global_results: dict[tuple[str, str], Any] = {}
+
+stat_name_to_func = {
+    "max": max,
+    "mean": mean,
+    "stdev": stdev,
+    "median": median,
+    "min": min
+}
 
 
-def print_error_stats(header: str, errs: list[float]):
-    name_to_func = {
-        "max": max,
-        "mean": mean,
-        "stdev": stdev,
-        "median": median,
-        "min": min
-    }
-    print(
-        f"{header}:", ", ".join(f"{stat_type}={name_to_func[stat_type](errs)}"
-                                for stat_type in name_to_func))
-
-
-def get_vllm_outputs(args: EngineArgs, temperature: float):
+def get_vllm_outputs(
+    args: EngineArgs,
+    sampling_params: SamplingParams,
+) -> list[dict[str, Any]]:
     llm = LLM(**dataclasses.asdict(args))
-    model = llm.llm_engine.model_executor.driver_worker.model_runner.model
-
-    def logits_processor_hook(module, input, output):
-        assert isinstance(output, torch.Tensor)
-        vllm_logits_processor_outputs.append(output.clone())
-
-    model.logits_processor.register_forward_hook(logits_processor_hook)
-
     outputs = llm.generate(
         PROMPTS,
-        sampling_params=SamplingParams(
-            max_tokens=512,
-            temperature=temperature,
-            logprobs=2,
-        ),
+        sampling_params=sampling_params,
     )
     final_outputs = []
     for output in outputs:
-        assert len(output.outputs[0].token_ids) == len(
-            output.outputs[0].logprobs)
         final_outputs.append({
             "input_ids": output.prompt_token_ids,
             "output_ids": output.outputs[0].token_ids,
             "logprobs": output.outputs[0].logprobs,
         })
+    # Release memory for next benchmark
+    del llm
+    gc.collect()
     return final_outputs
 
 
-def compare_with_hf(vllm_outputs, args: EngineArgs, temperature: float):
+def compare_with_hf(vllm_outputs: list[dict[str, Any]],
+                    args: EngineArgs) -> tuple[list[float], list[float]]:
     model_config = args.create_model_config()
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, torch_dtype=model_config.dtype, device_map="cuda")
-
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        args.model,
+        torch_dtype=model_config.dtype,
+        device_map="cuda",
+        trust_remote_code=True)
     vllm_errs = []
-    hook_errs = []
     vllm_prob_errs = []
-    hook_prob_errs = []
-    hook_log_name = "vLLM w/ F.log_softmax"
-    for seq_id, output in enumerate(vllm_outputs):
-        token_ids = torch.tensor([*output["input_ids"], *output["output_ids"]],
-                                 device="cuda").unsqueeze(0)
+    eps = 1e-10
+    for vllm_output in vllm_outputs:
+        token_ids = torch.tensor(
+            [*vllm_output["input_ids"], *vllm_output["output_ids"]],
+            device="cuda").unsqueeze(0)
         with torch.inference_mode():
-            hf_outputs = model(token_ids)
-        hf_logprobs = F.log_softmax(hf_outputs.logits / temperature, dim=-1)
+            hf_outputs = hf_model(token_ids)
+        if "logprobs" in args.logprobs_mode:
+            hf_logprobs = F.log_softmax(hf_outputs.logits, dim=-1)
+        else:
+            hf_logprobs = hf_outputs.logits
 
-        for i in range(len(output["logprobs"])):
-            hook_logprobs = F.log_softmax(
-                vllm_logits_processor_outputs[i][seq_id] / temperature, dim=-1)
-            for key in output["logprobs"][i]:
-                _real_logprobs = hf_logprobs[0,
-                                             i - 1 + len(output["input_ids"])]
-                eps = 1e-10
-                vllm_rel_err = abs((output["logprobs"][i][key].logprob -
+        for i in range(len(vllm_output["logprobs"])):
+            for key in vllm_output["logprobs"][i]:
+                _real_logprobs = hf_logprobs[0, i - 1 +
+                                             len(vllm_output["input_ids"])]
+                vllm_rel_err = abs((vllm_output["logprobs"][i][key].logprob -
                                     _real_logprobs[key].item()) /
                                    (_real_logprobs[key].item() + eps))
-                hook_rel_err = abs(
-                    (hook_logprobs[key].item() - _real_logprobs[key].item()) /
-                    (_real_logprobs[key].item() + eps))
                 vllm_errs.append(vllm_rel_err)
-                hook_errs.append(hook_rel_err)
+                if "logprobs" in args.logprobs_mode:
+                    vllm_prob = math.exp(
+                        vllm_output["logprobs"][i][key].logprob)
+                    real_prob = math.exp(_real_logprobs[key].item())
+                    vllm_prob_err = abs(vllm_prob - real_prob)
+                    vllm_prob_errs.append(vllm_prob_err)
+    # Release memory for next benchmark
+    del hf_model
+    gc.collect()
+    return vllm_errs, vllm_prob_errs
 
-                vllm_prob = math.exp(output["logprobs"][i][key].logprob)
-                hook_prob = math.exp(hook_logprobs[key].item())
-                real_prob = math.exp(_real_logprobs[key].item())
-                vllm_prob_err = abs(vllm_prob - real_prob)
-                hook_prob_err = abs(hook_prob - real_prob)
-                vllm_prob_errs.append(vllm_prob_err)
-                hook_prob_errs.append(hook_prob_err)
 
-                if (vllm_rel_err > 0.1
-                        or hook_rel_err > 0.1) and real_prob < 0.9:
-                    print(
-                        (i, key),
-                        output["logprobs"][i][key],
-                        "HF logprobs:",
-                        hf_logprobs[0, i - 1 +
-                                    len(output["input_ids"])][key].item(),
-                        f"{hook_log_name} logprobs:",
-                        hook_logprobs[key].item(),
-                    )
-                    print(f"HF Prob: {real_prob}, vLLM: {vllm_prob}"
-                          f", {hook_log_name}: {hook_prob}")
-    print("===Relative logprobs errors vs HF===")
-    print_error_stats("vLLM", vllm_errs)
-    print_error_stats(hook_log_name, hook_errs)
-    print("===Absolute probs errors vs HF===")
-    print_error_stats("vLLM", vllm_prob_errs)
-    print_error_stats(hook_log_name, hook_prob_errs)
+def run_benchmark(args: Namespace, sampling_params: SamplingParams) -> None:
+    engine_args = EngineArgs.from_cli_args(args)
+    vllm_outputs = get_vllm_outputs(engine_args, sampling_params)
+    vllm_errs, vllm_prob_errs = compare_with_hf(vllm_outputs, engine_args)
+    global_results[(args.model, args.logprobs_mode)] = (vllm_errs,
+                                                        vllm_prob_errs)
+
+
+def print_results(
+    models: list[str],
+    logprobs_modes: list[str],
+    stats: list[str],
+) -> None:
+    headers = ["Model"]
+    for logprobs_mode in logprobs_modes:
+        if "logprobs" in logprobs_mode:
+            headers.append(f"{logprobs_mode} (rel err)")
+            probs_header = logprobs_mode.replace("logprobs", "probs")
+            headers.append(f"{probs_header} (abs err)")
+        else:
+            headers.append(f"{logprobs_mode} (rel err)")
+    for stat in stats:
+        stat_func = stat_name_to_func[stat]
+        data = []
+        print(f"======{stat} stat======")
+        data = []
+        for model in models:
+            row = [model]
+            for logprobs_mode in logprobs_modes:
+                vllm_errs, vllm_prob_errs = global_results[(model,
+                                                            logprobs_mode)]
+                row.append(stat_func(vllm_errs))
+                if "logprobs" in logprobs_mode:
+                    row.append(stat_func(vllm_prob_errs))
+            data.append(row)
+        table = tabulate(data, headers=headers, tablefmt="grid")
+        print(table)
 
 
 def main():
     parser = FlexibleArgumentParser(description="Benchmark logprobs.")
+    parser.add_argument("--models",
+                        type=str,
+                        required=False,
+                        help="Comma separated list of models to benchmark.")
+    parser.add_argument("--logprobs-modes",
+                        type=str,
+                        required=False,
+                        help="Comma separated list of logprobs modes.")
+    parser.add_argument("--stats",
+                        type=str,
+                        required=False,
+                        default="max,mean,stdev,median,min",
+                        help="Comma separated list of stats to print.")
     parser.add_argument("--temperature",
                         type=float,
                         required=False,
                         default=0.7)
+    parser.add_argument("--num-logprobs", type=int, required=False, default=2)
+    parser.add_argument("--max-tokens", type=int, required=False, default=512)
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
+    assert args is not None
+
+    # Process sampling params
     temperature = args.temperature
     del args.temperature
-    engine_args = EngineArgs.from_cli_args(args)
-    vllm_outputs = get_vllm_outputs(engine_args, temperature)
-    compare_with_hf(vllm_outputs, engine_args, temperature)
+    num_logprobs = args.num_logprobs
+    del args.num_logprobs
+    max_tokens = args.max_tokens
+    del args.max_tokens
+    sampling_params = SamplingParams(
+        max_tokens=max_tokens,
+        temperature=temperature,
+        logprobs=num_logprobs,
+    )
+
+    # Process benchmark sweeping params
+    models = args.models
+    del args.models
+    logprobs_modes = args.logprobs_modes
+    del args.logprobs_modes
+    models = [args.model] if models is None else models.split(",")
+    logprobs_modes = ([args.logprobs_mode]
+                      if logprobs_modes is None else logprobs_modes.split(","))
+
+    # Process stats arg
+    stats = args.stats.split(",")
+    del args.stats
+
+    # Run benchmark for each model and logprobs mode
+    for model in models:
+        for logprobs_mode in logprobs_modes:
+            args.model = model
+            args.logprobs_mode = logprobs_mode
+            print(f"Running benchmark for {model} with {logprobs_mode=}")
+            run_benchmark(args, sampling_params)
+    print_results(models, logprobs_modes, stats)
 
 
 if __name__ == "__main__":
