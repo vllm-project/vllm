@@ -17,6 +17,9 @@ class TensorShape:
         self.dims = dims
         self.dynamic_dims = dynamic_dims if dynamic_dims else set()
 
+    def __class_getitem__(cls, item):
+        return cls
+
     def resolve(self, **bindings: dict[str,
                                        int]) -> tuple[Union[int, str], ...]:
         resolved = []
