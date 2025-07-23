@@ -1944,7 +1944,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 sampled_token_ids = torch.tensor(sampled_token_ids).to(
                     self.device)
                 sampled_token_ids = broadcast_tensor_dict(
-                    {"sampled_token_ids": 
+                    {"sampled_token_ids":
                      sampled_token_ids})["sampled_token_ids"]
             else:
                 sampled_token_ids = broadcast_tensor_dict(
