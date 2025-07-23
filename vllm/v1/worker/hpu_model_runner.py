@@ -2349,11 +2349,18 @@ class HPUModelRunner:
                     kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                         num_blocks + 1, kv_cache_spec.block_size,
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
+                    v_cache_shape = None if self.model_config.use_mla \
+                    else kv_cache_shape
                     dtype = kv_cache_spec.dtype
                     key_cache = torch.zeros(kv_cache_shape,
                                             dtype=dtype,
                                             device=self.device)
-                    value_cache = torch.zeros_like(key_cache)
+                    if v_cache_shape is not None:
+                        value_cache = torch.zeros(v_cache_shape,
+                                                  dtype=dtype,
+                                                  device=self.device)
+                    else:
+                        value_cache = None
                     kv_caches[layer_name] = (key_cache, value_cache)
                 else:
                     # TODO: add new branches when introducing more types of

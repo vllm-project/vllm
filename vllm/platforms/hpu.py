@@ -40,9 +40,12 @@ class HpuPlatform(Platform):
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool,
                              use_mla: bool) -> str:
-        if use_v1:
+        if use_v1 and not use_mla:
             logger.info("Using HPUAttentionV1 backend.")
             return "vllm.v1.attention.backends.hpu_attn.HPUAttentionBackendV1"
+        if use_v1 and use_mla:
+            logger.info("Using HPUAttentionMLA backend.")
+            return "vllm.attention.backends.hpu_attn.HPUMLAAttentionBackend"
         if use_mla:
             logger.info("Using HPUAttentionMLA backend.")
             return "vllm.attention.backends.hpu_attn.HPUMLAAttentionBackend"
