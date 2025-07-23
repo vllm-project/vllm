@@ -14,7 +14,7 @@ To install `tensorizer`, run `pip install vllm[tensorizer]`.
 ## The basics
 
 To load a model using Tensorizer, the model first needs to be serialized by
-Tensorizer. [The example script](https://docs.vllm.ai/en/latest/examples/others/tensorize_vllm_model.html) takes care of this process.
+Tensorizer. [The example script](../../examples/others/tensorize_vllm_model.md) takes care of this process.
 
 Let's walk through a basic example by serializing `facebook/opt-125m` using the script, and then loading it for inference.
 

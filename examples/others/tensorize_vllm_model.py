@@ -88,8 +88,7 @@ directly to load models:
 from vllm import LLM
 llm = LLM(
     "s3://my-bucket/vllm/facebook/opt-125m/v1", 
-    load_format="tensorizer",
-    enable_lora=True
+    load_format="tensorizer"
 )
 ```
 
@@ -99,8 +98,7 @@ inference server:
 
 ```
 vllm serve s3://my-bucket/vllm/facebook/opt-125m/v1 \
-    --load-format tensorizer \
-    --enable-lora 
+    --load-format tensorizer
 ```
 
 In order to see all of the available arguments usable to configure 
