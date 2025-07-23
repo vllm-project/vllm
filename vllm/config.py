@@ -803,14 +803,34 @@ class ModelConfig:
                     if getattr(pooler_config, k) is None:
                         setattr(pooler_config, k, v)
 
-            if self.is_matryoshka:
-                if pooler_config.normalize is None:
-                    pooler_config.normalize = True
-                elif not pooler_config.normalize:
-                    raise ValueError(
-                        "`normalize` must be enabled (set to True) "
-                        "for models that are compatible with "
-                        "Matryoshka Representation.")
+            # set default pooler config
+            default_pooling_type = self.model_info.default_pooling_type
+            if self.task == "embed":
+                default_pooler_config = PoolerConfig(
+                    pooling_type=default_pooling_type,
+                    normalize=True,
+                    softmax=False)
+            elif self.task == "classify":
+                default_pooler_config = PoolerConfig(
+                    pooling_type=default_pooling_type,
+                    normalize=False,
+                    softmax=True)
+            elif self.task in ["reward", "encode"]:
+                default_pooler_config = PoolerConfig(pooling_type="ALL",
+                                                     normalize=False,
+                                                     softmax=False)
+            else:
+                raise ValueError(f"Pooling runner does not "
+                                 f"support {self.task} task.")
+
+            for k, v in asdict(default_pooler_config).items():
+                if getattr(pooler_config, k) is None:
+                    setattr(pooler_config, k, v)
+
+            if self.is_matryoshka and not pooler_config.normalize:
+                raise ValueError("`normalize` must be enabled (set to True) "
+                                 "for models that are compatible with "
+                                 "Matryoshka Representation.")
 
             return pooler_config
 
@@ -842,6 +862,18 @@ class ModelConfig:
             if arch.endswith("ForSequenceClassification"):
                 return True
         return self.registry.is_cross_encoder_model(architectures)
+
+    @property
+    def attn_type(self) -> Optional[str]:
+        if self.is_attention_free:
+            return None
+        if self.is_encoder_decoder:
+            return "encoder_decoder"
+        if self.model_info.default_pooling_type == "CLS" or not getattr(
+                self.hf_config, "is_causal", True):
+            return "encoder_only"
+        else:
+            return "decoder"
 
     def _get_preferred_pooling_task(
         self,
@@ -964,6 +996,9 @@ class ModelConfig:
         if "classify" in supported_tasks.get("pooling", []):
             # When multiple pooling tasks are present, default to
             # pooling (eg cross-encoder) for non-standard architectures.
+            return "pooling"
+
+        if get_pooling_config(self.model, self.revision):
             return "pooling"
 
         suffix_to_preferred_runner: list[tuple[str, RunnerType]] = [
@@ -4668,12 +4703,12 @@ class VllmConfig:
 
         disable_chunked_prefill_reasons: list[str] = []
 
-        if self.model_config and self.model_config.pooler_config:
-            pooling_type = self.model_config.pooler_config.pooling_type
-            if pooling_type is None or pooling_type.lower() != "last":
+        if self.model_config and self.model_config.runner_type == "pooling":
+            attn_type = self.model_config.attn_type
+            if attn_type != "decoder":
                 disable_chunked_prefill_reasons.append(
-                    "Only \"last\" pooling supports chunked "
-                    "prefill and prefix caching; disabling both.")
+                    "Chunked prefill and prefix caching are only available "
+                    "with attn_type='decoder';disabling both.")
 
         if disable_chunked_prefill_reasons:
             for reason in disable_chunked_prefill_reasons:

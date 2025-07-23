@@ -26,7 +26,8 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.pooling_params import PoolingTask
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsCrossEncoding, SupportsV0Only
+from .interfaces import (SupportsCrossEncoding, SupportsV0Only,
+                         default_pooling_type)
 from .utils import WeightsMapper, maybe_prefix
 
 
@@ -201,6 +202,7 @@ class ModernBertEncoderLayer(nn.Module):
 
 
 @support_torch_compile
+@default_pooling_type("CLS")
 class ModernBertModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"layers.": "encoder_layer.layers."})
@@ -296,6 +298,7 @@ class ModernBertPooler(Pooler):
         return pooled_output
 
 
+@default_pooling_type("CLS")
 class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
                                           SupportsCrossEncoding):
 

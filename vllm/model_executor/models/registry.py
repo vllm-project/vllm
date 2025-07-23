@@ -20,8 +20,8 @@ import torch.nn as nn
 
 from vllm.logger import init_logger
 
-from .interfaces import (has_inner_state, has_noops, is_attention_free,
-                         is_hybrid, supports_cross_encoding,
+from .interfaces import (get_default_pooling_type, has_inner_state, has_noops,
+                         is_attention_free, is_hybrid, supports_cross_encoding,
                          supports_multimodal, supports_pp,
                          supports_transcription, supports_v0_only)
 from .interfaces_base import is_text_generation_model
@@ -285,6 +285,7 @@ class _ModelInfo:
     architecture: str
     is_text_generation_model: bool
     is_pooling_model: bool
+    default_pooling_type: str
     supports_cross_encoding: bool
     supports_multimodal: bool
     supports_pp: bool
@@ -302,6 +303,7 @@ class _ModelInfo:
             architecture=model.__name__,
             is_text_generation_model=is_text_generation_model(model),
             is_pooling_model=True,  # Can convert any model into a pooling model
+            default_pooling_type=get_default_pooling_type(model),
             supports_cross_encoding=supports_cross_encoding(model),
             supports_multimodal=supports_multimodal(model),
             supports_pp=supports_pp(model),
