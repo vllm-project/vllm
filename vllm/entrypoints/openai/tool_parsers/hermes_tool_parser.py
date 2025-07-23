@@ -228,17 +228,14 @@ class Hermes2ProToolParser(ToolParser):
                                           arguments=diff).model_dump(
                                               exclude_none=True))
                     ])
-                else :
+                else:
                     if isinstance(diff, dict):
-                        return DeltaMessage(
-                            tool_calls=[
-                                DeltaToolCall(
-                                    index=self.current_tool_id,
-                                    function=DeltaFunctionCall(arguments="{}").
-                                        model_dump(exclude_none=True)
-                                )
-                            ]
-                        )
+                        return DeltaMessage(tool_calls=[
+                            DeltaToolCall(index=self.current_tool_id,
+                                          function=DeltaFunctionCall(
+                                              arguments="{}").model_dump(
+                                                  exclude_none=True))
+                        ])
 
             # case -- otherwise we're just generating text
             else:
