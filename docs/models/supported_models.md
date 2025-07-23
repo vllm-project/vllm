@@ -436,8 +436,8 @@ See [this page](./pooling_models.md) for more information on how to use pooling 
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* | \* |
 | `*ForTextEncoding`<sup>C</sup>, `*EmbeddingModel`<sup>C</sup>, etc. | Transformers embedding models | N/A | \* | \* | \* |
 
-<sup>C</sup> You should set `--convert embed` to load the model as an embedding model in vLLM.
-\*Feature support is the same as that of the original model.
+<sup>C</sup> You should set `--convert embed` to load the model as an embedding model in vLLM.  
+\* Feature support is the same as that of the original model.
 
 !!! note
     `ssmits/Qwen2-7B-Instruct-embed-base` has an improperly defined Sentence Transformers config.
@@ -468,8 +468,8 @@ of the whole prompt are extracted from the normalized hidden state corresponding
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* | \* |
 | `*ForRewardModeling`<sup>C</sup>, `*RewardModel`<sup>C</sup>, etc. | Transformers reward models | N/A | \* | \* | \* |
 
-<sup>C</sup> You should set `--convert reward` to load the model as a reward model in vLLM.
-\*Feature support is the same as that of the original model.
+<sup>C</sup> You should set `--convert reward` to load the model as a reward model in vLLM.  
+\* Feature support is the same as that of the original model.
 
 If your model is not in the above list, we will try to automatically convert the model using
 [as_reward_model][vllm.model_executor.models.adapters.as_reward_model]. By default, we return the hidden states of each token directly.
@@ -487,22 +487,26 @@ If your model is not in the above list, we will try to automatically convert the
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* | \* |
 | `*ForSequenceClassification`<sup>C</sup>, etc. | Transformers classification models | N/A | \* | \* | \* |
 
-<sup>C</sup> You should set `--convert classify` to load the model as an classification model in vLLM.
-\*Feature support is the same as that of the original model.
+<sup>C</sup> You should set `--convert classify` to load the model as an classification model in vLLM.  
+\* Feature support is the same as that of the original model.
 
 If your model is not in the above list, we will try to automatically convert the model using
 [as_seq_cls_model][vllm.model_executor.models.adapters.as_seq_cls_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
 
 #### Sentence Pair Scoring
 
-| Architecture | Models | Example HF Models | [V1](gh-issue:8779) |
-|--------------|--------|-------------------|---------------------|
-| `BertForSequenceClassification` | BERT-based | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc. | |
-| `GemmaForSequenceClassification` | Gemma-based | `BAAI/bge-reranker-v2-gemma` (see note), etc. | |
-| `Qwen2ForSequenceClassification` | Qwen2-based | `mixedbread-ai/mxbai-rerank-base-v2` (see note), etc. | ✅︎ |
-| `Qwen3ForSequenceClassification` | Qwen3-based | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. | ✅︎ |
-| `RobertaForSequenceClassification` | RoBERTa-based | `cross-encoder/quora-roberta-base`, etc. | |
-| `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc. | |
+| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/distributed_serving.md) | [V1](gh-issue:8779) |
+|--------------|--------|-------------------|----------------------|---------------------------|---------------------|
+| `BertForSequenceClassification` | BERT-based | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc. | | | |
+| `GemmaForSequenceClassification` | Gemma-based | `BAAI/bge-reranker-v2-gemma` (see note), etc. | ✅︎ | ✅︎ | ✅︎ |
+| `Qwen2ForSequenceClassification` | Qwen2-based | `mixedbread-ai/mxbai-rerank-base-v2` (see note), etc. | ✅︎ | ✅︎ | ✅︎ |
+| `Qwen3ForSequenceClassification` | Qwen3-based | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. | ✅︎ | ✅︎ | ✅︎ |
+| `RobertaForSequenceClassification` | RoBERTa-based | `cross-encoder/quora-roberta-base`, etc. | | | |
+| `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc. | | | |
+| `*ForSequenceClassification`<sup>C</sup>, etc. | Transformers classification models | N/A | \* | \* | \* |
+
+<sup>C</sup> You should set `--convert classify` to load the model as an classification model in vLLM.  
+\* Feature support is the same as that of the original model.
 
 !!! note
     Load the official original `BAAI/bge-reranker-v2-gemma` by using the following command.
@@ -726,8 +730,8 @@ The following table lists those that are tested in vLLM.
 | `*ForConditionalGeneration`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | \* | N/A | \* | \* | \* |
 | `*EmbeddingModel`<sup>C</sup>, etc. | Transformers embedding models | \* | N/A | \* | \* | \* |
 
-<sup>C</sup> You should set `--convert embed` to load the model as an embedding model in vLLM.
-\*Feature support is the same as that of the original model.
+<sup>C</sup> You should set `--convert embed` to load the model as an embedding model in vLLM.  
+\* Feature support is the same as that of the original model.
 
 ---
 
@@ -736,6 +740,10 @@ The following table lists those that are tested in vLLM.
 | Architecture                        | Models             | Inputs   | Example HF Models        | [LoRA][lora-adapter]   | [PP][distributed-serving]   | [V1](gh-issue:8779)   |
 |-------------------------------------|--------------------|----------|--------------------------|------------------------|-----------------------------|-----------------------|
 | `JinaVLForSequenceClassification` | JinaVL-based | T + I<sup>E+</sup> | `jinaai/jina-reranker-m0`, etc. | | | ✅︎ |
+| `*ForSequenceClassification`<sup>C</sup>, etc. | Transformers classification models | \* | N/A | \* | \* | \* |
+
+<sup>C</sup> You should set `--convert classify` to load the model as an classification model in vLLM.  
+\* Feature support is the same as that of the original model.
 
 ## Model Support Policy
 

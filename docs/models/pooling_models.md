@@ -34,7 +34,7 @@ In vLLM, we define the following pooling tasks and corresponding APIs:
 | `classify` | `classify`         |
 | `score`    | `score`            |
 
-\*The `score` API falls back to `embed` task if the model does not support `score` task.
+\* The `score` API falls back to `embed` task if the model does not support `score` task.
 
 Each pooling model in vLLM supports one or more of these tasks according to [Pooler.get_supported_tasks][vllm.model_executor.layers.pooler.Pooler.get_supported_tasks].
 

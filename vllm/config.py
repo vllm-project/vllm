@@ -105,12 +105,16 @@ ConvertOption = Literal["auto", "none", "embed", "classify", "reward"]
 
 ConvertType = Literal["none", "embed", "classify", "reward"]
 
-_POOLING_CONVERT_TYPES = ("embed", "classify", "reward")
-
 _RUNNER_TASKS: dict[RunnerType, list[TaskOption]] = {
     "generate": ["generate", "transcription"],
     "pooling": ["embedding", "embed", "classify", "score", "reward"],
     "draft": ["draft"],
+}
+
+_RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
+    "generate": [],
+    "pooling": ["embed", "classify", "reward"],
+    "draft": [],
 }
 
 
@@ -608,7 +612,7 @@ class ModelConfig:
                                 f"{self.convert}` to continue "
                                 "adapting this generative model into a "
                                 "pooling model.")
-                else:
+                else:  # task == "auto"
                     self.runner = "auto"
                     self.convert = "auto"
                     msg_hint = "Please remove this option."
@@ -624,10 +628,10 @@ class ModelConfig:
                     msg_hint = ("Please replace this option with `--convert "
                                 f"{self.convert}` to continue "
                                 "using this pooling model.")
-                else:
-                    msg_hint = "Please remove this option."
+                else:  # task == "auto"
                     self.runner = "auto"
                     self.convert = "auto"
+                    msg_hint = "Please remove this option."
             elif is_generative_model and is_pooling_model:
                 if is_generative_task:
                     self.runner = "auto"
@@ -641,13 +645,14 @@ class ModelConfig:
                     msg_hint = ("Please replace this option with `--runner "
                                 "pooling` to continue using this model as a "
                                 "pooling model.")
-                else:
+                else:  # task == "auto"
                     self.runner = "auto"
                     self.convert = "auto"
                     msg_hint = "Please remove this option."
             else:
                 raise AssertionError("The model should be a generative or "
-                                     "pooling model")
+                                     "pooling model when task is set to "
+                                     f"{self.task!r}.")
 
             msg = f"{msg_prefix} {msg_hint}"
             warnings.warn(msg, DeprecationWarning, stacklevel=2)
@@ -663,9 +668,10 @@ class ModelConfig:
 
         if self.runner_type == "generate" and not is_generative_model:
             raise ValueError("This model does not support `--runner generate`")
-        if self.runner_type == "pooling" and not is_pooling_model:  # noqa: SIM102
-            if self.convert_type not in _POOLING_CONVERT_TYPES:
-                convert_option = "<" + "|".join(_POOLING_CONVERT_TYPES) + ">"
+        if self.runner_type == "pooling" and not is_pooling_model:
+            pooling_converts = _RUNNER_CONVERTS["pooling"]
+            if self.convert_type not in pooling_converts:
+                convert_option = "<" + "|".join(pooling_converts) + ">"
                 raise ValueError(
                     "This model does not support `--runner pooling`. "
                     f"You can pass `--convert {convert_option} to adapt "
@@ -1011,7 +1017,7 @@ class ModelConfig:
         # TODO: Use get_supported_pooling_tasks once V0 is removed
         supported_tasks = list[_ResolvedTask]()
         if (registry.is_pooling_model(architecture)
-                or convert_type in _POOLING_CONVERT_TYPES):
+                or convert_type in _RUNNER_CONVERTS["pooling"]):
             supported_tasks.append("encode")
 
             extra_task = (self._get_default_pooling_task(architecture)
