@@ -698,7 +698,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Prepare encoder attention metadata separately
         # (encoder layers are not in KV cache groups)
         if self.is_encoder_only_model:
-            common_attn_metadata, encoder_attn_metdata = \
+            common_attn_metadata, encoder_attn_metadata = \
                 self._build_encoder_only_attn_metadata(
                 scheduler_output)
 
@@ -707,7 +707,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config, Attention)
             for layer_name, attn_module in attention_layers.items():
                 if attn_module.attn_type == AttentionType.ENCODER_ONLY:
-                    attn_metadata[layer_name] = encoder_attn_metdata
+                    attn_metadata[layer_name] = encoder_attn_metadata
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
