@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from collections.abc import AsyncIterator
+from typing import Iterable, Union
 from unittest.mock import MagicMock
 
 import pytest
@@ -155,13 +156,13 @@ def _chunked(text: str, chunk_length: int) -> list[str]:
 def test_streaming_and_non_streaming(model_output: str,
                                      expected_tool_calls: list[FunctionCall],
                                      expected_content: str,
-                                     chunk_length: int | None):
+                                     chunk_length: Union[int, None]):
     """Test model outputs in streaming mode with different chunk lengths
     and in non-streaming mode. Only check re-assembled tool calls,
     not their chunked representations."""
     tool_parser = TngToolParser(tokenizer=MagicMock())
     if chunk_length:
-        model_output = _chunked(model_output, chunk_length=chunk_length)
+        model_output = _chunked(model_output, chunk_length=chunk_length)  # type: ignore
     streaming = chunk_length is not None
 
     actual_content, actual_tool_calls = run_tool_extraction(
@@ -239,9 +240,7 @@ def test_streamed_tool_call_chunks(tng_tool_parser, model_output: list[str],
                                                   actual_chunk.tool_calls,
                                                   strict=True):
                 assert actual_call.index == expected_call.index
-                assert actual_call.function.name == expected_call.function.name
-                assert (actual_call.function.arguments ==
-                        expected_call.function.arguments)
+                assert actual_call.function == expected_call.function
 
 
 @pytest.mark.parametrize(
@@ -268,10 +267,10 @@ def test_streamed_tool_call_chunks(tng_tool_parser, model_output: list[str],
     ])
 @pytest.mark.parametrize("chunk_length", [1, 3, 15, 0, None])
 def test_streaming_and_non_streaming_error_scenarios(model_output: str,
-                                                     chunk_length: int | None):
+                                                     chunk_length: Union[int, None]):
     tool_parser = TngToolParser(tokenizer=MagicMock())
     if chunk_length:
-        model_output = _chunked(model_output, chunk_length=chunk_length)
+        model_output = _chunked(model_output, chunk_length=chunk_length)  # type: ignore
     streaming = chunk_length is not None
 
     # just make sure no exceptions are raised
@@ -294,14 +293,12 @@ def test_streaming_and_non_streaming_error_scenarios(model_output: str,
 @pytest.mark.parametrize("chunk_length", [1, 3, 15])
 @pytest.mark.parametrize("trailing_empty_chunk", [False, True])
 @pytest.mark.asyncio
-async def test_chat_completion_serving(tng_tool_parser: TngToolParser,
-                                       full_model_output: str,
+async def test_chat_completion_serving(full_model_output: str,
                                        chunk_length: int,
                                        trailing_empty_chunk: bool):
     # Some streaming logic is hidden in entrypoints/openai/serving_chat.py,
     # here we test the full streaming behavior
-    ToolParserManager.get_tool_parser = (
-        lambda tool_parser: lambda tokenizer: tng_tool_parser)
+    ToolParserManager.register_module("tng", module=TngToolParser)
     serving = OpenAIServingChat(engine_client=MagicMock(),
                                 model_config=MagicMock(),
                                 models=MagicMock(),
