@@ -538,7 +538,6 @@ class MambaMixer2(MambaBase, CustomOp):
         has_decode = num_decodes > 0
         num_actual_tokens = num_prefill_tokens + num_decodes
 
-        # NOTE: V0 put prefill before decode, v1 puts decode before prefill
         # Separate prefill and decode by splitting varlen input
         # Split along token dimension
         # NOTE: V0 put prefill before decode, v1 puts decode before prefill
