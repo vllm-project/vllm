@@ -67,6 +67,8 @@ class OpenAISpeechToText(OpenAIServing):
         self.asr_config = self.model_cls.get_speech_to_text_config(
             model_config, task_type)
 
+        self.max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
+
         if self.default_sampling_params:
             logger.info(
                 "Overwriting default completion sampling param with: %s",
@@ -90,7 +92,7 @@ class OpenAISpeechToText(OpenAIServing):
         lang = request.language or "en"
         self.model_cls.validate_language(lang)
 
-        if len(audio_data) / 1024**2 > envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB:
+        if len(audio_data) / 1024**2 > self.max_audio_filesize_mb:
             raise ValueError("Maximum file size exceeded.")
 
         with io.BytesIO(audio_data) as bytes_:
