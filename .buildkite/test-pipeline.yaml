@@ -225,7 +225,7 @@ steps:
 #####  1 GPU test  #####
 
 - label: Regression Test # 5min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   source_file_dependencies:
   - vllm/
   - tests/test_regression
@@ -277,7 +277,7 @@ steps:
     - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 - label: Examples Test # 25min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
   - vllm/entrypoints
@@ -311,7 +311,7 @@ steps:
 
 
 - label: Platform Tests (CUDA)
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   source_file_dependencies:
   - vllm/
   - tests/cuda
@@ -330,7 +330,7 @@ steps:
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
 
 - label: LoRA Test %N # 15min each
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/lora
   - tests/lora
@@ -382,7 +382,7 @@ steps:
     - pytest -v -s kernels/core
 
 - label: Kernels Attention Test %N
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - csrc/attention/
   - vllm/attention
@@ -393,7 +393,7 @@ steps:
   parallelism: 2
 
 - label: Kernels Quantization Test %N
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
@@ -412,7 +412,7 @@ steps:
     - pytest -v -s kernels/moe
 
 - label: Kernels Mamba Test
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
@@ -420,7 +420,7 @@ steps:
     - pytest -v -s kernels/mamba
 
 - label: Tensorizer Test # 11min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   soft_fail: true
   source_file_dependencies:
   - vllm/model_executor/model_loader
@@ -490,7 +490,7 @@ steps:
   - pytest -s entrypoints/openai/correctness/
 
 - label: Encoder Decoder tests # 5min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   source_file_dependencies:
   - vllm/
   - tests/encoder_decoder
@@ -498,7 +498,7 @@ steps:
     - pytest -v -s encoder_decoder
 
 - label: OpenAI-Compatible Tool Use # 20 min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   fast_check: false
   source_file_dependencies:
     - vllm/
@@ -610,7 +610,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
 
 - label: Quantized Models Test
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
   - tests/models/quantization
