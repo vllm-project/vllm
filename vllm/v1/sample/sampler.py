@@ -5,6 +5,7 @@
 import torch
 import torch.nn as nn
 
+from vllm.config import LogprobsMode
 from vllm.utils import is_pin_memory_available
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -18,10 +19,11 @@ _SAMPLING_EPS = 1e-5
 
 class Sampler(nn.Module):
 
-    def __init__(self):
+    def __init__(self, logprobs_mode: LogprobsMode = "raw_logprobs"):
         super().__init__()
         self.topk_topp_sampler = TopKTopPSampler()
         self.pin_memory = is_pin_memory_available()
+        self.logprobs_mode = logprobs_mode
 
     def forward(
         self,
@@ -36,7 +38,10 @@ class Sampler(nn.Module):
         # See https://vllm-dev.slack.com/archives/C07UUL8E61Z/p1735907856007919 # noqa: E501
         num_logprobs = sampling_metadata.max_num_logprobs
         if num_logprobs is not None:
-            raw_logprobs = self.compute_logprobs(logits)
+            if self.logprobs_mode == "raw_logprobs":
+                raw_logprobs = self.compute_logprobs(logits)
+            elif self.logprobs_mode == "raw_logits":
+                raw_logprobs = logits.clone()
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
@@ -51,6 +56,14 @@ class Sampler(nn.Module):
 
         # Apply penalties (e.g., min_tokens, freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata)
+
+        # Get the process logprobs or logits.
+        if num_logprobs is not None:
+            if self.logprobs_mode == "processed_logprobs":
+                raw_logprobs = self.compute_logprobs(logits)
+            elif self.logprobs_mode == "processed_logits":
+                raw_logprobs = logits.clone()
+
         # Sample the next token.
         sampled = self.sample(logits, sampling_metadata)
         # Convert sampled token ids to int64 (long) type to ensure compatibility
