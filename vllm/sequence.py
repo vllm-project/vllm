@@ -1173,6 +1173,10 @@ class PoolingSequenceGroupOutput(
     # The actual type is in SequenceGroup.pooled_data
     data: Any
 
+    def get_data_nbytes(self) -> int:
+        data: torch.Tensor = self.data
+        return data.nbytes
+
     def __repr__(self) -> str:
         return f"PoolingSequenceGroupOutput(data={self.data}"
 
@@ -1233,6 +1237,9 @@ class PoolerOutput(
         array_like=True):  # type: ignore[call-arg]
     """The output from a pooling operation in the pooling model."""
     outputs: list[PoolingSequenceGroupOutput]
+
+    def get_data_nbytes(self) -> int:
+        return sum(o.get_data_nbytes() for o in self.outputs)
 
     def __getitem__(self, idx: int) -> PoolingSequenceGroupOutput:
         return self.outputs[idx]
