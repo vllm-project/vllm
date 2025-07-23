@@ -148,7 +148,7 @@ class LLMEngine:
                    log_stats=not engine_args.disable_log_stats,
                    usage_context=usage_context,
                    stat_loggers=stat_loggers,
-                   multiprocess_mode=self._get_multiprocessing_mode())
+                   multiprocess_mode=cls._get_multiprocessing_mode())
 
     @staticmethod
     def _get_multiprocessing_mode() -> bool:
