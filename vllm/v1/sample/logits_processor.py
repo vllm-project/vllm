@@ -335,14 +335,19 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
         if not batch_update:
             return
 
+        needs_update: bool = False
         # Process added requests.
-        needs_update = bool(batch_update.added)
         for index, params, _ in batch_update.added:
             if isinstance(params, SamplingParams) and (lb :=
                                                        params.logit_bias):
                 self.biases[index] = lb
+                needs_update = True
             else:
-                self.biases.pop(index, None)
+                # Drop biases metadata at batch index
+                if self.biases.pop(index, None) is not None:
+                    # If a new request replaces an old request which
+                    # specified biases, we should update processor tensors
+                    needs_update = True
 
         if self.biases:
             # Process removed requests.
@@ -419,7 +424,6 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 
         if batch_update:
             # Process added requests.
-            needs_update |= bool(batch_update.added)
             for index, params, output_tok_ids in batch_update.added:
                 if (isinstance(params, SamplingParams)
                         and (min_tokens := params.min_tokens)
@@ -427,9 +431,13 @@ class MinTokensLogitsProcessor(LogitsProcessor):
                     # Replace request metadata at batch index
                     self.min_toks[index] = (min_tokens, output_tok_ids,
                                             params.all_stop_token_ids)
+                    needs_update = True
                 else:
-                    # Drop request metadata at batch index
-                    self.min_toks.pop(index, None)
+                    # Drop min_toks metadata at batch index
+                    if self.min_toks.pop(index, None) is not None:
+                        # If a new request replaces an old request which
+                        # specified min_toks, we should update processor tensors
+                        needs_update = True
 
             if self.min_toks:
                 # Process removed requests.
