@@ -287,6 +287,11 @@ void scaled_fp4_experts_quant(
     torch::Tensor const& input, torch::Tensor const& input_global_scale,
     torch::Tensor const& input_offset_by_experts,
     torch::Tensor const& output_scale_offset_by_experts);
+
+void per_token_group_quant_fp8(const torch::Tensor& input,
+                               torch::Tensor& output_q, torch::Tensor& output_s,
+                               int64_t group_size, double eps, double fp8_min,
+                               double fp8_max, bool scale_ue8m0);
 #endif
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
@@ -296,11 +301,6 @@ void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
 void dynamic_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                                torch::Tensor& scales,
                                std::optional<torch::Tensor> const& azp);
-
-void per_token_group_quant_fp8(const torch::Tensor& input,
-                               torch::Tensor& output_q, torch::Tensor& output_s,
-                               int64_t group_size, double eps, double fp8_min,
-                               double fp8_max, bool scale_ue8m0);
 
 torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,
