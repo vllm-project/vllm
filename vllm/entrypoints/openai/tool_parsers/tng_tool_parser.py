@@ -4,7 +4,7 @@
 import json
 from collections.abc import Sequence
 from enum import Enum
-from typing import Any
+from typing import Any, Union
 
 import partial_json_parser
 import regex as re
@@ -160,7 +160,7 @@ class TngToolParser(ToolParser):
         return raw_text[:think_end_pos], False, raw_text[think_end_pos:]
 
     def _parse_unambiguous_text_content(
-            self, raw_text: str) -> tuple[str, str | None, str]:
+            self, raw_text: str) -> tuple[str, Union[str, None], str]:
         """
         Returns: (unambiguous_text_content, interrupting_tag, rest_string)
         """
@@ -197,8 +197,8 @@ class TngToolParser(ToolParser):
             rest = rest[1:].lstrip()
         return True, rest
 
-    def _parse_tool_call_end_tag(self,
-                                 raw_text: str) -> tuple[bool | None, str]:
+    def _parse_tool_call_end_tag(
+            self, raw_text: str) -> tuple[Union[bool, None], str]:
         """
         Removes tool_call_end_tag from the beginning of raw_text,
         and an optional "]" before it, and leading whitespace.
@@ -221,8 +221,8 @@ class TngToolParser(ToolParser):
         # incomplete tool call end tag, can not be decided yet
         return None, raw_text
 
-    def _extract_arguments_from_partial_tool_call(self,
-                                                  raw_text: str) -> str | None:
+    def _extract_arguments_from_partial_tool_call(
+            self, raw_text: str) -> Union[str, None]:
         """
         Extracts the raw text of the "arguments" field of a complete
         or partial tool call.
@@ -251,8 +251,8 @@ class TngToolParser(ToolParser):
         arguments_raw_text = raw_text[arguments_start_pos:]
         return arguments_raw_text
 
-    def _parse_complete_tool_call(self,
-                                  raw_text: str) -> tuple[dict | None, str]:
+    def _parse_complete_tool_call(
+            self, raw_text: str) -> tuple[Union[dict, None], str]:
         """
         Returns: tuple
             parsed tool call if complete, None otherwise
@@ -279,7 +279,7 @@ class TngToolParser(ToolParser):
         }
         return tool_call, raw_text[end_pos:]
 
-    def _parse_partial_tool_call(self, raw_text: str) -> dict | None:
+    def _parse_partial_tool_call(self, raw_text: str) -> Union[dict, None]:
         # raw_text must start without whitespace for correct parsing
         obj = partial_json_parser.loads(raw_text, Allow.ALL)
         arguments_raw_text = (
@@ -293,7 +293,8 @@ class TngToolParser(ToolParser):
         return tool_call
 
     def _parse_tool_call(
-            self, raw_text: str) -> tuple[bool | None, dict | None, str]:
+            self,
+            raw_text: str) -> tuple[Union[bool, None], Union[dict, None], str]:
         # remove optional whitespace and closing ] bracket
         # from json list notation
         rest = raw_text.lstrip()
@@ -318,8 +319,8 @@ class TngToolParser(ToolParser):
             # invalid json -> neither complete nor partial tool call
             return False, None, rest
 
-    def _parse_tool_call_delimiter(self,
-                                   raw_text: str) -> tuple[bool | None, str]:
+    def _parse_tool_call_delimiter(
+            self, raw_text: str) -> tuple[Union[bool, None], str]:
         """
         Returns: tuple
             does raw_text start with tool call delimiter?
@@ -384,52 +385,47 @@ class TngToolParser(ToolParser):
             return content, tool_calls, rest, structure
 
         elif start_mode == ParsedStructure.TOOL_CALL:
-            found_tool_call, tool_call, rest = self._parse_tool_call(
-                raw_text)
+            found_tool_call, tool_call, rest = self._parse_tool_call(raw_text)
             if found_tool_call is True:
                 tool_calls = [tool_call] if tool_call else []
                 content, more_tool_calls, rest, structure = self._parse_all(
-                    rest,
-                    start_mode=ParsedStructure.TOOL_CALL_DELIMITER)
-                return (content, tool_calls + more_tool_calls, rest,
-                        structure)
+                    rest, start_mode=ParsedStructure.TOOL_CALL_DELIMITER)
+                return (content, tool_calls + more_tool_calls, rest, structure)
             elif found_tool_call is None:
                 # partial tool call -> need to parse again with next chunk
-                tool_calls = ([tool_call]
-                              if tool_call is not None else [])
+                tool_calls = ([tool_call] if tool_call is not None else [])
                 return "", tool_calls, rest, ParsedStructure.TOOL_CALL
             else:
                 logger.warning(
                     "Invalid tool call -> continue with parsing model output as text content"
                 )
-                return self._parse_all(
-                    raw_text, start_mode=ParsedStructure.CONTENT)
+                return self._parse_all(raw_text,
+                                       start_mode=ParsedStructure.CONTENT)
 
         elif start_mode == ParsedStructure.TOOL_CALL_DELIMITER:
             found_tool_call_delimiter, rest = self._parse_tool_call_delimiter(
                 raw_text)
             if found_tool_call_delimiter is True:
-                return self._parse_all(
-                    rest, start_mode=ParsedStructure.TOOL_CALL)
+                return self._parse_all(rest,
+                                       start_mode=ParsedStructure.TOOL_CALL)
             elif found_tool_call_delimiter is None:
                 # could neither confirm nor deny that raw_text starts with a tool call delimiter
                 return "", [], rest, ParsedStructure.TOOL_CALL_DELIMITER
             else:
                 return self._parse_all(
-                    raw_text,
-                    start_mode=ParsedStructure.TOOL_CALL_END_TAG)
+                    raw_text, start_mode=ParsedStructure.TOOL_CALL_END_TAG)
 
         elif start_mode == ParsedStructure.TOOL_CALL_END_TAG:
             found_tool_call_end_tag, rest = self._parse_tool_call_end_tag(
                 raw_text)
             if found_tool_call_end_tag is True:
-                return self._parse_all(
-                    rest, start_mode=ParsedStructure.CONTENT)
+                return self._parse_all(rest,
+                                       start_mode=ParsedStructure.CONTENT)
             elif found_tool_call_end_tag is None:
                 return "", [], rest, ParsedStructure.TOOL_CALL_END_TAG
             else:
-                return self._parse_all(
-                    raw_text, start_mode=ParsedStructure.CONTENT)
+                return self._parse_all(raw_text,
+                                       start_mode=ParsedStructure.CONTENT)
 
         logger.warning(
             f"Unknown tool call parser start_mode '{start_mode}'. Falling back to text content."
@@ -445,7 +441,7 @@ class TngToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> DeltaMessage | None:
+    ) -> Union[DeltaMessage, None]:
         """
         Extract tool calls for streaming mode.
         """
@@ -475,7 +471,7 @@ class TngToolParser(ToolParser):
                             tool_calls=to_be_streamed_tool_calls)
 
     def _calculate_delta_tool_calls(
-            self, current_tool_calls: list[dict] | None,
+            self, current_tool_calls: Union[list[dict], None],
             already_streamed_tool_calls: list[dict]) -> list[DeltaToolCall]:
         if not current_tool_calls:
             return []
@@ -532,7 +528,7 @@ class TngToolParser(ToolParser):
 
     def _delta_for_partial_tool_call(
             self, new_tool_call: dict,
-            already_streamed_tool_call: dict) -> DeltaToolCall | None:
+            already_streamed_tool_call: dict) -> Union[DeltaToolCall, None]:
         """Calculate delta for a tool call of which some parts have already been streamed."""
         assert new_tool_call["name"] == already_streamed_tool_call["name"]
         assert already_streamed_tool_call.get("tool_call_id")
