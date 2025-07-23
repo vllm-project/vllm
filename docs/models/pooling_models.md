@@ -3,7 +3,7 @@
 vLLM also supports pooling models, including embedding, reranking and reward models.
 
 In vLLM, pooling models implement the [VllmModelForPooling][vllm.model_executor.models.VllmModelForPooling] interface.
-These models use a [Pooler][vllm.model_executor.layers.pooling.Pooler] to extract the final hidden states of the input
+These models use a [Pooler][vllm.model_executor.layers.pooler.Pooler] to extract the final hidden states of the input
 before returning them.
 
 !!! note
@@ -36,7 +36,7 @@ In vLLM, we define the following pooling tasks and corresponding APIs:
 
 \*The `score` API falls back to `embed` task if the model does not support `score` task.
 
-Each pooling model in vLLM supports one or more of these tasks according to [Pooler.get_supported_tasks][vllm.model_executor.layers.pooling.Pooler.get_supported_tasks].
+Each pooling model in vLLM supports one or more of these tasks according to [Pooler.get_supported_tasks][vllm.model_executor.layers.pooler.Pooler.get_supported_tasks].
 
 By default, the pooler assigned to each task has the following attributes:
 

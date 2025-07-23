@@ -173,7 +173,7 @@ class VLMTestInfo(NamedTuple):
             "enforce_eager": self.enforce_eager,
             "max_model_len": self.max_model_len,
             "max_num_seqs": self.max_num_seqs,
-            "task": self.task,
+            "runner": self.runner,
             "tensor_parallel_size": self.tensor_parallel_size,
             "vllm_runner_kwargs": self.vllm_runner_kwargs,
             "hf_output_post_proc": self.hf_output_post_proc,

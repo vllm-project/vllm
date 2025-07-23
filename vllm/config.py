@@ -573,7 +573,6 @@ class ModelConfig:
 
         is_generative_model = self.registry.is_text_generation_model(arch)
         is_pooling_model = self.registry.is_pooling_model(arch)
-        print(f"{arch=}", f"{is_generative_model=}", f"{is_pooling_model=}")
 
         def _task_to_convert(task: TaskOption) -> ConvertType:
             if task == "embedding" or task == "embed":
@@ -590,19 +589,18 @@ class ModelConfig:
             return "none"
 
         if self.task is not None:
-            msg_prefix = ("The 'task' option is now deprecated and "
-                          "will be removed in v0.13.0.")
+            msg_prefix = ("The 'task' option has been deprecated and will be "
+                          "removed in v0.13.0 or v1.0, whichever comes first.")
 
             is_generative_task = self.task in _RUNNER_TASKS["generate"]
             is_pooling_task = self.task in _RUNNER_TASKS["pooling"]
-            print(f"{is_generative_task=}", f"{is_pooling_task=}")
 
             if is_generative_model and not is_pooling_model:
                 if is_generative_task:
                     self.runner = "generate"
                     self.convert = "auto"
                     msg_hint = ("Please remove this option as it is useless "
-                                "for generative-only models")
+                                "for generation-only models")
                 elif is_pooling_task:
                     self.runner = "pooling"
                     self.convert = _task_to_convert(self.task)
@@ -662,6 +660,16 @@ class ModelConfig:
             arch, self.runner_type) if self.convert == "auto" else
                                           self.convert)
         logger.debug("Selected convert type: %s", self.convert_type)
+
+        if self.runner_type == "generate" and not is_generative_model:
+            raise ValueError("This model does not support `--runner generate`")
+        if self.runner_type == "pooling" and not is_pooling_model:  # noqa: SIM102
+            if self.convert_type not in _POOLING_CONVERT_TYPES:
+                convert_option = "<" + "|".join(_POOLING_CONVERT_TYPES) + ">"
+                raise ValueError(
+                    "This model does not support `--runner pooling`. "
+                    f"You can pass `--convert {convert_option} to adapt "
+                    "it into a pooling model.")
 
         self.supported_tasks = self._get_supported_tasks(
             arch, self.runner_type, self.convert_type)

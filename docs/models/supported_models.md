@@ -433,10 +433,11 @@ See [this page](./pooling_models.md) for more information on how to use pooling 
 | `Qwen2Model`<sup>C</sup>, `Qwen2ForCausalLM`<sup>C</sup> | Qwen2-based | `ssmits/Qwen2-7B-Instruct-embed-base` (see note), `Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc. | ✅︎ | ✅︎ | ✅︎ |
 | `Qwen3Model`<sup>C</sup>, `Qwen3ForCausalLM`<sup>C</sup> | Qwen3-based | `Qwen/Qwen3-Embedding-0.6B`, etc. | ✅︎ | ✅︎ | ✅︎ |
 | `RobertaModel`, `RobertaForMaskedLM` | RoBERTa-based | `sentence-transformers/all-roberta-large-v1`, etc. | | | |
-| \*<sup>C</sup> | Generative models | \* | \* | | \* |
+| `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* | \* |
+| `*ForTextEncoding`<sup>C</sup>, `*EmbeddingModel`<sup>C</sup>, etc. | Transformers embedding models | N/A | \* | \* | \* |
 
-<sup>C</sup> You need to set `--convert embed` to load the model as an embedding model in vLLM.
-\*Depends on the original model.
+<sup>C</sup> You should set `--convert embed` to load the model as an embedding model in vLLM.
+\*Feature support is the same as that of the original model.
 
 !!! note
     `ssmits/Qwen2-7B-Instruct-embed-base` has an improperly defined Sentence Transformers config.
@@ -464,10 +465,11 @@ of the whole prompt are extracted from the normalized hidden state corresponding
 | `LlamaForCausalLM`<sup>C</sup> | Llama-based | `peiyi9979/math-shepherd-mistral-7b-prm`, etc. | ✅︎ | ✅︎ | ✅︎ |
 | `Qwen2ForRewardModel` | Qwen2-based | `Qwen/Qwen2.5-Math-RM-72B`, etc. | ✅︎ | ✅︎ | ✅︎ |
 | `Qwen2ForProcessRewardModel` | Qwen2-based | `Qwen/Qwen2.5-Math-PRM-7B`, etc. | ✅︎ | ✅︎ | ✅︎ |
-| \*<sup>C</sup> | Generative models | \* | \* | | \* |
+| `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* | \* |
+| `*ForRewardModeling`<sup>C</sup>, `*RewardModel`<sup>C</sup>, etc. | Transformers reward models | N/A | \* | \* | \* |
 
-<sup>C</sup> You need to set `--convert reward` to load the model as a reward model in vLLM.
-\*Depends on the original model.
+<sup>C</sup> You should set `--convert reward` to load the model as a reward model in vLLM.
+\*Feature support is the same as that of the original model.
 
 If your model is not in the above list, we will try to automatically convert the model using
 [as_reward_model][vllm.model_executor.models.adapters.as_reward_model]. By default, we return the hidden states of each token directly.
@@ -482,10 +484,11 @@ If your model is not in the above list, we will try to automatically convert the
 |--------------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `JambaForSequenceClassification` | Jamba | `ai21labs/Jamba-tiny-reward-dev`, etc. | ✅︎ | ✅︎ | |
 | `GPT2ForSequenceClassification` | GPT2 | `nie3e/sentiment-polish-gpt2-small` | | | ✅︎ |
-| \*<sup>C</sup> | Generative models | \* | \* | | \* |
+| `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* | \* |
+| `*ForSequenceClassification`<sup>C</sup>, etc. | Transformers classification models | N/A | \* | \* | \* |
 
-<sup>C</sup> You need to set `--convert classify` to load the model as an classification model in vLLM.
-\*Depends on the original model.
+<sup>C</sup> You should set `--convert classify` to load the model as an classification model in vLLM.
+\*Feature support is the same as that of the original model.
 
 If your model is not in the above list, we will try to automatically convert the model using
 [as_seq_cls_model][vllm.model_executor.models.adapters.as_seq_cls_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
@@ -707,7 +710,7 @@ See [this page](./pooling_models.md) for more information on how to use pooling 
 
 !!! important
     Since some model architectures support both generative and pooling tasks,
-    you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
+    you should explicitly specify `--runner pooling` to ensure that the model is used in pooling mode instead of generative mode.
 
 #### Text Embedding
 
@@ -720,10 +723,11 @@ The following table lists those that are tested in vLLM.
 |--------------|--------|--------|-------------------|----------------------|---------------------------|---------------------|
 | `LlavaNextForConditionalGeneration`<sup>C</sup> | LLaVA-NeXT-based | T / I | `royokong/e5-v` | | | |
 | `Phi3VForCausalLM`<sup>C</sup> | Phi-3-Vision-based | T + I | `TIGER-Lab/VLM2Vec-Full` | 🚧 | ✅︎ | |
-| \*<sup>C</sup> | Generative models | \* | \* | \* | | \* |
+| `*ForConditionalGeneration`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | \* | N/A | \* | \* | \* |
+| `*EmbeddingModel`<sup>C</sup>, etc. | Transformers embedding models | \* | N/A | \* | \* | \* |
 
-<sup>C</sup> You need to set `--convert embed` to load the model as an embedding model in vLLM.
-\*Depends on the original model.
+<sup>C</sup> You should set `--convert embed` to load the model as an embedding model in vLLM.
+\*Feature support is the same as that of the original model.
 
 ---
 
