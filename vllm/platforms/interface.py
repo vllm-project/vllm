@@ -552,7 +552,8 @@ class Platform:
 
     @classmethod
     def empty_cache(cls):
-        torch.accelerator.empty_cache()
+        # torch.accelerator.empty_cache() only works after torch 2.8
+        raise NotImplementedError
 
     @classmethod
     def reset_peak_memory_stats(cls):
