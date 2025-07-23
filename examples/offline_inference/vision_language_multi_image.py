@@ -1116,7 +1116,7 @@ model_example_map = {
     "step3": load_step3,
     "tarsier": load_tarsier,
     "tarsier2": load_tarsier2,
-    "siglip": load_siglip_so400m,
+    "siglip_so400m": load_siglip_so400m,
 }
 
 
