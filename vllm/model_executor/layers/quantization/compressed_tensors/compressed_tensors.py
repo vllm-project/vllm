@@ -415,7 +415,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     CompressedTensorsW8A8Fp8.get_min_capability(), error=False)
                 if is_fp8_w8a8_supported:
                     return CompressedTensorsW8A8Fp8(
-                        strategy=weight_quant.strategy,
+                        weight_quant=weight_quant,
                         is_static_input_scheme=(input_quant
                                                 and not input_quant.dynamic))
                 else:

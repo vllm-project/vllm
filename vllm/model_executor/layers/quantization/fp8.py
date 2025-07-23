@@ -317,12 +317,6 @@ class Fp8LinearMethod(LinearMethodBase):
         # If checkpoint is fp8, handle that there are N scales for N
         # shards in a fused module
         else:
-            layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
-                                                    requires_grad=False)
-            if self.act_q_static:
-                layer.input_scale = torch.nn.Parameter(layer.input_scale.data,
-                                                       requires_grad=False)
-
             weight = layer.weight
             weight_scale = layer.weight_scale
 
@@ -333,8 +327,8 @@ class Fp8LinearMethod(LinearMethodBase):
                     process_fp8_weight_tensor_strategy(
                         weight, weight_scale, layer.logical_widths,
                         getattr(layer, 'input_scale', None)))
-
             weight = weight.t()
+
             if self.act_q_static:
                 assert input_scale is not None
                 layer.input_scale = Parameter(input_scale.max(),

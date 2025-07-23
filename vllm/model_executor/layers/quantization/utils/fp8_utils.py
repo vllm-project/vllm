@@ -934,7 +934,7 @@ def process_fp8_weight_tensor_strategy(
     )
 
     weight = _maybe_pad_fp8_weight(weight)
-    return weight.t(), weight_scale, input_scale
+    return weight, weight_scale, input_scale
 
 
 def process_fp8_weight_channel_strategy(
@@ -950,7 +950,7 @@ def process_fp8_weight_channel_strategy(
         weight, weight_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
             weight=weight, weight_scale=weight_scale, input_scale=input_scale)
 
-    return weight.t(), weight_scale, input_scale
+    return weight, weight_scale, input_scale
 
 
 def process_fp8_weight_block_strategy(
