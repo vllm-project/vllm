@@ -7,11 +7,8 @@
 
 import contextlib
 import gc
-import gzip
-import json
 import os
 import queue
-import time
 from typing import List, Optional, Set, Tuple, Type
 
 import habana_frameworks.torch as htorch  # noqa:F401
@@ -111,7 +108,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
                         torch_profiler_trace_dir)
 
             if os.getenv('VLLM_PROFILER_ENABLED') == 'full':
-                fn = self.full_trace_handler
+                fn = self.model_runner.profiler.full_trace_handler
                 with_stack = False
             else:
                 fn = torch.profiler.tensorboard_trace_handler
@@ -125,53 +122,6 @@ class HPUWorker(LocalOrDistributedWorkerBase):
                 on_trace_ready=fn(torch_profiler_trace_dir, use_gzip=True))
         else:
             self.profiler = None
-
-    def full_trace_handler(self, dir_name, use_gzip=False):
-
-        def handler_fn(prof) -> None:
-            if not os.path.isdir(dir_name):
-                try:
-                    os.makedirs(dir_name, exist_ok=True)
-                except Exception as e:
-                    raise RuntimeError("Can't create directory: " +
-                                       dir_name) from e
-            file_name = f"vllm.{time.time_ns()}.pt.trace.json"
-            file_path = os.path.join(dir_name, file_name)
-            prof.export_chrome_trace(file_path)
-            with open(file_path) as f:
-                pytorch_trace = json.load(f)
-            os.remove(file_path)
-            base = pytorch_trace['baseTimeNanoseconds'] / 1000
-            events = self.model_runner.profiler.profiling_trace_events
-            while True:
-                try:
-                    event_str = events.get_nowait()
-                    event = json.loads(event_str[:-1])
-                    event['ts'] = event['ts'] - base
-                    pytorch_trace['traceEvents'].append(event)
-                except queue.Empty:
-                    break
-
-            pytorch_trace['traceEvents'].append({
-                "args": {
-                    "name": "vLLM"
-                },
-                "name": "process_name",
-                "ph": "M",
-                "pid": 1,
-                "tid": 0,
-                "ts": 0.0
-            })
-            if use_gzip:
-                file_path = file_path + ".gz"
-                with gzip.open(file_path, 'wt', encoding="ascii") as zipfile:
-                    json.dump(pytorch_trace, zipfile)
-            else:
-                with open(file_path, "w") as outfile:
-                    outfile.write(json.dumps(pytorch_trace))
-            logger.info("Saved full profiling to %s", file_path)
-
-        return handler_fn
 
     def _is_encoder_decoder_model(self):
         return self.model_config.is_encoder_decoder
