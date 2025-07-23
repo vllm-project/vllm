@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -154,10 +155,13 @@ class EagleProposer:
         # one layer. Adapt this code to support multiple layers once
         # there's a multi-layer MTP module.
 
-        # Currently FlashAttention is the only backend that supports
-        # multi-token eagle spec decode. This is because the code below
-        # makes assumptions about attn_metadata attributes available.
-        assert isinstance(attn_metadata, FlashAttentionMetadata)
+        if not current_platform.is_rocm():
+            # On ROCm, both AiterFlashAttention and TritonAttention
+            # support multi-token eagle spec decode.
+            # Currently FlashAttention is the only backend that supports
+            # multi-token eagle spec decode. This is because the code below
+            # makes assumptions about attn_metadata attributes available.
+            assert isinstance(attn_metadata, FlashAttentionMetadata)
 
         # Generate the remaining draft tokens.
         draft_token_ids_list = [draft_token_ids]
