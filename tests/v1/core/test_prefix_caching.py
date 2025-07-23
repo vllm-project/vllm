@@ -1097,6 +1097,73 @@ def test_prefix_cache_stats_disabled():
     assert manager.prefix_cache_stats is None
 
 
+def test_maybe_evict_cached_block():
+    pool = BlockPool(num_gpu_blocks=4, enable_caching=True)
+    block_hash0 = BlockHashWithGroupId(block_hash=BlockHash(hash_value=10,
+                                                            token_ids=(100, )),
+                                       group_id=1000)
+    block_hash1 = BlockHashWithGroupId(block_hash=BlockHash(hash_value=20,
+                                                            token_ids=(200, )),
+                                       group_id=2000)
+    block_hash2 = BlockHashWithGroupId(block_hash=BlockHash(hash_value=30,
+                                                            token_ids=(300, )),
+                                       group_id=3000)
+    block_hashes = [
+        block_hash0,
+        block_hash1,
+        block_hash2,
+        # block3 had the exact same block_hash as the first block
+        block_hash0,
+    ]
+    assert len(pool.blocks) == len(block_hashes)
+    # Manually add all blocks to cached_blocks
+    for block, block_hash in zip(pool.blocks, block_hashes):
+        block.block_hash = block_hash
+        pool.cached_block_hash_to_block[block_hash][block.block_id] = block
+
+    block0, block1, block2, block3 = pool.blocks
+    assert pool.cached_block_hash_to_block == {
+        block_hash0: {
+            block0.block_id: block0,
+            block3.block_id: block3
+        },
+        block_hash1: {
+            block1.block_id: block1
+        },
+        block_hash2: {
+            block2.block_id: block2
+        }
+    }
+    # Evict block1
+    pool._maybe_evict_cached_block(block1)
+    assert pool.cached_block_hash_to_block == {
+        block_hash0: {
+            block0.block_id: block0,
+            block3.block_id: block3
+        },
+        block_hash2: {
+            block2.block_id: block2
+        }
+    }
+    # Evict block0: block_hash0 entry should NOT be removed, as block3
+    # also use the same hash
+    pool._maybe_evict_cached_block(block0)
+    assert pool.cached_block_hash_to_block == {
+        block_hash0: {
+            block3.block_id: block3
+        },
+        block_hash2: {
+            block2.block_id: block2
+        }
+    }
+    # Evict block2
+    pool._maybe_evict_cached_block(block2)
+    assert pool.cached_block_hash_to_block == {block_hash0: {3: block3}}
+    # Evict block3
+    pool._maybe_evict_cached_block(block3)
+    assert pool.cached_block_hash_to_block == {}
+
+
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
 def test_kv_cache_events(blocks_to_cache: int):
     block_size = 16
