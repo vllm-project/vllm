@@ -335,6 +335,8 @@ class EagleProposer:
                                                                      .
                                                                      query_start_loc
                                                                  )
+                    self.attn_metadata_cudagraph.block_table[:batch_size] = (
+                        attn_metadata.block_table)
 
             # Run the model.
             with set_forward_context(per_layer_attn_metadata,
