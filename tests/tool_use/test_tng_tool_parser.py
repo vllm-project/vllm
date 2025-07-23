@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from collections.abc import AsyncIterator
-from typing import Iterable, Union
+from typing import Union
 from unittest.mock import MagicMock
 
 import pytest
@@ -162,15 +162,16 @@ def test_streaming_and_non_streaming(model_output: str,
     not their chunked representations."""
     tool_parser = TngToolParser(tokenizer=MagicMock())
     if chunk_length:
-        model_output = _chunked(model_output, chunk_length=chunk_length)  # type: ignore
+        model_output = _chunked(model_output,
+                                chunk_length=chunk_length)  # type: ignore
     streaming = chunk_length is not None
 
     actual_content, actual_tool_calls = run_tool_extraction(
         tool_parser, model_output, streaming=streaming)
 
+    assert len(actual_tool_calls) == len(expected_tool_calls)
     for actual_tool_call, expected_tool_call in zip(actual_tool_calls,
-                                                    expected_tool_calls,
-                                                    strict=True):
+                                                    expected_tool_calls):
         assert actual_tool_call.function == expected_tool_call
     if expected_content:
         assert actual_content == expected_content
@@ -229,16 +230,16 @@ def test_streamed_tool_call_chunks(tng_tool_parser, model_output: list[str],
                        is not None or result.tool_calls != []):
             actual_stream.append(result)
 
-    for expected_chunk, actual_chunk in zip(expected_stream,
-                                            actual_stream,
-                                            strict=True):
+    assert len(actual_stream) == len(expected_stream)
+    for expected_chunk, actual_chunk in zip(expected_stream, actual_stream):
         assert actual_chunk.content == expected_chunk.content
         assert (
             actual_chunk.reasoning_content == expected_chunk.reasoning_content)
         if expected_chunk.tool_calls:
+            assert (len(actual_chunk.tool_calls) == len(
+                expected_chunk.tool_calls))
             for expected_call, actual_call in zip(expected_chunk.tool_calls,
-                                                  actual_chunk.tool_calls,
-                                                  strict=True):
+                                                  actual_chunk.tool_calls):
                 assert actual_call.index == expected_call.index
                 assert actual_call.function == expected_call.function
 
@@ -266,11 +267,12 @@ def test_streamed_tool_call_chunks(tng_tool_parser, model_output: list[str],
                      id="tool_call_text_arguments"),
     ])
 @pytest.mark.parametrize("chunk_length", [1, 3, 15, 0, None])
-def test_streaming_and_non_streaming_error_scenarios(model_output: str,
-                                                     chunk_length: Union[int, None]):
+def test_streaming_and_non_streaming_error_scenarios(
+        model_output: str, chunk_length: Union[int, None]):
     tool_parser = TngToolParser(tokenizer=MagicMock())
     if chunk_length:
-        model_output = _chunked(model_output, chunk_length=chunk_length)  # type: ignore
+        model_output = _chunked(model_output,
+                                chunk_length=chunk_length)  # type: ignore
     streaming = chunk_length is not None
 
     # just make sure no exceptions are raised
