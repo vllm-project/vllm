@@ -25,7 +25,8 @@ from vllm.model_executor.models.adapters import (as_embedding_model,
                                                  as_reward_model,
                                                  as_seq_cls_model)
 from vllm.model_executor.models.interfaces import SupportsQuant
-from vllm.model_executor.models.registry import _TRANSFORMERS_MODELS
+from vllm.model_executor.models.registry import (_PREVIOUSLY_SUPPORTED_MODELS,
+                                                 _TRANSFORMERS_MODELS)
 from vllm.utils import is_pin_memory_available
 
 logger = init_logger(__name__)
@@ -260,6 +261,14 @@ def get_model_architecture(
             architectures = [causal_lm_arch]
             vllm_not_supported = False
             break
+
+    if any(arch in _PREVIOUSLY_SUPPORTED_MODELS for arch in architectures):
+        previous_version = _PREVIOUSLY_SUPPORTED_MODELS[architectures[0]]
+        raise ValueError(
+            f"Model architecture {architectures[0]} was supported"
+            f" in vLLM until version {previous_version}, and is "
+            "not supported anymore. Please use an older version"
+            " of vLLM if you want to use this model architecture.")
 
     if (model_config.model_impl == ModelImpl.TRANSFORMERS or
             model_config.model_impl == ModelImpl.AUTO and vllm_not_supported):
