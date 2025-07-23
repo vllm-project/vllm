@@ -313,7 +313,6 @@ class EngineArgs:
         CacheConfig.prefix_caching_hash_algo
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
-    use_v2_block_manager: bool = True
     swap_space: float = CacheConfig.swap_space
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
@@ -364,7 +363,6 @@ class EngineArgs:
     max_prompt_adapter_token: int = \
         PromptAdapterConfig.max_prompt_adapter_token
 
-    device: Device = DeviceConfig.device
     num_scheduler_steps: int = SchedulerConfig.num_scheduler_steps
     multi_step_stream_outputs: bool = SchedulerConfig.multi_step_stream_outputs
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
@@ -745,16 +743,6 @@ class EngineArgs:
             "--max-prompt-adapter-token",
             **prompt_adapter_kwargs["max_prompt_adapter_token"])
 
-        # Device arguments
-        device_kwargs = get_kwargs(DeviceConfig)
-        device_group = parser.add_argument_group(
-            title="DeviceConfig",
-            description=DeviceConfig.__doc__,
-        )
-        device_group.add_argument("--device",
-                                  **device_kwargs["device"],
-                                  deprecated=True)
-
         # Speculative arguments
         speculative_group = parser.add_argument_group(
             title="SpeculativeConfig",
@@ -856,15 +844,6 @@ class EngineArgs:
                                 **vllm_kwargs["additional_config"])
 
         # Other arguments
-        parser.add_argument('--use-v2-block-manager',
-                            action='store_true',
-                            default=True,
-                            deprecated=True,
-                            help='[DEPRECATED] block manager v1 has been '
-                            'removed and SelfAttnBlockSpaceManager (i.e. '
-                            'block manager v2) is now the default. '
-                            'Setting this flag to True or False'
-                            ' has no effect on vLLM behavior.')
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
@@ -1352,22 +1331,8 @@ class EngineArgs:
 
         # No Fp8 KV cache so far.
         if self.kv_cache_dtype != "auto":
-            fp8_attention = self.kv_cache_dtype.startswith("fp8")
-            will_use_fa = (
-                current_platform.is_cuda()
-                and not envs.is_set("VLLM_ATTENTION_BACKEND")
-            ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
-            supported = False
-            if (current_platform.is_rocm()
-                    or (current_platform.is_cuda()
-                        and current_platform.is_device_capability(100))
-                    or current_platform.is_tpu()):
-                supported = True
-            elif fp8_attention and will_use_fa:
-                from vllm.attention.utils.fa_utils import (
-                    flash_attn_supports_fp8)
-                supported = flash_attn_supports_fp8()
-
+            supported = current_platform.is_kv_cache_dtype_supported(
+                self.kv_cache_dtype)
             if not supported:
                 _raise_or_fallback(feature_name="--kv-cache-dtype",
                                    recommend_to_remove=False)

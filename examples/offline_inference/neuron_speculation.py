@@ -37,7 +37,6 @@ def initialize_llm():
         max_num_seqs=4,
         max_model_len=2048,
         block_size=2048,
-        use_v2_block_manager=True,
         device="neuron",
         tensor_parallel_size=32,
     )

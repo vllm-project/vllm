@@ -2108,6 +2108,15 @@ class ParallelConfig:
                 raise ValueError(
                     "num_redundant_experts must be non-negative, but got "
                     f"{self.num_redundant_experts}.")
+            if not self.enable_expert_parallel:
+                raise ValueError(
+                    "enable_expert_parallel must be True to use EPLB.")
+            if self.tensor_parallel_size * self.data_parallel_size <= 1:
+                raise ValueError(
+                    "EPLB requires tensor_parallel_size or data_parallel_size "
+                    f"to be greater than 1, but got "
+                    f"TP={self.tensor_parallel_size},DP={self.data_parallel_size}."
+                )
         else:
             if self.num_redundant_experts != 0:
                 raise ValueError(
@@ -2128,10 +2137,11 @@ class ParallelConfig:
             elif (current_platform.is_cuda()
                   and cuda_device_count_stateless() < self.world_size):
                 if not ray_found:
-                    raise ValueError("Unable to load Ray which is "
+                    raise ValueError("Unable to load Ray: "
+                                     f"{ray_utils.ray_import_err}. Ray is "
                                      "required for multi-node inference, "
                                      "please install Ray with `pip install "
-                                     "ray`.") from ray_utils.ray_import_err
+                                     "ray`.")
                 backend = "ray"
             elif self.data_parallel_backend == "ray":
                 logger.info("Using ray distributed inference because "
