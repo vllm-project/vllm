@@ -22,8 +22,8 @@ from typing import Literal, Optional, TypedDict, Union
 
 import torch
 from torch import nn
-from transformers import (AddedToken, BatchFeature, Idefics3Config,
-                          Idefics3ImageProcessor, Idefics3Processor)
+from transformers import (BatchFeature, Idefics3Config, Idefics3ImageProcessor,
+                          Idefics3Processor)
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -199,21 +199,14 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
 
         return grid_w * grid_h + 1
 
-    # TODO: Remove after requiring transformers>=4.52
-    def _get_content(self, token: Union[AddedToken, str]) -> str:
-        if isinstance(token, str):
-            return token
-
-        return token.content
-
     def _get_image_token(
             self,
             processor: Optional[Idefics3Processor]) -> tuple[str, str, str]:
         if processor is None:
             processor = self.get_hf_processor()
 
-        image_token = self._get_content(processor.image_token)
-        fake_image_token = self._get_content(processor.fake_image_token)
+        image_token = processor.image_token
+        fake_image_token = processor.fake_image_token
         global_image_token = processor.global_image_tag
         return image_token, fake_image_token, global_image_token
 
@@ -326,6 +319,7 @@ class Idefics3MultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
         if not (images := mm_data.get("images", [])):
@@ -337,6 +331,7 @@ class Idefics3MultiModalProcessor(
             prompt,
             mm_data,
             mm_kwargs,
+            tok_kwargs,
         )
 
         parsed_images = (self._get_data_parser().parse_mm_data({
@@ -588,6 +583,13 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
             "up_proj",
         ],
     }
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+
+        raise ValueError("Only image modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

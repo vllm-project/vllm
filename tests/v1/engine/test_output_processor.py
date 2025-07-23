@@ -35,7 +35,7 @@ def _ref_convert_id_to_token(
     Returns:
       String representation of input token id
     """
-    return tokenizer.convert_ids_to_tokens(token_id) or ""
+    return tokenizer.decode([token_id]) or ""
 
 
 @pytest.mark.parametrize(

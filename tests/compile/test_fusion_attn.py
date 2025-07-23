@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional
 
 import pytest
@@ -49,6 +50,7 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
         # DYNAMO_ONCE does not properly propagate shapes.
         level=CompilationLevel.DYNAMO_AS_IS,
         backend="tests.compile.test_fusion_attn.backend_unfused",
+        custom_ops=["+quant_fp8"],
     )
     vllm_config = VllmConfig(compilation_config=compile_config)
     backend_unfused = TestBackend(NoOpEliminationPass(vllm_config))
@@ -72,6 +74,7 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
         # DYNAMO_ONCE does not properly propagate shapes.
         level=CompilationLevel.DYNAMO_AS_IS,
         backend="tests.compile.test_fusion_attn.backend",
+        custom_ops=["+quant_fp8"],
     )
     vllm_config = VllmConfig(compilation_config=compile_config)
 

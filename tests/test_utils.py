@@ -5,6 +5,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import pickle
 import socket
 from collections.abc import AsyncIterator
@@ -13,16 +14,20 @@ from unittest.mock import patch
 import pytest
 import torch
 import zmq
+from transformers import AutoTokenizer
 from vllm_test_utils.monitor import monitor
 
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.transformers_utils.detokenizer_utils import (
+    convert_ids_list_to_tokens)
 from vllm.utils import (CacheInfo, FlexibleArgumentParser, LRUCache,
                         MemorySnapshot, PlaceholderModule, StoreBoolean,
                         bind_kv_cache, common_broadcastable_dtype,
-                        deprecate_kwargs, get_open_port, is_lossless_cast,
+                        current_stream, deprecate_kwargs, get_open_port,
+                        get_tcp_uri, is_lossless_cast, join_host_port,
                         make_zmq_path, make_zmq_socket, memory_profiling,
-                        merge_async_iterators, sha256, split_zmq_path,
-                        supports_kw, swap_dict_values)
+                        merge_async_iterators, sha256, split_host_port,
+                        split_zmq_path, supports_kw, swap_dict_values)
 
 from .utils import create_new_process_for_each_test, error_on_warning
 
@@ -142,6 +147,7 @@ def parser():
     parser.add_argument('--batch-size', type=int)
     parser.add_argument('--enable-feature', action='store_true')
     parser.add_argument('--hf-overrides', type=json.loads)
+    parser.add_argument('-O', '--compilation-config', type=json.loads)
     return parser
 
 
@@ -265,6 +271,11 @@ def test_dict_args(parser):
         "val2",
         "--hf-overrides.key2.key4",
         "val3",
+        # Test compile config and compilation level
+        "-O.use_inductor=true",
+        "-O.backend",
+        "custom",
+        "-O1",
         # Test = sign
         "--hf-overrides.key5=val4",
         # Test underscore to dash conversion
@@ -281,6 +292,13 @@ def test_dict_args(parser):
         "true",
         "--hf_overrides.key12.key13",
         "null",
+        # Test '-' and '.' in value
+        "--hf_overrides.key14.key15",
+        "-minus.and.dot",
+        # Test array values
+        "-O.custom_ops+",
+        "-quant_fp8",
+        "-O.custom_ops+=+silu_mul,-rms_norm",
     ]
     parsed_args = parser.parse_args(args)
     assert parsed_args.model_name == "something.something"
@@ -301,7 +319,40 @@ def test_dict_args(parser):
         "key12": {
             "key13": None,
         },
+        "key14": {
+            "key15": "-minus.and.dot",
+        }
     }
+    assert parsed_args.compilation_config == {
+        "level": 1,
+        "use_inductor": True,
+        "backend": "custom",
+        "custom_ops": ["-quant_fp8", "+silu_mul", "-rms_norm"],
+    }
+
+
+def test_duplicate_dict_args(caplog_vllm, parser):
+    args = [
+        "--model-name=something.something",
+        "--hf-overrides.key1",
+        "val1",
+        "--hf-overrides.key1",
+        "val2",
+        "-O1",
+        "-O.level",
+        "2",
+        "-O3",
+    ]
+
+    parsed_args = parser.parse_args(args)
+    # Should be the last value
+    assert parsed_args.hf_overrides == {"key1": "val2"}
+    assert parsed_args.compilation_config == {"level": 3}
+
+    assert len(caplog_vllm.records) == 1
+    assert "duplicate" in caplog_vllm.text
+    assert "--hf-overrides.key1" in caplog_vllm.text
+    assert "-O.level" in caplog_vllm.text
 
 
 # yapf: enable
@@ -406,6 +457,31 @@ def test_bind_kv_cache():
     assert ctx['layers.1.self_attn'].kv_cache[0] is kv_cache[1]
     assert ctx['layers.2.self_attn'].kv_cache[0] is kv_cache[2]
     assert ctx['layers.3.self_attn'].kv_cache[0] is kv_cache[3]
+
+def test_bind_kv_cache_kv_sharing():
+    from vllm.attention import Attention
+
+    ctx = {
+        'layers.0.self_attn': Attention(32, 128, 0.1),
+        'layers.1.self_attn': Attention(32, 128, 0.1),
+        'layers.2.self_attn': Attention(32, 128, 0.1),
+        'layers.3.self_attn': Attention(32, 128, 0.1),
+    }
+    kv_cache = [
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+        torch.zeros((1, )),
+    ]
+    shared_kv_cache_layers = {
+        'layers.2.self_attn': 'layers.1.self_attn',
+        'layers.3.self_attn': 'layers.0.self_attn'
+    }
+    bind_kv_cache(ctx, [kv_cache], shared_kv_cache_layers)
+    assert ctx['layers.0.self_attn'].kv_cache[0] is kv_cache[0]
+    assert ctx['layers.1.self_attn'].kv_cache[0] is kv_cache[1]
+    assert ctx['layers.2.self_attn'].kv_cache[0] is kv_cache[1]
+    assert ctx['layers.3.self_attn'].kv_cache[0] is kv_cache[0]
 
 def test_bind_kv_cache_non_attention():
     from vllm.attention import Attention
@@ -829,3 +905,93 @@ def test_make_zmq_socket_ipv6():
 def test_make_zmq_path():
     assert make_zmq_path("tcp", "127.0.0.1", "5555") == "tcp://127.0.0.1:5555"
     assert make_zmq_path("tcp", "::1", "5555") == "tcp://[::1]:5555"
+
+
+def test_get_tcp_uri():
+    assert get_tcp_uri("127.0.0.1", 5555) == "tcp://127.0.0.1:5555"
+    assert get_tcp_uri("::1", 5555) == "tcp://[::1]:5555"
+
+
+def test_split_host_port():
+    # valid ipv4
+    assert split_host_port("127.0.0.1:5555") == ("127.0.0.1", 5555)
+    # invalid ipv4
+    with pytest.raises(ValueError):
+        # multi colon
+        assert split_host_port("127.0.0.1::5555")
+    with pytest.raises(ValueError):
+        # tailing colon
+        assert split_host_port("127.0.0.1:5555:")
+    with pytest.raises(ValueError):
+        # no colon
+        assert split_host_port("127.0.0.15555")
+    with pytest.raises(ValueError):
+        # none int port
+        assert split_host_port("127.0.0.1:5555a")
+
+    # valid ipv6
+    assert split_host_port("[::1]:5555") == ("::1", 5555)
+    # invalid ipv6
+    with pytest.raises(ValueError):
+        # multi colon
+        assert split_host_port("[::1]::5555")
+    with pytest.raises(IndexError):
+        # no colon
+        assert split_host_port("[::1]5555")
+    with pytest.raises(ValueError):
+        # none int port
+        assert split_host_port("[::1]:5555a")
+
+
+def test_join_host_port():
+    assert join_host_port("127.0.0.1", 5555) == "127.0.0.1:5555"
+    assert join_host_port("::1", 5555) == "[::1]:5555"
+
+
+def test_convert_ids_list_to_tokens():
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
+    token_ids = tokenizer.encode("Hello, world!")
+    # token_ids = [9707, 11, 1879, 0]
+    assert tokenizer.convert_ids_to_tokens(token_ids) == [
+        'Hello', ',', 'Ġworld', '!'
+    ]
+    tokens = convert_ids_list_to_tokens(tokenizer, token_ids)
+    assert tokens == ['Hello', ',', ' world', '!']
+
+
+def test_current_stream_multithread():
+    import threading
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    main_default_stream = torch.cuda.current_stream()
+    child_stream = torch.cuda.Stream()
+
+    thread_stream_ready = threading.Event()
+    thread_can_exit = threading.Event()
+
+    def child_thread_func():
+        with torch.cuda.stream(child_stream):
+            thread_stream_ready.set()
+            thread_can_exit.wait(timeout=10)
+
+    child_thread = threading.Thread(target=child_thread_func)
+    child_thread.start()
+
+    try:
+        assert thread_stream_ready.wait(
+            timeout=5), "Child thread failed to enter stream context in time"
+
+        main_current_stream = current_stream()
+
+        assert main_current_stream != child_stream, "Main thread's current_stream was contaminated by child thread"
+        assert main_current_stream == main_default_stream, "Main thread's current_stream is not the default stream"
+
+        # Notify child thread it can exit
+        thread_can_exit.set()
+
+    finally:
+        # Ensure child thread exits properly
+        child_thread.join(timeout=5)
+        if child_thread.is_alive():
+            pytest.fail("Child thread failed to exit properly")
