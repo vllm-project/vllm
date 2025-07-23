@@ -3297,4 +3297,3 @@ def bind_process_name(name: str, suffixe: str = "") -> None:
     if suffixe:
         name = f"{name}_{suffixe}"
     setproctitle.setproctitle(name)
-

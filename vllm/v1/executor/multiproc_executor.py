@@ -366,7 +366,7 @@ class WorkerProc:
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
         bind_process_name(
-            self.worker.worker.__class__.__name__, 
+            self.worker.worker.__class__.__name__,
             f"TP{self.rank}_DP{vllm_config.parallel_config.data_parallel_rank}"
         )
         pid = os.getpid()
