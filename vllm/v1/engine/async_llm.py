@@ -94,11 +94,14 @@ class AsyncLLM(EngineClient):
         self.log_requests = log_requests
         self.log_stats = log_stats
 
-        # Tokenizer (+ ensure liveness if running in another process).
-        self.tokenizer = init_tokenizer_from_configs(
-            model_config=vllm_config.model_config,
-            scheduler_config=vllm_config.scheduler_config,
-            lora_config=vllm_config.lora_config)
+        if self.model_config.skip_tokenizer_init:
+            self.tokenizer = None
+        else:
+            # Tokenizer (+ ensure liveness if running in another process).
+            self.tokenizer = init_tokenizer_from_configs(
+                model_config=vllm_config.model_config,
+                scheduler_config=vllm_config.scheduler_config,
+                lora_config=vllm_config.lora_config)
 
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(
@@ -437,6 +440,7 @@ class AsyncLLM(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -465,6 +469,7 @@ class AsyncLLM(EngineClient):
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=priority,
+                tokenization_kwargs=tokenization_kwargs,
             )
 
             # The output_handler task pushes items into the queue.
@@ -523,6 +528,10 @@ class AsyncLLM(EngineClient):
         self,
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
+        if self.tokenizer is None:
+            raise ValueError("Unable to get tokenizer because "
+                             "skip_tokenizer_init is True")
+
         return self.tokenizer.get_lora_tokenizer(lora_request)
 
     async def is_tracing_enabled(self) -> bool:
