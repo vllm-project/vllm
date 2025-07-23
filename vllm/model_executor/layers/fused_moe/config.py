@@ -151,14 +151,16 @@ class FusedMoEQuantConfig:
         ]) <= 1, "Quantization flags are mutually exclusive."
 
         if ocp_mx_scheme is not None:
-            ocp_mx_scheme = ocp_mx_scheme.value
+            ocp_mx_scheme_str = ocp_mx_scheme.value
+        else:
+            ocp_mx_scheme_str = None
 
         quant_dtype = get_config_quant_dtype(
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a8=use_int8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
             use_int4_w4a16=use_int4_w4a16,
-            ocp_mx_scheme=ocp_mx_scheme,
+            ocp_mx_scheme=ocp_mx_scheme_str,
         )
         return FusedMoEQuantConfig(
             quant_dtype,

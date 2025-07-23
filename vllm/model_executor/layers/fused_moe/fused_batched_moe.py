@@ -856,7 +856,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.use_int8_w8a16 = use_int8_w8a16
 
         if ocp_mx_scheme is not None:
-            self.ocp_mx_scheme = ocp_mx_scheme.value
+            self.ocp_mx_scheme: Optional[str] = ocp_mx_scheme.value
         else:
             self.ocp_mx_scheme = ocp_mx_scheme
 

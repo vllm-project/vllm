@@ -3,13 +3,13 @@
 
 from fractions import Fraction
 from functools import partial
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.nn.functional as F
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
+from .quark_scheme import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE, OCP_MX_Scheme, dequant_mxfp4, dequant_mxfp6,
     quant_dequant_mxfp4, quant_dequant_mxfp6)
@@ -38,7 +38,7 @@ class QuarkOCP_MX(QuarkScheme):
             self.input_dtype, self.weight_dtype)
 
         if self.weight_dtype == "fp4":
-            self.packed_factor = 2
+            self.packed_factor: Union[int, Fraction] = 2
             self.dequant_func = dequant_mxfp4
         else:
             self.packed_factor = Fraction(numerator=8, denominator=6)
