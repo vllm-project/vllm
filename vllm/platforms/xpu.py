@@ -226,3 +226,7 @@ class XPUPlatform(Platform):
     @classmethod
     def memory_reserved(cls):
         return torch.xpu.memory_reserved()
+
+    @classmethod
+    def empty_cache(cls):
+        torch.cuda.empty_cache()

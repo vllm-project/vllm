@@ -538,6 +538,10 @@ class CudaPlatformBase(Platform):
     def memory_reserved(cls):
         return torch.cuda.memory_reserved()
 
+    @classmethod
+    def empty_cache(cls):
+        torch.cuda.empty_cache()
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
