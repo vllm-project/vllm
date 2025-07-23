@@ -150,18 +150,11 @@ class OpenAISpeechToText(OpenAIServing):
             raw_request.state.request_metadata = request_metadata
 
         try:
-            (
-                lora_request,
-                prompt_adapter_request,
-            ) = self._maybe_get_adapters(request)
+            lora_request = self._maybe_get_adapters(request)
 
             if lora_request:
                 return self.create_error_response(
                     "Currently do not support LoRA for "
-                    f"{self.task_type.title()}.")
-            if prompt_adapter_request:
-                return self.create_error_response(
-                    f"Currently do not support PromptAdapter for "
                     f"{self.task_type.title()}.")
 
             prompts, duration_s = await self._preprocess_speech_to_text(
@@ -188,8 +181,7 @@ class OpenAISpeechToText(OpenAIServing):
                 # It will not display special tokens like <|startoftranscript|>
                 request.prompt,
                 params=sampling_params,
-                lora_request=None,
-                prompt_adapter_request=None)
+                lora_request=None)
 
             list_result_generator = [
                 self.engine_client.generate(

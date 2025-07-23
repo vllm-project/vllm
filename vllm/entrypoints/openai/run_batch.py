@@ -337,7 +337,6 @@ async def main(args):
         model_config=model_config,
         base_model_paths=base_model_paths,
         lora_modules=None,
-        prompt_adapters=None,
     )
     openai_serving_chat = OpenAIServingChat(
         engine,
