@@ -55,8 +55,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.distributed.communication_op import (
-    tensor_model_parallel_maybe_get_symm_buffer,
-    tensor_model_parallel_use_symmetric_memory)
+    tensor_model_parallel_use_symmetric_memory,)
 from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
