@@ -78,7 +78,7 @@ def compare_with_hf(vllm_outputs, args: EngineArgs, temperature: float):
                                  device="cuda").unsqueeze(0)
         with torch.inference_mode():
             hf_outputs = model(token_ids)
-        hf_logprobs = F.log_softmax(hf_outputs[0] / temperature, dim=-1)
+        hf_logprobs = F.log_softmax(hf_outputs.logits / temperature, dim=-1)
 
         for i in range(len(output["logprobs"])):
             hook_logprobs = F.log_softmax(
@@ -86,12 +86,13 @@ def compare_with_hf(vllm_outputs, args: EngineArgs, temperature: float):
             for key in output["logprobs"][i]:
                 _real_logprobs = hf_logprobs[0,
                                              i - 1 + len(output["input_ids"])]
+                eps = 1e-10
                 vllm_rel_err = abs((output["logprobs"][i][key].logprob -
                                     _real_logprobs[key].item()) /
-                                   (_real_logprobs[key].item() + 1e-10))
+                                   (_real_logprobs[key].item() + eps))
                 hook_rel_err = abs(
                     (hook_logprobs[key].item() - _real_logprobs[key].item()) /
-                    (_real_logprobs[key].item() + 1e-10))
+                    (_real_logprobs[key].item() + eps))
                 vllm_errs.append(vllm_rel_err)
                 hook_errs.append(hook_rel_err)
 
