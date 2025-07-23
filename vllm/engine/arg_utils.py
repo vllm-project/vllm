@@ -26,10 +26,10 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          DetailedTraceModules, Device, DeviceConfig,
                          DistributedExecutorBackend, GuidedDecodingBackend,
                          GuidedDecodingBackendV1, HfOverrides, KVEventsConfig,
-                         KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ModelDType, ModelImpl, MultiModalConfig,
-                         ObservabilityConfig, ParallelConfig, PoolerConfig,
-                         PrefixCachingHashAlgo, PromptAdapterConfig,
+                         KVTransferConfig, LoadConfig, LoadFormat,
+                         LogprobsMode, LoRAConfig, ModelConfig, ModelDType,
+                         ModelImpl, MultiModalConfig, ObservabilityConfig,
+                         ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
                          SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
                          TaskOption, TokenizerMode, VllmConfig, get_attr_docs,
                          get_field)
@@ -313,7 +313,6 @@ class EngineArgs:
         CacheConfig.prefix_caching_hash_algo
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
-    use_v2_block_manager: bool = True
     swap_space: float = CacheConfig.swap_space
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
@@ -325,6 +324,7 @@ class EngineArgs:
         SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: Optional[int] = SchedulerConfig.max_num_seqs
     max_logprobs: int = ModelConfig.max_logprobs
+    logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     disable_log_stats: bool = False
     revision: Optional[str] = ModelConfig.revision
     code_revision: Optional[str] = ModelConfig.code_revision
@@ -358,13 +358,7 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
     lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
     lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
-    # PromptAdapter fields
-    enable_prompt_adapter: bool = False
-    max_prompt_adapters: int = PromptAdapterConfig.max_prompt_adapters
-    max_prompt_adapter_token: int = \
-        PromptAdapterConfig.max_prompt_adapter_token
 
-    device: Device = DeviceConfig.device
     num_scheduler_steps: int = SchedulerConfig.num_scheduler_steps
     multi_step_stream_outputs: bool = SchedulerConfig.multi_step_stream_outputs
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
@@ -438,6 +432,8 @@ class EngineArgs:
         ParallelConfig.enable_multimodal_encoder_data_parallel
 
     async_scheduling: bool = SchedulerConfig.async_scheduling
+    # DEPRECATED
+    enable_prompt_adapter: bool = False
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -492,6 +488,8 @@ class EngineArgs:
                                  **model_kwargs["max_seq_len_to_capture"])
         model_group.add_argument("--max-logprobs",
                                  **model_kwargs["max_logprobs"])
+        model_group.add_argument("--logprobs-mode",
+                                 **model_kwargs["logprobs_mode"])
         model_group.add_argument("--disable-sliding-window",
                                  **model_kwargs["disable_sliding_window"])
         model_group.add_argument("--disable-cascade-attn",
@@ -728,33 +726,6 @@ class EngineArgs:
         lora_group.add_argument("--default-mm-loras",
                                 **lora_kwargs["default_mm_loras"])
 
-        # PromptAdapter related configs
-        prompt_adapter_kwargs = get_kwargs(PromptAdapterConfig)
-        prompt_adapter_group = parser.add_argument_group(
-            title="PromptAdapterConfig",
-            description=PromptAdapterConfig.__doc__,
-        )
-        prompt_adapter_group.add_argument(
-            "--enable-prompt-adapter",
-            action=argparse.BooleanOptionalAction,
-            help="If True, enable handling of PromptAdapters.")
-        prompt_adapter_group.add_argument(
-            "--max-prompt-adapters",
-            **prompt_adapter_kwargs["max_prompt_adapters"])
-        prompt_adapter_group.add_argument(
-            "--max-prompt-adapter-token",
-            **prompt_adapter_kwargs["max_prompt_adapter_token"])
-
-        # Device arguments
-        device_kwargs = get_kwargs(DeviceConfig)
-        device_group = parser.add_argument_group(
-            title="DeviceConfig",
-            description=DeviceConfig.__doc__,
-        )
-        device_group.add_argument("--device",
-                                  **device_kwargs["device"],
-                                  deprecated=True)
-
         # Speculative arguments
         speculative_group = parser.add_argument_group(
             title="SpeculativeConfig",
@@ -856,18 +827,15 @@ class EngineArgs:
                                 **vllm_kwargs["additional_config"])
 
         # Other arguments
-        parser.add_argument('--use-v2-block-manager',
-                            action='store_true',
-                            default=True,
-                            deprecated=True,
-                            help='[DEPRECATED] block manager v1 has been '
-                            'removed and SelfAttnBlockSpaceManager (i.e. '
-                            'block manager v2) is now the default. '
-                            'Setting this flag to True or False'
-                            ' has no effect on vLLM behavior.')
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
+        parser.add_argument('--enable-prompt-adapter',
+                            action='store_true',
+                            deprecated=True,
+                            help='[DEPRECATED] Prompt adapter has been '
+                            'removed. Setting this flag to True or False'
+                            ' has no effect on vLLM behavior.')
 
         return parser
 
@@ -913,6 +881,7 @@ class EngineArgs:
             enforce_eager=self.enforce_eager,
             max_seq_len_to_capture=self.max_seq_len_to_capture,
             max_logprobs=self.max_logprobs,
+            logprobs_mode=self.logprobs_mode,
             disable_sliding_window=self.disable_sliding_window,
             disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,
@@ -1251,11 +1220,6 @@ class EngineArgs:
 
         load_config = self.create_load_config()
 
-        prompt_adapter_config = PromptAdapterConfig(
-            max_prompt_adapters=self.max_prompt_adapters,
-            max_prompt_adapter_token=self.max_prompt_adapter_token) \
-                                        if self.enable_prompt_adapter else None
-
         decoding_config = DecodingConfig(
             backend=self.guided_decoding_backend,
             disable_fallback=self.guided_decoding_disable_fallback,
@@ -1283,7 +1247,6 @@ class EngineArgs:
             load_config=load_config,
             decoding_config=decoding_config,
             observability_config=observability_config,
-            prompt_adapter_config=prompt_adapter_config,
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
@@ -1352,32 +1315,12 @@ class EngineArgs:
 
         # No Fp8 KV cache so far.
         if self.kv_cache_dtype != "auto":
-            fp8_attention = self.kv_cache_dtype.startswith("fp8")
-            will_use_fa = (
-                current_platform.is_cuda()
-                and not envs.is_set("VLLM_ATTENTION_BACKEND")
-            ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
-            supported = False
-            if (current_platform.is_rocm()
-                    or (current_platform.is_cuda()
-                        and current_platform.is_device_capability(100))
-                    or current_platform.is_tpu()):
-                supported = True
-            elif fp8_attention and will_use_fa:
-                from vllm.attention.utils.fa_utils import (
-                    flash_attn_supports_fp8)
-                supported = flash_attn_supports_fp8()
-
+            supported = current_platform.is_kv_cache_dtype_supported(
+                self.kv_cache_dtype)
             if not supported:
                 _raise_or_fallback(feature_name="--kv-cache-dtype",
                                    recommend_to_remove=False)
                 return False
-
-        # No Prompt Adapter so far.
-        if self.enable_prompt_adapter:
-            _raise_or_fallback(feature_name="--enable-prompt-adapter",
-                               recommend_to_remove=False)
-            return False
 
         # No text embedding inputs so far.
         if self.enable_prompt_embeds:
@@ -1500,7 +1443,6 @@ class EngineArgs:
 
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
-                        and not self.enable_prompt_adapter
                         and model_config.runner_type != "pooling"):
                     self.enable_chunked_prefill = True
                     logger.warning(
@@ -1639,13 +1581,14 @@ class EngineArgs:
 
         # cpu specific default values.
         if current_platform.is_cpu():
+            world_size = self.pipeline_parallel_size * self.tensor_parallel_size
             default_max_num_batched_tokens = {
-                UsageContext.LLM_CLASS: 4096,
-                UsageContext.OPENAI_API_SERVER: 2048,
+                UsageContext.LLM_CLASS: 4096 * world_size,
+                UsageContext.OPENAI_API_SERVER: 2048 * world_size,
             }
             default_max_num_seqs = {
-                UsageContext.LLM_CLASS: 128,
-                UsageContext.OPENAI_API_SERVER: 32,
+                UsageContext.LLM_CLASS: 256 * world_size,
+                UsageContext.OPENAI_API_SERVER: 128 * world_size,
             }
 
         use_context_value = usage_context.value if usage_context else None
