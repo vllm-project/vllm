@@ -330,7 +330,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         Args:
             scheduler_output: The scheduler output.
         """
-        if self.model_config.is_attention_free:
+        # Attention free models have zero kv_cache_goups, however models
+        # like Mamba are also attention free but use the kv_cache for
+        # keeping its internal state. This is why we check the number
+        # of kv_cache groups instead of solely checking
+        # for self.model_config.is_attention_free.
+        if len(self.kv_cache_config.kv_cache_groups) == 0:
             return
 
         self.attn_metadata_builders[0].reorder_batch(self.input_batch,
