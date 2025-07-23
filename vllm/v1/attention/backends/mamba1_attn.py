@@ -93,6 +93,6 @@ class Mamba1AttentionMetadataBuilder(
             query_start_loc=query_start_loc,
             context_lens_tensor=context_lens_tensor,
             seq_lens=seq_lens,
-            has_initial_states=has_initial_states.to(query_start_loc.device),
+            has_initial_states=has_initial_states,
             state_indices_tensor=state_indices_tensor,
         )
