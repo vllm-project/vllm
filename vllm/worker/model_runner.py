@@ -1945,7 +1945,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     self.device)
                 sampled_token_ids = broadcast_tensor_dict(
                     {"sampled_token_ids": 
-                    sampled_token_ids})["sampled_token_ids"]
+                     sampled_token_ids})["sampled_token_ids"]
             else:
                 sampled_token_ids = broadcast_tensor_dict(
                 )["sampled_token_ids"]
