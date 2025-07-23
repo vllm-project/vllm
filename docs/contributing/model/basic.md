@@ -1,7 +1,4 @@
----
-title: Implementing a Basic Model
----
-[](){ #new-model-basic }
+# Basic Model
 
 This guide walks you through the steps to implement a basic vLLM model.
 
@@ -27,33 +24,35 @@ All vLLM modules within the model must include a `prefix` argument in their cons
 
 The initialization code should look like this:
 
-```python
-from torch import nn
-from vllm.config import VllmConfig
-from vllm.attention import Attention
+??? code
 
-class MyAttention(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str):
-        super().__init__()
-        self.attn = Attention(prefix=f"{prefix}.attn")
+    ```python
+    from torch import nn
+    from vllm.config import VllmConfig
+    from vllm.attention import Attention
 
-class MyDecoderLayer(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str):
-        super().__init__()
-        self.self_attn = MyAttention(prefix=f"{prefix}.self_attn")
+    class MyAttention(nn.Module):
+        def __init__(self, vllm_config: VllmConfig, prefix: str):
+            super().__init__()
+            self.attn = Attention(prefix=f"{prefix}.attn")
 
-class MyModel(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str):
-        super().__init__()
-        self.layers = nn.ModuleList(
-            [MyDecoderLayer(vllm_config, prefix=f"{prefix}.layers.{i}") for i in range(vllm_config.model_config.hf_config.num_hidden_layers)]
-        )
+    class MyDecoderLayer(nn.Module):
+        def __init__(self, vllm_config: VllmConfig, prefix: str):
+            super().__init__()
+            self.self_attn = MyAttention(prefix=f"{prefix}.self_attn")
 
-class MyModelForCausalLM(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        self.model = MyModel(vllm_config, prefix=f"{prefix}.model")
-```
+    class MyModel(nn.Module):
+        def __init__(self, vllm_config: VllmConfig, prefix: str):
+            super().__init__()
+            self.layers = nn.ModuleList(
+                [MyDecoderLayer(vllm_config, prefix=f"{prefix}.layers.{i}") for i in range(vllm_config.model_config.hf_config.num_hidden_layers)]
+            )
+
+    class MyModelForCausalLM(nn.Module):
+        def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+            super().__init__()
+            self.model = MyModel(vllm_config, prefix=f"{prefix}.model")
+    ```
 
 ### Computation Code
 
@@ -74,6 +73,8 @@ def forward(
     self,
     input_ids: torch.Tensor,
     positions: torch.Tensor,
+    intermediate_tensors: Optional[IntermediateTensors] = None,
+    inputs_embeds: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     ...
 ```
@@ -106,7 +107,7 @@ This method should load the weights from the HuggingFace's checkpoint file and a
 
 ## 5. Register your model
 
-See [this page][new-model-registration] for instructions on how to register your new model to be used by vLLM.
+See [this page](registration.md) for instructions on how to register your new model to be used by vLLM.
 
 ## Frequently Asked Questions
 

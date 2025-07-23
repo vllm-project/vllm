@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from importlib.util import find_spec
 from typing import List, Optional
@@ -72,7 +73,6 @@ class MultiStepNeuronModelRunner(NeuronModelRunner):
             input_block_ids=model_input.input_block_ids,
             **MultiModalKwargs.as_kwargs(
                 model_input.multi_modal_kwargs or {},
-                dtype=self.model_config.dtype,
                 device=self.device,
             ),
         )

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This is a demo script showing how to use the
 PrithviGeospatialMAE model with vLLM
@@ -139,7 +140,7 @@ datamodule_config = {
 class PrithviMAE:
     def __init__(self):
         print("Initializing PrithviMAE model")
-        self.model = LLM(
+        self.llm = LLM(
             model=os.path.join(os.path.dirname(__file__), "./model"),
             skip_tokenizer_init=True,
             dtype="float32",
@@ -157,7 +158,7 @@ class PrithviMAE:
 
         prompt = {"prompt_token_ids": [1], "multi_modal_data": mm_data}
 
-        outputs = self.model.encode(prompt, use_tqdm=False)
+        outputs = self.llm.encode(prompt, use_tqdm=False)
         print("################ Inference done (it took seconds)  ##############")
 
         return outputs[0].outputs.data

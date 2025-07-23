@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
 import json
@@ -65,4 +66,9 @@ class InfEncoder(json.JSONEncoder):
 
 def write_to_json(filename: str, records: list) -> None:
     with open(filename, "w") as f:
-        json.dump(records, f, cls=InfEncoder)
+        json.dump(
+            records,
+            f,
+            cls=InfEncoder,
+            default=lambda o: f"<{type(o).__name__} object is not JSON serializable>",
+        )

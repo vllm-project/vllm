@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
 from copy import copy
@@ -14,7 +15,7 @@ from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.outputs import RequestOutput
+from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -159,7 +160,7 @@ class LLMEngine:
     def has_unfinished_requests(self) -> bool:
         has_unfinished = self.output_processor.has_unfinished_requests()
         if self.dp_group is None:
-            return has_unfinished
+            return has_unfinished or self.engine_core.dp_engines_running()
         return self.has_unfinished_requests_dp(has_unfinished)
 
     def has_unfinished_requests_dp(self, has_unfinished: bool) -> bool:
@@ -191,6 +192,11 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
+        # Validate the request_id type.
+        if not isinstance(request_id, str):
+            raise TypeError(
+                f"request_id must be a string, got {type(request_id)}")
+
         # Process raw inputs into the request.
         prompt_str, request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
@@ -220,7 +226,7 @@ class LLMEngine:
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
 
-    def step(self) -> list[RequestOutput]:
+    def step(self) -> Union[list[RequestOutput], list[PoolingRequestOutput]]:
 
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False

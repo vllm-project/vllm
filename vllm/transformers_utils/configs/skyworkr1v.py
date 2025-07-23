@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://huggingface.co/Skywork/Skywork-R1V-38B/blob/main/configuration_skywork_chat.py

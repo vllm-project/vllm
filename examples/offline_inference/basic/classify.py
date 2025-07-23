@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from argparse import Namespace
 
@@ -27,10 +28,10 @@ def main(args: Namespace):
 
     # Create an LLM.
     # You should pass task="classify" for classification models
-    model = LLM(**vars(args))
+    llm = LLM(**vars(args))
 
     # Generate logits. The output is a list of ClassificationRequestOutputs.
-    outputs = model.classify(prompts)
+    outputs = llm.classify(prompts)
 
     # Print the outputs.
     print("\nGenerated Outputs:\n" + "-" * 60)

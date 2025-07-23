@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A Neuron worker class."""
 import os
 from typing import List, Optional, Set, Tuple
@@ -155,7 +156,7 @@ class NeuronWorker(LocalOrDistributedWorkerBase):
             rank=self.rank,
             local_rank=self.local_rank,
             distributed_init_method=self.distributed_init_method,
-            backend="gloo",
+            backend=current_platform.dist_backend,
         )
 
         ensure_model_parallel_initialized(

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from pathlib import Path
 
 import numpy as np
@@ -59,3 +60,15 @@ def test_hash_collision_array_shape():
 
     hasher = MultiModalHasher
     assert hasher.hash_kwargs(data=arr1) != hasher.hash_kwargs(data=arr2)
+
+
+def test_hash_non_contiguous_array():
+    arr = np.arange(24).reshape(4, 6).T
+    assert not arr.flags.c_contiguous
+
+    arr_c = np.ascontiguousarray(arr)
+    assert arr_c.flags.c_contiguous
+
+    hasher = MultiModalHasher
+    # Both should be hashable and produce the same hashes
+    assert hasher.hash_kwargs(data=arr) == hasher.hash_kwargs(data=arr_c)

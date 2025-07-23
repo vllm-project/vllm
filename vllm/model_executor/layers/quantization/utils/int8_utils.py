@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from https://github.com/sgl-project/sglang/blob/4cb53ecd0cffceb6dee5c011a58f65997a86f151/python/sglang/srt/layers/quantization/int8_kernel.py
 import functools
@@ -218,7 +219,7 @@ def per_token_group_quant_int8(
     quantized tensor along with the scaling factor used for quantization.
 
     Args:
-        x: The input tenosr with ndim >= 2.
+        x: The input tensor with ndim >= 2.
         group_size: The group size used for quantization.
         eps: The minimum to avoid dividing zero.
         dtype: The dype of output tensor. Note that only `torch.int8`

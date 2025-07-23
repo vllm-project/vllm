@@ -31,6 +31,20 @@ check_gpus() {
   echo "GPU type is $gpu_type"
 }
 
+check_cpus() {
+  # check the number of CPUs and NUMA Node and GPU type.
+  declare -g numa_count=$(python3 -c  "from numa import info;numa_size = info.get_num_configured_nodes(); print(numa_size)")
+  if [[ $numa_count -gt 0 ]]; then
+    echo "NUMA found."
+    echo $numa_count
+  else
+    echo "Need at least 1 NUMA to run benchmarking."
+    exit 1
+  fi
+  declare -g gpu_type="cpu"
+  echo "GPU type is $gpu_type"
+}
+
 check_hf_token() {
   # check if HF_TOKEN is available and valid
   if [[ -z "$HF_TOKEN" ]]; then
@@ -63,6 +77,22 @@ json2args() {
     echo "$json_string" | jq -r '
       to_entries |
       map("--" + (.key | gsub("_"; "-")) + " " + (.value | tostring)) |
+      join(" ")
+    '
+  )
+  echo "$args"
+}
+
+json2envs() {
+  # transforms the JSON string to environment variables.
+  # example:
+  # input: { "VLLM_CPU_KVCACHE_SPACE": 5 }
+  # output: VLLM_CPU_KVCACHE_SPACE=5
+  local json_string=$1
+  local args=$(
+    echo "$json_string" | jq -r '
+      to_entries |
+      map((.key ) + "=" + (.value | tostring)) |
       join(" ")
     '
   )
@@ -158,15 +188,24 @@ run_latency_tests() {
     # get arguments
     latency_params=$(echo "$params" | jq -r '.parameters')
     latency_args=$(json2args "$latency_params")
+    latency_environment_variables=$(echo "$params" | jq -r '.environment_variables')
+    latency_envs=$(json2envs "$latency_environment_variables")
 
     # check if there is enough GPU to run the test
     tp=$(echo "$latency_params" | jq -r '.tensor_parallel_size')
-    if [[ $gpu_count -lt $tp ]]; then
-      echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
-      continue
+    if [ "$ON_CPU" == "1" ];then
+      if [[ $numa_count -lt $tp ]]; then
+        echo "Required tensor-parallel-size $tp but only $numa_count NUMA nodes found. Skip testcase $test_name."
+        continue
+      fi
+    else
+      if [[ $gpu_count -lt $tp ]]; then
+        echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
+        continue
+      fi
     fi
 
-    latency_command="python3 benchmark_latency.py \
+    latency_command=" $latency_envs python3 benchmark_latency.py \
       --output-json $RESULTS_FOLDER/${test_name}.json \
       $latency_args"
 
@@ -216,15 +255,24 @@ run_throughput_tests() {
     # get arguments
     throughput_params=$(echo "$params" | jq -r '.parameters')
     throughput_args=$(json2args "$throughput_params")
+    throughput_environment_variables=$(echo "$params" | jq -r '.environment_variables')
+    throughput_envs=$(json2envs "$throughput_environment_variables")
 
     # check if there is enough GPU to run the test
     tp=$(echo "$throughput_params" | jq -r '.tensor_parallel_size')
-    if [[ $gpu_count -lt $tp ]]; then
-      echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
-      continue
+    if [ "$ON_CPU" == "1" ];then
+      if [[ $numa_count -lt $tp ]]; then
+        echo "Required tensor-parallel-size $tp but only $numa_count NUMA nodes found. Skip testcase $test_name."
+        continue
+      fi
+    else
+      if [[ $gpu_count -lt $tp ]]; then
+        echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
+        continue
+      fi
     fi
 
-    throughput_command="python3 benchmark_throughput.py \
+    throughput_command=" $throughput_envs python3 benchmark_throughput.py \
       --output-json $RESULTS_FOLDER/${test_name}.json \
       $throughput_args"
 
@@ -272,18 +320,27 @@ run_serving_tests() {
 
     # get client and server arguments
     server_params=$(echo "$params" | jq -r '.server_parameters')
+    server_envs=$(echo "$params" | jq -r '.server_environment_variables')
     client_params=$(echo "$params" | jq -r '.client_parameters')
     server_args=$(json2args "$server_params")
+    server_envs=$(json2envs "$server_envs")
     client_args=$(json2args "$client_params")
     qps_list=$(echo "$params" | jq -r '.qps_list')
     qps_list=$(echo "$qps_list" | jq -r '.[] | @sh')
     echo "Running over qps list $qps_list"
 
-    # check if there is enough GPU to run the test
+    # check if there is enough resources to run the test
     tp=$(echo "$server_params" | jq -r '.tensor_parallel_size')
-    if [[ $gpu_count -lt $tp ]]; then
-      echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
-      continue
+    if [ "$ON_CPU" == "1" ];then
+      if [[ $numa_count -lt $tp ]]; then
+        echo "Required tensor-parallel-size $tp but only $numa_count NUMA nodes found. Skip testcase $test_name."
+        continue
+      fi
+    else
+      if [[ $gpu_count -lt $tp ]]; then
+        echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
+        continue
+      fi
     fi
 
     # check if server model and client model is aligned
@@ -294,23 +351,33 @@ run_serving_tests() {
       continue
     fi
 
-    server_command="python3 \
+    server_command="$server_envs python3 \
       -m vllm.entrypoints.openai.api_server \
       $server_args"
 
     # run the server
     echo "Running test case $test_name"
     echo "Server command: $server_command"
-    bash -c "$server_command" &
-    server_pid=$!
-
-    # wait until the server is alive
-    if wait_for_server; then
-      echo ""
-      echo "vllm server is up and running."
+    # support remote vllm server
+    client_remote_args=""
+    if [[ -z "${REMOTE_HOST}" ]]; then
+      bash -c "$server_command" &
+      server_pid=$!
+      # wait until the server is alive
+      if wait_for_server; then
+        echo ""
+        echo "vLLM server is up and running."
+      else
+        echo ""
+        echo "vLLM failed to start within the timeout period."
+      fi
     else
-      echo ""
-      echo "vllm failed to start within the timeout period."
+      server_command="Using Remote Server $REMOTE_HOST $REMOTE_PORT"
+      if [[ ${REMOTE_PORT} ]]; then
+        client_remote_args=" --host=$REMOTE_HOST --port=$REMOTE_PORT "
+      else
+        client_remote_args=" --host=$REMOTE_HOST "
+      fi
     fi
 
     # iterate over different QPS
@@ -332,7 +399,7 @@ run_serving_tests() {
         --result-filename ${new_test_name}.json \
         --request-rate $qps \
         --metadata "tensor_parallel_size=$tp" \
-        $client_args"
+        $client_args $client_remote_args "
 
       echo "Running test case $test_name with qps $qps"
       echo "Client command: $client_command"
@@ -360,7 +427,14 @@ run_serving_tests() {
 }
 
 main() {
-  check_gpus
+  local ARCH
+  ARCH=''
+  if [ "$ON_CPU" == "1" ];then
+     check_cpus
+     ARCH='-cpu'
+  else
+     check_gpus
+  fi
   check_hf_token
 
   # Set to v1 to run v1 benchmark
@@ -386,9 +460,9 @@ main() {
   QUICK_BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
 
   # benchmarking
-  run_serving_tests $QUICK_BENCHMARK_ROOT/tests/serving-tests.json
-  run_latency_tests $QUICK_BENCHMARK_ROOT/tests/latency-tests.json
-  run_throughput_tests $QUICK_BENCHMARK_ROOT/tests/throughput-tests.json
+  run_serving_tests $QUICK_BENCHMARK_ROOT/tests/"${SERVING_JSON:-serving-tests$ARCH.json}"
+  run_latency_tests $QUICK_BENCHMARK_ROOT/tests/"${LATENCY_JSON:-latency-tests$ARCH.json}"
+  run_throughput_tests $QUICK_BENCHMARK_ROOT/tests/"${THROUGHPUT_JSON:-throughput-tests$ARCH.json}"
 
   # postprocess benchmarking results
   pip install tabulate pandas

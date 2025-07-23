@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """This file is a pure Python wrapper for the cudart library.
 It avoids the need to compile a separate shared library, and is
 convenient for use when we just need to call a few functions.

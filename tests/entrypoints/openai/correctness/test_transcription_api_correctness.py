@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Evaluate Transcription API correctness by computing Word Error Rate (WER)
 on a given ASR dataset. When provided, it will also compare the WER against

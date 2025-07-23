@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests whether gptq models with dynamic quantized can be loaded.
 
 Run `pytest tests/quantization/test_gptq_dynamic.py --forked`.
@@ -38,7 +39,7 @@ def test_gptq_with_dynamic(vllm_runner, model_id: str, use_marlin_kernel: bool,
     linear_method_cls = GPTQMarlinLinearMethod if use_marlin_kernel else (
         GPTQLinearMethod)
 
-    for name, submodule in (vllm_model.model.llm_engine.model_executor.
+    for name, submodule in (vllm_model.llm.llm_engine.model_executor.
                             driver_worker.model_runner.model.named_modules()):
         if name == "lm_head":
             assert isinstance(submodule.quant_method, linear_method_cls)

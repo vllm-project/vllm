@@ -33,7 +33,7 @@ Quantized models take less memory at the cost of lower precision.
 Statically quantized models can be downloaded from HF Hub (some popular ones are available at [Red Hat AI](https://huggingface.co/RedHatAI))
 and used directly without extra configuration.
 
-Dynamic quantization is also supported via the `quantization` option -- see [here][quantization-index] for more details.
+Dynamic quantization is also supported via the `quantization` option -- see [here](../features/quantization/README.md) for more details.
 
 ## Context length and batch size
 
@@ -57,19 +57,21 @@ By default, we optimize model inference using CUDA graphs which take up extra me
 
 You can adjust `compilation_config` to achieve a better balance between inference speed and memory usage:
 
-```python
-from vllm import LLM
-from vllm.config import CompilationConfig, CompilationLevel
+??? code
 
-llm = LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    compilation_config=CompilationConfig(
-        level=CompilationLevel.PIECEWISE,
-        # By default, it goes up to max_num_seqs
-        cudagraph_capture_sizes=[1, 2, 4, 8, 16],
-    ),
-)
-```
+    ```python
+    from vllm import LLM
+    from vllm.config import CompilationConfig, CompilationLevel
+
+    llm = LLM(
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        compilation_config=CompilationConfig(
+            level=CompilationLevel.PIECEWISE,
+            # By default, it goes up to max_num_seqs
+            cudagraph_capture_sizes=[1, 2, 4, 8, 16],
+        ),
+    )
+    ```
 
 You can disable graph capturing completely via the `enforce_eager` flag:
 
@@ -127,18 +129,20 @@ reduce the size of the processed multi-modal inputs, which in turn saves memory.
 
 Here are some examples:
 
-```python
-from vllm import LLM
+??? code
 
-# Available for Qwen2-VL series models
-llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
-          mm_processor_kwargs={
-              "max_pixels": 768 * 768,  # Default is 1280 * 28 * 28
-          })
+    ```python
+    from vllm import LLM
 
-# Available for InternVL series models
-llm = LLM(model="OpenGVLab/InternVL2-2B",
-          mm_processor_kwargs={
-              "max_dynamic_patch": 4,  # Default is 12
-          })
-```
+    # Available for Qwen2-VL series models
+    llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
+            mm_processor_kwargs={
+                "max_pixels": 768 * 768,  # Default is 1280 * 28 * 28
+            })
+
+    # Available for InternVL series models
+    llm = LLM(model="OpenGVLab/InternVL2-2B",
+            mm_processor_kwargs={
+                "max_dynamic_patch": 4,  # Default is 12
+            })
+    ```

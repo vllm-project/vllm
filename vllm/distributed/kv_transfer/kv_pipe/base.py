@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This file defines an interface `KVPipeBase`
 that provides an abstraction for sending and receiving tensors, or None, via

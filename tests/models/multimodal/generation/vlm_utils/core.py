@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Core test implementation to be shared across modalities."""
 from typing import Any, Callable, Optional
 
@@ -84,7 +85,7 @@ def run_test(
                      enforce_eager=enforce_eager,
                      task=task,
                      **vllm_runner_kwargs_) as vllm_model:
-        tokenizer = vllm_model.model.get_tokenizer()
+        tokenizer = vllm_model.llm.get_tokenizer()
 
         vllm_kwargs: dict[str, Any] = {}
         if get_stop_token_ids is not None:

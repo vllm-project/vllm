@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, Optional
@@ -179,8 +180,7 @@ def test_chat(
     ) as vllm_model:
         outputs = []
         for msg in MSGS:
-            output = vllm_model.model.chat(msg,
-                                           sampling_params=SAMPLING_PARAMS)
+            output = vllm_model.llm.chat(msg, sampling_params=SAMPLING_PARAMS)
 
             outputs.extend(output)
 
@@ -216,7 +216,7 @@ def test_multi_modal_placeholders(vllm_runner, prompt,
             max_model_len=8192,
             limit_mm_per_prompt=LIMIT_MM_PER_PROMPT,
     ) as vllm_model:
-        outputs = vllm_model.model.generate(prompt)
+        outputs = vllm_model.llm.generate(prompt)
 
         assert len(outputs) == 1, f"{len(outputs)=}"
         output: RequestOutput = outputs[0]

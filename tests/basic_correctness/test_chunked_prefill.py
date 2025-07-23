@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Compare the outputs of HF and vLLM when using greedy sampling.
 
 It tests chunked prefill. Chunked prefill can be enabled by
@@ -48,7 +49,13 @@ def use_v0_only(monkeypatch: pytest.MonkeyPatch):
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
-@pytest.mark.parametrize("attention_backend", ["FLASHINFER", "FLASH_ATTN"])
+@pytest.mark.parametrize("attention_backend", [
+    pytest.param("FLASHINFER",
+                 marks=pytest.mark.skipif(
+                     current_platform.is_rocm(),
+                     reason="FLASHINFER isn't supported on ROCm")),
+    "FLASH_ATTN"
+])
 def test_models(
     hf_runner: HfRunner,
     vllm_runner: VllmRunner,
@@ -98,7 +105,13 @@ def test_models(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", "mp"])
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("attention_backend", ["FLASHINFER", "FLASH_ATTN"])
+@pytest.mark.parametrize("attention_backend", [
+    pytest.param("FLASHINFER",
+                 marks=pytest.mark.skipif(
+                     current_platform.is_rocm(),
+                     reason="FLASHINFER isn't supported on ROCm")),
+    "FLASH_ATTN"
+])
 def test_models_distributed(
     hf_runner: HfRunner,
     vllm_runner: VllmRunner,
@@ -171,6 +184,8 @@ def test_models_distributed(
 # Due to low-precision numerical divergence, this test is too sensitive to
 # the async postprocessor
 @pytest.mark.parametrize("disable_async_output_proc", [True])
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="machete_prepack_B isn't supported on ROCm")
 def test_models_with_fp8_kv_cache(
     vllm_runner: VllmRunner,
     example_prompts,
@@ -278,62 +293,4 @@ def test_with_prefix_caching(
         outputs_1_lst=outputs[True],
         name_0="w/o prefix caching",
         name_1="with prefix caching",
-    )
-
-
-@pytest.mark.parametrize("model", ["facebook/opt-125m"])
-@pytest.mark.parametrize("dtype", ["bfloat16", "half"])
-@pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
-@pytest.mark.parametrize("enforce_eager", [False])
-@pytest.mark.parametrize("attention_backend", ["TORCH_SDPA"])
-@pytest.mark.cpu_model
-@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
-def test_models_cpu(
-    hf_runner: HfRunner,
-    vllm_runner: VllmRunner,
-    example_prompts,
-    model: str,
-    dtype: str,
-    max_tokens: int,
-    chunked_prefill_token_size: int,
-    enforce_eager: bool,
-    attention_backend: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    test_models(
-        hf_runner,
-        vllm_runner,
-        example_prompts,
-        model,
-        dtype,
-        max_tokens,
-        chunked_prefill_token_size,
-        enforce_eager,
-        1,
-        attention_backend,
-        monkeypatch,
-    )
-
-
-@pytest.mark.parametrize("max_tokens", [16])
-@pytest.mark.parametrize("enforce_eager", [False])
-@pytest.mark.parametrize("chunk_size", [30, 32])
-@pytest.mark.parametrize("dtype", ["bfloat16", "half"])
-@pytest.mark.cpu_model
-@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
-def test_with_prefix_caching_cpu(
-    vllm_runner: VllmRunner,
-    max_tokens: int,
-    enforce_eager: bool,
-    chunk_size: int,
-    dtype: str,
-) -> None:
-    test_with_prefix_caching(
-        vllm_runner,
-        max_tokens,
-        enforce_eager,
-        chunk_size,
-        1,
-        dtype,
     )
