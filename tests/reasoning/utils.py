@@ -66,7 +66,8 @@ def run_reasoning_extraction_nonstreaming(
         assert isinstance(reasoning_parser.model_tokenizer, MistralTokenizer)
         str_output = reasoning_parser.model_tokenizer.convert_ids_to_tokens(
             model_output)
-    str_output = [str(o) for o in model_output]
+    else:
+        str_output = [str(o) for o in model_output]
     return reasoning_parser.extract_reasoning_content(
         model_output=''.join(str_output), request=request)
 
