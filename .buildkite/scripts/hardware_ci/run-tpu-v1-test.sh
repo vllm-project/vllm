@@ -62,7 +62,8 @@ echo "Results will be stored in: $RESULTS_DIR"
 echo "--- Installing Python dependencies ---"
 python3 -m pip install --progress-bar off git+https://github.com/thuml/depyf.git \
     && python3 -m pip install --progress-bar off pytest pytest-asyncio tpu-info \
-    && python3 -m pip install --progress-bar off lm_eval[api]==0.4.4
+    && python3 -m pip install --progress-bar off lm_eval[api]==0.4.4 \
+    && python3 -m pip install --progress-bar off hf-transfer
 echo "--- Python dependencies installed ---"
 export VLLM_USE_V1=1
 export VLLM_XLA_CHECK_RECOMPILATION=1
@@ -150,7 +151,7 @@ run_and_track_test 9 "test_multimodal.py" \
 run_and_track_test 10 "test_pallas.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_pallas.py"
 run_and_track_test 11 "test_struct_output_generate.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py -k \"not test_structured_output_with_reasoning_matrices\""
+    "HF_HUB_DISABLE_XET=1 python3 -m pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py -k \"not test_structured_output_with_reasoning_matrices\""
 run_and_track_test 12 "test_moe_pallas.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_moe_pallas.py"
 run_and_track_test 13 "test_lora.py" \
