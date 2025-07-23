@@ -2823,8 +2823,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                     if kv_cache_spec.mamba_type == "mamba1":
                         state_tensors = self._create_mamba1_state_tensors(
-                            raw_tensor, dtype, kv_cache_spec.shapes, storage_offset
-                        )
+                            raw_tensor, dtype, kv_cache_spec.shapes,
+                            storage_offset)
                         state_tensors.extend(state_tensors)
                     else:
                         # Handle other mamba types
@@ -2850,7 +2850,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                        kv_cache_raw_tensors)
 
         return kv_caches
-
 
     def _verify_hybrid_attention_mamba_layout(
             self, kv_cache_config: KVCacheConfig,
@@ -3087,16 +3086,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
 
     def _create_mamba1_state_tensors(
-        self,
-        raw_tensor: torch.Tensor,
-        dtype: torch.dtype,
-        shapes: tuple,
-        storage_offset: int
-    ) -> list[torch.Tensor]:
+            self, raw_tensor: torch.Tensor, dtype: torch.dtype, shapes: tuple,
+            storage_offset: int) -> list[torch.Tensor]:
         conv_state_shape, temporal_state_shape = shapes
         num_sequences = len(self.seq_lens)
 
-        conv_target_shape = (num_sequences, conv_state_shape[1], conv_state_shape[0])
+        conv_target_shape = (num_sequences, conv_state_shape[1],
+                             conv_state_shape[0])
         conv_stride = torch.empty(conv_target_shape).stride()
         conv_state = torch.as_strided(
             raw_tensor.view(dtype),
@@ -3105,10 +3101,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             storage_offset=storage_offset,
         ).transpose(-1, -2)
 
-        conv_elements = conv_target_shape[0] * conv_target_shape[1] * conv_target_shape[2]
+        conv_elements = conv_target_shape[0] * conv_target_shape[
+            1] * conv_target_shape[2]
         storage_offset += conv_elements
 
-        temporal_target_shape = (num_sequences, temporal_state_shape[0], temporal_state_shape[1])
+        temporal_target_shape = (num_sequences, temporal_state_shape[0],
+                                 temporal_state_shape[1])
         temporal_stride = torch.empty(temporal_target_shape).stride()
         temporal_state = torch.as_strided(
             raw_tensor.view(dtype),

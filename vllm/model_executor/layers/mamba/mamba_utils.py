@@ -14,7 +14,7 @@ class MambaStateShapeCalculator:
         conv_kernel: int,
     ) -> tuple[tuple[int, int], tuple[int, int]]:
         conv_state_shape = (divide(intermediate_size,
-                                    tp_world_size), conv_kernel - 1)
+                                   tp_world_size), conv_kernel - 1)
 
         temporal_state_shape = (divide(intermediate_size,
                                        tp_world_size), state_size)
