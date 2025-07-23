@@ -18,9 +18,7 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
-__all__ = [
-    "QuarkMoEMethod", "QuarkW8A8Fp8MoEMethod", "QuarkOCP_MX_MoEMethod"
-]
+__all__ = ["QuarkMoEMethod", "QuarkW8A8Fp8MoEMethod", "QuarkOCP_MX_MoEMethod"]
 
 
 class QuarkMoEMethod(FusedMoEMethodBase):
@@ -272,7 +270,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         self.weight_dtype = self.weight_quant["dtype"]
         self.input_dtype = self.input_quant["dtype"]
 
-        self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(self.input_dtype, self.weight_dtype)
+        self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
+            self.input_dtype, self.weight_dtype)
 
         if self.static_input_scales:
             raise NotImplementedError(
@@ -329,7 +328,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         w2_weight = torch.nn.Parameter(torch.empty(
             num_experts,
             hidden_size,
-            self.get_packed_dim(intermediate_size_per_partition, self.weight_dtype),
+            self.get_packed_dim(intermediate_size_per_partition,
+                                self.weight_dtype),
             dtype=params_dtype),
                                        requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)

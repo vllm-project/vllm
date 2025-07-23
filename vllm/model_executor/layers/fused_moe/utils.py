@@ -172,10 +172,12 @@ def _mxfp4_quantize(
     if not current_platform.supports_mx():
         A = quant_dequant_mxfp4(A)
     else:
-        # TODO: native mxfp4 is currently not integrated in vllm, so simulating even on devices supporting this data type natively.
+        # TODO: native mxfp4 is currently not integrated in vllm,
+        # so simulating even on devices supporting this data type natively.
         A = quant_dequant_mxfp4(A)
 
     return A, None
+
 
 def _mxfp6_quantize(
     A: torch.Tensor,
@@ -188,7 +190,8 @@ def _mxfp6_quantize(
     if not current_platform.supports_mx():
         A = quant_dequant_mxfp6(A, quant_dtype=quant_dtype)
     else:
-        # TODO: native mxfp6 is currently not integrated in vllm, so simulating even on devices supporting this data type natively.
+        # TODO: native mxfp6 is currently not integrated in vllm,
+        # so simulating even on devices supporting this data type natively.
         A = quant_dequant_mxfp6(A, quant_dtype=quant_dtype)
 
     return A, None
@@ -213,7 +216,8 @@ def moe_kernel_quantize_input(
     elif quant_dtype == "fp4":
         return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype in ["fp6_e3m2", "fp6_e2m3"]:
-        return _mxfp6_quantize(A, quant_dtype, A_scale, per_act_token_quant, block_shape)
+        return _mxfp6_quantize(A, quant_dtype, A_scale, per_act_token_quant,
+                               block_shape)
     else:
         return A, A_scale
 

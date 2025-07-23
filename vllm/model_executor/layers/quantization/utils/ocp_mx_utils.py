@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import torch
-
 from enum import Enum
+
+import torch
 
 from vllm.utils import direct_register_custom_op
 
 OCP_MX_BLOCK_SIZE = 32
+
 
 class OCP_MX_Scheme(str, Enum):
     w_fp4_a_fp4 = "w_fp4_a_fp4"
@@ -28,12 +29,16 @@ class OCP_MX_Scheme(str, Enum):
         elif input_dtype == "fp6_e2m3" and weight_dtype == "fp6_e2m3":
             return cls.w_fp6_e2m3_a_fp6_e2m3
         else:
-            raise NotImplementedError(f"input_dtype='{input_dtype}' and weight_dtype='{weight_dtype}' is not supported.")
+            raise NotImplementedError(
+                f"input_dtype='{input_dtype}' and"
+                f" weight_dtype='{weight_dtype}' is not supported.")
 
-def _quant_dequant_mxfp6(x: torch.Tensor,
-                         quant_dtype: str,
-                         scale_calculation_mode: str = "even",
-                         ) -> torch.Tensor:
+
+def _quant_dequant_mxfp6(
+    x: torch.Tensor,
+    quant_dtype: str,
+    scale_calculation_mode: str = "even",
+) -> torch.Tensor:
     try:
         from quark.torch.kernel.hw_emulation.hw_emulation_interface import (
             fake_quantize_fp4_fp6_per_group_with_scale)
@@ -68,39 +73,49 @@ def _quant_dequant_mxfp6(x: torch.Tensor,
 
     return x
 
-def _quant_dequant_mxfp6_fake(x: torch.Tensor,
-                         quant_dtype: str,
-                         scale_calculation_mode: str = "even",
-                         ) -> torch.Tensor:
+
+def _quant_dequant_mxfp6_fake(
+    x: torch.Tensor,
+    quant_dtype: str,
+    scale_calculation_mode: str = "even",
+) -> torch.Tensor:
     return torch.empty_like(x)
 
-def _dequant_mxfp6(x: torch.Tensor, scale: torch.Tensor, float_dtype: torch.dtype, quant_dtype: str) -> torch.Tensor:
+
+def _dequant_mxfp6(x: torch.Tensor, scale: torch.Tensor,
+                   float_dtype: torch.dtype, quant_dtype: str) -> torch.Tensor:
     try:
         from quark.torch.kernel.hw_emulation.hw_emulation_interface import (
             dequantize_fp4_fp6_per_group)
         from quark.torch.utils.pack import create_pack_method
     except ImportError as e:
         raise ImportError("The package `amd-quark` is required to use "
-                        "MX-FP6 models. Please install it with `pip install "
-                        "amd-quark`.") from e
+                          "MX-FP6 models. Please install it with `pip install "
+                          "amd-quark`.") from e
 
     pack_method = create_pack_method(None, dtype=quant_dtype)
     unpacked_x = pack_method.unpack(x, reorder=False)
 
     scale = 2**(scale.view(torch.uint8).to(torch.int16) - 127).to(float_dtype)
 
-    # TODO: `dequantize_fp4_fp6_per_group` and `prepare_inputs_per_group` always return fp32.
-    return dequantize_fp4_fp6_per_group(unpacked_x,
-                                        scale,
-                                        axis=-1,
-                                        group_size=OCP_MX_BLOCK_SIZE,
-                                        quant_dtype=quant_dtype).to(float_dtype)
+    # TODO: `dequantize_fp4_fp6_per_group` and `prepare_inputs_per_group`
+    # always return fp32.
+    return dequantize_fp4_fp6_per_group(
+        unpacked_x,
+        scale,
+        axis=-1,
+        group_size=OCP_MX_BLOCK_SIZE,
+        quant_dtype=quant_dtype).to(float_dtype)
 
-def _dequant_mxfp6_fake(x: torch.Tensor, scale: torch.Tensor, float_dtype: torch.dtype, quant_dtype: str) -> torch.Tensor:
+
+def _dequant_mxfp6_fake(x: torch.Tensor, scale: torch.Tensor,
+                        float_dtype: torch.dtype,
+                        quant_dtype: str) -> torch.Tensor:
     assert (x.shape[-1] * 4) % 3 == 0
     return torch.empty((*x.shape[:-1], (x.shape[-1] * 4) // 3),
                        dtype=float_dtype,
                        device=x.device)
+
 
 def _dequant_mxfp4(x: torch.Tensor, scale: torch.Tensor,
                    float_dtype: torch.dtype) -> torch.Tensor:
@@ -138,10 +153,15 @@ def _quant_dequant_mxfp4_fake(x: torch.Tensor,
                               ) -> torch.Tensor:
     return torch.empty_like(x)
 
+
 # Protect these operations into a torch custom op to avoid errors as
 # torch._dynamo.exc.Unsupported: Attempted to call function marked as skipped
-# Explanation: Dynamo does not know how to trace the builtin `kernel_ext.PyCapsule.dq_uint8_mxfp4_to_half.` This function is either a Python builtin (e.g. _warnings.warn) or a third-party C/C++ Python extension (perhaps created with pybind).
-# TODO: Make sure there is no way to avoid having these functions marked as skipped by dynamo.
+# Explanation: Dynamo does not know how to trace the builtin
+# `kernel_ext.PyCapsule.dq_uint8_mxfp4_to_half.` This function is either a
+# Python builtin (e.g. _warnings.warn) or a third-party C/C++ Python
+# extension (perhaps created with pybind).
+# TODO: Make sure there is no way to avoid having these functions
+# marked as skipped by dynamo.
 try:
     direct_register_custom_op(
         op_name="dequant_mxfp4",
@@ -174,12 +194,16 @@ try:
 except AttributeError as error:
     raise error
 
+
 # Expose keyword arguments.
-def quant_dequant_mxfp6(x: torch.Tensor,
-                        quant_dtype: str,
-                        scale_calculation_mode: str = "even",
-                        ) -> torch.Tensor:
-    return torch.ops.vllm.quant_dequant_mxfp6(x, quant_dtype, scale_calculation_mode)
+def quant_dequant_mxfp6(
+    x: torch.Tensor,
+    quant_dtype: str,
+    scale_calculation_mode: str = "even",
+) -> torch.Tensor:
+    return torch.ops.vllm.quant_dequant_mxfp6(x, quant_dtype,
+                                              scale_calculation_mode)
+
 
 try:
     direct_register_custom_op(
@@ -191,5 +215,7 @@ try:
 except AttributeError as error:
     raise error
 
-def dequant_mxfp6(x: torch.Tensor, scale: torch.Tensor, float_dtype: torch.dtype, quant_dtype: str) -> torch.Tensor:
+
+def dequant_mxfp6(x: torch.Tensor, scale: torch.Tensor,
+                  float_dtype: torch.dtype, quant_dtype: str) -> torch.Tensor:
     return torch.ops.vllm.dequant_mxfp6(x, scale, float_dtype, quant_dtype)

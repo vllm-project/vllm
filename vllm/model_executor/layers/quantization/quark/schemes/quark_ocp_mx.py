@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from functools import partial
 from typing import Any, Callable, Optional
 
 import torch
@@ -8,11 +9,12 @@ import torch.nn.functional as F
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
-from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_BLOCK_SIZE, quant_dequant_mxfp6, quant_dequant_mxfp4, dequant_mxfp4, OCP_MX_Scheme, dequant_mxfp6
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    OCP_MX_BLOCK_SIZE, OCP_MX_Scheme, dequant_mxfp4, dequant_mxfp6,
+    quant_dequant_mxfp4, quant_dequant_mxfp6)
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
 from vllm.platforms import current_platform
-from functools import partial
 
 logger = init_logger(__name__)
 
@@ -31,19 +33,22 @@ class QuarkOCP_MX(QuarkScheme):
         self.weight_dtype = weight_quant_spec["dtype"]
         self.input_dtype = input_quant_spec["dtype"]
 
-        self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(self.input_dtype, self.weight_dtype)
+        self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
+            self.input_dtype, self.weight_dtype)
 
         if self.weight_dtype == "fp4":
             self.packed_factor = 2
             self.dequant_func = dequant_mxfp4
         else:
-            self.packed_factor = 8/6
-            self.dequant_func = partial(dequant_mxfp6, quant_dtype=self.weight_dtype)
+            self.packed_factor = 8 / 6
+            self.dequant_func = partial(dequant_mxfp6,
+                                        quant_dtype=self.weight_dtype)
 
         if self.input_dtype == "fp4":
             self.quant_dequant_func = quant_dequant_mxfp4
         else:
-            self.quant_dequant_func = partial(quant_dequant_mxfp6, quant_dtype=self.input_dtype)
+            self.quant_dequant_func = partial(quant_dequant_mxfp6,
+                                              quant_dtype=self.input_dtype)
 
         self.static_input_scales = not input_quant_spec.get("is_dynamic")
 
@@ -93,7 +98,8 @@ class QuarkOCP_MX(QuarkScheme):
         weight = PackedvLLMParameter(
             data=torch.empty(
                 output_size_per_partition,
-                self.get_packed_dim(input_size_per_partition, self.weight_dtype),
+                self.get_packed_dim(input_size_per_partition,
+                                    self.weight_dtype),
                 dtype=torch.uint8,
             ),
             input_dim=1,
@@ -119,7 +125,7 @@ class QuarkOCP_MX(QuarkScheme):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = torch.nn.Parameter(layer.weight.data,
-                                        requires_grad=False)
+                                          requires_grad=False)
         layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
                                                 requires_grad=False)
 

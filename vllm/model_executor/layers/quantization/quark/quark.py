@@ -17,7 +17,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
     QuarkMoEMethod)
 from vllm.model_executor.layers.quantization.quark.schemes import (
-    QuarkScheme, QuarkOCP_MX, QuarkW8A8Fp8, QuarkW8A8Int8)
+    QuarkOCP_MX, QuarkScheme, QuarkW8A8Fp8, QuarkW8A8Int8)
 from vllm.model_executor.layers.quantization.quark.utils import (
     deep_compare, should_ignore_layer)
 from vllm.platforms import current_platform
@@ -239,10 +239,13 @@ class QuarkConfig(QuantizationConfig):
             return False
 
         # Input and weight dtype needs to be fp4.
-        if weight_quant.get("dtype") not in ["fp4", "fp6_e3m2", "fp6_e2m3"] or input_quant.get("dtype") not in ["fp4", "fp6_e3m2", "fp6_e2m3"]:
-            logger.debug("Quark model is not in OCP MX format: dtype not fp4, fp6_e3m2, fp6_e2m3")
+        if weight_quant.get("dtype") not in [
+                "fp4", "fp6_e3m2", "fp6_e2m3"
+        ] or input_quant.get("dtype") not in ["fp4", "fp6_e3m2", "fp6_e2m3"]:
+            logger.debug("Quark model is not in OCP MX format:"
+                         " dtype not fp4, fp6_e3m2, fp6_e2m3")
             return False
-                
+
         return True
 
     def _find_matched_config(self, layer_name: str,

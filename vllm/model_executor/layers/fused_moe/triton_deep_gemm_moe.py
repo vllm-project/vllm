@@ -10,8 +10,10 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     DeepGemmExperts, _valid_deep_gemm, _valid_deep_gemm_shape,
     deep_gemm_block_shape)
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    OCP_MX_Scheme)
 from vllm.utils.deep_gemm import is_blackwell_deep_gemm_used
-from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
+
 
 class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 

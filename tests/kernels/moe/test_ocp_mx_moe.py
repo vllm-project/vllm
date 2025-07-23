@@ -41,7 +41,8 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
                      cuda_graph_sizes=[16]) as llm:
 
         # TODO: llm.apply_model(check_model) currently relies on V0 internals.
-        # Re-enable once https://github.com/vllm-project/vllm/pull/18465 is merged.
+        # Re-enable once https://github.com/vllm-project/vllm/pull/18465
+        # is merged.
         # def check_model(model):
         #     layer = model.model.layers[0]
 

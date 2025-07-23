@@ -14,10 +14,12 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input, normalize_batched_scales_shape,
     normalize_scales_shape)
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    OCP_MX_Scheme)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     group_broadcast)
 from vllm.triton_utils import tl, triton
-from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
+
 
 @triton.jit
 def moe_mmk(
@@ -932,11 +934,12 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert w1.size(0) == E
         assert w2.size(0) == E
 
-        config_dtype = get_config_dtype_str(use_fp8_w8a8=self.use_fp8_w8a8,
-                                            use_int8_w8a16=self.use_int8_w8a16,
-                                            use_int4_w4a16=self.use_int4_w4a16,
-                                            ocp_mx_scheme=self.ocp_mx_scheme.value,
-                                            dtype=hidden_states.dtype)
+        config_dtype = get_config_dtype_str(
+            use_fp8_w8a8=self.use_fp8_w8a8,
+            use_int8_w8a16=self.use_int8_w8a16,
+            use_int4_w4a16=self.use_int4_w4a16,
+            ocp_mx_scheme=self.ocp_mx_scheme.value,
+            dtype=hidden_states.dtype)
 
         config = try_get_optimal_moe_config(
             w1.size(),

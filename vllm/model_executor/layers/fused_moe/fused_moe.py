@@ -30,7 +30,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache, moe_kernel_quantize_input, per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
-    dequant_mxfp4, OCP_MX_Scheme, dequant_mxfp6)
+    OCP_MX_Scheme, dequant_mxfp4, dequant_mxfp6)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
@@ -975,11 +975,12 @@ def grouped_topk(
 
 
 def get_config_dtype_str(
-        dtype: torch.dtype,
-        use_int4_w4a16: Optional[bool] = False,
-        use_int8_w8a16: Optional[bool] = False,
-        use_fp8_w8a8: Optional[bool] = False,
-        ocp_mx_scheme: Optional[str] = None,) -> Optional[str]:
+    dtype: torch.dtype,
+    use_int4_w4a16: Optional[bool] = False,
+    use_int8_w8a16: Optional[bool] = False,
+    use_fp8_w8a8: Optional[bool] = False,
+    ocp_mx_scheme: Optional[str] = None,
+) -> Optional[str]:
     if use_fp8_w8a8:
         return "fp8_w8a8"
     elif use_int8_w8a16:
@@ -1188,10 +1189,10 @@ def outplace_fused_experts(
     return fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids,
                               False, activation, apply_router_weight_on_input,
                               use_fp8_w8a8, use_int8_w8a8, use_int8_w8a16,
-                              use_int4_w4a16, ocp_mx_scheme,
-                              per_channel_quant, global_num_experts,
-                              expert_map, w1_scale, w2_scale, w1_zp, w2_zp,
-                              a1_scale, a2_scale, block_shape)
+                              use_int4_w4a16, ocp_mx_scheme, per_channel_quant,
+                              global_num_experts, expert_map, w1_scale,
+                              w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
+                              block_shape)
 
 
 def outplace_fused_experts_fake(
@@ -1369,11 +1370,17 @@ def fused_experts_impl(
         assert hidden_states.size(1) // 2 == w1.size(2), (
             "Hidden size mismatch")
     elif ocp_mx_scheme is not None:
-        if ocp_mx_scheme in {"w_fp4_a_fp4", "w_fp4_a_fp6_e3m2", "w_fp4_a_fp6_e2m3"}:
+        if ocp_mx_scheme in {
+                "w_fp4_a_fp4", "w_fp4_a_fp6_e3m2", "w_fp4_a_fp6_e2m3"
+        }:
             # 16bit activation and fp4x2 packed weight
-            assert hidden_states.size(1) == w1.size(2) * 2, "hidden size mismatch"
-        elif ocp_mx_scheme in {"w_fp6_e3m2_a_fp6_e3m2", "w_fp6_e2m3_a_fp6_e2m3"}:
-            assert hidden_states.size(1) == (w1.size(2) * 4) // 3, "hidden size mismatch"
+            assert hidden_states.size(
+                1) == w1.size(2) * 2, "hidden size mismatch"
+        elif ocp_mx_scheme in {
+                "w_fp6_e3m2_a_fp6_e3m2", "w_fp6_e2m3_a_fp6_e2m3"
+        }:
+            assert hidden_states.size(1) == (w1.size(2) *
+                                             4) // 3, "hidden size mismatch"
     else:
         assert hidden_states.size(1) == w1.size(2), (
             f"Hidden size mismatch {hidden_states.size(1)} != {w1.size(2)}")
@@ -1450,21 +1457,36 @@ def fused_experts_impl(
         # TODO: On platforms for which `current_platform.supports_mx()` is True
         # and for which we have a native OCP mx fused MOE kernel,
         # this dequantization step should not be done.
-        if ocp_mx_scheme in {OCP_MX_Scheme.w_fp4_a_fp4, OCP_MX_Scheme.w_fp4_a_fp6_e3m2, OCP_MX_Scheme.w_fp4_a_fp6_e2m3}:
+        if ocp_mx_scheme in {
+                OCP_MX_Scheme.w_fp4_a_fp4, OCP_MX_Scheme.w_fp4_a_fp6_e3m2,
+                OCP_MX_Scheme.w_fp4_a_fp6_e2m3
+        }:
             # Weight has to be dequantized for mxfp4 emulation.
             w1 = dequant_mxfp4(w1, w1_scale, hidden_states.dtype)
             w1_scale = None
             w2 = dequant_mxfp4(w2, w2_scale, hidden_states.dtype)
             w2_scale = None
         elif ocp_mx_scheme == OCP_MX_Scheme.w_fp6_e3m2_a_fp6_e3m2:
-            w1 = dequant_mxfp6(w1, w1_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype)
+            w1 = dequant_mxfp6(w1,
+                               w1_scale,
+                               quant_dtype="fp6_e3m2",
+                               float_dtype=hidden_states.dtype)
             w1_scale = None
-            w2 = dequant_mxfp6(w2, w2_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype)
+            w2 = dequant_mxfp6(w2,
+                               w2_scale,
+                               quant_dtype="fp6_e3m2",
+                               float_dtype=hidden_states.dtype)
             w2_scale = None
         elif ocp_mx_scheme == OCP_MX_Scheme.w_fp6_e2m3_a_fp6_e2m3:
-            w1 = dequant_mxfp6(w1, w1_scale, quant_dtype="fp6_e2m3", float_dtype=hidden_states.dtype)
+            w1 = dequant_mxfp6(w1,
+                               w1_scale,
+                               quant_dtype="fp6_e2m3",
+                               float_dtype=hidden_states.dtype)
             w1_scale = None
-            w2 = dequant_mxfp6(w2, w2_scale, quant_dtype="fp6_e2m3", float_dtype=hidden_states.dtype)
+            w2 = dequant_mxfp6(w2,
+                               w2_scale,
+                               quant_dtype="fp6_e2m3",
+                               float_dtype=hidden_states.dtype)
             w2_scale = None
 
     for chunk in range((num_tokens // CHUNK_SIZE) + 1):
@@ -1624,7 +1646,9 @@ def fused_moe(
     - use_int4_w4a16 (bool): If True, use matmul of int4 weight and bf16/fp16
         activation to compute the inner products for w1 and w2.
         Defaults to False.
-    - ocp_mx_scheme (Optional[OCP_MX_Scheme]): If provided, use matmul of the corresponding OCP MX weights/activations to compute the inner products for w1 and w2. Defaults to None.
+    - ocp_mx_scheme (Optional[OCP_MX_Scheme]): If provided, use matmul of the
+        corresponding OCP MX weights/activations to compute the inner products
+        for w1 and w2. Defaults to None.
     - global_num_experts (int): The total number of experts in the global
         expert space.
     - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices 
