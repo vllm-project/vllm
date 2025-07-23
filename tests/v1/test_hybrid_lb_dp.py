@@ -171,9 +171,10 @@ async def clients(servers: list[tuple[RemoteOpenAIServer, list[str]]]):
     "model_name",
     [MODEL_NAME],
 )
-async def test_hybrid_lb_single_completion(clients: list[
-    openai.AsyncOpenAI], servers: list[tuple[RemoteOpenAIServer, list[str]]],
-                                           model_name: str) -> None:
+async def test_hybrid_lb_completion(clients: list[openai.AsyncOpenAI],
+                                    servers: list[tuple[RemoteOpenAIServer,
+                                                        list[str]]],
+                                    model_name: str) -> None:
 
     async def make_request(client: openai.AsyncOpenAI):
         completion = await client.completions.create(
