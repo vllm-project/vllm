@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # imports for guided decoding tests
 import json
+import os
 import shutil
 from tempfile import TemporaryDirectory
 from typing import Optional
@@ -79,8 +80,19 @@ def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files):
 def server(default_server_args, request):
     if request.param:
         default_server_args.append(request.param)
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
-        yield remote_server
+
+    original_value = os.environ.get('VLLM_USE_V1')
+    os.environ['VLLM_USE_V1'] = '0'
+    try:
+        with RemoteOpenAIServer(MODEL_NAME,
+                                default_server_args) as remote_server:
+            yield remote_server
+    finally:
+        # Restore original env value
+        if original_value is None:
+            os.environ.pop('VLLM_USE_V1', None)
+        else:
+            os.environ['VLLM_USE_V1'] = original_value
 
 
 @pytest_asyncio.fixture
