@@ -4996,7 +4996,7 @@ def get_layers_from_vllm_config(
     """
 
     if layer_names is None:
-        layer_names = (
+        layer_names = list(
             vllm_config.compilation_config.static_forward_context.keys())
 
     forward_context = vllm_config.compilation_config.static_forward_context
