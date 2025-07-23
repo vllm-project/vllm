@@ -410,6 +410,11 @@ class Llama4Model(LlamaModel):
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
+        expert_scale_params_mapping = [
+            ("w13_", 0, 'w1'),
+            ("w13_", 0, 'w3'),
+            ("w2_",  0, 'w2')
+        ]
         fused_experts_params = False
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
@@ -491,14 +496,6 @@ class Llama4Model(LlamaModel):
                                                'supports_moe_loading', False)
 
                         if supports_moe:
-                            # w13_weight_scale
-                            # This is a MoE weight loader
-                            # weight_name, expert_id, shard_id
-                            expert_scale_params_mapping = [
-                                ("w13_", 0, 'w1'),
-                                ("w13_", 0, 'w3'),
-                                ("w2_",  0, 'w2')
-                            ]
                             if loaded_weight.dtype == torch.uint8 or loaded_weight.dtype == torch.float8_e4m3fn:
                                 loaded_weight = loaded_weight.transpose(-1, -2)
                                 param.data.fill_(0)
@@ -582,15 +579,18 @@ class Llama4ForCausalLM(LlamaForCausalLM):
             )
 
         modules = name.split(".")
-
-
+        is_nvfp4_weights = (
+            (modules[-1] == "weight_scale" and loaded_weight.dtype == torch.float8_e4m3fn) or \
+                (modules[-1] == "weight" and loaded_weight.dtype == torch.uint8)
+        )
+        # rotary embeds should be sliced
         if ("wk" in modules or "k_proj" in modules) \
-           and (modules[-1] == "weight" or modules[-1] == "weight_scale"):
-            loaded_weight = permute(loaded_weight,
+           and (modules[-1] == "weight" or is_nvfp4_weights):
+               loaded_weight = permute(loaded_weight,
                                     self.config.num_key_value_heads)
         elif ("wq" in modules or "q_proj" in modules) \
-           and (modules[-1] == "weight" or modules[-1] == "weight_scale"):
-            loaded_weight = permute(loaded_weight,
+           and (modules[-1] == "weight" or is_nvfp4_weights):
+               loaded_weight = permute(loaded_weight,
                                     self.config.num_attention_heads)
 
         return name, loaded_weight
