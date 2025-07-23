@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import numpy as np
+from typing import Any, Optional
+
 import torch
 import torch.nn as nn
 
@@ -75,6 +77,7 @@ class EagleProposer:
                                    1,
                                    device=device,
                                    dtype=torch.int32)
+        self.draft_attn_metadata = None
 
     def propose(
         self,
@@ -128,6 +131,13 @@ class EagleProposer:
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
+
+        # copy attention metadata for full cudagraph mode
+        if self.draft_attn_metadata is not None and num_tokens <= self.cudagraph_batch_sizes[-1]:
+            self.draft_attn_metadata.seq_lens[:attn_metadata.seq_lens.shape[0]].copy_(attn_metadata.seq_lens.clone())
+            self.draft_attn_metadata.slot_mapping[:attn_metadata.slot_mapping.shape[0]].copy_(attn_metadata.slot_mapping.clone())
+            self.draft_attn_metadata.query_start_loc[:attn_metadata.query_start_loc.shape[0]].copy_(attn_metadata.query_start_loc.clone())
+            self.draft_attn_metadata.block_table[:attn_metadata.block_table.shape[0]].copy_(attn_metadata.block_table.clone())
 
         with set_forward_context(per_layer_attn_metadata,
                                  self.vllm_config,
@@ -218,6 +228,13 @@ class EagleProposer:
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states
+
+            # copy attention metadata for full cudagraph mode
+            if self.draft_attn_metadata is not None:
+                self.draft_attn_metadata.seq_lens[:attn_metadata.seq_lens.shape[0]].copy_(attn_metadata.seq_lens.clone())
+                self.draft_attn_metadata.slot_mapping[:attn_metadata.slot_mapping.shape[0]].copy_(attn_metadata.slot_mapping.clone())
+                self.draft_attn_metadata.query_start_loc[:attn_metadata.query_start_loc.shape[0]].copy_(attn_metadata.query_start_loc.clone())
+                self.draft_attn_metadata.block_table[:attn_metadata.block_table.shape[0]].copy_(attn_metadata.block_table.clone())
 
             # Run the model.
             with set_forward_context(per_layer_attn_metadata,
@@ -387,8 +404,13 @@ class EagleProposer:
     def dummy_run(
         self,
         num_tokens: int,
+        attn_metadata: Optional[dict[str, Any]],
     ) -> None:
-        with set_forward_context(None, self.vllm_config,
+        if attn_metadata is not None and self.draft_attn_metadata is None:
+            attn_metadata[self.attn_layer_names[0]].scheduler_metadata = None
+            self.draft_attn_metadata = attn_metadata[self.attn_layer_names[0]] # assume only one draft layer
+        with set_forward_context(attn_metadata,
+                                 self.vllm_config,
                                  num_tokens=num_tokens):
             self.model(
                 self.input_ids[:num_tokens],
