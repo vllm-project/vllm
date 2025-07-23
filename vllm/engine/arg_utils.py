@@ -1098,8 +1098,7 @@ class EngineArgs:
             data_parallel_size_local = 1
             # Use full external lb if we have local_size of 1.
             self.data_parallel_hybrid_lb = False
-        elif self.data_parallel_size_local is not None and (
-                self.data_parallel_size_local != self.data_parallel_size):
+        elif self.data_parallel_size_local is not None:
             data_parallel_size_local = self.data_parallel_size_local
 
             if self.data_parallel_start_rank and not headless:
@@ -1109,6 +1108,10 @@ class EngineArgs:
             if self.data_parallel_hybrid_lb and data_parallel_size_local == 1:
                 # Use full external lb if we have local_size of 1.
                 data_parallel_external_lb = True
+                self.data_parallel_hybrid_lb = False
+
+            if data_parallel_size_local == self.data_parallel_size:
+                # Disable hybrid LB mode if set for a single node
                 self.data_parallel_hybrid_lb = False
 
             self.data_parallel_rank = self.data_parallel_start_rank or 0
