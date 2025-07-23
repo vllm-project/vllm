@@ -277,6 +277,8 @@ _SUBPROCESS_COMMAND = [
     sys.executable, "-m", "vllm.model_executor.models.registry"
 ]
 
+_PREVIOUSLY_SUPPORTED_MODELS = {"Phi3SmallForCausalLM": "0.9.2"}
+
 
 @dataclass(frozen=True)
 class _ModelInfo:
