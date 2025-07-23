@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
@@ -35,6 +37,7 @@ def parse_args():
     parser.add_argument("--output-len", type=int, default=256)
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
+    parser.add_argument("--compilation-config", type=str, default="")
     return parser.parse_args()
 
 
@@ -85,6 +88,9 @@ def main():
         speculative_config=speculative_config,
         disable_log_stats=False,
         max_model_len=16384,
+        compilation_config=(
+            json.loads(args.compilation_config) if args.compilation_config else None
+        ),
     )
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)

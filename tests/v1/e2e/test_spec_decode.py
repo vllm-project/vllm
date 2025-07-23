@@ -114,11 +114,13 @@ def test_ngram_correctness(
         marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
 ],
                          ids=["llama3_eagle", "llama3_eagle3", "llama4_eagle"])
+@pytest.mark.parametrize("full_cuda_graph", [True, False])
 def test_eagle_correctness(
     monkeypatch: pytest.MonkeyPatch,
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
     model_setup: tuple[str, str, str, int],
+    full_cuda_graph: bool,
 ):
     '''
     Compare the outputs of a original LLM and a speculative LLM
@@ -148,6 +150,9 @@ def test_eagle_correctness(
                 "max_model_len": 2048,
             },
             max_model_len=2048,
+            compilation_config={
+                "full_cuda_graph": full_cuda_graph
+            },
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0

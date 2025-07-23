@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import numpy as np
 from typing import Any, Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -59,7 +59,6 @@ class EagleProposer:
         self.cudagraph_batch_sizes = list(
             reversed(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
-
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int32,
@@ -71,13 +70,14 @@ class EagleProposer:
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
             device=device)
+        # attention metadata captured in full cudagraph mode
+        self.attn_metadata_cudagraph = None
         # We need +1 here because the arange is used to set query_start_loc,
         # which has one more element than batch_size.
         self.arange = torch.arange(vllm_config.scheduler_config.max_num_seqs +
                                    1,
                                    device=device,
                                    dtype=torch.int32)
-        self.draft_attn_metadata = None
 
     def propose(
         self,
@@ -111,11 +111,14 @@ class EagleProposer:
 
         assert self.runner is not None
 
+        use_attn_cudagraph = self.vllm_config.compilation_config.full_cuda_graph
+
         # FIXME: need to consider multiple kv_cache_groups
         attn_metadata = self.runner.attn_metadata_builders[0].build(
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
-            fast_build=True,
+            fast_build=
+            not use_attn_cudagraph,  # use fast build with eager mode attention
         )
 
         # At this moment, we assume all eagle layers belong to the same KV
@@ -131,14 +134,16 @@ class EagleProposer:
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
-
-        # copy attention metadata for full cudagraph mode
-        if self.draft_attn_metadata is not None and num_tokens <= self.cudagraph_batch_sizes[-1]:
-            self.draft_attn_metadata.seq_lens[:attn_metadata.seq_lens.shape[0]].copy_(attn_metadata.seq_lens.clone())
-            self.draft_attn_metadata.slot_mapping[:attn_metadata.slot_mapping.shape[0]].copy_(attn_metadata.slot_mapping.clone())
-            self.draft_attn_metadata.query_start_loc[:attn_metadata.query_start_loc.shape[0]].copy_(attn_metadata.query_start_loc.clone())
-            self.draft_attn_metadata.block_table[:attn_metadata.block_table.shape[0]].copy_(attn_metadata.block_table.clone())
-
+        if use_attn_cudagraph and num_tokens <= self.cudagraph_batch_sizes[-1]:
+            assert self.attn_metadata_cudagraph
+            self.attn_metadata_cudagraph.seq_lens[:batch_size] = (
+                attn_metadata.seq_lens)
+            self.attn_metadata_cudagraph.slot_mapping[:num_tokens] = (
+                attn_metadata.slot_mapping)
+            self.attn_metadata_cudagraph.query_start_loc[:batch_size + 1] = (
+                attn_metadata.query_start_loc)
+            self.attn_metadata_cudagraph.block_table[:batch_size] = (
+                attn_metadata.block_table)
         with set_forward_context(per_layer_attn_metadata,
                                  self.vllm_config,
                                  num_tokens=num_input_tokens):
@@ -228,13 +233,20 @@ class EagleProposer:
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states
-
-            # copy attention metadata for full cudagraph mode
-            if self.draft_attn_metadata is not None:
-                self.draft_attn_metadata.seq_lens[:attn_metadata.seq_lens.shape[0]].copy_(attn_metadata.seq_lens.clone())
-                self.draft_attn_metadata.slot_mapping[:attn_metadata.slot_mapping.shape[0]].copy_(attn_metadata.slot_mapping.clone())
-                self.draft_attn_metadata.query_start_loc[:attn_metadata.query_start_loc.shape[0]].copy_(attn_metadata.query_start_loc.clone())
-                self.draft_attn_metadata.block_table[:attn_metadata.block_table.shape[0]].copy_(attn_metadata.block_table.clone())
+            if use_attn_cudagraph and batch_size <= self.cudagraph_batch_sizes[
+                    -1]:
+                assert self.attn_metadata_cudagraph
+                self.attn_metadata_cudagraph.seq_lens[:batch_size] = (
+                    attn_metadata.seq_lens)
+                self.attn_metadata_cudagraph.slot_mapping[:batch_size] = (
+                    attn_metadata.slot_mapping)
+                self.attn_metadata_cudagraph.query_start_loc[:batch_size +
+                                                             1] = (
+                                                                 attn_metadata.
+                                                                 query_start_loc
+                                                             )
+                self.attn_metadata_cudagraph.block_table[:batch_size] = (
+                    attn_metadata.block_table)
 
             # Run the model.
             with set_forward_context(per_layer_attn_metadata,
@@ -404,11 +416,11 @@ class EagleProposer:
     def dummy_run(
         self,
         num_tokens: int,
-        attn_metadata: Optional[dict[str, Any]],
+        attn_metadata: Optional[dict[str, Any]] = None,
     ) -> None:
-        if attn_metadata is not None and self.draft_attn_metadata is None:
-            attn_metadata[self.attn_layer_names[0]].scheduler_metadata = None
-            self.draft_attn_metadata = attn_metadata[self.attn_layer_names[0]] # assume only one draft layer
+        if attn_metadata is not None and self.attn_metadata_cudagraph is None:
+            self.attn_metadata_cudagraph = attn_metadata[
+                self.attn_layer_names[0]]
         with set_forward_context(attn_metadata,
                                  self.vllm_config,
                                  num_tokens=num_tokens):
