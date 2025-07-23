@@ -14,8 +14,9 @@ from typing import Literal, NamedTuple, Optional
 
 import pytest
 
-from vllm.config import TaskOption
+from vllm.config import _FLOAT16_NOT_SUPPORTED_MODELS, TaskOption
 from vllm.logger import init_logger
+from vllm.transformers_utils.config import get_config
 
 from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import compare_two_settings, create_new_process_for_each_test
@@ -158,7 +159,7 @@ TEXT_GENERATION_MODELS = {
     "databricks/dbrx-instruct": PPTestSettings.fast(load_format="dummy"),
     "Deci/DeciLM-7B-instruct": PPTestSettings.fast(),
     "deepseek-ai/deepseek-llm-7b-chat": PPTestSettings.fast(),
-    "deepseek-ai/DeepSeek-V2-Lite-Chat": PPTestSettings.fast(),
+    "deepseek-ai/DeepSeek-V2-Lite-Chat": PPTestSettings.fast(tp_base=2),
     "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct": PPTestSettings.fast(),
     "tiiuae/falcon-7b": PPTestSettings.fast(),
     "google/gemma-1.1-2b-it": PPTestSettings.fast(),
@@ -176,7 +177,7 @@ TEXT_GENERATION_MODELS = {
     "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
     "meta-llama/Llama-3.2-1B-Instruct": PPTestSettings.detailed(),
     # Tests TransformersForCausalLM
-    "ArthurZ/Ilama-3.2-1B": PPTestSettings.fast(),
+    "hmellor/Ilama-3.2-1B": PPTestSettings.fast(),
     "openbmb/MiniCPM-2B-sft-bf16": PPTestSettings.fast(),
     "openbmb/MiniCPM3-4B": PPTestSettings.fast(),
     # Uses Llama
@@ -210,9 +211,11 @@ TEXT_GENERATION_MODELS = {
 
 EMBEDDING_MODELS = {  # type: ignore[var-annotated]
     # [Text-only]
-    "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(),
-    "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(),
-    "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(load_format="dummy"),
+    "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(task="embed"),
+    "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(task="embed"),
+    "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(
+        load_format="dummy", task="embed"
+    ),
 }
 
 MULTIMODAL_MODELS = {
@@ -246,8 +249,9 @@ TEST_MODELS = [
     # [LANGUAGE GENERATION]
     "microsoft/Phi-3.5-MoE-instruct",
     "meta-llama/Llama-3.2-1B-Instruct",
-    "ArthurZ/Ilama-3.2-1B",
+    "hmellor/Ilama-3.2-1B",
     "ibm/PowerLM-3b",
+    "deepseek-ai/DeepSeek-V2-Lite-Chat",
     # [LANGUAGE EMBEDDING]
     "intfloat/e5-mistral-7b-instruct",
     "BAAI/bge-multilingual-gemma2",
@@ -287,6 +291,11 @@ def _compare_tp(
     trust_remote_code = model_info.trust_remote_code
     tokenizer_mode = model_info.tokenizer_mode
     hf_overrides = model_info.hf_overrides
+    hf_config = get_config(model_id, trust_remote_code)
+
+    dtype = "float16"
+    if hf_config.model_type in _FLOAT16_NOT_SUPPORTED_MODELS:
+        dtype = "bfloat16"
 
     if load_format == "dummy":
         # Avoid OOM
@@ -316,7 +325,7 @@ def _compare_tp(
     common_args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
-        "float16",
+        dtype,
         "--max-model-len",
         "2048",
         "--max-num-seqs",
@@ -338,6 +347,7 @@ def _compare_tp(
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
 
     specific_case = tp_size == 2 and pp_size == 2 and chunked_prefill
+    testing_ray_compiled_graph = False
     if distributed_backend == "ray" and (vllm_major_version == "1"
                                          or specific_case):
         # For V1, test Ray Compiled Graph for all the tests
@@ -351,6 +361,7 @@ def _compare_tp(
         # Temporary. Currently when zeromq + SPMD is used, it does not properly
         # terminate because of a Ray Compiled Graph issue.
         common_args.append("--disable-frontend-multiprocessing")
+        testing_ray_compiled_graph = True
     elif distributed_backend == "mp":
         # Both V0/V1 of multiprocessing executor support PP
         pp_env = {
@@ -394,7 +405,6 @@ def _compare_tp(
                              tp_env,
                              method=method)
     except Exception:
-        testing_ray_compiled_graph = pp_env is not None
         if testing_ray_compiled_graph and vllm_major_version == "0":
             # Ray Compiled Graph tests are flaky for V0,
             # so we don't want to fail the test
