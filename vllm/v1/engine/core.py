@@ -6,6 +6,7 @@ import signal
 import sys
 import threading
 import time
+import setproctitle
 from collections import deque
 from collections.abc import Generator
 from concurrent.futures import Future
@@ -17,6 +18,7 @@ from typing import Any, Callable, Optional, TypeVar, Union
 import msgspec
 import zmq
 
+import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.executor.multiproc_worker_utils import _add_prefix
@@ -572,7 +574,8 @@ class EngineCoreProc(EngineCore):
                         local_dp_rank: int = 0,
                         **kwargs):
         """Launch EngineCore busy loop in background process."""
-
+        setproctitle.setproctitle(
+            f"{envs.VLLM_PROCESS_NAME_PREFIX}::EngineCore_{dp_rank}")
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker
         # processes to terminate without error

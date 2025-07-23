@@ -9,6 +9,7 @@ import threading
 import time
 import traceback
 import weakref
+import setproctitle
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -365,7 +366,9 @@ class WorkerProc:
         }
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
-
+        setproctitle.setproctitle(
+            f"{envs.VLLM_PROCESS_NAME_PREFIX}::{
+                self.worker.worker.__class__.__name__}_{self.rank}")
         pid = os.getpid()
         _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)
         _add_prefix(sys.stderr, f"VllmWorker rank={rank}", pid)

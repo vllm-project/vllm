@@ -9,6 +9,7 @@ import inspect
 import json
 import multiprocessing
 import os
+import setproctitle
 import signal
 import socket
 import tempfile
@@ -1803,7 +1804,8 @@ async def run_server_worker(listen_address,
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
     server_index = client_config.get("client_index", 0) if client_config else 0
-
+    setproctitle.setproctitle(
+        f"{envs.VLLM_PROCESS_NAME_PREFIX}::APIServer_{server_index}")
     # Load logging config for uvicorn if specified
     log_config = load_log_config(args.log_config_file)
     if log_config is not None:
