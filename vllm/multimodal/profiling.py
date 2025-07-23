@@ -275,7 +275,7 @@ class MultiModalProfiler(Generic[_I]):
             if total_mm_tokens > seq_len:
                 logger.warning_once(
                     "The sequence length (%d) is smaller than the pre-defined"
-                    " wosrt-case total number of multimodal tokens (%d). "
+                    " worst-case total number of multimodal tokens (%d). "
                     "This may cause certain multi-modal inputs to fail during "
                     "inference. To avoid this, you should increase "
                     "`max_model_len` or reduce `mm_counts`.",
