@@ -387,10 +387,11 @@ class TngToolParser(ToolParser):
             found_tool_call, tool_call, rest = self._parse_tool_call(
                 raw_text)
             if found_tool_call is True:
+                tool_calls = [tool_call] if tool_call else []
                 content, more_tool_calls, rest, structure = self._parse_all(
                     rest,
                     start_mode=ParsedStructure.TOOL_CALL_DELIMITER)
-                return (content, [tool_call] + more_tool_calls, rest,
+                return (content, tool_calls + more_tool_calls, rest,
                         structure)
             elif found_tool_call is None:
                 # partial tool call -> need to parse again with next chunk
