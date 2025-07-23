@@ -473,7 +473,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             max_seq_len=max_seq_len,
             seq_lens=seq_lens,
             block_table_tensor=block_table_tensor,
-            workspace_buffer=self._workspace_buffer,
+            workspace_buffer=self._get_workspace_buffer(),
         )
 
         self._plan(num_prefills, num_decodes, attn_metadata)
@@ -672,6 +672,7 @@ class FlashInferImpl(AttentionImpl):
                     assert kv_cache_permute.is_contiguous()
                     assert block_tables_decode.is_contiguous()
                     assert seq_lens_decode.is_contiguous()
+
 
                     output[:num_decode_tokens] = (
                         trtllm_batch_decode_with_kv_cache(

@@ -9,9 +9,10 @@ from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_common_attn_metadata,
                                       create_standard_kv_cache_spec,
                                       create_vllm_config,
-                                      get_attention_backend)
+                                      get_attention_backend,)
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (
+    CommonAttentionMetadata, set_kv_cache_layout)
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 BACKENDS_TO_TEST = [
@@ -297,7 +298,8 @@ def test_backend_correctness(batch_spec_name: str, model: str):
     5. Comparing the vLLM backend's output to the ground-truth SDPA output.
     """
     batch_spec = BATCH_SPECS[batch_spec_name]
-    vllm_config = create_vllm_config(model_name=model)
+    vllm_config = create_vllm_config(model_name=model,
+                                     max_model_len=max(batch_spec.seq_lens))
     device = torch.device("cuda:0")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
@@ -418,6 +420,10 @@ def test_backend_correctness(batch_spec_name: str, model: str):
         kv_cache_for_backend = kv_cache
         if backend_name == _Backend.FLASHINFER_VLLM_V1:
             kv_cache_for_backend = kv_cache.transpose(0, 1)
+
+            # For FlashInfer default to HND layout and 
+            kv_cache_for_backend = kv_cache_for_backend.transpose(2, 3).contiguous().transpose(2, 3)
+            set_kv_cache_layout("HND")
 
         backend_output = run_attention_backend(backend_name, kv_cache_spec,
                                                vllm_config, device,
