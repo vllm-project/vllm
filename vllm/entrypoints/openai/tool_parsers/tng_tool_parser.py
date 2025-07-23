@@ -344,95 +344,91 @@ class TngToolParser(ToolParser):
     def _parse_all(
         self, raw_text: str, start_mode: ParsedStructure
     ) -> tuple[str, list[dict], str, ParsedStructure]:
-        match start_mode:
-            case ParsedStructure.REASONING_CONTENT:
-                content, found_closing_think, rest = self._parse_think_trace(
-                    raw_text)
-                if found_closing_think:
-                    more_content, tool_calls, rest, structure = self._parse_all(
-                        rest, start_mode=ParsedStructure.CONTENT)
-                    return content + more_content, tool_calls, rest, structure
-                return content, [], rest, ParsedStructure.REASONING_CONTENT
+        if start_mode == ParsedStructure.REASONING_CONTENT:
+            content, found_closing_think, rest = self._parse_think_trace(
+                raw_text)
+            if found_closing_think:
+                more_content, tool_calls, rest, structure = self._parse_all(
+                    rest, start_mode=ParsedStructure.CONTENT)
+                return content + more_content, tool_calls, rest, structure
+            return content, [], rest, ParsedStructure.REASONING_CONTENT
 
-            case ParsedStructure.CONTENT:
-                content, interrupting_tag, rest = self._parse_unambiguous_text_content(
-                    raw_text)
+        elif start_mode == ParsedStructure.CONTENT:
+            content, interrupting_tag, rest = self._parse_unambiguous_text_content(
+                raw_text)
 
-                # rest might contain a tool call start tag or a think start tag
-                if interrupting_tag == self.tool_call_start_tag:
-                    more_content, tool_calls, rest, structure = self._parse_all(
-                        rest, start_mode=ParsedStructure.TOOL_CALL_START_TAG)
-                    return content + more_content, tool_calls, rest, structure
-                elif interrupting_tag == self.think_start_tag:
-                    more_content, tool_calls, rest, structure = self._parse_all(
-                        rest, start_mode=ParsedStructure.REASONING_CONTENT)
-                    return content + more_content, tool_calls, rest, structure
-                else:
-                    return content, [], rest, ParsedStructure.CONTENT
+            # rest might contain a tool call start tag or a think start tag
+            if interrupting_tag == self.tool_call_start_tag:
+                more_content, tool_calls, rest, structure = self._parse_all(
+                    rest, start_mode=ParsedStructure.TOOL_CALL_START_TAG)
+                return content + more_content, tool_calls, rest, structure
+            elif interrupting_tag == self.think_start_tag:
+                more_content, tool_calls, rest, structure = self._parse_all(
+                    rest, start_mode=ParsedStructure.REASONING_CONTENT)
+                return content + more_content, tool_calls, rest, structure
+            else:
+                return content, [], rest, ParsedStructure.CONTENT
 
-            case ParsedStructure.TOOL_CALL_START_TAG:
-                found_tool_call_start_tag, rest = self._parse_tool_call_start_tag(
-                    raw_text)
-                if not found_tool_call_start_tag:
-                    return "", [], raw_text, ParsedStructure.CONTENT
-                # we found a complete start tag, but we haven't seen the begin of a tool call json yet
-                content, tool_calls, rest, structure = self._parse_all(
+        elif start_mode == ParsedStructure.TOOL_CALL_START_TAG:
+            found_tool_call_start_tag, rest = self._parse_tool_call_start_tag(
+                raw_text)
+            if not found_tool_call_start_tag:
+                return "", [], raw_text, ParsedStructure.CONTENT
+            # we found a complete start tag, but we haven't seen the begin of a tool call json yet
+            content, tool_calls, rest, structure = self._parse_all(
+                rest, start_mode=ParsedStructure.TOOL_CALL)
+            if not content and not tool_calls:
+                # We haven't reached the opening "{" of the tool call yet.
+                # We might see a "[" before the "{", so let's process the start tag again next chunk.
+                return content, [], raw_text, ParsedStructure.CONTENT
+            return content, tool_calls, rest, structure
+
+        elif start_mode == ParsedStructure.TOOL_CALL:
+            found_tool_call, tool_call, rest = self._parse_tool_call(
+                raw_text)
+            if found_tool_call is True:
+                content, more_tool_calls, rest, structure = self._parse_all(
+                    rest,
+                    start_mode=ParsedStructure.TOOL_CALL_DELIMITER)
+                return (content, [tool_call] + more_tool_calls, rest,
+                        structure)
+            elif found_tool_call is None:
+                # partial tool call -> need to parse again with next chunk
+                tool_calls = ([tool_call]
+                              if tool_call is not None else [])
+                return "", tool_calls, rest, ParsedStructure.TOOL_CALL
+            else:
+                logger.warning(
+                    "Invalid tool call -> continue with parsing model output as text content"
+                )
+                return self._parse_all(
+                    raw_text, start_mode=ParsedStructure.CONTENT)
+
+        elif start_mode == ParsedStructure.TOOL_CALL_DELIMITER:
+            found_tool_call_delimiter, rest = self._parse_tool_call_delimiter(
+                raw_text)
+            if found_tool_call_delimiter is True:
+                return self._parse_all(
                     rest, start_mode=ParsedStructure.TOOL_CALL)
-                if not content and not tool_calls:
-                    # We haven't reached the opening "{" of the tool call yet.
-                    # We might see a "[" before the "{", so let's process the start tag again next chunk.
-                    return content, [], raw_text, ParsedStructure.CONTENT
-                return content, tool_calls, rest, structure
+            elif found_tool_call_delimiter is None:
+                # could neither confirm nor deny that raw_text starts with a tool call delimiter
+                return "", [], rest, ParsedStructure.TOOL_CALL_DELIMITER
+            else:
+                return self._parse_all(
+                    raw_text,
+                    start_mode=ParsedStructure.TOOL_CALL_END_TAG)
 
-            case ParsedStructure.TOOL_CALL:
-                found_tool_call, tool_call, rest = self._parse_tool_call(
-                    raw_text)
-                match found_tool_call:
-                    case True:
-                        content, more_tool_calls, rest, structure = self._parse_all(
-                            rest,
-                            start_mode=ParsedStructure.TOOL_CALL_DELIMITER)
-                        return (content, [tool_call] + more_tool_calls, rest,
-                                structure)
-                    case None:
-                        # partial tool call -> need to parse again with next chunk
-                        tool_calls = ([tool_call]
-                                      if tool_call is not None else [])
-                        return "", tool_calls, rest, ParsedStructure.TOOL_CALL
-                    case False:
-                        logger.warning(
-                            "Invalid tool call -> continue with parsing model output as text content"
-                        )
-                        return self._parse_all(
-                            raw_text, start_mode=ParsedStructure.CONTENT)
-
-            case ParsedStructure.TOOL_CALL_DELIMITER:
-                found_tool_call_delimiter, rest = self._parse_tool_call_delimiter(
-                    raw_text)
-                match found_tool_call_delimiter:
-                    case True:
-                        return self._parse_all(
-                            rest, start_mode=ParsedStructure.TOOL_CALL)
-                    case None:
-                        # could neither confirm nor deny that raw_text starts with a tool call delimiter
-                        return "", [], rest, ParsedStructure.TOOL_CALL_DELIMITER
-                    case False:
-                        return self._parse_all(
-                            raw_text,
-                            start_mode=ParsedStructure.TOOL_CALL_END_TAG)
-
-            case ParsedStructure.TOOL_CALL_END_TAG:
-                found_tool_call_end_tag, rest = self._parse_tool_call_end_tag(
-                    raw_text)
-                match found_tool_call_end_tag:
-                    case True:
-                        return self._parse_all(
-                            rest, start_mode=ParsedStructure.CONTENT)
-                    case None:
-                        return "", [], rest, ParsedStructure.TOOL_CALL_END_TAG
-                    case False:
-                        return self._parse_all(
-                            raw_text, start_mode=ParsedStructure.CONTENT)
+        elif start_mode == ParsedStructure.TOOL_CALL_END_TAG:
+            found_tool_call_end_tag, rest = self._parse_tool_call_end_tag(
+                raw_text)
+            if found_tool_call_end_tag is True:
+                return self._parse_all(
+                    rest, start_mode=ParsedStructure.CONTENT)
+            elif found_tool_call_end_tag is None:
+                return "", [], rest, ParsedStructure.TOOL_CALL_END_TAG
+            else:
+                return self._parse_all(
+                    raw_text, start_mode=ParsedStructure.CONTENT)
 
         logger.warning(
             f"Unknown tool call parser start_mode '{start_mode}'. Falling back to text content."
