@@ -6,8 +6,10 @@ import weakref
 from typing import Optional
 
 import msgspec.msgpack
+import setproctitle
 import zmq
 
+import vllm.envs as envs
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import get_mp_context, make_zmq_socket
@@ -136,6 +138,7 @@ class CoordinatorProc:
         back_publish_address: str,
         min_stats_update_interval_ms: int = 100,
     ):
+        setproctitle.setproctitle(f"{envs.VLLM_PROCESS_NAME_PREFIX}::DPCoordinator")
         coordinator = CoordinatorProc(
             engine_count=engine_count,
             min_stats_update_interval_ms=min_stats_update_interval_ms)

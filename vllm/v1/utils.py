@@ -11,7 +11,9 @@ from typing import (TYPE_CHECKING, Any, Callable, Generic, Optional, TypeVar,
                     Union, overload)
 
 import torch
+import setproctitle
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
@@ -144,7 +146,8 @@ class APIServerProcessManager:
         self.listen_address = listen_address
         self.sock = sock
         self.args = args
-
+        setproctitle.setproctitle(
+            f"{envs.VLLM_PROCESS_NAME_PREFIX}::{self.__class__.__name__}")
         # Start API servers
         spawn_context = multiprocessing.get_context("spawn")
         self.processes: list[BaseProcess] = []

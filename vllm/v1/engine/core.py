@@ -403,6 +403,8 @@ class EngineCoreProc(EngineCore):
         client_handshake_address: Optional[str] = None,
         engine_index: int = 0,
     ):
+        setproctitle.setproctitle(
+                f"{envs.VLLM_PROCESS_NAME_PREFIX}::{self.__class__.__name__}_{engine_index}")
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
                                               bytes]]()
@@ -574,8 +576,7 @@ class EngineCoreProc(EngineCore):
                         local_dp_rank: int = 0,
                         **kwargs):
         """Launch EngineCore busy loop in background process."""
-        setproctitle.setproctitle(
-            f"{envs.VLLM_PROCESS_NAME_PREFIX}::EngineCore_{dp_rank}")
+
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker
         # processes to terminate without error
