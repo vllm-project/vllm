@@ -454,6 +454,7 @@ class _ModelRegistry:
                 "to be inspected. Please check the logs for more details.")
 
         if any(arch in _PREVIOUSLY_SUPPORTED_MODELS for arch in architectures):
+            assert len(architectures) == 1 # should only have one architecture?
             previous_version = _PREVIOUSLY_SUPPORTED_MODELS[architectures[0]]
             raise ValueError(
                 "Model architecture was supported in vLLM until "
