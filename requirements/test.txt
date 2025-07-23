@@ -242,7 +242,7 @@ genai-perf==0.0.8
     # via -r requirements/test.in
 genson==1.3.0
     # via datamodel-code-generator
-geopandas==1.1.0
+geopandas==1.0.1
     # via terratorch
 gitdb==4.0.12
     # via gitpython
@@ -275,7 +275,7 @@ h11==0.14.0
     # via
     #   httpcore
     #   uvicorn
-h5py==3.14.0
+h5py==3.13.0
     # via terratorch
 harfile==0.3.0
     # via schemathesis
@@ -349,6 +349,7 @@ jinja2==3.1.6
     # via
     #   datamodel-code-generator
     #   flask
+    #   mlflow
     #   torch
 jiwer==3.0.5
     # via -r requirements/test.in
@@ -395,7 +396,7 @@ libnacl==2.1.0
     # via tensorizer
 librosa==0.10.2.post1
     # via -r requirements/test.in
-lightly==1.5.21
+lightly==1.5.20
     # via
     #   terratorch
     #   torchgeo
@@ -422,6 +423,8 @@ mako==1.3.10
     # via alembic
 mamba-ssm==2.2.4
     # via -r requirements/test.in
+markdown==3.8.2
+    # via mlflow
 markdown-it-py==3.0.0
     # via rich
 markupsafe==3.0.1
@@ -435,6 +438,7 @@ matplotlib==3.9.2
     #   -r requirements/test.in
     #   lightning
     #   mlflow
+    #   pycocotools
     #   torchgeo
 mbstrdecoder==1.1.3
     # via
@@ -445,9 +449,9 @@ mdurl==0.1.2
     # via markdown-it-py
 mistral-common==1.8.0
     # via -r requirements/test.in
-mlflow==3.1.1
+mlflow==2.22.0
     # via terratorch
-mlflow-skinny==3.1.1
+mlflow-skinny==2.22.0
     # via mlflow
 more-itertools==10.5.0
     # via lm-eval
@@ -729,7 +733,7 @@ pyasn1-modules==0.4.2
     # via google-auth
 pybind11==2.13.6
     # via lm-eval
-pycocotools==2.0.10
+pycocotools==2.0.8
     # via terratorch
 pycountry==24.6.1
     # via pydantic-extra-types
@@ -754,9 +758,7 @@ pydantic-core==2.33.2
 pydantic-extra-types==2.10.5
     # via mistral-common
 pygments==2.18.0
-    # via
-    #   pytest
-    #   rich
+    # via rich
 pyogrio==0.11.0
     # via geopandas
 pyparsing==3.2.0
@@ -774,7 +776,7 @@ pystemmer==3.0.0
     # via mteb
 pytablewriter==1.2.0
     # via lm-eval
-pytest==8.4.1
+pytest==8.3.5
     # via
     #   -r requirements/test.in
     #   buildkite-test-collector
@@ -1034,11 +1036,11 @@ tensorboardx==2.6.4
     # via lightning
 tensorizer==2.10.1
     # via -r requirements/test.in
-terratorch @ git+https://github.com/IBM/terratorch.git@b7fc34d471ee6b45da4abb7ae2c244e91385df6d
+terratorch==1.1rc2
     # via -r requirements/test.in
 threadpoolctl==3.5.0
     # via scikit-learn
-tifffile==2025.6.11
+tifffile==2025.3.30
     # via
     #   scikit-image
     #   terratorch
