@@ -13,7 +13,7 @@ Increase the number of GPUs and nodes until there is enough GPU memory for the m
 After you provision sufficient resources to fit the model, run `vllm`. Look for a log message similar to `# GPU blocks: 790`. Multiply that number by `16` (the block size) to estimate the maximum number of tokens the configuration can serve. If this estimate is less than your throughput requirements, increase the number of GPUs in your cluster.
 
 !!! note
-    Edge case: if the model fits within a single node but the GPU count doesn't evenly divide the model size, enable pipeline parallelism, which splits the model along layers and supports uneven splits. In this scenario, set `tensor_parallel_size=1` and `pipeline_parallel_size` to the number of GPUs. Furthermore, if the GPUs on the node do not have NVLINK interconnect (e.g. L40S), leverage pipeline parallelism instead of tensor parallelism for higher throughput and lower communication overhead. 
+    Edge case: if the model fits within a single node but the GPU count doesn't evenly divide the model size, enable pipeline parallelism, which splits the model along layers and supports uneven splits. In this scenario, set `tensor_parallel_size=1` and `pipeline_parallel_size` to the number of GPUs. Furthermore, if the GPUs on the node do not have NVLINK interconnect (e.g. L40S), leverage pipeline parallelism instead of tensor parallelism for higher throughput and lower communication overhead.
 
 ### Distributed serving of *Mixture of Experts* (*MoE*) models
 
