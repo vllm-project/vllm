@@ -2270,19 +2270,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         hidden_states: torch.Tensor,
     ) -> PoolerOutput:
-        memory_usage = dict[PoolingTask, float]()
+        # Find the task that has the largest output for subsequent steps
+        output_size = dict[PoolingTask, float]()
         for task in self.get_supported_pooling_tasks():
-            with DeviceMemoryProfiler() as m:
-                # NOTE: Keep in memory until after the ctx is exited
-                output = self._dummy_pooler_run_task(hidden_states, task)
+            # Run a full batch with each task to ensure none of them OOMs
+            output = self._dummy_pooler_run_task(hidden_states, task)
+            output_size[task] = output.get_data_nbytes()
+            del output  # Allow GC
 
-            memory_usage[task] = m.consumed_memory / GiB_bytes
-            del output
-            gc.collect()
-
-        logger.debug("Memory usage (GiB) for pooler: %s", memory_usage)
-
-        max_task = max(memory_usage.items(), key=lambda x: x[1])[0]
+        max_task = max(output_size.items(), key=lambda x: x[1])[0]
         return self._dummy_pooler_run_task(hidden_states, max_task)
 
     def profile_run(self) -> None:
