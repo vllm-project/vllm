@@ -236,11 +236,20 @@ class Worker(WorkerBase):
         available_kv_cache_memory = self.requested_memory \
             - profile_result.non_kv_cache_memory
 
+        unrequested_memory = self.init_snapshot.free_memory \
+            - self.requested_memory
         logger.debug(
-            "Initial free memory: %.2f GiB, free memory: %.2f GiB, "
-            "requested GPU memory: %.2f GiB",
-            GiB(self.init_snapshot.free_memory), GiB(free_gpu_memory),
-            GiB(self.requested_memory))
+            "Total free memory: %.2f GiB, "
+            "free memory after profile (total): %.2f GiB, "
+            "free memory after profile (within requested): %.2f GiB, "
+            "requested GPU memory utilization: %.2f, "
+            "requested GPU memory: %.2f GiB, ",
+            GiB(self.init_snapshot.free_memory),
+            GiB(free_gpu_memory),
+            GiB(free_gpu_memory - unrequested_memory),
+            self.cache_config.gpu_memory_utilization,
+            GiB(self.requested_memory),
+        )
         logger.debug(profile_result)
         logger.info("Available KV cache memory: %.2f GiB",
                     GiB(available_kv_cache_memory))
