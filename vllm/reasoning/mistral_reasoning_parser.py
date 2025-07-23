@@ -15,7 +15,10 @@ logger = init_logger(__name__)
 @ReasoningParserManager.register_module("mistral")
 class MistralReasoningParser(DeepSeekR1ReasoningParser):
     """
-    Reasoning parser for Mistral model.
+    Reasoning parser for Mistral models.
+
+    The Mistral models uses [THINK]...[/THINK] tokens to denote reasoning
+    text. This parser extracts the reasoning content from the model output.
     """
 
     def __init__(self, tokenizer: MistralTokenizer):
@@ -40,5 +43,5 @@ class MistralReasoningParser(DeepSeekR1ReasoningParser):
 
         if self.start_token_id is None or self.end_token_id is None:
             raise RuntimeError(
-                "DeepSeek R1 reasoning parser could not locate think start/end "
+                "Mistral reasoning parser could not locate think start/end "
                 "tokens in the tokenizer!")
