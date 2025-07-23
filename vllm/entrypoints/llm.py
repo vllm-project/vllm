@@ -489,7 +489,8 @@ class LLM:
         truncate_prompt_tokens = None
         if isinstance(sampling_params, SamplingParams):
             truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
-        _validate_truncation_size(self.llm_engine.model_config.max_model_len,
+
+        _validate_truncation_size(model_config.max_model_len,
                                   truncate_prompt_tokens, tokenization_kwargs)
 
         # Add any modality specific loras to the corresponding prompts
@@ -1294,6 +1295,8 @@ class LLM:
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[ScoringRequestOutput]:
+        model_config = self.llm_engine.model_config
+
         if isinstance(tokenizer, MistralTokenizer):
             raise ValueError(
                 "Score API is not supported for Mistral tokenizer")
@@ -1303,17 +1306,15 @@ class LLM:
 
         pooling_params = PoolingParams(task="score")
         tokenization_kwargs: dict[str, Any] = {}
-        _validate_truncation_size(self.llm_engine.model_config.max_model_len,
+
+        _validate_truncation_size(model_config.max_model_len,
                                   truncate_prompt_tokens, tokenization_kwargs)
 
         parsed_prompts = []
 
         input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
 
-        if self.llm_engine.model_config.is_multimodal_model:
-
-            model_config = self.llm_engine.model_config
-
+        if model_config.is_multimodal_model:
             for q, d in input_pairs:
                 _, engine_prompt = get_score_prompt(
                     model_config=model_config,
@@ -1324,11 +1325,9 @@ class LLM:
                 )
 
                 parsed_prompts.append(engine_prompt)
-
         else:
-
             for q, t in input_pairs:
-                if self.llm_engine.model_config.use_pad_token:
+                if model_config.use_pad_token:
                     # cross_encoder models defaults to using pad_token.
                     prompt_inputs = tokenizer(
                         text=q,  # type: ignore[arg-type]
@@ -1421,7 +1420,7 @@ class LLM:
                              "Try converting the model using "
                              "`--convert embed` or `--convert classify`.")
 
-        if (model_config.task == "classify"
+        if (model_config.is_cross_encoder
                 and getattr(model_config.hf_config, "num_labels", 0) != 1):
             raise ValueError("Score API is only enabled for num_labels == 1.")
 
@@ -1430,15 +1429,14 @@ class LLM:
         # lists of tokens to the `text` and `text_pair` kwargs
         tokenizer = self.get_tokenizer()
 
-        if not self.llm_engine.model_config.is_multimodal_model:
+        if not model_config.is_multimodal_model:
 
             def check_data_type(data: Union[SingletonPrompt,
                                             Sequence[SingletonPrompt],
                                             ScoreMultiModalParam]):
                 if isinstance(data, dict) and "content" in data:
-                    raise ValueError(
-                        f"ScoreMultiModalParam is not supported for {self.llm_engine.model_config.architecture}",  # noqa: E501
-                    )
+                    raise ValueError("ScoreMultiModalParam is not supported "
+                                     f"for {model_config.architecture}")
 
             check_data_type(data_1)
             check_data_type(data_2)
@@ -1480,7 +1478,7 @@ class LLM:
 
         _validate_score_input_lens(data_1, data_2)  # type: ignore[arg-type]
 
-        if self.llm_engine.model_config.is_cross_encoder:
+        if model_config.is_cross_encoder:
             return self._cross_encoding_score(
                 tokenizer,
                 data_1,  # type: ignore[arg-type]

@@ -1715,7 +1715,6 @@ async def init_app_state(
         state.openai_serving_models,
         request_logger=request_logger,
     ) if "transcription" in model_config.supported_tasks else None
-    state.task = model_config.task
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0

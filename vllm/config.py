@@ -117,6 +117,30 @@ _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
     "draft": [],
 }
 
+# https://huggingface.co/docs/transformers/en/model_doc/auto
+SUFFIX_TO_RUNNER_TYPE: list[tuple[str, RunnerType]] = [
+    ("ForCausalLM", "generate"),
+    ("ForConditionalGeneration", "generate"),
+    ("ChatModel", "generate"),
+    ("LMHeadModel", "generate"),
+    ("ForTextEncoding", "pooling"),
+    ("ForSequenceClassification", "pooling"),
+    ("EmbeddingModel", "pooling"),
+    ("ForRewardModeling", "pooling"),
+    ("RewardModel", "pooling"),
+]
+
+SUFFIX_TO_CONVERT_TYPE: list[tuple[str, ConvertType]] = [
+    ("ForTextEncoding", "embed"),
+    ("EmbeddingModel", "embed"),
+    ("ForSequenceClassification", "classify"),
+    ("ForAudioClassification", "classify"),
+    ("ForImageClassification", "classify"),
+    ("ForVideoClassification", "classify"),
+    ("ForRewardModeling", "reward"),
+    ("RewardModel", "reward"),
+]
+
 
 @runtime_checkable
 class SupportsHash(Protocol):
@@ -603,8 +627,7 @@ class ModelConfig:
                 if is_generative_task:
                     self.runner = "generate"
                     self.convert = "auto"
-                    msg_hint = ("Please remove this option as it is useless "
-                                "for generation-only models")
+                    msg_hint = "Please remove this option"
                 elif is_pooling_task:
                     self.runner = "pooling"
                     self.convert = _task_to_convert(self.task)
@@ -921,22 +944,9 @@ class ModelConfig:
         if get_pooling_config(model_id, self.revision):
             return "pooling"
 
-        # https://huggingface.co/docs/transformers/en/model_doc/auto
-        suffix_to_runner_type: list[tuple[str, RunnerType]] = [
-            ("ForCausalLM", "generate"),
-            ("ForConditionalGeneration", "generate"),
-            ("ChatModel", "generate"),
-            ("LMHeadModel", "generate"),
-            ("ForTextEncoding", "pooling"),
-            ("ForSequenceClassification", "pooling"),
-            ("EmbeddingModel", "pooling"),
-            ("ForRewardModeling", "pooling"),
-            ("RewardModel", "pooling"),
-        ]
-
-        for suffix, pref_runner in suffix_to_runner_type:
+        for suffix, runner_type in SUFFIX_TO_RUNNER_TYPE:
             if architecture.endswith(suffix):
-                return pref_runner
+                return runner_type
 
         return "generate"
 
@@ -948,21 +958,9 @@ class ModelConfig:
         if self.registry.is_cross_encoder_model(architecture):
             return "classify"
 
-        # https://huggingface.co/docs/transformers/en/model_doc/auto
-        suffix_to_convert_type: list[tuple[str, ConvertType]] = [
-            ("ForTextEncoding", "embed"),
-            ("EmbeddingModel", "embed"),
-            ("ForSequenceClassification", "classify"),
-            ("ForAudioClassification", "classify"),
-            ("ForImageClassification", "classify"),
-            ("ForVideoClassification", "classify"),
-            ("ForRewardModeling", "reward"),
-            ("RewardModel", "reward"),
-        ]
-
-        for suffix, pref_runner in suffix_to_convert_type:
+        for suffix, convert_type in SUFFIX_TO_CONVERT_TYPE:
             if architecture.endswith(suffix):
-                return pref_runner
+                return convert_type
 
         if runner_type == "pooling":
             return "embed"
@@ -979,7 +977,12 @@ class ModelConfig:
         if registry.is_transcription_only_model(architecture):
             return ["transcription"]
 
-        supported_tasks: list[_ResolvedTask] = ["generate"]
+        # TODO: Use get_supported_generation_tasks once V0 is removed
+        supported_tasks = list[_ResolvedTask]()
+        if (registry.is_text_generation_model(architecture)
+                or convert_type in _RUNNER_CONVERTS["generate"]):
+            supported_tasks.append("generate")
+
         if registry.is_transcription_model(architecture):
             supported_tasks.append("transcription")
 
@@ -1611,7 +1614,8 @@ class ModelConfig:
 
     @property
     def is_cross_encoder(self) -> bool:
-        return self.task == "classify"
+        return (self.registry.is_cross_encoder_model(self.architecture)
+                or self.convert_type == "classify")
 
     @property
     def use_mla(self) -> bool:
@@ -4908,7 +4912,7 @@ class VllmConfig:
         if self.model_config.is_hybrid:
             HybridAttentionMambaModelConfig.verify_and_update_config(self)
 
-        if self.model_config.task == "classify":
+        if self.model_config.convert_type == "classify":
             # Maybe convert ForCausalLM into ForSequenceClassification model.
             from vllm.model_executor.models.adapters import (
                 SequenceClassificationConfig)

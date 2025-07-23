@@ -15,8 +15,8 @@ from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from typing_extensions import assert_never
 
 from vllm.attention import Attention
-from vllm.config import (ModelConfig, ModelImpl, VllmConfig,
-                         set_current_vllm_config)
+from vllm.config import (SUFFIX_TO_CONVERT_TYPE, ModelConfig, ModelImpl,
+                         VllmConfig, set_current_vllm_config)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import QKVCrossParallelLinear
 from vllm.model_executor.layers.quantization.base_config import (
@@ -243,25 +243,21 @@ def get_model_architecture(
     vllm_supported_archs = ModelRegistry.get_supported_archs()
     is_supported = lambda arch: (arch in vllm_supported_archs and arch not in
                                  _TRANSFORMERS_MODELS)
-    vllm_not_supported = not any(is_supported(arch) for arch in architectures)
 
-    if vllm_not_supported:
+    if not any(is_supported(arch) for arch in architectures):
         # try automatic conversion in adapters.py
-        for arch in architectures:
-            if not arch.endswith("ForSequenceClassification"):
-                continue
+        for i in range(len(architectures)):
+            arch = architectures[i]
 
-            assert model_config.task == "classify"
-            causal_lm_arch = arch.replace("ForSequenceClassification",
-                                          "ForCausalLM")
-            causal_lm_arch_vllm_supported = (causal_lm_arch
-                                             in vllm_supported_archs)
-            if not causal_lm_arch_vllm_supported:
-                continue
+            for suffix, convert_type in SUFFIX_TO_CONVERT_TYPE:
+                if (convert_type == model_config.convert_type
+                        and arch.endswith(suffix)):
+                    causal_lm_arch = arch.replace(suffix, "ForCausalLM")
+                    if causal_lm_arch in vllm_supported_archs:
+                        architectures[i] = causal_lm_arch
+                        break
 
-            architectures = [causal_lm_arch]
-            vllm_not_supported = False
-            break
+    vllm_not_supported = not any(is_supported(arch) for arch in architectures)
 
     if any(arch in _PREVIOUSLY_SUPPORTED_MODELS for arch in architectures):
         previous_version = _PREVIOUSLY_SUPPORTED_MODELS[architectures[0]]

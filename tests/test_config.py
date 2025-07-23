@@ -219,12 +219,14 @@ def test_draft_runner(model_id, expected_runner_type, expected_convert_type,
 
 
 @pytest.mark.parametrize(
-    ("model_id", "expected_runner_type", "expected_task"),
+    ("model_id", "expected_runner_type", "expected_convert_type",
+     "expected_task"),
     [
-        ("openai/whisper-small", "generate", "transcription"),
+        ("openai/whisper-small", "generate", "none", "transcription"),
     ],
 )
-def test_transcription_task(model_id, expected_runner_type, expected_task):
+def test_transcription_task(model_id, expected_runner_type,
+                            expected_convert_type, expected_task):
     config = ModelConfig(
         model_id,
         task="transcription",
@@ -236,7 +238,8 @@ def test_transcription_task(model_id, expected_runner_type, expected_task):
     )
 
     assert config.runner_type == expected_runner_type
-    assert config.task == expected_task
+    assert config.convert_type == expected_convert_type
+    assert expected_task in config.supported_tasks
 
 
 MODEL_IDS_EXPECTED = [
