@@ -490,14 +490,15 @@ class MistralTokenizer(TokenizerBase):
 
         if self.is_tekken:
             # skip special tokens except tool call and think tokens
+            tool_calls_id = self.tokenizer.get_control_token(
+                SpecialTokens.tool_calls)
+            begin_think_id = self.tokenizer.get_control_token(
+                SpecialTokens.begin_think)
+            end_think_id = self.tokenizer.get_control_token(
+                SpecialTokens.end_think)
             ids = [
-                i for i in ids
-                if i > self.tokenizer.num_special_tokens or i in [
-                    self.tokenizer.get_control_token(SpecialTokens.tool_calls),
-                    self.tokenizer.get_control_token(
-                        SpecialTokens.begin_think),
-                    self.tokenizer.get_control_token(SpecialTokens.end_think)
-                ]
+                i for i in ids if i > self.tokenizer.num_special_tokens
+                or i in [tool_calls_id, begin_think_id, end_think_id]
             ]
 
         tokens = [self.tokenizer.id_to_piece(id) for id in ids]

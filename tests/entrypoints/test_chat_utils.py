@@ -1508,13 +1508,9 @@ def test_apply_mistral_chat_template_thinking_chunk():
     assert isinstance(mistral_tokenizer.tokenizer, Tekkenizer)
     # Add think special tokens to the tokenizer
     mistral_tokenizer.tokenizer._all_special_tokens[35] = SpecialTokenInfo(
-        SpecialTokenInfo(rank=35,
-                         is_control=True,
-                         token_str=SpecialTokens.begin_think.value))
+        rank=35, is_control=True, token_str=SpecialTokens.begin_think.value)
     mistral_tokenizer.tokenizer._all_special_tokens[36] = SpecialTokenInfo(
-        SpecialTokenInfo(rank=36,
-                         is_control=True,
-                         token_str=SpecialTokens.end_think.value))
+        rank=36, is_control=True, token_str=SpecialTokens.end_think.value)
     mistral_tokenizer.tokenizer._special_tokens_reverse_vocab = {
         k: v
         for k, v in
