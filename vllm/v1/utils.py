@@ -10,15 +10,13 @@ from multiprocessing.process import BaseProcess
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Optional, TypeVar,
                     Union, overload)
 
-import setproctitle
 import torch
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import (get_open_port, get_open_zmq_ipc_path, get_tcp_uri,
-                        kill_process_tree)
+from vllm.utils import (bind_process_name, get_open_port, get_open_zmq_ipc_path,
+                        get_tcp_uri, kill_process_tree)
 
 if TYPE_CHECKING:
     from vllm.v1.engine.coordinator import DPCoordinator
@@ -146,8 +144,7 @@ class APIServerProcessManager:
         self.listen_address = listen_address
         self.sock = sock
         self.args = args
-        setproctitle.setproctitle(
-            f"{envs.VLLM_PROCESS_NAME_PREFIX}::{self.__class__.__name__}")
+        bind_process_name(self.__class__.__name__)
         # Start API servers
         spawn_context = multiprocessing.get_context("spawn")
         self.processes: list[BaseProcess] = []

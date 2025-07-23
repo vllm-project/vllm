@@ -58,6 +58,7 @@ import numpy as np
 import numpy.typing as npt
 import psutil
 import regex as re
+import setproctitle
 import torch
 import torch.types
 import yaml
@@ -3283,3 +3284,17 @@ def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available."""
 
     return _has_module("deep_gemm")
+
+
+def bind_process_name(name: str, suffixe: str = "") -> None:
+    """Bind the process name to a specific name with an optional suffix.
+
+    Args:
+        name: The base name to bind the process to.
+        suffixe: An optional suffix to append to the base name.
+    """
+    name = f"{envs.VLLM_PROCESS_NAME_PREFIX}::{name}"
+    if suffixe:
+        name = f"{name}_{suffixe}"
+    setproctitle.setproctitle(name)
+

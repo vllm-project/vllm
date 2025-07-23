@@ -6,7 +6,6 @@ import weakref
 from typing import Optional
 
 import msgspec.msgpack
-import setproctitle
 import zmq
 
 import vllm.envs as envs
@@ -15,7 +14,8 @@ from vllm.logger import init_logger
 from vllm.utils import get_mp_context, make_zmq_socket
 from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
 from vllm.v1.serial_utils import MsgpackDecoder
-from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
+from vllm.v1.utils import (bind_process_name, get_engine_client_zmq_addr,
+                           shutdown)
 
 logger = init_logger(__name__)
 
@@ -119,8 +119,7 @@ class DPCoordinatorProc:
     def __init__(self,
                  engine_count: int,
                  min_stats_update_interval_ms: int = 100):
-        setproctitle.setproctitle(
-            f"{envs.VLLM_PROCESS_NAME_PREFIX}::{self.__class__.__name__}")
+        bind_process_name(self.__class__.__name__)
         self.ctx = zmq.Context()
 
         self.engines = [EngineState() for _ in range(engine_count)]
