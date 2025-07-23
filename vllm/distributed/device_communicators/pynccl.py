@@ -67,6 +67,7 @@ class PyNcclCommunicator:
         self.available = True
         self.disabled = False
 
+        self.nccl_version = self.nccl.ncclGetRawVersion()
         logger.info("vLLM is using nccl==%s", self.nccl.ncclGetVersion())
 
         if self.rank == 0:

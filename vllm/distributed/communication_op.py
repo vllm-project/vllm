@@ -7,7 +7,7 @@ import torch
 import torch.distributed
 from contextlib import nullcontext
 from vllm.distributed.device_communicators.pynccl_allocator import (
-    get_nccl_mem_pool)
+    get_nccl_mem_pool, use_symmetric_memory)
 from .parallel_state import get_tp_group
 
 
@@ -61,3 +61,6 @@ def tensor_model_parallel_maybe_get_symm_buffer(shape, dtype):
     # in case symm memory is available for this process group, we return a
     # tensor in symm memory, otherwise we return a regular torch tensor.
     return get_tp_group().maybe_get_symm_buffer(shape, dtype)
+
+def tensor_model_parallel_use_symmetric_memory():
+    return use_symmetric_memory(get_tp_group())

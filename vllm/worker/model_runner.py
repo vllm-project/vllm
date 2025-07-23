@@ -28,6 +28,7 @@ from vllm.distributed import broadcast_tensor_dict, get_pp_group
 from vllm.distributed.kv_transfer import get_kv_transfer_group
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
                                              graph_capture)
+from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
@@ -2074,6 +2075,7 @@ class CUDAGraphRunner(nn.Module):
         torch.cuda.synchronize()
         # Capture the graph.
         self._graph = torch.cuda.CUDAGraph()
+        set_graph_pool_id(memory_pool)
         with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
             output_hidden_or_intermediate_states = self.model(
                 input_ids=input_ids,

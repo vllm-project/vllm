@@ -290,10 +290,14 @@ class NCCLLibrary:
             error_str = self.ncclGetErrorString(result)
             raise RuntimeError(f"NCCL error: {error_str}")
 
-    def ncclGetVersion(self) -> str:
+    def ncclGetRawVersion(self) -> int:
         version = ctypes.c_int()
         self.NCCL_CHECK(self._funcs["ncclGetVersion"](ctypes.byref(version)))
-        version_str = str(version.value)
+        # something like 21903
+        return version.value
+
+    def ncclGetVersion(self) -> str:
+        version_str = str(self.ncclGetRawVersion())
         # something like 21903 --> "2.19.3"
         major = version_str[0].lstrip("0")
         minor = version_str[1:3].lstrip("0")

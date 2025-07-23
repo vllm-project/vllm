@@ -48,7 +48,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         self.pynccl_comm: Optional[PyNcclCommunicator] = None
         if use_pynccl and self.world_size > 1:
-            get_nccl_mem_pool()
             self.pynccl_comm = PyNcclCommunicator(
                 group=self.cpu_group,
                 device=self.device,
@@ -93,7 +92,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 raise ValueError(f"Unknown all2all backend: {all2all_backend}")
 
     def all_reduce(self, input_, output_=None):
-        print(f"all_reduce: {input_.shape}")
+        if (
+            self.pynccl_comm is not None
+            and self.pynccl_comm.nccl_version >= 22703
+            and hasattr(input_, "symmetric_memory")
+            and input_.symmetric_memory
+        ):
+            # TODO(asamani): this is under change_state in sglang, double check!
+            self.pynccl_comm.all_reduce(input_)
+            return input_
         # always try quick reduce first, then custom allreduce,
         # and then pynccl. (quick reduce just for ROCM MI3*)
         qr_comm = self.qr_comm
