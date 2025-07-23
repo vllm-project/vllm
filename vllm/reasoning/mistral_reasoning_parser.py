@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from mistral_common.tokens.tokenizers.base import SpecialTokens
-
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.reasoning.deepseek_r1_reasoning_parser import (
@@ -32,6 +30,8 @@ class MistralReasoningParser(DeepSeekR1ReasoningParser):
             raise ValueError(
                 "The model tokenizer must be passed to the ReasoningParser "
                 "constructor during construction.")
+
+        from mistral_common.tokens.tokenizers.base import SpecialTokens
 
         self.start_token = SpecialTokens.begin_think
         self.end_token = SpecialTokens.end_think
