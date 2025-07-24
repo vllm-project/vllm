@@ -245,6 +245,13 @@ class MistralToolParser(ToolParser):
             content=additional_content,
             tool_calls=delta_tool_calls,
         )
+        # HACK: serving_chat.py inspects the internal state of tool parsers
+        # when determining it's final streaming delta, automatically
+        # adding autocompleted JSON.
+        # These two lines avoid that nonsense while ensuring finish_reason
+        # is set to tool_calls when at least one tool is called.
+        if delta and not self.prev_tool_call_arr:
+            self.prev_tool_call_arr = [{"arguments": {}}]
         return delta
 
     def _generate_delta_tool_call(self,
@@ -476,6 +483,15 @@ class MistralToolParser(ToolParser):
 
         if current_tool_call_modified:
             delta_tool_calls.append(current_tool_call)
+
+        # HACK: serving_chat.py inspects the internal state of tool parsers
+        # when determining it's final streaming delta, automatically
+        # adding autocompleted JSON.
+        # These two lines avoid that nonsense while ensuring finish_reason
+        # is set to tool_calls when at least one tool is called.
+        if delta_tool_calls and not self.prev_tool_call_arr:
+            self.prev_tool_call_arr = [{"arguments": {}}]
+
         return DeltaMessage(content=content, tool_calls=delta_tool_calls)
 
     def _split_delta(

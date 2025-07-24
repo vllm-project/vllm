@@ -302,6 +302,8 @@ def _test_extract_tool_calls_streaming(tool_parser, tokenizer, model_output,
             assert len(streamed_tool_calls) == 1
             tool_call = streamed_tool_calls[0]
 
+            assert len(tool_parser.prev_tool_call_arr) > 0
+
             # if a new tool is being called, set up empty arguments
             if tool_call.index != tool_call_idx:
                 tool_call_idx = tool_call.index
