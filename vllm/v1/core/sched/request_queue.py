@@ -217,8 +217,23 @@ class PriorityRequestQueue(RequestQueue):
 
 
 class ShortestPrefillFirstRequestQueue(RequestQueue):
+    """
+    A queue that pops the request with least number of cache miss token first.
+
+    TODO: add a fairness parameter to avoid request starvation.
+    """
 
     def __init__(self, kv_cache_manager: KVCacheManager) -> None:
+        """
+        Initialize shortest prefill first queue.
+
+        It requires the KV cache manager to estimate the number of cache miss
+        tokens.
+
+        Args:
+            kv_cache_manager: The KV cache manager to use for estimating the
+                number of cache miss tokens.
+        """
         self._requests: list[Request] = []
         self._kv_cache_manager = kv_cache_manager
         assert self._kv_cache_manager is not None
@@ -239,7 +254,7 @@ class ShortestPrefillFirstRequestQueue(RequestQueue):
         return num_cache_miss_tokens
 
     def peek_request(self) -> Request:
-        """Pop a request from the queue according to priority policy."""
+        """Peek the request with least number of cache miss tokens."""
         if not self._requests:
             raise IndexError("peek / pop from empty queue")
 
@@ -258,33 +273,41 @@ class ShortestPrefillFirstRequestQueue(RequestQueue):
         return min_request
 
     def pop_request(self) -> Request:
+        """Pop the request with least number of cache miss tokens."""
         request = self.peek_request()
         self._requests.remove(request)
         return request
 
     def prepend_request(self, request: Request) -> None:
+        """Prepend a request to the queue."""
         self.add_request(request)
 
     def prepend_requests(self, requests: RequestQueue) -> None:
+        """Prepend all requests from another queue to this queue."""
         for request in requests:
             self.add_request(request)
 
     def remove_request(self, request: Request) -> None:
+        """Remove a specific request from the queue."""
         self._requests.remove(request)
 
     def remove_requests(self, requests: Iterable[Request]) -> None:
+        """Remove multiple specific requests from the queue."""
         requests_to_remove = set(requests)
         self._requests = [
             req for req in self._requests if req not in requests_to_remove
         ]
 
     def __bool__(self) -> bool:
+        """Check if queue has any requests."""
         return bool(self._requests)
 
     def __len__(self) -> int:
+        """Get number of requests in queue."""
         return len(self._requests)
 
     def __iter__(self) -> Iterator[Request]:
+        """Iterate over the queue according to shortest prefill first policy."""
         copy_requests = [(self.get_num_cache_miss_tokens(req), req)
                          for req in self._requests]
         heapq.heapify(copy_requests)
@@ -293,6 +316,7 @@ class ShortestPrefillFirstRequestQueue(RequestQueue):
             yield request
 
     def __reversed__(self) -> Iterator[Request]:
+        """Iterate over the queue in reverse order."""
         return reversed(self._requests)
 
 
