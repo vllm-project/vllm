@@ -134,7 +134,7 @@ MAX_JOBS=16 uv pip install --system \
 
 ```bash
 uv pip install --system \
-    --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
+    --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.5"
 ```
 
 ### causal-conv1d
