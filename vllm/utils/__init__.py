@@ -2662,6 +2662,7 @@ class MemoryProfilingResult:
     torch_peak_increase: int = 0
     non_torch_increase: int = 0
     weights_memory: float = 0
+    cudagraph_memory: float = 0
     before_create: MemorySnapshot = field(default_factory=MemorySnapshot)
     before_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
     after_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
@@ -2754,10 +2755,7 @@ def memory_profiling(
     result.non_torch_increase = diff_from_create.non_torch_memory
     result.profile_time = diff_profile.timestamp
 
-    # include all non_torch_memory after profile instead of
-    # only the increase
-    non_torch_memory = result.after_profile.non_torch_memory
-
+    non_torch_memory = result.non_torch_increase
     peak_activation_memory = result.torch_peak_increase
 
     # cudagraph memory
@@ -2772,10 +2770,12 @@ def memory_profiling(
         vllm_config.compilation_config.max_capture_size /
         vllm_config.scheduler_config.max_num_batched_tokens
     ) * _CUDAGRAPH_MEMORY_ESTIMATION_FACTOR
-    cudagraph_memory = (estimated_cudagraph_memory
-                        if vllm_config.compilation_config.use_cudagraph else 0)
-
-    result.non_kv_cache_memory = non_torch_memory + peak_activation_memory + cudagraph_memory + result.weights_memory  # noqa
+    result.cudagraph_memory = (estimated_cudagraph_memory
+                               if vllm_config.compilation_config.use_cudagraph
+                               else 0)
+    result.non_kv_cache_memory = (non_torch_memory + peak_activation_memory +
+                                  result.cudagraph_memory +
+                                  result.weights_memory)
 
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501
