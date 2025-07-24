@@ -440,6 +440,7 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
     echo "🏗️  Building DeepGEMM"
     pushd deepgemm
         # Build DeepGEMM
+        # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)
         rm -rf build dist
         rm -rf *.egg-info
         python3 setup.py bdist_wheel
