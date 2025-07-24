@@ -14,8 +14,10 @@ from einops import rearrange, repeat
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.transformers import replace_linear_class
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -39,11 +41,6 @@ from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
-
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
-from vllm.distributed import get_tensor_model_parallel_world_size
 
 # The image token id may be various
 _IMAGE_TOKEN = "<image>"
@@ -392,34 +389,23 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             parent = getattr(parent, n)
         return parent, names[-1]
 
-    
-    def convert_linear(self, module: torch.nn.Linear,
-                   linear_type:str):
-        """Return TP-aware Linear with same params."""
-        bias = module.bias is not None
-        in_dim, out_dim = module.in_features, module.out_features
-
-        LinearClass = ColumnParallelLinear if linear_type == "col" else RowParallelLinear
-        new_linear = LinearClass(in_dim, out_dim, bias=bias)
-            
-        return new_linear
-
     #patch for timm ViT instance to support tensor parallel
-    def patch_vit_for_tp(self, vit: torch.nn.Module):
+    def patch_vit_for_tp(self, vit: torch.nn.Module, quant_config: QuantizationConfig):
         try:
             import timm
-        except ImportError:
-            raise ImportError("Please install timm") from ImportError
+        except ImportError as e:
+            raise ImportError("Please install timm") from e
             
         for name, module in vit.named_modules():
             if isinstance(module, nn.Linear):
                 parent, attr_name = self._get_parent_and_attr(vit, name)
-                if isinstance(parent, timm.layers.Mlp) and attr_name == "fc1":          
-                    new_linear = self.convert_linear(module, linear_type="col")
-                    setattr(parent, attr_name, TimmTPLinearWrapper(new_linear))
-                elif isinstance(parent, timm.layers.Mlp) and attr_name == "fc2": 
-                    new_linear = self.convert_linear(module, linear_type="row")
-                    setattr(parent, attr_name, TimmTPLinearWrapper(new_linear))  
+                if isinstance(parent, timm.layers.Mlp) and attr_name == "fc1":         
+                    new_linear = replace_linear_class(module, "colwise", quant_config)
+                    setattr(parent, attr_name, new_linear)
+                elif isinstance(parent, 
+                                timm.layers.Mlp) and attr_name == "fc2": 
+                    new_linear = replace_linear_class(module, "rowwise", quant_config)
+                    setattr(parent, attr_name, new_linear)
 
         return vit
 
@@ -432,8 +418,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         # TODO: refactor vision model through timm wrapper from transformers
         try:
             import timm
-        except ImportError:
-            raise ImportError("Please install timm") from ImportError
+        except ImportError as e:
+            raise ImportError("Please install timm") from e
 
         with set_default_torch_dtype(torch.float16):
             model = timm.create_model(
@@ -444,8 +430,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 dynamic_img_pad=True,
             )
         
-        if get_tensor_model_parallel_world_size()>1:
-            model = self.patch_vit_for_tp(model)
+        if get_tensor_model_parallel_world_size() > 1:
+            model = self.patch_vit_for_tp(model,quant_config)
 
         model = model.to(dtype=torch.get_default_dtype())
         return model
@@ -705,15 +691,3 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         autoloaded_weights = loader.load_weights(weights,
                                                  mapper=self.hf_to_vllm_mapper)
         return autoloaded_weights
-
-#Timm ViT wrapper, convert tuple TP outpout to single tensor output
-class TimmTPLinearWrapper(nn.Module):
-    def __init__(self, TPLinear:nn.Module) -> None:
-        super().__init__()
-        self.TPLinear = TPLinear
-        self.weight = TPLinear.weight
-        self.bias = TPLinear.bias
-    
-    def forward(self, x):
-        x, _ = self.TPLinear(x)
-        return x
