@@ -17,6 +17,50 @@ __device__ __forceinline__ scalar_t compute(const scalar_t& x,
 }
 // Activation and gating kernel template.
 
+template <typename T, uint32_t N>
+struct __align__(16) vec_t {
+  T values[N];
+};
+
+template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
+          bool act_first>
+__global__ void act_and_mul_kernel_vec(
+    scalar_t* __restrict__ out,          // [..., d]
+    const scalar_t* __restrict__ input,  // [..., 2, d]
+    const int d) {
+#if (__CUDACC_VER_MAJOR__ >= 12 && defined(__CUDA_ARCH__) && \
+     (__CUDA_ARCH__ >= 900))
+  asm volatile("griddepcontrol.wait;");
+#endif
+  constexpr uint32_t vec_size = 16 / sizeof(scalar_t);
+  const int64_t token_idx = blockIdx.x;
+  scalar_t* __restrict__ out_ptr = out + token_idx * d;
+  vec_t<scalar_t, vec_size>* __restrict__ out_vec_ptr =
+      reinterpret_cast<vec_t<scalar_t, vec_size>*>(out_ptr);
+  vec_t<scalar_t, vec_size> out_vec;
+  const int64_t stride = blockDim.x;
+  const int64_t offset = token_idx * 2 * d;
+#pragma unroll 1
+  for (int64_t idx = threadIdx.x; idx < d / vec_size; idx += stride) {
+    const vec_t<scalar_t, vec_size> x_vec =
+        reinterpret_cast<const vec_t<scalar_t, vec_size>*>(
+            input)[offset / vec_size + idx];
+    const vec_t<scalar_t, vec_size> y_vec =
+        reinterpret_cast<const vec_t<scalar_t, vec_size>*>(
+            input)[(offset + d) / vec_size + idx];
+#pragma unroll
+    for (uint32_t i = 0; i < vec_size; ++i) {
+      out_vec.values[i] = compute<scalar_t, ACT_FN, act_first>(x_vec.values[i],
+                                                               y_vec.values[i]);
+    }
+    out_vec_ptr[idx] = out_vec;
+  }
+#if (__CUDACC_VER_MAJOR__ >= 12 && defined(__CUDA_ARCH__) && \
+     (__CUDA_ARCH__ >= 900))
+  asm volatile("griddepcontrol.launch_dependents;");
+#endif
+}
+
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
           bool act_first>
 __global__ void act_and_mul_kernel(
@@ -65,21 +109,31 @@ __device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
 // Launch activation and gating kernel.
 // Use ACT_FIRST (bool) indicating whether to apply the activation function
 // first.
-#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL, ACT_FIRST)                 \
-  int d = input.size(-1) / 2;                                            \
-  int64_t num_tokens = input.numel() / input.size(-1);                   \
-  dim3 grid(num_tokens);                                                 \
-  dim3 block(std::min(d, 1024));                                         \
-  if (num_tokens == 0) {                                                 \
-    return;                                                              \
-  }                                                                      \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));      \
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();          \
-  VLLM_DISPATCH_FLOATING_TYPES(                                          \
-      input.scalar_type(), "act_and_mul_kernel", [&] {                   \
-        vllm::act_and_mul_kernel<scalar_t, KERNEL<scalar_t>, ACT_FIRST>  \
-            <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),       \
-                                         input.data_ptr<scalar_t>(), d); \
+#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL, ACT_FIRST)                       \
+  int d = input.size(-1) / 2;                                                  \
+  int64_t num_tokens = input.numel() / input.size(-1);                         \
+  if (num_tokens == 0) {                                                       \
+    return;                                                                    \
+  }                                                                            \
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));            \
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                \
+  VLLM_DISPATCH_FLOATING_TYPES(                                                \
+      input.scalar_type(), "act_and_mul_kernel", [&] {                         \
+        uint32_t vec_size = 16 / sizeof(scalar_t);                             \
+        dim3 grid(num_tokens);                                                 \
+        dim3 block_vec(std::min(d / vec_size, 1024U));                         \
+        dim3 block(std::min(d, 1024));                                         \
+        if (d % vec_size == 0 &&                                               \
+            (reinterpret_cast<uintptr_t>(input.data_ptr()) % 16 == 0) &&       \
+            (reinterpret_cast<uintptr_t>(out.data_ptr()) % 16 == 0)) {         \
+          vllm::act_and_mul_kernel_vec<scalar_t, KERNEL<scalar_t>, ACT_FIRST>  \
+              <<<grid, block_vec, 0, stream>>>(out.data_ptr<scalar_t>(),       \
+                                               input.data_ptr<scalar_t>(), d); \
+        } else {                                                               \
+          vllm::act_and_mul_kernel<scalar_t, KERNEL<scalar_t>, ACT_FIRST>      \
+              <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),           \
+                                           input.data_ptr<scalar_t>(), d);     \
+        }                                                                      \
       });
 
 void silu_and_mul(torch::Tensor& out,    // [..., d]
