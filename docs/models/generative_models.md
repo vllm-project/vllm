@@ -12,7 +12,7 @@ which are then passed through [Sampler][vllm.model_executor.layers.Sampler] to o
 
 Run a model in generation mode via the option `--runner generate`.
 
-!! tip
+!!! tip
     There is no need to set this option because `--runner auto` (the default)
     automatically resolves to `--runner generate` for models that support the
     [VllmModelForTextGeneration][vllm.model_executor.models.VllmModelForTextGeneration] interface.

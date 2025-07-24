@@ -17,7 +17,7 @@ before returning them.
 
 Run a model in pooling mode via the option `--runner pooling`.
 
-!! note
+!!! note
     It is recommended to always set `--runner pooling` because `--runner auto` (the default)
     automatically resolves to `--runner generate` for models that implement the
     [VllmModelForTextGeneration][vllm.model_executor.models.VllmModelForTextGeneration] interface,
@@ -43,7 +43,7 @@ shown in the table below.
 | `*For*Classification`, `*ClassificationModel` | `classify`  | `encode`, `classify`, `score` |
 | `*ForRewardModeling`, `*RewardModel`          | `reward`    | `encode`                      |
 
-!! tip
+!!! tip
     You can explicitly set `--convert <...>` to specify how to convert the model.
 
 ### Pooling Tasks
