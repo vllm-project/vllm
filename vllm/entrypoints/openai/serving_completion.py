@@ -83,9 +83,10 @@ class OpenAIServingCompletion(OpenAIServing):
             source = "model" if source == "auto" else source
             logger.info("Using default completion sampling params from %s: %s",
                         source, self.default_sampling_params)
-            
-        self.beam_scorer = BeamScorer(classi_idx=MEOW_CLASSI_IDX)
-        self.beam_validator = BeamValidator(classi_idx=MEOW_CLASSI_IDX, classifier_names=MEOW_CLASSI_IDX.keys())
+
+        if self.model_config.has_additional_heads:
+            self.beam_scorer = BeamScorer(classi_idx=MEOW_CLASSI_IDX)
+            self.beam_validator = BeamValidator(classi_idx=MEOW_CLASSI_IDX, classifier_names=MEOW_CLASSI_IDX.keys())
 
     @trace_streaming_completion()
     async def create_completion_with_chunkwise_beam(
@@ -115,7 +116,11 @@ class OpenAIServingCompletion(OpenAIServing):
             request.echo = False
             request.stream = True
             return res
-    
+
+        if not self.model_config.has_additional_heads:
+            return self.create_error_response(
+                "Chunkwise beam search is not supported for this model")
+
         res = await _process_prefix(request)
         if isinstance(res, ErrorResponse):
             return res

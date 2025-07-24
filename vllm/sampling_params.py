@@ -605,3 +605,11 @@ class BeamSearchParams(
     temperature: float = 0.0
     length_penalty: float = 1.0
     include_stop_str_in_output: bool = False
+
+class ChunkwiseBeamSearchParams(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        # required for @cached_property.
+        dict=True):  # type: ignore[call-arg]
+    """Chunkwise beam search parameters for text generation."""
+    beam_width: int

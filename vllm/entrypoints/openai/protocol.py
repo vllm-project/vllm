@@ -883,6 +883,12 @@ class CompletionRequest(OpenAIBaseModel):
             "The arrival time of the request. This is used for priority scheduling."
         )
     )
+    use_chunkwise_beam_search: Optional[bool] = Field(
+        default=None,
+        description=(
+            "If set to True, chunkwise beam search will be used for the "
+            "completion request. If the model does not support chunkwise beam search, it will raise 400")
+    )
     # doc: end-completion-extra-params
 
     # Default sampling parameters for completion requests

@@ -413,6 +413,8 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation."""
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
+    has_additional_heads: bool = False
+    """Whether the model has additional classifier heads"""
 
     def compute_hash(self) -> str:
         """
