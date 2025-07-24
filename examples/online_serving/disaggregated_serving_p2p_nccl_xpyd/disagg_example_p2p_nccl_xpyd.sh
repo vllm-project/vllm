@@ -93,6 +93,7 @@ ensure_python_library_installed() {
 cleanup() {
     echo "Stopping everything…"
     trap - INT TERM        # prevent re-entrancy
+    pkill -9 -f "disagg_proxy_p2p_nccl_xpyd.py"
     kill -- -$$            # negative PID  ==  "this whole process-group"
     wait                   # reap children so we don't leave zombies
     exit 0
