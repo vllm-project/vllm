@@ -133,6 +133,9 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     """If specified, API server will add X-Request-Id header to responses. 
     Caution: this hurts performance at high QPS."""
     enable_auto_tool_choice: bool = False
+    """If specified, exclude tool definitions in prompts when 
+    tool_choice='none'."""
+    exclude_tools_when_tool_choice_none: bool = False
     """Enable auto tool choice for supported models. Use `--tool-call-parser` 
     to specify which parser to use."""
     tool_call_parser: Optional[str] = None
