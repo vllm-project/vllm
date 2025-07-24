@@ -365,8 +365,11 @@ async def test_multinode_dp_completion(client: openai.AsyncOpenAI,
     await asyncio.sleep(0.5)
 
     # Send multiple requests - internal LB should distribute across DP ranks
-    num_requests = 100
-    all_tasks = [make_request() for _ in range(num_requests)]
+    num_requests = 200
+    all_tasks = []
+    for _ in range(num_requests):
+        all_tasks.append(asyncio.create_task(make_request()))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
     assert len(results) == num_requests
@@ -375,7 +378,10 @@ async def test_multinode_dp_completion(client: openai.AsyncOpenAI,
     await asyncio.sleep(0.5)
 
     # Second burst of requests
-    all_tasks = [make_request() for _ in range(num_requests)]
+    all_tasks = []
+    for _ in range(num_requests):
+        all_tasks.append(asyncio.create_task(make_request()))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
     assert len(results) == num_requests
@@ -453,8 +459,11 @@ async def test_multinode_dp_completion_streaming(client: openai.AsyncOpenAI,
 
     # Send multiple streaming requests - internal LB should distribute across
     # DP ranks
-    num_requests = 100
-    all_tasks = [make_streaming_request() for _ in range(num_requests)]
+    num_requests = 200
+    all_tasks = []
+    for _ in range(num_requests):
+        all_tasks.append(asyncio.create_task(make_streaming_request()))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
     assert len(results) == num_requests
@@ -463,7 +472,10 @@ async def test_multinode_dp_completion_streaming(client: openai.AsyncOpenAI,
     await asyncio.sleep(0.5)
 
     # Second burst of streaming requests
-    all_tasks = [make_streaming_request() for _ in range(num_requests)]
+    all_tasks = []
+    for _ in range(num_requests):
+        all_tasks.append(asyncio.create_task(make_streaming_request()))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
     assert len(results) == num_requests
@@ -526,8 +538,11 @@ async def test_api_only_multinode_dp_completion(
 
     # Send multiple requests - should be distributed across engines on
     # headless server
-    num_requests = 100
-    all_tasks = [make_request() for _ in range(num_requests)]
+    num_requests = 200
+    all_tasks = []
+    for _ in range(num_requests):
+        all_tasks.append(asyncio.create_task(make_request()))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
     assert len(results) == num_requests
@@ -536,7 +551,10 @@ async def test_api_only_multinode_dp_completion(
     await asyncio.sleep(0.5)
 
     # Second burst of requests
-    all_tasks = [make_request() for _ in range(num_requests)]
+    all_tasks = []
+    for _ in range(num_requests):
+        all_tasks.append(asyncio.create_task(make_request()))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
     assert len(results) == num_requests
@@ -614,8 +632,11 @@ async def test_api_only_multinode_dp_completion_streaming(
     await asyncio.sleep(0.5)
 
     # Send multiple streaming requests - should be distributed across engines
-    num_requests = 100
-    all_tasks = [make_streaming_request() for _ in range(num_requests)]
+    num_requests = 200
+    all_tasks = []
+    for _ in range(num_requests):
+        all_tasks.append(asyncio.create_task(make_streaming_request()))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
     assert len(results) == num_requests
@@ -624,7 +645,10 @@ async def test_api_only_multinode_dp_completion_streaming(
     await asyncio.sleep(0.5)
 
     # Second burst of streaming requests
-    all_tasks = [make_streaming_request() for _ in range(num_requests)]
+    all_tasks = []
+    for _ in range(num_requests):
+        all_tasks.append(asyncio.create_task(make_streaming_request()))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
     assert len(results) == num_requests

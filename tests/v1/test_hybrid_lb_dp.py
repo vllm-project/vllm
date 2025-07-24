@@ -214,27 +214,28 @@ async def test_hybrid_lb_completion(clients: list[openai.AsyncOpenAI],
     await asyncio.sleep(0.5)
 
     # Send requests to all nodes - each should balance within its local DP ranks
-    num_requests_per_node = 50  # Total 100 requests across 2 nodes
+    num_requests = 200  # Total 200 requests across 2 nodes
     all_tasks = []
-
-    for i, client in enumerate(clients):
-        tasks = [make_request(client) for _ in range(num_requests_per_node)]
-        all_tasks.extend(tasks)
+    for i in range(num_requests):
+        client = clients[i % len(clients)]
+        all_tasks.append(asyncio.create_task(make_request(client)))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
-    assert len(results) == num_requests_per_node * len(clients)
+    assert len(results) == num_requests
     assert all(completion is not None for completion in results)
 
     await asyncio.sleep(0.5)
 
     # Second burst of requests
     all_tasks = []
-    for i, client in enumerate(clients):
-        tasks = [make_request(client) for _ in range(num_requests_per_node)]
-        all_tasks.extend(tasks)
+    for i in range(num_requests):
+        client = clients[i % len(clients)]
+        all_tasks.append(asyncio.create_task(make_request(client)))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
-    assert len(results) == num_requests_per_node * len(clients)
+    assert len(results) == num_requests
     assert all(completion is not None for completion in results)
 
     _, server_args = servers[0]
@@ -311,33 +312,28 @@ async def test_hybrid_lb_completion_streaming(clients: list[
     await asyncio.sleep(0.5)
 
     # Send streaming requests to all nodes
-    num_requests_per_node = 50  # Total 100 requests across 2 nodes
+    num_requests = 200  # Total 200 requests across 2 nodes
     all_tasks = []
-
-    for i, client in enumerate(clients):
-        tasks = [
-            make_streaming_request(client)
-            for _ in range(num_requests_per_node)
-        ]
-        all_tasks.extend(tasks)
+    for i in range(num_requests):
+        client = clients[i % len(clients)]
+        all_tasks.append(asyncio.create_task(make_streaming_request(client)))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
-    assert len(results) == num_requests_per_node * len(clients)
+    assert len(results) == num_requests
     assert all(results), "Not all streaming requests completed successfully."
 
     await asyncio.sleep(0.5)
 
     # Second burst of streaming requests
     all_tasks = []
-    for i, client in enumerate(clients):
-        tasks = [
-            make_streaming_request(client)
-            for _ in range(num_requests_per_node)
-        ]
-        all_tasks.extend(tasks)
+    for i in range(num_requests):
+        client = clients[i % len(clients)]
+        all_tasks.append(asyncio.create_task(make_streaming_request(client)))
+        await asyncio.sleep(0.01)
 
     results = await asyncio.gather(*all_tasks)
-    assert len(results) == num_requests_per_node * len(clients)
+    assert len(results) == num_requests
     assert all(results), "Not all streaming requests completed successfully."
 
     _, server_args = servers[0]
