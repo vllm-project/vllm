@@ -286,6 +286,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
   FetchContent_MakeAvailable(cutlass)
 
+  # FP8 blockwise cutlass moe has low performance, build it only if
+  # VLLM_COMPILE_FP8_BLOCKWISE_CUTLASS_MOE is set.
+  if (DEFINED ENV{VLLM_COMPILE_FP8_BLOCKWISE_CUTLASS_MOE})
+    set(VLLM_COMPILE_FP8_BLOCKWISE_CUTLASS_MOE $ENV{VLLM_COMPILE_FP8_BLOCKWISE_CUTLASS_MOE})
+  else()
+    set(VLLM_COMPILE_FP8_BLOCKWISE_CUTLASS_MOE OFF)
+  endif()
+
   list(APPEND VLLM_EXT_SRC
     "csrc/quantization/aqlm/gemm_kernels.cu"
     "csrc/quantization/awq/gemm_kernels.cu"
@@ -578,14 +586,22 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # if it's possible to compile MoE kernels that use its output.
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
-    set(SRCS "csrc/quantization/cutlass_w8a8/moe/grouped_mm_c3x_sm90.cu"
-             "csrc/quantization/cutlass_w8a8/moe/blockwise_scaled_group_mm_sm90.cu")
+    set(SRCS "csrc/quantization/cutlass_w8a8/moe/grouped_mm_c3x_sm90.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM90=1")
     message(STATUS "Building grouped_mm_c3x for archs: ${SCALED_MM_ARCHS}")
+    if (VLLM_COMPILE_FP8_BLOCKWISE_CUTLASS_MOE)
+      message(STATUS "blockwise_scaled_group_mm_sm90 for archs: ${SCALED_MM_ARCHS}")
+      set(SRCS "csrc/quantization/cutlass_w8a8/moe/blockwise_scaled_group_mm_sm90.cu")
+      set_gencode_flags_for_srcs(
+        SRCS "${SRCS}"
+        CUDA_ARCHS "${SCALED_MM_ARCHS}")
+      list(APPEND VLLM_EXT_SRC "${SRCS}")
+      list(APPEND VLLM_GPU_FLAGS "-DENABLE_FP8_BLOCKED_CUTLASS_MOE=1")
+    endif()
   else()
     if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
       message(STATUS "Not building grouped_mm_c3x kernels as CUDA Compiler version is "
@@ -636,15 +652,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                      "in CUDA target architectures.")
     endif()
   endif()
-  
+
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a" "${CUDA_ARCHS}")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
+  if(VLLM_COMPILE_FP8_BLOCKWISE_CUTLASS_MOE AND ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
     set(SRCS "csrc/quantization/cutlass_w8a8/moe/blockwise_scaled_group_mm_sm100.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_FP8_BLOCKED_CUTLASS_MOE=1")
     message(STATUS "Building blockwise_scaled_group_mm_sm100 for archs: ${SCALED_MM_ARCHS}")
   else()
     if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)

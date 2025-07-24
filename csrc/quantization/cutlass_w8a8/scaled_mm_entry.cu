@@ -182,8 +182,8 @@ bool cutlass_group_gemm_supported(int64_t cuda_device_capability) {
 bool cutlass_blockwise_group_gemm_supported(int64_t cuda_device_capability) {
   // Blockwise CUTLASS grouped FP8 kernels need SM90/SM100 (Hopper/Blackwell)
   // and CUDA 12.3/12.8 (respectively)
-
-#if defined CUDA_VERSION
+#if defined CUDA_VERSION && defined ENABLE_FP8_BLOCKED_CUTLASS_MOE && \
+    ENABLE_FP8_BLOCKED_CUTLASS_MOE
   if (cuda_device_capability == 90) {
     return CUDA_VERSION >= 12030;
   } else if (cuda_device_capability == 100) {
@@ -294,7 +294,8 @@ void cutlass_moe_mm(
   TORCH_CHECK_NOT_IMPLEMENTED(
       false,
       "No compiled cutlass_scaled_mm for CUDA device capability: ", version_num,
-      ". Required capability: 90 or 100");
+      ". Required capability: 90 or 100 and compilation with enviromental",
+      "variable VLLM_COMPILE_FP8_BLOCKWISE_CUTLASS_MOE=1");
 }
 
 void cutlass_blockwise_scaled_grouped_mm_sm90(
@@ -305,7 +306,8 @@ void cutlass_blockwise_scaled_grouped_mm_sm90(
     torch::Tensor const& b_strides, torch::Tensor const& c_strides,
     bool per_act_block) {
   int32_t version_num = get_sm_version_num();
-#if defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90
+#if defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90 && \
+    defined ENABLE_FP8_BLOCKED_CUTLASS_MOE && ENABLE_FP8_BLOCKED_CUTLASS_MOE
   cutlass_moe_blockwise_mm_sm90(out_tensors, a_tensors, b_tensors, a_scales,
                                 b_scales, expert_offsets, problem_sizes,
                                 a_strides, b_strides, c_strides, per_act_block);
@@ -314,7 +316,8 @@ void cutlass_blockwise_scaled_grouped_mm_sm90(
   TORCH_CHECK_NOT_IMPLEMENTED(
       false,
       "No compiled cutlass_scaled_mm for CUDA device capability: ", version_num,
-      ". Required capability: 90");
+      ". Required capability: 90 and compilation with enviromental variable",
+      "VLLM_COMPILE_FP8_BLOCKWISE_CUTLASS_MOE=1");
 }
 
 void get_cutlass_moe_mm_data(

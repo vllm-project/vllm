@@ -609,7 +609,8 @@ def test_run_cutlass_moe_fp8(
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_blockwise_group_gemm_supported(
         x.to_int()))(current_platform.get_device_capability()),
-    reason="Blockwise grouped gemm is not supported on this GPU type.")
+    reason="Blockwise grouped gemm is not supported on this GPU type or not "
+    "compiled.")
 def test_blocked_cutlass_moe_8_bit(
     m: int,
     n: int,
@@ -670,7 +671,8 @@ def test_blocked_cutlass_moe_8_bit(
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_blockwise_group_gemm_supported(
         x.to_int()))(current_platform.get_device_capability()),
-    reason="Grouped gemm is not supported on this GPU type.")
+    reason="Blockwise grouped gemm is not supported on this GPU type or not "
+    "compiled.")
 def test_blocked_cutlass_moe_8_bit_EP(
     m: int,
     n: int,

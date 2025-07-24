@@ -268,7 +268,8 @@ void cutlass_blockwise_scaled_grouped_mm_sm100(
   TORCH_CHECK(c_strides.size(0) == b.size(0),
               "c_strides must have shape (num_experts)");
 
-#if defined(ENABLE_CUTLASS_MOE_SM100) && ENABLE_CUTLASS_MOE_SM100
+#if defined(ENABLE_CUTLASS_MOE_SM100) && ENABLE_CUTLASS_MOE_SM100 && \
+    defined ENABLE_FP8_BLOCKED_CUTLASS_MOE && ENABLE_FP8_BLOCKED_CUTLASS_MOE
   if (output.scalar_type() == torch::kBFloat16) {
     blockwise_scaled_group_mm_sm100_dispatch_shape<cutlass::bfloat16_t>(
         output, a, b, scales_a, scales_b, expert_offsets, problem_sizes,
@@ -281,6 +282,11 @@ void cutlass_blockwise_scaled_grouped_mm_sm100(
     TORCH_CHECK(false, "Unsupported output tensor type");
   }
 #endif
+  TORCH_CHECK_NOT_IMPLEMENTED(
+      false,
+      "No compiled cutlass_scaled_mm for CUDA device capability: ", version_num,
+      ". Required capability: 100 and compilation with enviromental variable",
+      "VLLM_COMPILE_FP8_BLOCKWISE_CUTLASS_MOE=1");
 }
 
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {

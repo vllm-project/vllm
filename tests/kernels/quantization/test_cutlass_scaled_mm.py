@@ -649,9 +649,10 @@ def test_cutlass_fp8_group_gemm(num_experts: int, per_act_token: bool,
 @pytest.mark.parametrize("per_act_block", [True, False])
 @pytest.mark.parametrize("repeat", range(10))
 @pytest.mark.skipif(
-    (lambda x: x is None or (x.to_int() != 90 and x.to_int() != 100))(
-        current_platform.get_device_capability()),
-    reason="Block Scaled Grouped GEMM is only supported on SM90 or SM100.")
+    (lambda x: x is None or not ops.cutlass_blockwise_group_gemm_supported(
+        x.to_int()))(current_platform.get_device_capability()),
+    reason="Blockwise grouped gemm is not supported on this GPU type or not "
+    "compiled.")
 def test_cutlass_fp8_blockwise_group_gemm(num_experts: int,
                                           per_act_block: bool, repeat: int):
 
