@@ -368,19 +368,21 @@ class EmbeddingMixin(OpenAIServing):
             if max_embed_len is not None:
                 # Use max_embed_len for validation instead of max_model_len
                 effective_max_len = max_embed_len
-                validation_error_msg = (
-                    f"This model's maximum embedding input length is "
-                    f"{max_embed_len} tokens. However, you requested "
-                    f"{token_num} tokens in the input for embedding "
-                    f"generation. Please reduce the length of the input.")
+                length_type = "maximum embedding input length"
+                max_length_value = max_embed_len
             else:
                 # Fall back to max_model_len validation (original behavior)
                 effective_max_len = self.max_model_len
-                validation_error_msg = (
-                    f"This model's maximum context length is "
-                    f"{self.max_model_len} tokens. However, you requested "
-                    f"{token_num} tokens in the input for embedding "
-                    f"generation. Please reduce the length of the input.")
+                length_type = "maximum context length"
+                max_length_value = self.max_model_len
+
+            validation_error_msg = (
+                "This model's {length_type} is {max_length} tokens. "
+                "However, you requested {token_num} tokens in the input for "
+                "embedding generation. Please reduce the length of the input."
+            ).format(length_type=length_type,
+                     max_length=max_length_value,
+                     token_num=token_num)
 
             # Check if input exceeds effective max length
             if token_num > effective_max_len:
