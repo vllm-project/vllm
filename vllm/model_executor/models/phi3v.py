@@ -26,6 +26,7 @@ from transformers import (BatchFeature, CLIPVisionConfig, PretrainedConfig,
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -114,7 +115,7 @@ class Phi3VImagePixelInputs(TensorSchema):
     ]
 
     # Stacked tensor with height and width for each image
-    image_sizes: Annotated[Union[torch.Tensor, None], TensorShape("bn", 2)]
+    image_sizes: Annotated[Optional[torch.Tensor], TensorShape("bn", 2)]
 
 
 class Phi3VImageEmbeddingInputs(TypedDict):
