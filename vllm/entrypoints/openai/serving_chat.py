@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import json
-import re
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
@@ -10,6 +10,7 @@ from typing import Callable, Final, Optional, Union
 
 import jinja2
 import partial_json_parser
+import regex as re
 from fastapi import Request
 from pydantic import TypeAdapter
 
@@ -33,6 +34,7 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
     MistralToolCall)
+from vllm.entrypoints.utils import get_max_tokens
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
@@ -63,12 +65,14 @@ class OpenAIServingChat(OpenAIServing):
         enable_auto_tools: bool = False,
         tool_parser: Optional[str] = None,
         enable_prompt_tokens_details: bool = False,
+        enable_force_include_usage: bool = False,
     ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
                          request_logger=request_logger,
-                         return_tokens_as_token_ids=return_tokens_as_token_ids)
+                         return_tokens_as_token_ids=return_tokens_as_token_ids,
+                         enable_force_include_usage=enable_force_include_usage)
 
         self.response_role = response_role
         self.chat_template = chat_template
@@ -109,6 +113,7 @@ class OpenAIServingChat(OpenAIServing):
                                 "been registered") from e
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
+        self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = (
             self.model_config.get_diff_sampling_param())
         if self.default_sampling_params:
@@ -142,10 +147,8 @@ class OpenAIServingChat(OpenAIServing):
             raise self.engine_client.dead_error
 
         try:
-            (
-                lora_request,
-                prompt_adapter_request,
-            ) = self._maybe_get_adapters(request)
+            lora_request = self._maybe_get_adapters(
+                request, supports_default_mm_loras=True)
 
             model_name = self._get_model_name(request.model, lora_request)
 
@@ -171,9 +174,10 @@ class OpenAIServingChat(OpenAIServing):
                     "--enable-auto-tool-choice and --tool-call-parser to be set"
                 )
 
-            tool_dicts = None if request.tools is None else [
-                tool.model_dump() for tool in request.tools
-            ]
+            if request.tools is None:
+                tool_dicts = None
+            else:
+                tool_dicts = [tool.model_dump() for tool in request.tools]
 
             (
                 conversation,
@@ -197,7 +201,7 @@ class OpenAIServingChat(OpenAIServing):
         except (ValueError, TypeError, RuntimeError,
                 jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            return self.create_error_response(f"{e} {e.__cause__}")
 
         request_id = "chatcmpl-" \
                      f"{self._base_request_id(raw_request, request.request_id)}"
@@ -211,22 +215,28 @@ class OpenAIServingChat(OpenAIServing):
         try:
             for i, engine_prompt in enumerate(engine_prompts):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
-                default_max_tokens = self.max_model_len - len(
-                    engine_prompt["prompt_token_ids"])
+
+                if self.default_sampling_params is None:
+                    self.default_sampling_params = {}
+
+                max_tokens = get_max_tokens(
+                    max_model_len=self.max_model_len,
+                    request=request,
+                    input_length=len(engine_prompt["prompt_token_ids"]),
+                    default_sampling_params=self.default_sampling_params)
+
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
-                        default_max_tokens, self.default_sampling_params)
+                        max_tokens, self.default_sampling_params)
                 else:
                     sampling_params = request.to_sampling_params(
-                        default_max_tokens,
-                        self.model_config.logits_processor_pattern,
+                        max_tokens, self.model_config.logits_processor_pattern,
                         self.default_sampling_params)
 
                 self._log_inputs(request_id,
                                  request_prompts[i],
                                  params=sampling_params,
-                                 lora_request=lora_request,
-                                 prompt_adapter_request=prompt_adapter_request)
+                                 lora_request=lora_request)
 
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
@@ -236,6 +246,7 @@ class OpenAIServingChat(OpenAIServing):
                         prompt=engine_prompt,
                         request_id=request_id,
                         params=sampling_params,
+                        lora_request=lora_request,
                     )
                 else:
                     generator = self.engine_client.generate(
@@ -244,7 +255,6 @@ class OpenAIServingChat(OpenAIServing):
                         request_id,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
-                        prompt_adapter_request=prompt_adapter_request,
                         priority=request.priority,
                     )
 
@@ -259,8 +269,14 @@ class OpenAIServingChat(OpenAIServing):
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
-                request, result_generator, request_id, model_name,
-                conversation, tokenizer, request_metadata)
+                request,
+                result_generator,
+                request_id,
+                model_name,
+                conversation,
+                tokenizer,
+                request_metadata,
+                enable_force_include_usage=self.enable_force_include_usage)
 
         try:
             return await self.chat_completion_full_generator(
@@ -318,10 +334,13 @@ class OpenAIServingChat(OpenAIServing):
     def extract_tool_call_required_streaming(
         self,
         previous_text: str,
-        current_text: str,
+        current_text: Optional[str],
         delta_text: str,
         function_name_returned: bool,
     ) -> tuple[Optional[DeltaMessage], bool]:
+        if current_text is None or current_text == "":
+            # if the current text is empty, we cannot parse it
+            return None, function_name_returned
         try:
             obj = partial_json_parser.loads(current_text)
         except partial_json_parser.core.exceptions.MalformedJSON:
@@ -400,6 +419,7 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
+        enable_force_include_usage: bool,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
@@ -466,7 +486,8 @@ class OpenAIServingChat(OpenAIServing):
 
         stream_options = request.stream_options
         if stream_options:
-            include_usage = stream_options.include_usage
+            include_usage = stream_options.include_usage \
+                            or enable_force_include_usage
             include_continuous_usage = include_usage and \
                                        stream_options.continuous_usage_stats
         else:
@@ -587,8 +608,13 @@ class OpenAIServingChat(OpenAIServing):
                         previous_text = previous_texts[i]
                         previous_token_ids = all_previous_token_ids[i]
                         current_text = previous_text + delta_text
-                        current_token_ids = previous_token_ids + list(
-                            output.token_ids)
+
+                        # avoid the None + list error.
+                        if previous_token_ids:
+                            current_token_ids = previous_token_ids + list(
+                                output.token_ids)
+                        else:
+                            current_token_ids = list(output.token_ids)
 
                     # handle streaming deltas for tools with named tool_choice
                     if tool_choice_function_name:
@@ -648,10 +674,18 @@ class OpenAIServingChat(OpenAIServing):
                         current_text = previous_text + delta_text
                         fn_name_returned = function_name_returned[i]
 
+                        if self.reasoning_parser:
+                            _, content = \
+                                reasoning_parser.extract_reasoning_content(
+                                    current_text,
+                                    request
+                                )
+                        else:
+                            content = current_text
                         delta_message, function_name_returned[i] = (
                             self.extract_tool_call_required_streaming(
                                 previous_text=previous_text,
-                                current_text=current_text,
+                                current_text=content,
                                 delta_text=delta_text,
                                 function_name_returned=fn_name_returned))
 
@@ -676,7 +710,21 @@ class OpenAIServingChat(OpenAIServing):
                                     current_token_ids,
                                     output.token_ids,
                                 ))
-
+                            # When encountering think end id in prompt_token_ids
+                            # i.e {"enable_thinking": False},
+                            # set reasoning status to end.
+                            # Remove the text and token ids related
+                            # to 'reasoning_content'.
+                            if res.prompt_token_ids and \
+                                reasoning_parser.is_reasoning_end(
+                                    list(res.prompt_token_ids)):
+                                reasoning_end_arr[i] = True
+                                current_token_ids = list(output.token_ids)
+                                if delta_message and delta_message.content:
+                                    current_text = delta_message.content
+                                    delta_message.content = None
+                                else:
+                                    current_text = ""
                             # When encountering think end id in delta_token_ids,
                             # set reasoning status to end.
                             # Remove the text and token ids related
@@ -846,7 +894,7 @@ class OpenAIServingChat(OpenAIServing):
                             total_tokens=num_prompt_tokens + completion_tokens,
                         )
 
-                    data = chunk.model_dump_json(exclude_none=True)
+                    data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
 
             # once the final token is handled, if stream_options.include_usage
@@ -979,15 +1027,18 @@ class OpenAIServingChat(OpenAIServing):
 
                 # the fields of FunctionDefinition are a superset of the
                 # tool call outputs and can be used for parsing
+                assert content is not None
                 tool_calls = TypeAdapter(
-                    list[FunctionDefinition]).validate_json(output.text)
+                    list[FunctionDefinition]).validate_json(content)
                 message = ChatMessage(
                     role=role,
                     content="",
+                    reasoning_content=reasoning_content,
                     tool_calls=[
                         tool_call_class(function=FunctionCall(
                             name=tool_call.name,
-                            arguments=json.dumps(tool_call.parameters)))
+                            arguments=json.dumps(tool_call.parameters,
+                                                 ensure_ascii=False)))
                         for tool_call in tool_calls
                     ])
 
@@ -1026,9 +1077,17 @@ class OpenAIServingChat(OpenAIServing):
                 else:
                     # FOR NOW make it a chat message; we will have to detect
                     # the type to make it later.
+                    ret_content = content
+
+                    # try to use content return from tool parser first,
+                    # tool parser may do some modify for the content.
+                    if (tool_call_info.content
+                            and len(tool_call_info.content) > 0):
+                        ret_content = tool_call_info.content
+
                     message = ChatMessage(role=role,
                                           reasoning_content=reasoning_content,
-                                          content=content)
+                                          content=ret_content)
 
             # undetermined case that is still important to handle
             else:

@@ -1,13 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from unittest import mock
 
 import pytest
 import torch
 
+from tests.v1.attention.utils import (BatchSpec, _Backend,
+                                      create_common_attn_metadata,
+                                      create_standard_kv_cache_spec,
+                                      get_attention_backend)
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VllmConfig)
+from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.platforms import current_platform
 from vllm.v1.spec_decode.eagle import EagleProposer
 
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"
@@ -36,15 +43,17 @@ def _create_proposer(method: str, k: int) -> EagleProposer:
         num_speculative_tokens=k,
     )
 
-    vllm_config = VllmConfig(model_config=model_config,
-                             cache_config=CacheConfig(),
-                             speculative_config=speculative_config,
-                             device_config=DeviceConfig(device="cuda"),
-                             parallel_config=ParallelConfig(),
-                             load_config=LoadConfig(),
-                             scheduler_config=SchedulerConfig())
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        cache_config=CacheConfig(),
+        speculative_config=speculative_config,
+        device_config=DeviceConfig(device=current_platform.device_type),
+        parallel_config=ParallelConfig(),
+        load_config=LoadConfig(),
+        scheduler_config=SchedulerConfig())
 
-    return EagleProposer(vllm_config=vllm_config, device='cuda')
+    return EagleProposer(vllm_config=vllm_config,
+                         device=current_platform.device_type)
 
 
 def test_prepare_inputs():
@@ -57,15 +66,21 @@ def test_prepare_inputs():
                     a, a + 1, ..., a + b - n2 - 1,
                     a + b, a + b + 1, ..., a + b + c - n3 - 1]
     """
-    device = torch.device('cuda')
+    device = torch.device(current_platform.device_type)
 
-    # a = 4, b = 7, c = 5
+    # q1 = 4, q2 = 7, q3 = 5
     # n1 = 1, n2 = 3, n3 = 2
 
-    # Cumulative lengths: [0, 4, 11, 16]
-    cu_target_query_lens = torch.tensor([0, 4, 11, 16],
-                                        dtype=torch.int32,
-                                        device=device)
+    batch_spec = BatchSpec(
+        seq_lens=[4, 7, 5],
+        query_lens=[4, 7, 5],
+    )
+
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        block_size=16,
+        device=device,
+    )
 
     # Rejected tokens per request: [1, 3, 2]
     num_rejected_tokens = torch.tensor([1, 3, 2],
@@ -99,51 +114,38 @@ def test_prepare_inputs():
         ],
         dtype=torch.int32,
         device=device)
+    proposer = _create_proposer("eagle", 1)
 
-    cu_num_tokens, token_indices = EagleProposer.prepare_inputs(
-        cu_target_query_lens, num_rejected_tokens)
+    updated_metadata, token_indices = proposer.prepare_inputs(
+        common_attn_metadata, num_rejected_tokens.cpu())
 
-    assert torch.equal(cu_num_tokens, expected_cu_num_tokens)
+    assert torch.equal(updated_metadata.query_start_loc,
+                       expected_cu_num_tokens)
     assert token_indices.shape[0] == expected_cu_num_tokens[-1].item()
     assert torch.equal(token_indices, expected_token_indices)
 
 
-@pytest.mark.parametrize(
-    "method,proposer_helper,draft_model_dir,target_attribute_path", [
-        ("eagle", lambda k: _create_proposer("eagle", k), eagle_dir,
-         ('lm_head', )),
-        ("eagle3", lambda k: _create_proposer("eagle3", k), eagle3_dir,
-         ('model', 'embed_tokens')),
-    ])
+@pytest.mark.parametrize("method,proposer_helper", [
+    ("eagle", lambda k: _create_proposer("eagle", k)),
+    ("eagle3", lambda k: _create_proposer("eagle3", k)),
+])
+@pytest.mark.parametrize("pp_size", [1, 2])
+@pytest.mark.parametrize("use_distinct_embed_tokens", [True, False])
+@mock.patch('vllm.v1.spec_decode.eagle.get_pp_group')
 @mock.patch('vllm.v1.spec_decode.eagle.get_layers_from_vllm_config')
-@mock.patch('vllm.v1.spec_decode.eagle.ModelRegistry')
-@mock.patch('vllm.v1.spec_decode.eagle.get_model_loader')
-@mock.patch('vllm.v1.spec_decode.eagle.set_default_torch_dtype')
-@mock.patch('vllm.v1.spec_decode.eagle.set_current_vllm_config')
-def test_load_model(mock_set_config, mock_set_dtype, mock_get_loader,
-                    mock_registry, mock_get_layers, method, proposer_helper,
-                    draft_model_dir, target_attribute_path):
+@mock.patch('vllm.v1.spec_decode.eagle.get_model')
+def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
+                    proposer_helper, pp_size, use_distinct_embed_tokens):
+    # Setup draft model mock
+    mock_model = mock.MagicMock()
+    if use_distinct_embed_tokens:
+        # Some models can have a different hidden size than the target model,
+        # so we test that their embed_tokens doesn't get overwritten
+        mock_model.model.embed_tokens.weight.shape = (131072, 2048)
+    else:
+        mock_model.model.embed_tokens.weight.shape = (131072, 4096)
 
-    # Setup mock for model class
-    mock_model_cls = mock.MagicMock()
-    mock_registry.resolve_model_cls.return_value = (mock_model_cls,
-                                                    "test_arch")
-
-    # Create a real context manager for mocks
-    class MockContextManager:
-
-        def __init__(self):
-            pass
-
-        def __enter__(self):
-            return None
-
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            return False
-
-    # Make the mocks return actual context manager objects
-    mock_set_dtype.return_value = MockContextManager()
-    mock_set_config.return_value = MockContextManager()
+    mock_get_model.return_value = mock_model
 
     # Setup mocks for attention layers
     target_attn_layers = {
@@ -158,38 +160,26 @@ def test_load_model(mock_set_config, mock_set_dtype, mock_get_loader,
     # Make mock_get_layers return different values for each call
     mock_get_layers.side_effect = [target_attn_layers, all_attn_layers]
 
-    # Setup model loader mock
-    mock_loader = mock.MagicMock()
-    mock_get_loader.return_value = mock_loader
+    # Setup mock for pp group to return the appropriate value for world size
+    mock_pp_group = mock.MagicMock()
+    mock_pp_group.world_size = pp_size
+    mock_get_pp_group.return_value = mock_pp_group
 
-    # Setup model mock
-    mock_model = mock.MagicMock()
-    mock_model_cls.return_value = mock_model
-    mock_model.to.return_value = mock_model
+    # Setup the target model mock with a custom class so that
+    # isinstance() checks match the expected type.
+    class _TargetModelStub(LlamaForCausalLM):
+        model: mock.MagicMock
+        lm_head: mock.MagicMock
 
-    # Configure mock to test the attribute sharing path
+    target_model = mock.create_autospec(_TargetModelStub, instance=True)
+    target_model.model = mock.MagicMock()
+    target_model.model.embed_tokens.weight.shape = (131072, 4096)
+
+    from vllm.model_executor.models import SupportsMultiModal
+    assert not isinstance(target_model, SupportsMultiModal)
+
     if method == "eagle":
-        # For eagle, test the lm_head path
-        mock_model.load_weights.return_value = {
-            "model.embed_tokens.weight": torch.zeros(1)
-        }
-    else:
-        # For eagle3, test the embed_tokens path
-        mock_model.load_weights.return_value = {}
-
-    # Setup target model with the appropriate attributes
-    target_model = mock.MagicMock()
-
-    # Create the necessary attributes on the target model
-    current_obj = target_model
-    for i, attr in enumerate(target_attribute_path):
-        if i == len(target_attribute_path) - 1:
-            # Set the last attribute in the path to a MagicMock
-            setattr(current_obj, attr, mock.MagicMock())
-        else:
-            # Create intermediate objects if needed
-            setattr(current_obj, attr, mock.MagicMock())
-            current_obj = getattr(current_obj, attr)
+        target_model.lm_head = mock.MagicMock()
 
     # Create proposer using the helper function
     proposer = proposer_helper(k=8)
@@ -198,18 +188,20 @@ def test_load_model(mock_set_config, mock_set_dtype, mock_get_loader,
     proposer.load_model(target_model)
 
     # Verify common interactions
-    mock_get_loader.assert_called_once()
-    mock_model_cls.assert_called_once()
-    mock_model.to.assert_called_once()
-    mock_model.load_weights.assert_called_once()
+    mock_get_model.assert_called_once()
 
-    # Verify the loader was called with the right config
-    mock_get_loader.assert_called_once_with(proposer.vllm_config.load_config)
-
-    # Verify the specific attribute sharing based on the method
+    # Verify that EAGLE models gain the lm head from the target model
     if method == "eagle":
         assert proposer.model.lm_head == target_model.lm_head
+
+    # Verify that the embed tokens are set correctly
+    # If pp_size is > 1, the embed tokens should be distinct
+    if pp_size > 1 or use_distinct_embed_tokens:
+        assert proposer.model.model.embed_tokens != \
+            target_model.model.embed_tokens
     else:
+        # When pp_size is 1 and the draft and target models have
+        # embed_tokens of the same shape, they should be shared.
         assert proposer.model.model.embed_tokens == \
             target_model.model.embed_tokens
 
@@ -217,7 +209,7 @@ def test_load_model(mock_set_config, mock_set_dtype, mock_get_loader,
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 8])
 def test_propose(num_speculative_tokens):
     # Use GPU device
-    device = torch.device('cuda')
+    device = torch.device(current_platform.device_type)
 
     # Setup test parameters
     batch_size = 2
@@ -225,6 +217,7 @@ def test_propose(num_speculative_tokens):
     seq_len_2 = 3
     total_tokens = seq_len_1 + seq_len_2
     vocab_size = 100
+    seq_lens = [seq_len_1, seq_len_2]
 
     # Create proposer first so we can use its actual hidden_size
     proposer = _create_proposer("eagle", num_speculative_tokens)
@@ -282,10 +275,20 @@ def test_propose(num_speculative_tokens):
     # Assign the mock to the proposer
     proposer.model = model_mock
 
+    # Assign draft attn_layer_names since load_model is not invoked
+    proposer.attn_layer_names = ["layer.0"]
+
     # Create input tensors
-    cu_num_tokens = torch.tensor([0, seq_len_1, total_tokens],
-                                 dtype=torch.int32,
-                                 device=device)
+    batch_spec = BatchSpec(
+        seq_lens=seq_lens,
+        query_lens=seq_lens,
+    )
+
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        block_size=16,
+        device=device,
+    )
 
     target_token_ids = torch.randint(0,
                                      vocab_size, (total_tokens, ),
@@ -297,25 +300,29 @@ def test_propose(num_speculative_tokens):
     target_hidden_states = torch.randn(total_tokens,
                                        hidden_size,
                                        device=device)
-    target_slot_mapping = torch.randint(0,
-                                        100, (total_tokens, ),
-                                        device=device)
     next_token_ids = torch.randint(0,
                                    vocab_size, (batch_size, ),
                                    dtype=torch.int32,
                                    device=device)
-    block_table = torch.randint(0, 10, (batch_size, 10), device=device)
-
     sampling_metadata = mock.MagicMock()
 
-    # Call the method under test
+    attn_metadata_builder_cls, _ = get_attention_backend(
+        _Backend.FLASH_ATTN_VLLM_V1)
+    attn_metadata_builder = attn_metadata_builder_cls(
+        kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
+        vllm_config=proposer.vllm_config,
+        device=device,
+    )
+
+    # Mock runner for attention metadata building
+    proposer.runner = mock.MagicMock()
+    proposer.runner.attn_metadata_builders = [attn_metadata_builder]
+
     result = proposer.propose(target_token_ids=target_token_ids,
                               target_positions=target_positions,
                               target_hidden_states=target_hidden_states,
-                              target_slot_mapping=target_slot_mapping,
                               next_token_ids=next_token_ids,
-                              cu_num_tokens=cu_num_tokens,
-                              block_table=block_table,
+                              common_attn_metadata=common_attn_metadata,
                               sampling_metadata=sampling_metadata)
 
     assert result.shape == (batch_size, num_speculative_tokens)

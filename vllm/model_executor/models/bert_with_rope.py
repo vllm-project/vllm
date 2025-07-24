@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-from typing import Iterable, Optional, Set, Tuple
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 from torch import nn
@@ -32,11 +34,18 @@ class BertWithRopeEmbedding(nn.Module):
     def __init__(self, config: PretrainedConfig):
 
         super().__init__()
-        assert config.type_vocab_size > 0
+        if config.position_embedding_type not in ["rope", "rotary"]:
+            raise ValueError("Only 'rotary'('rope') position_embedding_type" +
+                             " is supported")
+
         self.word_embeddings = VocabParallelEmbedding(config.vocab_size,
                                                       config.hidden_size)
-        self.token_type_embeddings = VocabParallelEmbedding(
-            config.type_vocab_size, config.hidden_size)
+        if config.type_vocab_size > 0:
+            self.token_type_embeddings = VocabParallelEmbedding(
+                config.type_vocab_size, config.hidden_size)
+        else:
+            self.token_type_embeddings = None
+
         self.LayerNorm = nn.LayerNorm(config.hidden_size,
                                       eps=config.layer_norm_eps)
 
@@ -47,13 +56,17 @@ class BertWithRopeEmbedding(nn.Module):
     ) -> torch.Tensor:
         input_shape = input_ids.size()
         inputs_embeds = self.word_embeddings(input_ids)
-        if token_type_ids is None:
-            token_type_ids = torch.zeros(input_shape,
-                                         dtype=torch.long,
-                                         device=inputs_embeds.device)
 
-        token_type_embeddings = self.token_type_embeddings(token_type_ids)
-        embeddings = inputs_embeds + token_type_embeddings
+        embeddings = inputs_embeds
+        if self.token_type_embeddings is not None:
+            if token_type_ids is None:
+                token_type_ids = torch.zeros(input_shape,
+                                             dtype=torch.long,
+                                             device=inputs_embeds.device)
+
+            token_type_embeddings = self.token_type_embeddings(token_type_ids)
+            embeddings += token_type_embeddings
+
         embeddings = self.LayerNorm(embeddings)
         return embeddings
 
@@ -197,7 +210,7 @@ class NomicRouter(nn.Module):
 
     def forward(
         self, x: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.LongTensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.LongTensor]:
         weights = self.layer(x.view(-1, x.shape[-1]))[0].softmax(
             dim=-1, dtype=torch.float32)
         top_weights, top_experts = torch.topk(weights, self.moe_top_k, dim=-1)
@@ -321,7 +334,7 @@ class BertWithRopeBlock(nn.Module):
         if moe:
             self.mlp = NomicMoELayer(config=config, )
         else:
-            if config.hidden_act in ["silu", "gelu_and_mul"]:
+            if config.hidden_act in ["silu", "geglu"]:
                 self.mlp = BertWithRopeGatedMLP(
                     hidden_size=config.hidden_size,
                     intermediate_size=config.intermediate_size,
@@ -390,16 +403,14 @@ class BertWithRope(nn.Module, SupportsV0Only, SupportsQuant):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.config = self.config_verify(vllm_config)
+        self.vllm_config = vllm_config
+        self.config = vllm_config.model_config.hf_config
         self.embeddings = BertWithRopeEmbedding(self.config)
         self.encoder = BertWithRopeEncoder(
             vllm_config=vllm_config,
             bias=getattr(self.config, "bias", True),
             rotary_kwargs=self.config.rotary_kwargs,
             prefix=f"{prefix}.encoder")
-
-    def config_verify(self, vllm_config):
-        raise NotImplementedError
 
     def forward(
         self,
@@ -416,11 +427,11 @@ class BertWithRope(nn.Module, SupportsV0Only, SupportsQuant):
                                             token_type_ids=token_type_ids)
         return self.encoder(positions, hidden_states)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         weights = self.hf_to_vllm_mapper.apply(weights)
 
-        if self.config.hidden_act in ["silu", "gelu_and_mul"]:
+        if self.config.hidden_act in ["silu", "geglu"]:
             stacked_params_mapping = [
                 # (param_name, shard_name, shard_id)
                 ("gate_up_proj", "gate_proj", 0),
@@ -430,7 +441,7 @@ class BertWithRope(nn.Module, SupportsV0Only, SupportsQuant):
             stacked_params_mapping = []
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "pooler" in name:
                 continue
@@ -458,6 +469,8 @@ class BertWithRope(nn.Module, SupportsV0Only, SupportsQuant):
 
 
 class NomicBertModel(BertWithRope):
+    # for https://huggingface.co/nomic-ai/nomic-bert-2048
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             "emb_ln": "embeddings.LayerNorm",
@@ -470,52 +483,14 @@ class NomicBertModel(BertWithRope):
             "norm2": "mlp_ln",
         })
 
-    def config_verify(self, vllm_config):
-        config = vllm_config.model_config.hf_config
 
-        assert config.__class__.__name__ == "NomicBertConfig"
-        assert config.activation_function in ["swiglu", "gelu"]
+class GteNewModel(BertWithRope):
+    # for https://huggingface.co/Alibaba-NLP/new-impl
 
-        if config.activation_function == "swiglu":
-            config.hidden_act = "silu"
-        else:
-            config.hidden_act = config.activation_function
-
-        assert (config.mlp_fc1_bias == config.mlp_fc2_bias ==
-                config.qkv_proj_bias)
-        config.bias = config.qkv_proj_bias
-
-        assert config.rotary_emb_scale_base is None
-        assert not config.rotary_emb_interleaved
-
-        config.layer_norm_eps = config.layer_norm_epsilon
-        config.intermediate_size = config.n_inner
-        config.hidden_size = config.n_embd
-        config.num_hidden_layers = config.n_layer
-
-        head_dim = config.hidden_size // config.num_attention_heads
-        rotary_emb_dim = head_dim * config.rotary_emb_fraction
-        config.rotary_kwargs = {
-            "head_size": head_dim,
-            "rotary_dim": rotary_emb_dim,
-            "max_position": config.max_trained_positions,
-            "base": getattr(config, "rope_theta", config.rotary_emb_base),
-            "rope_scaling": getattr(config, "rope_scaling", None)
-        }
-
-        # we ignore config.rotary_scaling_factor so that for datasets shorter
-        # than max_trained_positions 2048, the results are consistent
-        # with SentenceTransformer.
-        # The context extension uses vllm style rope_theta and rope_scaling.
-        # See #17785
-
-        return config
-
-
-class GteModel(BertWithRope):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
-            "layer": 'layers',
+            "new.": "",
+            "layer": "layers",
             "attention.qkv_proj": "attn.qkv_proj",
             "attention.o_proj": "attn.out_proj",
         })
@@ -523,33 +498,13 @@ class GteModel(BertWithRope):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
-        # GteModel only gate_up_proj does not have bias.
+        # GteNewModel only gate_up_proj does not have bias.
         # Hack method learned from vllm/model_executor/models/glm.py
         for layer in self.encoder.layers:
             layer.mlp.gate_up_proj.bias = None
             layer.mlp.gate_up_proj.skip_bias_add = True
 
-    def config_verify(self, vllm_config):
-        config = vllm_config.model_config.hf_config
-
-        assert config.__class__.__name__ == "GteConfig"
-        assert config.position_embedding_type == "rope"
-        assert config.hidden_act == "gelu"
-
-        config.position_embedding_type = "rotary"
-        config.hidden_act = "gelu_and_mul"
-
-        head_dim = config.hidden_size // config.num_attention_heads
-        config.rotary_kwargs = {
-            "head_size": head_dim,
-            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
-            "max_position": config.max_position_embeddings,
-            "base": config.rope_theta,
-            "rope_scaling": getattr(config, "rope_scaling", None)
-        }
-        return config
-
-    def split_up_gate_proj(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def split_up_gate_proj(self, weights: Iterable[tuple[str, torch.Tensor]]):
         n = "mlp.up_gate_proj"
         for name, weight in weights:
             if n in name:
@@ -559,13 +514,34 @@ class GteModel(BertWithRope):
             else:
                 yield name, weight
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def ignore_unnecessary_layers(self,
+                                  weights: Iterable[tuple[str, torch.Tensor]]):
+        for name, weight in weights:
+            if name.startswith("classifier"):
+                continue
+            yield name, weight
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        weights = self.ignore_unnecessary_layers(weights)
         weights = self.split_up_gate_proj(weights)
         return super().load_weights(weights)
 
 
+class SnowflakeGteNewModel(GteNewModel):
+    # for Snowflake/snowflake-arctic-embed-m-v2.0
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            "layer": "layers",
+            "attention.qkv_proj": "attn.qkv_proj",
+            "attention.o_proj": "attn.out_proj",
+        })
+
+
 class JinaRobertaModel(BertWithRope):
+    # for https://huggingface.co/jinaai/jina-embeddings-v3
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             "emb_ln": "embeddings.LayerNorm",
@@ -576,18 +552,6 @@ class JinaRobertaModel(BertWithRope):
             "mlp.fc2": "mlp.down_proj",
             "norm2": "mlp_ln",
         })
-
-    def config_verify(self, vllm_config):
-        config = vllm_config.model_config.hf_config
-        head_dim = config.hidden_size // config.num_attention_heads
-        config.rotary_kwargs = {
-            "head_size": head_dim,
-            "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
-            "max_position": config.max_position_embeddings,
-            "base": getattr(config, "rope_theta", config.rotary_emb_base),
-            "rope_scaling": getattr(config, "rope_scaling", None)
-        }
-        return config
 
     def forward(
         self,
@@ -604,13 +568,14 @@ class JinaRobertaModel(BertWithRope):
                                token_type_ids=token_type_ids)
 
     @torch.inference_mode()
-    def jina_merge_lora_weights(self, weights: Iterable[Tuple[str,
+    def jina_merge_lora_weights(self, weights: Iterable[tuple[str,
                                                               torch.Tensor]]):
         # use for jina-embeddings-v3
         # Merge Lora weights into a single weight tensor.
         # This is a temporary solution until we have a better way to handle
 
         scaling = self.config.lora_alpha / self.config.lora_rank
+        device = self.vllm_config.device_config.device
 
         weights = {name: weight for name, weight in weights}
 
@@ -628,13 +593,13 @@ class JinaRobertaModel(BertWithRope):
                 weight_name = name[:-len(o)]
 
                 if "embeddings" in weight_name:
-                    B = weights[weight_name + a][i].cuda().float()
-                    A = weights[weight_name + b][i].cuda().float()
+                    B = weights[weight_name + a][i].to(device).float()
+                    A = weights[weight_name + b][i].to(device).float()
                 else:
-                    B = weights[weight_name + b][i].cuda().float()
-                    A = weights[weight_name + a][i].cuda().float()
+                    B = weights[weight_name + b][i].to(device).float()
+                    A = weights[weight_name + a][i].to(device).float()
 
-                weight = (weights[weight_name + o].cuda() +
+                weight = (weights[weight_name + o].to(device) +
                           torch.matmul(B, A).view(shape) * scaling)
                 weight = weight.cpu().to(dtype)
 
@@ -646,7 +611,7 @@ class JinaRobertaModel(BertWithRope):
 
         return [(name, weight) for name, weight in weights.items()]
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         weights = self.jina_merge_lora_weights(weights)
         return super().load_weights(weights)

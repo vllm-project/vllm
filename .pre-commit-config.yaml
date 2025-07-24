@@ -11,17 +11,19 @@ repos:
   hooks:
   - id: yapf
     args: [--in-place, --verbose]
+    # Keep the same list from yapfignore here to avoid yapf failing without any inputs
+    exclude: '(.buildkite|benchmarks|build|examples)/.*'
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.11.7
   hooks:
   - id: ruff
     args: [--output-format, github, --fix]
-- repo: https://github.com/codespell-project/codespell
-  rev: v2.4.1
+  - id: ruff-format
+    files: ^(.buildkite|benchmarks|examples)/.*
+- repo: https://github.com/crate-ci/typos
+  rev: v1.34.0
   hooks:
-  - id: codespell
-    additional_dependencies: ['tomli']
-    args: ['--toml', 'pyproject.toml']
+  - id: typos
 - repo: https://github.com/PyCQA/isort
   rev: 6.0.1
   hooks:
@@ -37,6 +39,7 @@ repos:
   rev: v0.9.29
   hooks:
   - id: pymarkdown
+    exclude: '.*\.inc\.md'
     args: [fix]
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
@@ -50,12 +53,17 @@ repos:
       files: ^requirements/test\.(in|txt)$
 - repo: local
   hooks:
+  - id: format-torch-nightly-test
+    name: reformat nightly_torch_test.txt to be in sync with test.in
+    language: python
+    entry: python tools/generate_nightly_torch_test.py
+    files: ^requirements/test\.(in|txt)$
   - id: mypy-local
     name: Run mypy for local Python installation
     entry: tools/mypy.sh 0 "local"
     language: python
     types: [python]
-    additional_dependencies: &mypy_deps [mypy==1.11.1, types-cachetools, types-setuptools, types-PyYAML, types-requests]
+    additional_dependencies: &mypy_deps [mypy==1.11.1, types-cachetools, types-setuptools, types-PyYAML, types-requests, pydantic]
     stages: [pre-commit] # Don't run in CI
   - id: mypy-3.9 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.9
@@ -112,6 +120,11 @@ repos:
     entry: python tools/check_spdx_header.py
     language: python
     types: [python]
+  - id: check-root-lazy-imports
+    name: Check root lazy imports
+    entry: python tools/check_init_lazy_imports.py
+    language: python
+    types: [python]
   - id: check-filenames
     name: Check for spaces in all filenames
     entry: bash
@@ -125,10 +138,39 @@ repos:
     name: Update Dockerfile dependency graph
     entry: tools/update-dockerfile-graph.sh
     language: script
+  - id: enforce-import-regex-instead-of-re
+    name: Enforce import regex as re
+    entry: python tools/enforce_regex_import.py
+    language: python
+    types: [python]
+    pass_filenames: false
+    additional_dependencies: [regex]
+  # forbid directly import triton
+  - id: forbid-direct-triton-import
+    name: "Forbid direct 'import triton'"
+    entry: python tools/check_triton_import.py
+    language: python
+    types: [python]
+    pass_filenames: false
+    additional_dependencies: [regex]
+  - id: check-pickle-imports
+    name: Prevent new pickle/cloudpickle imports
+    entry: python tools/check_pickle_imports.py
+    language: python
+    types: [python]
+    pass_filenames: false
+    additional_dependencies: [pathspec, regex]
+  - id: validate-config
+    name: Validate configuration has default values and that each field has a docstring
+    entry: python tools/validate_config.py
+    language: python
+    types: [python]
+    pass_filenames: true
+    files: vllm/config.py|tests/test_config.py|vllm/entrypoints/openai/cli_args.py
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
-    entry: bash -c 'echo "To bypass pre-commit hooks, add --no-verify to git commit."'
+    entry: bash -c 'echo "To bypass all the pre-commit hooks, add --no-verify to git commit. To skip a specific hook, prefix the commit command with SKIP=<hook-id>."'
     language: system
     verbose: true
     pass_filenames: false

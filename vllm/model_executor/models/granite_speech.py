@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
@@ -21,9 +22,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only IBM Granite speeech model."""
+"""Inference-only IBM Granite speech model."""
 import math
-from typing import Iterable, Mapping, Optional, Set, Tuple, TypedDict, Union
+from collections.abc import Iterable, Mapping
+from typing import Optional, TypedDict, Union
 
 import torch
 import torch.nn.functional as F
@@ -34,7 +36,6 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -139,6 +140,7 @@ class GraniteSpeechMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
@@ -151,6 +153,7 @@ class GraniteSpeechMultiModalProcessor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
         if "audio" in mm_data:
@@ -529,6 +532,13 @@ class GraniteSpeechForConditionalGeneration(
         ],
     }
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("audio"):
+            return "<|audio|>"
+
+        raise ValueError("Only audio modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -538,7 +548,6 @@ class GraniteSpeechForConditionalGeneration(
         self.config = config
         self.quant_config = quant_config
         self.cache_config = cache_config
-        self.sampler = get_sampler()
 
         # The language model is typically a Granite LLM
         self.language_model = init_vllm_registered_model(
@@ -625,7 +634,7 @@ class GraniteSpeechForConditionalGeneration(
         audio_embed_sizes: torch.Tensor,
     ) -> torch.Tensor:
         """Calculate the input features mask, which will generally be used
-        to mask the the padded features for all entries in the batch except
+        to mask the padded features for all entries in the batch except
         for those with the most audio features.
 
         Args:
@@ -704,10 +713,11 @@ class GraniteSpeechForConditionalGeneration(
     def get_multimodal_embeddings(
         self,
         **kwargs: object,
-    ) -> Optional[MultiModalEmbeddings]:
+    ) -> MultiModalEmbeddings:
         """Compute the audio embeddings if audio inputs are present."""
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
+            return []
             return None
         audio_features = self._process_audio_input(audio_input)
         return audio_features
@@ -718,7 +728,8 @@ class GraniteSpeechForConditionalGeneration(
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         """Compute the merged LLM / audio embeddings."""
-        if multimodal_embeddings is None:
+        if multimodal_embeddings is None \
+            or len(multimodal_embeddings) == 0:
             return self.language_model.get_input_embeddings(input_ids)
 
         inputs_embeds = embed_multimodal(
@@ -763,8 +774,8 @@ class GraniteSpeechForConditionalGeneration(
 
     def load_weights(
         self,
-        weights: Iterable[Tuple[str, torch.Tensor]],
-    ) -> Set[str]:
+        weights: Iterable[tuple[str, torch.Tensor]],
+    ) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 

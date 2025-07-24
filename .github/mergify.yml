@@ -27,6 +27,22 @@ pull_request_rules:
       add:
         - ci/build
 
+- name: label-deepseek
+  description: Automatically apply deepseek label
+  conditions:
+    - or:
+      - files~=^examples/.*deepseek.*\.py
+      - files~=^tests/.*deepseek.*\.py
+      - files~=^vllm/entrypoints/openai/tool_parsers/.*deepseek.*\.py
+      - files~=^vllm/model_executor/models/.*deepseek.*\.py
+      - files~=^vllm/reasoning/.*deepseek.*\.py
+      - files~=^vllm/transformers_utils/.*deepseek.*\.py
+      - title~=(?i)DeepSeek
+  actions:
+    label:
+      add:
+        - deepseek
+
 - name: label-frontend
   description: Automatically apply frontend label
   conditions:
@@ -36,6 +52,21 @@ pull_request_rules:
       add:
         - frontend
 
+- name: label-llama
+  description: Automatically apply llama label
+  conditions:
+    - or:
+      - files~=^examples/.*llama.*\.py
+      - files~=^tests/.*llama.*\.py
+      - files~=^vllm/entrypoints/openai/tool_parsers/llama.*\.py
+      - files~=^vllm/model_executor/models/.*llama.*\.py
+      - files~=^vllm/transformers_utils/configs/.*llama.*\.py
+      - title~=(?i)llama
+  actions:
+    label:
+      add:
+        - llama
+
 - name: label-multi-modality
   description: Automatically apply multi-modality label
   conditions:
@@ -43,13 +74,69 @@ pull_request_rules:
       - files~=^vllm/multimodal/
       - files~=^tests/multimodal/
       - files~=^tests/models/multimodal/
-      - files~=^tests/models/*/audio_language/
-      - files~=^tests/models/*/vision_language/
       - files=tests/models/test_vision.py
   actions:
     label:
       add:
         - multi-modality
+
+- name: label-new-model
+  description: Automatically apply new-model label
+  conditions:
+    - and:
+      - files~=^vllm/model_executor/models/
+      - files=vllm/model_executor/models/registry.py
+  actions:
+    label:
+      add:
+        - new-model
+
+- name: label-performance
+  description: Automatically apply performance label
+  conditions:
+    - or:
+      - files~=^benchmarks/
+      - files~=^vllm/benchmarks/
+      - files~=^tests/benchmarks/
+      - files~=^\.buildkite/nightly-benchmarks/
+  actions:
+    label:
+      add:
+        - performance
+
+- name: label-qwen
+  description: Automatically apply qwen label
+  conditions:
+    - or:
+      - files~=^examples/.*qwen.*\.py
+      - files~=^tests/.*qwen.*\.py
+      - files~=^vllm/model_executor/models/.*qwen.*\.py
+      - files~=^vllm/reasoning/.*qwen.*\.py
+      - title~=(?i)Qwen
+  actions:
+    label:
+      add:
+        - qwen
+
+- name: label-rocm
+  description: Automatically apply rocm label
+  conditions:
+    - or:
+      - files~=^csrc/rocm/
+      - files~=^docker/Dockerfile.rocm
+      - files~=^requirements/rocm.*\.txt
+      - files~=^vllm/attention/backends/rocm.*\.py
+      - files~=^vllm/attention/ops/rocm.*\.py
+      - files~=^vllm/model_executor/layers/fused_moe/rocm.*\.py
+      - files~=^vllm/v1/attention/backends/mla/rocm.*\.py
+      - files~=^tests/kernels/.*_rocm.*\.py
+      - files=vllm/platforms/rocm.py
+      - title~=(?i)AMD
+      - title~=(?i)ROCm
+  actions:
+    label:
+      add:
+        - rocm
 
 - name: label-structured-output
   description: Automatically apply structured-output label
@@ -58,7 +145,7 @@ pull_request_rules:
       - files~=^benchmarks/structured_schemas/
       - files=benchmarks/benchmark_serving_structured_output.py
       - files=benchmarks/run_structured_output_benchmark.sh
-      - files=docs/source/features/structured_outputs.md
+      - files=docs/features/structured_outputs.md
       - files=examples/offline_inference/structured_outputs.py
       - files=examples/online_serving/openai_chat_completion_structured_outputs.py
       - files=examples/online_serving/openai_chat_completion_structured_outputs_with_reasoning.py
@@ -77,9 +164,12 @@ pull_request_rules:
   description: Automatically apply speculative-decoding label
   conditions:
     - or:
-      - files~=^vllm/spec_decode/
-      - files=vllm/model_executor/layers/spec_decode_base_sampler.py
-      - files~=^tests/spec_decode/
+      - files~=^vllm/v1/spec_decode/
+      - files~=^tests/v1/spec_decode/
+      - files~=^examples/.*(spec_decode|mlpspeculator|eagle|speculation).*\.py
+      - files~=^vllm/model_executor/models/.*eagle.*\.py
+      - files=vllm/model_executor/models/mlp_speculator.py
+      - files~=^vllm/transformers_utils/configs/(eagle|medusa|mlp_speculator)\.py
   actions:
     label:
       add:
@@ -135,9 +225,7 @@ pull_request_rules:
       - files~=^tests/entrypoints/openai/tool_parsers/
       - files=tests/entrypoints/openai/test_chat_with_tool_reasoning.py
       - files~=^vllm/entrypoints/openai/tool_parsers/
-      - files=docs/source/features/tool_calling.md
-      - files=docs/source/getting_started/examples/openai_chat_completion_client_with_tools.md
-      - files=docs/source/getting_started/examples/chat_with_tools.md
+      - files=docs/features/tool_calling.md
       - files~=^examples/tool_chat_*
       - files=examples/offline_inference/chat_with_tools.py
       - files=examples/online_serving/openai_chat_completion_client_with_tools_required.py
@@ -162,6 +250,17 @@ pull_request_rules:
        merged. Please rebase the PR, @{{author}}.
 
        https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-forks/syncing-a-fork
+
+- name: assign reviewer for tensorizer changes
+  conditions:
+      - files~=^vllm/model_executor/model_loader/tensorizer.py
+      - files~=^vllm/model_executor/model_loader/tensorizer_loader.py
+      - files~=^tests/entrypoints/openai/test_tensorizer_entrypoint.py
+      - files~=^tests/tensorizer_loader/
+  actions:
+    assign:
+      users:
+        - "sangstar"
 
 - name: remove 'needs-rebase' label when conflict is resolved
   conditions:

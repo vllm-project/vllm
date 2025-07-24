@@ -8,7 +8,7 @@ image:
   # -- Image tag
   tag: "latest"
   # -- Container launch command
-  command: ["vllm", "serve", "/data/", "--served-model-name", "opt-125m", "--dtype", "float32", "--block-size", "16", "--host", "0.0.0.0", "--port", "8000"]
+  command: ["vllm", "serve", "/data/", "--served-model-name", "opt-125m", "--enforce-eager", "--dtype", "bfloat16", "--block-size", "16", "--host", "0.0.0.0", "--port", "8000"]
 
 # -- Container port
 containerPort: 8000

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import nullcontext
 from types import MethodType
@@ -1085,6 +1086,7 @@ def test_hf_processor_kwargs(model_id, call_kwargs, expected_kwargs):
         prompt="",
         mm_data={},
         mm_kwargs=call_kwargs,
+        tok_kwargs={},
     )
 
     assert out_kwargs == expected_kwargs

@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.envs import VLLM_USE_MODELSCOPE
+from vllm import envs
 
-if VLLM_USE_MODELSCOPE:
+if envs.VLLM_USE_MODELSCOPE:
     try:
         # Patch here, before each import happens
         import modelscope

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # Copyright 2025 the LLAMA4, Meta Inc., vLLM, and HuggingFace Inc. team.
 # All rights reserved.
@@ -16,7 +17,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from collections.abc import Iterable
+from typing import Any, Optional
 
 import torch
 from torch import nn
@@ -25,8 +27,7 @@ from transformers import Llama4TextConfig
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce)
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
@@ -34,7 +35,8 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, maybe_remap_kv_scale_name)
 
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, extract_layer_index, fast_topk,
@@ -49,9 +51,9 @@ class Llama4MoE(nn.Module):
         gating_output: torch.Tensor,
         topk: int,
         renormalize: bool,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         router_scores, router_indices = fast_topk(gating_output, topk, dim=-1)
-        # psuedo-standard is that the router scores are floats
+        # pseudo-standard is that the router scores are floats
         router_scores = torch.sigmoid(router_scores.float())
         return (router_scores, router_indices.to(torch.int32))
 
@@ -89,7 +91,7 @@ class Llama4MoE(nn.Module):
             quant_config=quant_config,
             bias=False,
             prefix=f"{prefix}.shared_expert",
-            reduce_results=False,  # We need to do scatter before reduce
+            reduce_results=self.experts.must_reduce_shared_expert_outputs(),
         )
 
     def forward(self, hidden_states):
@@ -102,7 +104,8 @@ class Llama4MoE(nn.Module):
         experts_out = routed_out + shared_out
 
         if self.tp_size > 1:
-            experts_out = tensor_model_parallel_all_reduce(experts_out)
+            experts_out = self.experts.maybe_all_reduce_tensor_model_parallel(
+                experts_out)
 
         return experts_out
 
@@ -115,7 +118,7 @@ class Llama4Attention(nn.Module):
                  num_heads: int,
                  num_kv_heads: int,
                  rope_theta: float = 10000,
-                 rope_scaling: Optional[Dict[str, Any]] = None,
+                 rope_scaling: Optional[dict[str, Any]] = None,
                  max_position_embeddings: int = 8192,
                  quant_config: Optional[QuantizationConfig] = None,
                  bias: bool = False,
@@ -146,9 +149,8 @@ class Llama4Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        # TODO: attn_temperature_tuning should be a bool in huggingface
         self.attn_temperature_tuning = self.nope and \
-            config.attn_temperature_tuning > 0
+            config.attn_temperature_tuning
 
         self.floor_scale = getattr(config, "floor_scale", 8192.0)
         self.attn_scale = getattr(config, "attn_scale", 0.1)
@@ -300,7 +302,7 @@ class Llama4DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -335,9 +337,9 @@ class Llama4Model(LlamaModel):
         self,
         name: str,
         loaded_weight: torch.Tensor,
-        params_dict: Dict[str, nn.Parameter],
-        loaded_params: Set[str],
-        expert_params_mapping: List[Tuple[str, str, int, str]],
+        params_dict: dict[str, nn.Parameter],
+        loaded_params: set[str],
+        expert_params_mapping: list[tuple[str, str, int, str]],
         fused: bool = True,
     ) -> bool:
         expert_param_loaded = False
@@ -390,8 +392,8 @@ class Llama4Model(LlamaModel):
             expert_param_loaded = True
         return expert_param_loaded
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -412,7 +414,7 @@ class Llama4Model(LlamaModel):
             ckpt_up_proj_name="gate_up_proj",
             num_experts=1)
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "experts.gate_up_proj" in name or "experts.down_proj" in name:
                 fused_experts_params = True
@@ -431,12 +433,24 @@ class Llama4Model(LlamaModel):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name or "experts" in name:
                     continue
-                name = name.replace(weight_name, param_name)
+                # This check is for ModelOpt ckpts with kv cache quant enabled
+                if not (name.endswith(
+                    (".k_scale", ".v_scale")) and "self_attn" in name):
+                    name = name.replace(weight_name, param_name)
                 if is_pp_missing_parameter(name, self):
                     continue
+                if name.endswith("scale") and "expert" not in name:
+                    # Remapping the name of FP8 kv-scale.
+                    name = maybe_remap_kv_scale_name(name, params_dict)
+                    if name is None:
+                        continue
                 param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                if weight_loader == default_weight_loader:
+                    weight_loader(param, loaded_weight)
+                else:
+                    weight_loader(param, loaded_weight, shard_id)
                 loaded_params.add(name)
                 break
             else:
@@ -451,6 +465,44 @@ class Llama4Model(LlamaModel):
                 if not moe_loaded:
                     if is_pp_missing_parameter(name, self):
                         continue
+
+                    # Handle flat expert scale parameters that
+                    # don't match per-expert patterns
+                    if ("experts." in name and ("w13_input_scale" in name
+                                                or "w13_weight_scale" in name
+                                                or "w2_input_scale" in name
+                                                or "w2_weight_scale" in name)):
+                        # These are flat expert scales that apply to all experts
+                        param = params_dict[name]
+                        weight_loader = getattr(param, "weight_loader",
+                                                default_weight_loader)
+
+                        # Check for MoE-specific loading support via
+                        # attribute instead of expensive runtime reflection
+                        supports_moe = getattr(weight_loader,
+                                               'supports_moe_loading', False)
+
+                        if supports_moe:
+                            # This is a MoE weight loader
+                            if "w13_" in name:
+                                shard_id = "w1"
+                            elif "w2_" in name:
+                                shard_id = "w2"
+                            else:
+                                shard_id = "w1"
+
+                            weight_loader(param,
+                                          loaded_weight,
+                                          name,
+                                          shard_id=shard_id,
+                                          expert_id=0)
+                        else:
+                            # Regular weight loader (handles both
+                            # param.weight_loader and default_weight_loader)
+                            weight_loader(param, loaded_weight)
+                        loaded_params.add(name)
+                        continue
+
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
@@ -489,8 +541,8 @@ class Llama4ForCausalLM(LlamaForCausalLM):
                            prefix=prefix,
                            layer_type=layer_type)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]
@@ -506,7 +558,7 @@ class Llama4ForCausalLM(LlamaForCausalLM):
         self,
         name: str,
         loaded_weight: torch.Tensor,
-    ) -> Tuple[str, torch.Tensor]:
+    ) -> tuple[str, torch.Tensor]:
 
         def permute(w: torch.Tensor, n_heads: int):
             attn_in = self.config.head_dim * n_heads

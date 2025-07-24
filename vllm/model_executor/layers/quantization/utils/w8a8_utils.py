@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, Optional, Union
 
 import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 from vllm.platforms import current_platform
 
 # Input scaling factors are no longer optional in _scaled_mm starting
@@ -81,7 +85,7 @@ def all_close_1d(x: torch.Tensor) -> bool:
 
 def convert_to_channelwise(
         weight_scale: torch.Tensor,
-        logical_widths: List[int]) -> Tuple[torch.Tensor, torch.Tensor]:
+        logical_widths: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
     # Create channelwise buffer
     weight_scale_channel = torch.empty((sum(logical_widths), 1),
                                        dtype=torch.float32,
@@ -99,7 +103,7 @@ def convert_to_channelwise(
 
 def requantize_with_max_scale(
         weight: torch.Tensor, weight_scale: torch.Tensor,
-        logical_widths: List[int]) -> Tuple[torch.Tensor, torch.Tensor]:
+        logical_widths: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
     # Max scale to be used for requanitzation.
     max_w_scale = weight_scale.max()
 
@@ -136,7 +140,7 @@ def maybe_create_device_identity():
 def cutlass_w8a8_scaled_mm(*, qinput: torch.Tensor, weight: torch.Tensor,
                            out_dtype: torch.dtype, scale_a: torch.Tensor,
                            scale_b: torch.Tensor, bias: torch.Tensor,
-                           output_shape: List, **kwargs) -> torch.Tensor:
+                           output_shape: list, **kwargs) -> torch.Tensor:
 
     # Fused GEMM_DQ
     output = ops.cutlass_scaled_mm(qinput,
@@ -154,9 +158,9 @@ def rocm_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
                                    scale_a: torch.Tensor,
                                    scale_b: torch.Tensor, bias: torch.Tensor,
                                    input_2d: torch.Tensor,
-                                   output_shape: List) -> torch.Tensor:
-    from vllm.platforms.rocm import on_mi250_mi300
-    if envs.VLLM_ROCM_USE_SKINNY_GEMM and on_mi250_mi300(
+                                   output_shape: list) -> torch.Tensor:
+    from vllm.platforms.rocm import on_mi3xx
+    if envs.VLLM_ROCM_USE_SKINNY_GEMM and on_mi3xx(
     ) and qinput.shape[0] == 1 and qinput.shape[1] % 16 == 0:
         output = ops.wvSplitKQ(weight.t(), qinput, out_dtype, scale_a, scale_b,
                                current_platform.get_cu_count())
@@ -177,7 +181,7 @@ def torch_per_tensor_w8a8_scaled_mm(*, qinput: torch.Tensor,
                                     scale_a: torch.Tensor,
                                     scale_b: torch.Tensor, bias: torch.Tensor,
                                     input_2d: torch.Tensor,
-                                    output_shape: List) -> torch.Tensor:
+                                    output_shape: list) -> torch.Tensor:
     output = torch._scaled_mm(qinput,
                               weight,
                               out_dtype=out_dtype,
@@ -198,7 +202,7 @@ def torch_per_token_w8a8_scaled_mm(*, qinput: torch.Tensor,
                                    scale_a: torch.Tensor,
                                    scale_b: torch.Tensor, bias: torch.Tensor,
                                    input_2d: torch.Tensor,
-                                   output_shape: List) -> torch.Tensor:
+                                   output_shape: list) -> torch.Tensor:
     # Note: Callers of this function should check USE_ROWWISE_TORCH_SCALED_MM
     #  when using it.
     #  For now it has only been validated on ROCm platform.
@@ -228,7 +232,7 @@ def torch_channelwise_w8a8_scaled_mm(*, qinput: torch.Tensor,
                                      scale_a: torch.Tensor,
                                      scale_b: torch.Tensor, bias: torch.Tensor,
                                      input_2d: torch.Tensor,
-                                     output_shape: List,
+                                     output_shape: list,
                                      **kwargs) -> torch.Tensor:
     # Use unfused DQ due to limitations with scaled_mm
 
@@ -270,20 +274,21 @@ def torch_channelwise_w8a8_scaled_mm(*, qinput: torch.Tensor,
 
 def dispatch_w8a8_scaled_mm(
         cutlass_fp8_supported: bool, per_tensor_weights: bool,
-        per_tensor_activations: bool, use_per_token_if_dynamic: Optional[bool]
-) -> Callable[..., torch.Tensor]:
+        per_tensor_activations: bool) -> Callable[..., torch.Tensor]:
 
+    # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
     if cutlass_fp8_supported:
         return cutlass_w8a8_scaled_mm
     if per_tensor_weights and per_tensor_activations:
         if current_platform.is_rocm():
             return rocm_per_tensor_w8a8_scaled_mm
         return torch_per_tensor_w8a8_scaled_mm
-    # torch.scaled_mm supports per tensor weights + activations only
-    # so fallback to naive if per channel or per token
-    if (use_per_token_if_dynamic and not per_tensor_weights
-            and not per_tensor_activations and USE_ROWWISE_TORCH_SCALED_MM):
+    # If torch.scaled_mm supports per-channel (weights) per-token (inputs)
+    if not per_tensor_weights and not per_tensor_activations \
+            and USE_ROWWISE_TORCH_SCALED_MM:
         return torch_per_token_w8a8_scaled_mm
+    # Normally, torch.scaled_mm supports per tensor weights + activations only
+    # so fallback to naive if per channel or per token
     return torch_channelwise_w8a8_scaled_mm
 
 
@@ -298,11 +303,11 @@ class Fp8LinearOp:
     """
 
     def __init__(self,
+                 act_quant_static: bool,
                  cutlass_fp8_supported: bool = cutlass_fp8_supported(),
-                 use_per_token_if_dynamic: bool = False,
+                 act_quant_group_shape: GroupShape = GroupShape.PER_TENSOR,
                  pad_output: Optional[bool] = None):
         self.cutlass_fp8_supported = cutlass_fp8_supported
-        self.use_per_token_if_dynamic = use_per_token_if_dynamic
 
         # Note: we pad the input because torch._scaled_mm is more performant
         # for matrices with batch dimension > 16.
@@ -311,9 +316,16 @@ class Fp8LinearOp:
         # as it breaks with dynamic shapes.
         if pad_output is None:
             config = get_current_vllm_config().compilation_config
-            pad_output = config.level < CompilationLevel.PIECEWISE
-        self.output_padding = 17 if (
-            pad_output and not current_platform.is_rocm()) else None
+            pad_output = config.level < CompilationLevel.PIECEWISE and \
+                         not cutlass_fp8_supported and \
+                         not current_platform.is_rocm()
+
+        self.output_padding = 17 if pad_output else None
+        self.act_quant_static = act_quant_static
+        self.act_quant_group_shape = act_quant_group_shape
+        self.quant_fp8 = QuantFP8(static=act_quant_static,
+                                  group_shape=act_quant_group_shape,
+                                  num_token_padding=self.output_padding)
 
     def apply(
         self,
@@ -324,8 +336,6 @@ class Fp8LinearOp:
         input_scale: Optional[torch.Tensor] = None,
         input_scale_ub: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
-        # TODO(luka) remove this parameter in favor of __init__
-        use_per_token_if_dynamic: Optional[bool] = None
     ) -> torch.Tensor:
         # ops.scaled_fp8_quant supports both dynamic and static quant.
         #   If dynamic, layer.input_scale is None and x_scale computed from x.
@@ -335,40 +345,27 @@ class Fp8LinearOp:
         input_2d = input.view(-1, input.shape[-1])
         output_shape = [*input.shape[:-1], weight.shape[1]]
 
-        # TODO(luka) this is here because currently MLA only decides this
-        #  during the forward method instead of in __init__.
-        if use_per_token_if_dynamic is None:
-            use_per_token_if_dynamic = self.use_per_token_if_dynamic
-
         if out_dtype is None:
             out_dtype = input.dtype
 
-        # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
-        if self.cutlass_fp8_supported:
-            assert input.dtype != current_platform.fp8_dtype(
-            ), "FP8 input to cutlass is not currently implemented"
-            qinput, x_scale = ops.scaled_fp8_quant(
+        # If input not quantized
+        # TODO(luka) remove this path if not used anymore
+        if input.dtype != current_platform.fp8_dtype():
+            qinput, x_scale = self.quant_fp8(
                 input_2d,
                 input_scale,
-                scale_ub=input_scale_ub,
-                use_per_token_if_dynamic=use_per_token_if_dynamic)
+                input_scale_ub,
+            )
         else:
-            if input.dtype != current_platform.fp8_dtype():
-                # Maybe apply padding to output, see comment in __init__
-                qinput, x_scale = ops.scaled_fp8_quant(
-                    input_2d,
-                    input_scale,
-                    num_token_padding=self.output_padding,
-                    use_per_token_if_dynamic=use_per_token_if_dynamic)
-            else:
-                qinput, x_scale = input_2d, input_scale
+            qinput, x_scale = input_2d, input_scale
 
         per_tensor_weights = (weight_scale.numel() == 1)
         per_tensor_activations = (x_scale.numel() == 1)
 
+        # TODO(luka) do this dispatch during init (after ScaledMM refactor)
         w8a8_scaled_mm_func = dispatch_w8a8_scaled_mm(
             self.cutlass_fp8_supported, per_tensor_weights,
-            per_tensor_activations, use_per_token_if_dynamic)
+            per_tensor_activations)
 
         return w8a8_scaled_mm_func(qinput=qinput,
                                    weight=weight,
@@ -384,7 +381,7 @@ def normalize_e4m3fn_to_e4m3fnuz(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     input_scale: Optional[torch.Tensor] = None
-) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     assert weight.dtype == torch.float8_e4m3fn
     # The bits pattern 10000000(-128) represents zero in e4m3fn
     # but NaN in e4m3fnuz. So here we set it to 0.

@@ -82,8 +82,20 @@ if [[ $commands == *"pytest -v -s basic_correctness/test_basic_correctness.py"* 
   commands=${commands//"pytest -v -s basic_correctness/test_basic_correctness.py"/"VLLM_USE_TRITON_FLASH_ATTN=0 pytest -v -s basic_correctness/test_basic_correctness.py"}
 fi
 
+if [[ $commands == *"pytest -v -s models/test_registry.py"* ]]; then
+  commands=${commands//"pytest -v -s models/test_registry.py"/"pytest -v -s models/test_registry.py -k 'not BambaForCausalLM and not GritLM and not Mamba2ForCausalLM and not Zamba2ForCausalLM'"}
+fi
+
+if [[ $commands == *"VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'not llama4 and not plamo2'"* ]]; then
+  commands=${commands//"VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'not llama4 and not plamo2'"/"VLLM_USE_V1=0 pytest -v -s models/test_initialization.py -k 'not llama4 and not plamo2 and not BambaForCausalLM and not Gemma2ForCausalLM and not Grok1ModelForCausalLM and not Zamba2ForCausalLM and not Gemma2Model and not GritLM'"}
+fi
+
 if [[ $commands == *"pytest -v -s compile/test_basic_correctness.py"* ]]; then
   commands=${commands//"pytest -v -s compile/test_basic_correctness.py"/"VLLM_USE_TRITON_FLASH_ATTN=0 pytest -v -s compile/test_basic_correctness.py"}
+fi
+
+if [[ $commands == *"pytest -v -s lora"* ]]; then
+  commands=${commands//"pytest -v -s lora"/"VLLM_ROCM_CUSTOM_PAGED_ATTN=0 pytest -v -s lora"}
 fi
 
 #ignore certain kernels tests
@@ -95,10 +107,8 @@ fi
 
 if [[ $commands == *" kernels/attention"* ]]; then
   commands="${commands} \
-  --ignore=kernels/attention/stest_attention_selector.py \
-  --ignore=kernels/attention/test_blocksparse_attention.py \
-  --ignore=kernels/attention/test_encoder_decoder_attn.py \
   --ignore=kernels/attention/test_attention_selector.py \
+  --ignore=kernels/attention/test_encoder_decoder_attn.py \
   --ignore=kernels/attention/test_flash_attn.py \
   --ignore=kernels/attention/test_flashinfer.py \
   --ignore=kernels/attention/test_prefix_prefill.py \

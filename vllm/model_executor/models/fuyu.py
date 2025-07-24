@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from https://github.com/huggingface/transformers/blob/v4.39.3/src/transformers/models/fuyu/modeling_fuyu.py
 # Copyright 2023 The vLLM team.
@@ -18,7 +19,7 @@
 """ PyTorch Fuyu model."""
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Literal, Optional, Set, Tuple, TypedDict
+from typing import Literal, Optional, TypedDict
 
 import torch
 import torch.nn as nn
@@ -41,7 +42,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
 
 # Cannot find the following 2 numbers from hf config.
@@ -152,6 +153,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
             # Avoid warning from HF logger for text-only input
@@ -163,6 +165,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
         image_patches = processed_outputs.get("image_patches")
@@ -172,12 +175,21 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
 
             # Original output: (1, num_images, Pn, Px * Py * C)
             # New output: (num_images, Pn, Px * Py * C)
-            assert (isinstance(image_patches, list)
-                    and len(image_patches) == 1)
-            assert (isinstance(image_patches[0], torch.Tensor)
-                    and len(image_patches[0]) == len(images))
-
-            processed_outputs["image_patches"] = image_patches[0]
+            # image_patches is a list with shape:
+            # (1, num_images, Pn, Px * Py * C)
+            # before Transformers 4.53
+            if isinstance(image_patches, list):
+                assert len(image_patches) == 1
+                assert (isinstance(image_patches[0], torch.Tensor)
+                        and len(image_patches[0]) == len(images))
+                processed_outputs["image_patches"] = image_patches[0]
+            # image_patches is a tensor with shape:
+            # (num_images, Pn, Px * Py * C)
+            # after Transformers 4.53
+            elif isinstance(image_patches, torch.Tensor):
+                assert len(image_patches) == len(images)
+            else:
+                raise AssertionError("This line should be unreachable.")
 
         return processed_outputs
 
@@ -190,8 +202,10 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
         vocab = tokenizer.get_vocab()
 
         boa_token_id = vocab["<0x04>"]
+        if prompt_tokens[-1] != boa_token_id:
+            prompt_tokens.append(boa_token_id)
 
-        return prompt_tokens + [boa_token_id]
+        return prompt_tokens
 
     def _get_mm_fields_config(
         self,
@@ -243,6 +257,20 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
                                         info=FuyuProcessingInfo,
                                         dummy_inputs=FuyuDummyInputsBuilder)
 class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.vision_embed_tokens.": "vision_embed_tokens.",
+            "model.language_model.": "language_model.model.",
+            "lm_head.": "language_model.lm_head.",
+        })
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return None
+
+        raise ValueError("Only image modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -323,11 +351,11 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
 
         return self._process_image_input(image_input)
 
@@ -337,7 +365,8 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
@@ -382,7 +411,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             self.language_model.lm_head, hidden_states, sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

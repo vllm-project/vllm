@@ -1113,8 +1113,6 @@ __global__ void Marlin(
     if constexpr (has_zp && !is_zp_float) {
       if (is_new_zp) {
         if constexpr (group_blocks == -1) is_first_matmul_in_slice = false;
-        FragB frag_zp_0;
-        FragB frag_zp_1;
         int zp_quant_0, zp_quant_1;
 
         if constexpr (w_type.size_bits() == 4) {
@@ -1588,16 +1586,20 @@ __global__ void Marlin(
 
     if constexpr (has_act_order) {
       slice_k_start += tb_k * stages;
-      slice_k_start_shared_fetch += tb_k * stages;
-      int first_group_id = g_idx[slice_k_start];
-      int last_g_idx = slice_k_start + stages * tb_k * 2;
-      if (last_g_idx >= prob_k) {
-        last_g_idx = prob_k - 1;
-      }
-      int last_group_id = g_idx[last_g_idx];
-      if (last_group_id >= sh_first_group_id + sh_num_groups) {
-        fetch_act_order_scales_to_shared(false, first_group_id, last_group_id);
-        __syncthreads();
+
+      if (slice_k_start < prob_k) {
+        slice_k_start_shared_fetch += tb_k * stages;
+        int first_group_id = g_idx[slice_k_start];
+        int last_g_idx = slice_k_start + stages * tb_k * 2;
+        if (last_g_idx >= prob_k) {
+          last_g_idx = prob_k - 1;
+        }
+        int last_group_id = g_idx[last_g_idx];
+        if (last_group_id >= sh_first_group_id + sh_num_groups) {
+          fetch_act_order_scales_to_shared(false, first_group_id,
+                                           last_group_id);
+          __syncthreads();
+        }
       }
     }
 

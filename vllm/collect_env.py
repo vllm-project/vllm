@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # ruff: noqa
 # code borrowed from https://github.com/pytorch/pytorch/blob/main/torch/utils/collect_env.py
@@ -6,13 +7,14 @@
 import datetime
 import locale
 import os
-import re
 import subprocess
 import sys
 # Unlike the rest of the PyTorch this file must be python2 compliant.
 # This script outputs relevant system environment info
 # Run it with `python collect_env.py` or `python -m torch.utils.collect_env`
 from collections import namedtuple
+
+import regex as re
 
 from vllm.envs import environment_variables
 
@@ -94,25 +96,30 @@ DEFAULT_PIP_PATTERNS = {
 def run(command):
     """Return (return-code, stdout, stderr)."""
     shell = True if type(command) is str else False
-    p = subprocess.Popen(command,
-                         stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE,
-                         shell=shell)
-    raw_output, raw_err = p.communicate()
-    rc = p.returncode
-    if get_platform() == 'win32':
-        enc = 'oem'
-    else:
-        enc = locale.getpreferredencoding()
-    output = raw_output.decode(enc)
-    if command == 'nvidia-smi topo -m':
-        # don't remove the leading whitespace of `nvidia-smi topo -m`
-        #   because they are meaningful
-        output = output.rstrip()
-    else:
-        output = output.strip()
-    err = raw_err.decode(enc)
-    return rc, output, err.strip()
+    try:
+        p = subprocess.Popen(command,
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE,
+                             shell=shell)
+        raw_output, raw_err = p.communicate()
+        rc = p.returncode
+        if get_platform() == 'win32':
+            enc = 'oem'
+        else:
+            enc = locale.getpreferredencoding()
+        output = raw_output.decode(enc)
+        if command == 'nvidia-smi topo -m':
+            # don't remove the leading whitespace of `nvidia-smi topo -m`
+            #   because they are meaningful
+            output = output.rstrip()
+        else:
+            output = output.strip()
+        err = raw_err.decode(enc)
+        return rc, output, err.strip()
+
+    except FileNotFoundError:
+        cmd_str = command if isinstance(command, str) else command[0]
+        return 127, '', f"Command not found: {cmd_str}"
 
 
 def run_and_read_all(run_lambda, command):
@@ -146,7 +153,7 @@ def get_conda_packages(run_lambda, patterns=None):
     if patterns is None:
         patterns = DEFAULT_CONDA_PATTERNS
     conda = os.environ.get('CONDA_EXE', 'conda')
-    out = run_and_read_all(run_lambda, "{} list".format(conda))
+    out = run_and_read_all(run_lambda, [conda, 'list'])
     if out is None:
         return out
 
@@ -637,33 +644,50 @@ def get_env_info():
 
 
 env_info_fmt = """
-PyTorch version: {torch_version}
-Is debug build: {is_debug_build}
-CUDA used to build PyTorch: {cuda_compiled_version}
-ROCM used to build PyTorch: {hip_compiled_version}
+==============================
+        System Info
+==============================
+OS                           : {os}
+GCC version                  : {gcc_version}
+Clang version                : {clang_version}
+CMake version                : {cmake_version}
+Libc version                 : {libc_version}
 
-OS: {os}
-GCC version: {gcc_version}
-Clang version: {clang_version}
-CMake version: {cmake_version}
-Libc version: {libc_version}
+==============================
+       PyTorch Info
+==============================
+PyTorch version              : {torch_version}
+Is debug build               : {is_debug_build}
+CUDA used to build PyTorch   : {cuda_compiled_version}
+ROCM used to build PyTorch   : {hip_compiled_version}
 
-Python version: {python_version}
-Python platform: {python_platform}
-Is CUDA available: {is_cuda_available}
-CUDA runtime version: {cuda_runtime_version}
-CUDA_MODULE_LOADING set to: {cuda_module_loading}
-GPU models and configuration: {nvidia_gpu_models}
-Nvidia driver version: {nvidia_driver_version}
-cuDNN version: {cudnn_version}
-HIP runtime version: {hip_runtime_version}
-MIOpen runtime version: {miopen_runtime_version}
-Is XNNPACK available: {is_xnnpack_available}
+==============================
+      Python Environment
+==============================
+Python version               : {python_version}
+Python platform              : {python_platform}
 
-CPU:
+==============================
+       CUDA / GPU Info
+==============================
+Is CUDA available            : {is_cuda_available}
+CUDA runtime version         : {cuda_runtime_version}
+CUDA_MODULE_LOADING set to   : {cuda_module_loading}
+GPU models and configuration : {nvidia_gpu_models}
+Nvidia driver version        : {nvidia_driver_version}
+cuDNN version                : {cudnn_version}
+HIP runtime version          : {hip_runtime_version}
+MIOpen runtime version       : {miopen_runtime_version}
+Is XNNPACK available         : {is_xnnpack_available}
+
+==============================
+          CPU Info
+==============================
 {cpu_info}
 
-Versions of relevant libraries:
+==============================
+Versions of relevant libraries
+==============================
 {pip_packages}
 {conda_packages}
 """.strip()
@@ -671,17 +695,23 @@ Versions of relevant libraries:
 # both the above code and the following code use `strip()` to
 # remove leading/trailing whitespaces, so we need to add a newline
 # in between to separate the two sections
-env_info_fmt += "\n"
+env_info_fmt += "\n\n"
 
 env_info_fmt += """
-ROCM Version: {rocm_version}
-Neuron SDK Version: {neuron_sdk_version}
-vLLM Version: {vllm_version}
+==============================
+         vLLM Info
+==============================
+ROCM Version                 : {rocm_version}
+Neuron SDK Version           : {neuron_sdk_version}
+vLLM Version                 : {vllm_version}
 vLLM Build Flags:
-{vllm_build_flags}
+  {vllm_build_flags}
 GPU Topology:
-{gpu_topo}
+  {gpu_topo}
 
+==============================
+     Environment Variables
+==============================
 {env_vars}
 """.strip()
 

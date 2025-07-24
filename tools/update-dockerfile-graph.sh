@@ -24,7 +24,7 @@ if printf '%s\n' "${FILES[@]}" | grep -q "^docker/Dockerfile$"; then
   fi
 
   # Define the target file path
-  TARGET_GRAPH_FILE="docs/source/assets/contributing/dockerfile-stages-dependency.png"
+  TARGET_GRAPH_FILE="docs/assets/contributing/dockerfile-stages-dependency.png"
 
   # Ensure target directory exists
   mkdir -p "$(dirname "$TARGET_GRAPH_FILE")"

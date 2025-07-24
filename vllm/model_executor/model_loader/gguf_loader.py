@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from typing import Dict, Generator, Tuple
+from collections.abc import Generator
 
 import gguf
 import torch
 import torch.nn as nn
+from huggingface_hub import hf_hub_download
 from transformers import AutoModelForCausalLM
 
 from vllm.config import LoadConfig, ModelConfig, VllmConfig
@@ -31,8 +33,18 @@ class GGUFModelLoader(BaseModelLoader):
     def _prepare_weights(self, model_name_or_path: str):
         if os.path.isfile(model_name_or_path):
             return model_name_or_path
+        # for raw HTTPS link
+        if model_name_or_path.startswith(
+            ("http://", "https://")) and model_name_or_path.endswith(".gguf"):
+            return hf_hub_download(url=model_name_or_path)
+        # repo id/filename.gguf
+        if "/" in model_name_or_path and model_name_or_path.endswith(".gguf"):
+            repo_id, filename = model_name_or_path.rsplit("/", 1)
+            return hf_hub_download(repo_id=repo_id, filename=filename)
         else:
-            raise ValueError(f"{model_name_or_path} is not a file.")
+            raise ValueError(
+                f"Unrecognised GGUF reference: {model_name_or_path} "
+                "(expected local file, raw URL, or <repo_id>/<filename>.gguf)")
 
     def _get_gguf_weights_map(self, model_config: ModelConfig):
         """
@@ -84,17 +96,24 @@ class GGUFModelLoader(BaseModelLoader):
         return gguf_to_hf_name_map
 
     def _get_weights_iterator(
-        self, model_name_or_path: str, gguf_to_hf_name_map: Dict[str, str]
-    ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+        self, model_name_or_path: str, gguf_to_hf_name_map: dict[str, str]
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
         return gguf_quant_weights_iterator(model_name_or_path,
                                            gguf_to_hf_name_map)
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model)
 
-    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+    def load_weights(self, model: nn.Module,
+                     model_config: ModelConfig) -> None:
+        local_model_path = self._prepare_weights(model_config.model)
+        gguf_weights_map = self._get_gguf_weights_map(model_config)
+        model.load_weights(
+            self._get_weights_iterator(local_model_path, gguf_weights_map))
+
+    def load_model(self, vllm_config: VllmConfig,
+                   model_config: ModelConfig) -> nn.Module:
         device_config = vllm_config.device_config
-        model_config = vllm_config.model_config
         local_model_path = self._prepare_weights(model_config.model)
         gguf_weights_map = self._get_gguf_weights_map(model_config)
         # we can only know if tie word embeddings after mapping weights
@@ -106,8 +125,7 @@ class GGUFModelLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 model = initialize_model(vllm_config=vllm_config)
-            model.load_weights(
-                self._get_weights_iterator(local_model_path, gguf_weights_map))
+            self.load_weights(model, model_config)
 
             process_weights_after_loading(model, model_config, target_device)
         return model

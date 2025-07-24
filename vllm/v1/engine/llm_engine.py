@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
 from copy import copy
@@ -14,9 +15,8 @@ from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.outputs import RequestOutput
+from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import (
     TokenizerGroup, init_tokenizer_from_configs)
@@ -27,7 +27,10 @@ from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import StatLoggerFactory
+from vllm.v1.metrics.loggers import (PrometheusStatLogger, StatLoggerBase,
+                                     StatLoggerFactory)
+from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
+from vllm.v1.metrics.stats import IterationStats
 
 logger = init_logger(__name__)
 
@@ -64,6 +67,11 @@ class LLMEngine:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
 
+        self.log_stats = log_stats
+        self.stat_logger: Optional[StatLoggerBase] = None
+        if self.log_stats:
+            self.stat_logger = PrometheusStatLogger(vllm_config)
+
         # important: init dp group before init the engine_core
         # In the decoupled engine case this is handled in EngineCoreProc.
         parallel_config = vllm_config.parallel_config
@@ -73,11 +81,14 @@ class LLMEngine:
             self.dp_group = None
         self.should_execute_dummy_batch = False
 
-        # Tokenizer (+ ensure liveness if running in another process).
-        self.tokenizer = init_tokenizer_from_configs(
-            model_config=vllm_config.model_config,
-            scheduler_config=vllm_config.scheduler_config,
-            lora_config=vllm_config.lora_config)
+        if self.model_config.skip_tokenizer_init:
+            self.tokenizer = None
+        else:
+            # Tokenizer (+ ensure liveness if running in another process).
+            self.tokenizer = init_tokenizer_from_configs(
+                model_config=vllm_config.model_config,
+                scheduler_config=vllm_config.scheduler_config,
+                lora_config=vllm_config.lora_config)
 
         # Processor (convert Inputs --> EngineCoreRequests)
         self.processor = Processor(vllm_config=vllm_config,
@@ -86,7 +97,7 @@ class LLMEngine:
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(self.tokenizer,
-                                                log_stats=False)
+                                                log_stats=self.log_stats)
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(
@@ -94,7 +105,7 @@ class LLMEngine:
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_stats=False,  # FIXME: implement
+            log_stats=self.log_stats,
         )
 
         if not multiprocess_mode:
@@ -151,7 +162,7 @@ class LLMEngine:
     def has_unfinished_requests(self) -> bool:
         has_unfinished = self.output_processor.has_unfinished_requests()
         if self.dp_group is None:
-            return has_unfinished
+            return has_unfinished or self.engine_core.dp_engines_running()
         return self.has_unfinished_requests_dp(has_unfinished)
 
     def has_unfinished_requests_dp(self, has_unfinished: bool) -> bool:
@@ -180,14 +191,17 @@ class LLMEngine:
         lora_request: Optional[LoRARequest] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
+        # Validate the request_id type.
+        if not isinstance(request_id, str):
+            raise TypeError(
+                f"request_id must be a string, got {type(request_id)}")
+
         # Process raw inputs into the request.
         prompt_str, request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
-            tokenization_kwargs, trace_headers, prompt_adapter_request,
-            priority)
+            tokenization_kwargs, trace_headers, priority)
 
         n = params.n if isinstance(params, SamplingParams) else 1
 
@@ -212,7 +226,7 @@ class LLMEngine:
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
 
-    def step(self) -> list[RequestOutput]:
+    def step(self) -> Union[list[RequestOutput], list[PoolingRequestOutput]]:
 
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False
@@ -223,11 +237,20 @@ class LLMEngine:
         outputs = self.engine_core.get_output()
 
         # 2) Process EngineCoreOutputs.
+        iteration_stats = IterationStats() if self.log_stats else None
         processed_outputs = self.output_processor.process_outputs(
-            outputs.outputs)
+            outputs.outputs,
+            engine_core_timestamp=outputs.timestamp,
+            iteration_stats=iteration_stats)
 
         # 3) Abort any reqs that finished due to stop strings.
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
+
+        # 4) Record stats
+        if self.stat_logger is not None:
+            assert outputs.scheduler_stats is not None
+            self.stat_logger.record(scheduler_stats=outputs.scheduler_stats,
+                                    iteration_stats=iteration_stats)
 
         return processed_outputs.request_outputs
 
@@ -259,6 +282,10 @@ class LLMEngine:
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
+
+    def get_metrics(self) -> list[Metric]:
+        assert self.log_stats, "Stat logging disabled"
+        return get_metrics_snapshot()
 
     def get_tokenizer_group(self) -> TokenizerGroup:
         if self.tokenizer is None:

@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
-import re
 from copy import deepcopy
 from unittest.mock import MagicMock
 
 import pytest
+import regex as re
 from pydantic import TypeAdapter
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -71,7 +72,7 @@ def _compile_and_check(tools: list[ChatCompletionToolsParam], sample_output,
     assert isinstance(schema, dict)
 
     # use build_regex_from_schema used in JSONLogitsProcessor to create Guide
-    from outlines_core.fsm.json_schema import build_regex_from_schema
+    from outlines_core.json_schema import build_regex_from_schema
     regex = build_regex_from_schema(json.dumps(schema))
     compiled = re.compile(regex)
     matches = compiled.fullmatch(json.dumps(sample_output)) is not None

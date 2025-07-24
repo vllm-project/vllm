@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # flake8: noqa
 """Tests Model Optimizer nvfp4 models against ground truth generation
 Note: these tests will only pass on B200
@@ -41,16 +42,16 @@ EXPECTED_STRS_MAP = {
     reason=
     "Prevent unstable test based on golden strings from breaking the build "
     " and test input model being too large and hanging the system.")
-@pytest.mark.skipif(not is_quant_method_supported("nvfp4"),
-                    reason="nvfp4 is not supported on this GPU type.")
+@pytest.mark.skipif(not is_quant_method_supported("modelopt_fp4"),
+                    reason="modelopt_fp4 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_name", MODELS)
 def test_models(example_prompts, model_name) -> None:
-    model = LLM(
+    llm = LLM(
         model=model_name,
         max_model_len=MAX_MODEL_LEN,
         trust_remote_code=True,
         enforce_eager=True,
-        quantization="nvfp4",
+        quantization="modelopt_fp4",
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -68,9 +69,9 @@ def test_models(example_prompts, model_name) -> None:
     # Note: these need to be run 1 at a time due to numerical precision,
     # since the expected strs were generated this way.
     for prompt in formatted_prompts:
-        outputs = model.generate(prompt, params)
+        outputs = llm.generate(prompt, params)
         generations.append(outputs[0].outputs[0].text)
-    del model
+    del llm
 
     print(model_name, generations)
     expected_strs = EXPECTED_STRS_MAP[model_name]

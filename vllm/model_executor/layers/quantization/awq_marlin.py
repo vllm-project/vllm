@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
 
 import torch
 from torch.nn import Parameter
@@ -46,8 +47,8 @@ class AWQMarlinConfig(QuantizationConfig):
 
     def __init__(self, weight_bits: int, group_size: int, zero_point: bool,
                  lm_head_quantized: bool,
-                 modules_to_not_convert: Optional[List[str]],
-                 full_config: Dict[str, Any]) -> None:
+                 modules_to_not_convert: Optional[list[str]],
+                 full_config: dict[str, Any]) -> None:
         super().__init__()
         self.pack_factor = 32 // weight_bits  # packed into int32
         self.group_size = group_size
@@ -79,7 +80,7 @@ class AWQMarlinConfig(QuantizationConfig):
         return "awq_marlin"
 
     @classmethod
-    def get_supported_act_dtypes(cls) -> List[torch.dtype]:
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.half, torch.bfloat16]
 
     @classmethod
@@ -87,11 +88,11 @@ class AWQMarlinConfig(QuantizationConfig):
         return 80
 
     @classmethod
-    def get_config_filenames(cls) -> List[str]:
+    def get_config_filenames(cls) -> list[str]:
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "AWQMarlinConfig":
+    def from_config(cls, config: dict[str, Any]) -> "AWQMarlinConfig":
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         zero_point = cls.get_from_keys(config, ["zero_point"])
@@ -150,7 +151,7 @@ class AWQMarlinConfig(QuantizationConfig):
         return None
 
     @classmethod
-    def is_awq_marlin_compatible(cls, quant_config: Dict[str, Any]):
+    def is_awq_marlin_compatible(cls, quant_config: dict[str, Any]):
         # Extract data from quant config.
         quant_method = quant_config.get("quant_method", "").lower()
         num_bits = quant_config.get("bits")
@@ -189,7 +190,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_partition_sizes: List[int],
+        output_partition_sizes: list[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
@@ -481,13 +482,16 @@ class AWQMoEMethod(FusedMoEMethodBase):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        assert activation == "silu", "Only SiLU activation is supported."
-
-        if apply_router_weight_on_input:
+        if enable_eplb:
             raise NotImplementedError(
-                "Apply router weight on input is not supported for"
-                "fused Marlin MoE method.")
+                "EPLB not supported for `AWQMoEMethod` yet.")
+
+        assert activation == "silu", "Only SiLU activation is supported."
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -511,6 +515,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
             topk_weights,
             topk_ids,
             quant_type_id=self.quant_type.id,
+            apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             w1_zeros=layer.w13_qzeros,

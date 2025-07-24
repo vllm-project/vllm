@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping, Sequence
-from typing import List, Optional, Set, Tuple, TypedDict, Union
+from typing import Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -66,8 +67,8 @@ class AriaVisionTransformer(Idefics3VisionTransformer, SupportsQuant):
         # Identity layer
         self.post_layernorm = nn.Identity()
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -75,7 +76,7 @@ class AriaVisionTransformer(Idefics3VisionTransformer, SupportsQuant):
             ("qkv_proj", "v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
 
             # NOTE: post_layernorm is not used in Aria
@@ -326,8 +327,8 @@ class AriaTextModel(LlamaModel, SupportsQuant):
 
     # Adapted from LlamaModel.load_weights with the modification of adding
     # the expert weights mapping to `stacked_params_mapping`
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -339,7 +340,7 @@ class AriaTextModel(LlamaModel, SupportsQuant):
             ("experts.w2_weight", "experts.fc2.weight", 'w2'),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -485,6 +486,11 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     """
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            # mapping for new names in checkpoint saved after transformers v4.52
+            "model.language_model.": "language_model.model.",
+            "model.vision_tower.": "vision_tower.",
+            "model.multi_modal_projector.": "multi_modal_projector.",
+            # mapping for original checkpoint
             "language_model.model": "language_model",
             "language_model.lm_head": "lm_head",
         },
@@ -492,6 +498,13 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
             "router.weight": "router_weight",
         },
     )
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<|fim_prefix|><|img|><|fim_suffix|>"
+
+        raise ValueError("Only image modality is supported")
 
     def __init__(
         self,
@@ -528,7 +541,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
                                                 self.vocab_size, logit_scale)
 
     def _validate_image_sizes(
-            self, images: List[torch.Tensor]) -> List[torch.Tensor]:
+            self, images: list[torch.Tensor]) -> list[torch.Tensor]:
         if not all(img.shape == images[0].shape for img in images):
             raise ValueError("All images must be the same size")
         return images
@@ -578,7 +591,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def _process_image_input(
         self, image_input: AriaImagePixelInputs
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         assert self.vision_tower is not None
 
         pixel_values = image_input['pixel_values']
@@ -600,11 +613,11 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
         multimodal_embeddings = self._process_image_input(image_input)
         return multimodal_embeddings
 
@@ -614,7 +627,8 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 self.config.image_token_index)
@@ -651,6 +665,6 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

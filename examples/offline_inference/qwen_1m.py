@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from urllib.request import urlopen
 
@@ -17,10 +18,10 @@ def load_prompt() -> str:
     # https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen2.5-1M/test-data/1m.txt
 
     with urlopen(
-            "https://qianwen-res.oss-cn-beijing.aliyuncs.com"
-            "/Qwen2.5-1M/test-data/600k.txt",
-            timeout=5) as response:
-        prompt = response.read().decode('utf-8')
+        "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen2.5-1M/test-data/600k.txt",
+        timeout=5,
+    ) as response:
+        prompt = response.read().decode("utf-8")
     return prompt
 
 
@@ -41,18 +42,22 @@ def process_requests(llm: LLM, prompts: list[str]) -> None:
     for output in outputs:
         prompt_token_ids = output.prompt_token_ids
         generated_text = output.outputs[0].text
-        print(f"Prompt length: {len(prompt_token_ids)}, "
-              f"Generated text: {generated_text!r}")
+        print(
+            f"Prompt length: {len(prompt_token_ids)}, "
+            f"Generated text: {generated_text!r}"
+        )
 
 
 # Create an LLM.
 def initialize_engine() -> LLM:
-    llm = LLM(model="Qwen/Qwen2.5-7B-Instruct-1M",
-              max_model_len=1048576,
-              tensor_parallel_size=4,
-              enforce_eager=True,
-              enable_chunked_prefill=True,
-              max_num_batched_tokens=131072)
+    llm = LLM(
+        model="Qwen/Qwen2.5-7B-Instruct-1M",
+        max_model_len=1048576,
+        tensor_parallel_size=4,
+        enforce_eager=True,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=131072,
+    )
     return llm
 
 
@@ -62,5 +67,5 @@ def main():
     process_requests(llm, [prompt])
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

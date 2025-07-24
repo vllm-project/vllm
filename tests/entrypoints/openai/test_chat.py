@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # imports for guided decoding tests
 import json
-import re
 from typing import Optional
 
 import jsonschema
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+import regex as re
 import requests
 import torch
 from openai import BadRequestError, OpenAI
@@ -1112,10 +1113,7 @@ async def test_http_chat_no_model_name_with_curl(server: RemoteOpenAIServer):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME, ""])
-async def test_http_chat_no_model_name_with_openai(server: RemoteOpenAIServer,
-                                                   model_name: str):
-
+async def test_http_chat_no_model_name_with_openai(server: RemoteOpenAIServer):
     openai_api_key = "EMPTY"
     openai_api_base = f"http://localhost:{server.port}/v1"
 
@@ -1134,3 +1132,35 @@ async def test_http_chat_no_model_name_with_openai(server: RemoteOpenAIServer,
         messages=messages,
     )
     assert response.model == MODEL_NAME
+
+
+@pytest.mark.asyncio
+async def test_invocations(server: RemoteOpenAIServer,
+                           client: openai.AsyncOpenAI):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role": "user",
+        "content": "what is 1+1?"
+    }]
+
+    request_args = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "max_completion_tokens": 5,
+        "temperature": 0.0,
+        "logprobs": False,
+    }
+
+    chat_completion = await client.chat.completions.create(**request_args)
+
+    invocation_response = requests.post(server.url_for("invocations"),
+                                        json=request_args)
+    invocation_response.raise_for_status()
+
+    chat_output = chat_completion.model_dump()
+    invocation_output = invocation_response.json()
+
+    assert chat_output.keys() == invocation_output.keys()
+    assert chat_output["choices"] == invocation_output["choices"]

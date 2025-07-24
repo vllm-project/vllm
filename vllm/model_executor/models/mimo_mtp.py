@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/model_executor/models/deepseek_mtp.py
@@ -18,7 +19,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only MiMo-MTP model."""
-from typing import Iterable, Optional, Set, Tuple
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -28,7 +30,6 @@ from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -159,8 +160,6 @@ class MiMoMTP(nn.Module):
         self.lm_head = ParallelLMHead(self.config.vocab_size,
                                       self.config.hidden_size)
 
-        self.sampler = get_sampler()
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -185,16 +184,8 @@ class MiMoMTP(nn.Module):
         return self.model.compute_logits(hidden_states, self.lm_head,
                                          sampling_metadata, spec_step_idx)
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
@@ -204,7 +195,7 @@ class MiMoMTP(nn.Module):
         ]
 
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
 
             if "rotary_emb.inv_freq" in name:
@@ -249,7 +240,7 @@ class MiMoMTP(nn.Module):
         return loaded_params
 
     def map_model_name_to_mtp_param_name(self, name: str) -> str:
-        import re
+        import regex as re
         name_without_prefix = [
             "token_layernorm", "hidden_layernorm", "input_proj",
             "final_layernorm"

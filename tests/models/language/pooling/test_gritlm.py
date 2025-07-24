@@ -1,23 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
-import importlib.util
-import math
-from array import array
-
+import numpy as np
 import openai
 import pytest
 from scipy.spatial.distance import cosine
 
 from vllm import LLM, SamplingParams
 from vllm.config import ModelConfig
-from vllm.utils import STR_BACKEND_ENV_VAR
 
 from ....utils import RemoteOpenAIServer
-
-# GritLM embedding implementation is only supported by XFormers backend.
-pytestmark = pytest.mark.skipif(not importlib.util.find_spec("xformers"),
-                                reason="GritLM requires XFormers")
 
 MODEL_NAME = "parasail-ai/GritLM-7B-vllm"
 MAX_MODEL_LEN = 4000
@@ -27,11 +20,11 @@ def _arr(arr):
     """
     Convert a list of integers to an array of integers.
     """
-    return array("i", arr)
+    return np.array(arr)
 
 
 def test_find_array():
-    from vllm.model_executor.models.gritlm import GritLMPooler
+    from vllm.model_executor.models.gritlm import GritLMMeanPool
 
     model_config = ModelConfig(
         MODEL_NAME,
@@ -42,17 +35,19 @@ def test_find_array():
         dtype="bfloat16",
         seed=0,
     )
-    pooler = GritLMPooler(model_config=model_config)
+    pooling = GritLMMeanPool(model_config=model_config)
 
     arr = _arr([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
 
-    assert pooler._find_array(arr, _arr([3, 4, 5]), start_idx=0) == 3
-    assert pooler._find_array(arr, _arr([3, 4, 5]), start_idx=1) == 3
-    assert pooler._find_array(arr, _arr([3, 4, 5]), start_idx=5) == -1
-    assert pooler._find_array(arr, _arr([3, 5]), start_idx=0) == -1
+    assert pooling._find_array(arr, _arr([3, 4, 5]), start_idx=0) == 3
+    assert pooling._find_array(arr, _arr([3, 4, 5]), start_idx=1) == 3
+    assert pooling._find_array(arr, _arr([3, 4, 5]), start_idx=5) == -1
+    assert pooling._find_array(arr, _arr([3, 4, 5]), end_idx=3) == -1
+    assert pooling._find_array(arr, _arr([3, 4, 5]), end_idx=4) == 3
+    assert pooling._find_array(arr, _arr([3, 5]), start_idx=0) == -1
 
     with pytest.raises(ValueError):
-        pooler._find_array(arr, _arr([3, 4, 5]), start_idx=-1)
+        pooling._find_array(arr, _arr([3, 4, 5]), start_idx=-1)
 
 
 def run_llm_encode(
@@ -105,56 +100,49 @@ def get_test_data():
 
 def validate_embed_output(q_rep: list[list[float]], d_rep: list[list[float]]):
     cosine_sim_q0_d0 = 1 - cosine(q_rep[0], d_rep[0])
-    assert math.isclose(cosine_sim_q0_d0, 0.609, abs_tol=0.001)
+    assert cosine_sim_q0_d0 == pytest.approx(0.609, abs=0.001)
 
     cosine_sim_q0_d1 = 1 - cosine(q_rep[0], d_rep[1])
-    assert math.isclose(cosine_sim_q0_d1, 0.101, abs_tol=0.001)
+    assert cosine_sim_q0_d1 == pytest.approx(0.101, abs=0.001)
 
     cosine_sim_q1_d0 = 1 - cosine(q_rep[1], d_rep[0])
-    assert math.isclose(cosine_sim_q1_d0, 0.120, abs_tol=0.001)
+    assert cosine_sim_q1_d0 == pytest.approx(0.120, abs=0.001)
 
     cosine_sim_q1_d1 = 1 - cosine(q_rep[1], d_rep[1])
-    assert math.isclose(cosine_sim_q1_d1, 0.534, abs_tol=0.001)
+    assert cosine_sim_q1_d1 == pytest.approx(0.534, abs=0.001)
 
 
-def test_gritlm_offline_embedding(monkeypatch: pytest.MonkeyPatch,
-                                  vllm_runner):
-    # GritLM embedding implementation is only supported by XFormers backend.
-    with monkeypatch.context() as m:
-        m.setenv(STR_BACKEND_ENV_VAR, "XFORMERS")
+def test_gritlm_offline_embedding(vllm_runner):
+    queries, q_instruction, documents, d_instruction = get_test_data()
 
-        queries, q_instruction, documents, d_instruction = get_test_data()
+    with vllm_runner(
+            MODEL_NAME,
+            task="embed",
+            max_model_len=MAX_MODEL_LEN,
+    ) as vllm_model:
+        llm = vllm_model.llm
 
-        with vllm_runner(
-                MODEL_NAME,
-                task="embed",
-                max_model_len=MAX_MODEL_LEN,
-        ) as vllm_model:
-            llm = vllm_model.model
+        d_rep = run_llm_encode(
+            llm,
+            documents,
+            d_instruction,
+        )
+        q_rep = run_llm_encode(
+            llm,
+            queries,
+            q_instruction,
+        )
 
-            d_rep = run_llm_encode(
-                llm,
-                documents,
-                d_instruction,
-            )
-            q_rep = run_llm_encode(
-                llm,
-                queries,
-                q_instruction,
-            )
-
-        validate_embed_output(q_rep, d_rep)
+    validate_embed_output(q_rep, d_rep)
 
 
 @pytest.mark.asyncio
 async def test_gritlm_api_server_embedding():
     queries, q_instruction, documents, d_instruction = get_test_data()
 
-    # GritLM embedding implementation is only supported by XFormers backend.
     args = ["--task", "embed", "--max_model_len", str(MAX_MODEL_LEN)]
-    env_dict = {STR_BACKEND_ENV_VAR: "XFORMERS"}
 
-    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as server:
         client_embedding = server.get_async_client()
 
         d_rep = await run_client_embeddings(
@@ -172,35 +160,28 @@ async def test_gritlm_api_server_embedding():
 
 
 def test_gritlm_offline_generate(monkeypatch: pytest.MonkeyPatch, vllm_runner):
-    # GritLM embedding implementation is only supported by XFormers backend.
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "0")
-        m.setenv(STR_BACKEND_ENV_VAR, "XFORMERS")
+    input = "<|user|>\nWhat is the capital of France?\n<|assistant|>\n"
 
-        input = "<|user|>\nWhat is the capital of France?\n<|assistant|>\n"
+    with vllm_runner(
+            MODEL_NAME,
+            task="generate",
+            max_model_len=MAX_MODEL_LEN,
+    ) as vllm_model:
+        llm = vllm_model.llm
 
-        with vllm_runner(
-                MODEL_NAME,
-                task="generate",
-                max_model_len=MAX_MODEL_LEN,
-        ) as vllm_model:
-            llm = vllm_model.model
+        sampling_params = SamplingParams(temperature=0.0, max_tokens=256)
+        outputs = llm.generate(input, sampling_params=sampling_params)
 
-            sampling_params = SamplingParams(temperature=0.0, max_tokens=256)
-            outputs = llm.generate(input, sampling_params=sampling_params)
-
-        assert outputs[0].outputs[0].text == "The capital of France is Paris."
+    assert outputs[0].outputs[0].text == "The capital of France is Paris."
 
 
 @pytest.mark.asyncio
 async def test_gritlm_api_server_generate():
     input = "<|user|>\nWhat is the capital of France?\n<|assistant|>\n"
 
-    # GritLM embedding implementation is only supported by XFormers backend.
     args = ["--task", "generate", "--max_model_len", str(MAX_MODEL_LEN)]
-    env_dict = {"VLLM_USE_V1": "0", STR_BACKEND_ENV_VAR: "XFORMERS"}
 
-    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as server:
         client_generate = server.get_async_client()
 
         outputs = await client_generate.completions.create(

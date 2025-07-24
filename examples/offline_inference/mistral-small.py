@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # ruff: noqa
 import argparse
 
 from vllm import LLM
 from vllm.sampling_params import SamplingParams
+from vllm.assets.image import ImageAsset
 
 # This script is an offline demo for running Mistral-Small-3.1
 #
@@ -70,22 +72,15 @@ def run_simple_demo(args: argparse.Namespace):
     )
 
     prompt = "Describe this image in one sentence."
-    image_url = "https://picsum.photos/id/237/200/300"
 
     messages = [
         {
-            "role":
-            "user",
+            "role": "user",
             "content": [
+                {"type": "text", "text": prompt},
                 {
-                    "type": "text",
-                    "text": prompt
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": image_url
-                    }
+                    "type": "image_pil",
+                    "image_pil": ImageAsset("cherry_blossom").pil_image,
                 },
             ],
         },
@@ -121,25 +116,11 @@ def run_advanced_demo(args: argparse.Namespace):
 
     messages = [
         {
-            "role":
-            "user",
+            "role": "user",
             "content": [
-                {
-                    "type": "text",
-                    "text": prompt
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": url_1
-                    }
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": url_2
-                    }
-                },
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": url_1}},
+                {"type": "image_url", "image_url": {"url": url_2}},
             ],
         },
         {
@@ -153,12 +134,7 @@ def run_advanced_demo(args: argparse.Namespace):
         {
             "role": "user",
             "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": url_3
-                    }
-                },
+                {"type": "image_url", "image_url": {"url": url_3}},
             ],
         },
     ]
@@ -171,7 +147,8 @@ def run_advanced_demo(args: argparse.Namespace):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run a demo in simple or advanced mode.")
+        description="Run a demo in simple or advanced mode."
+    )
 
     parser.add_argument(
         "mode",
@@ -179,15 +156,18 @@ def parse_args():
         help="Specify the demo mode: 'simple' or 'advanced'",
     )
 
-    parser.add_argument('--format',
-                        choices=["mistral", "hf"],
-                        default="mistral",
-                        help='Specify the format of the model to load.')
+    parser.add_argument(
+        "--format",
+        choices=["mistral", "hf"],
+        default="mistral",
+        help="Specify the format of the model to load.",
+    )
 
     parser.add_argument(
-        '--disable-mm-preprocessor-cache',
-        action='store_true',
-        help='If True, disables caching of multi-modal preprocessor/mapper.')
+        "--disable-mm-preprocessor-cache",
+        action="store_true",
+        help="If True, disables caching of multi-modal preprocessor/mapper.",
+    )
     return parser.parse_args()
 
 
