@@ -6,12 +6,15 @@ from collections.abc import Sequence
 from typing import Union
 
 import regex as re
-
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall)
+                                              FunctionCall, ResponsesRequest,
+                                              ToolCall)
+# yapf: enable
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.logger import init_logger
@@ -90,7 +93,7 @@ class Glm4MoeModelToolParser(ToolParser):
     def extract_tool_calls(
         self,
         model_output: str,
-        request: ChatCompletionRequest,
+        request: Union[ChatCompletionRequest, ResponsesRequest],
     ) -> ExtractedToolCallInformation:
 
         # sanity check; avoid unnecessary processing
