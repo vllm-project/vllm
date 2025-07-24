@@ -622,65 +622,50 @@ class ModelConfig:
             return "none"
 
         if self.task is not None:
+            runner: RunnerOption = "auto"
+            convert: ConvertOption = "auto"
             msg_prefix = ("The 'task' option has been deprecated and will be "
                           "removed in v0.13.0 or v1.0, whichever comes first.")
+            msg_hint = "Please remove this option."
 
             is_generative_task = self.task in _RUNNER_TASKS["generate"]
             is_pooling_task = self.task in _RUNNER_TASKS["pooling"]
 
-            if is_generative_model and not is_pooling_model:
+            if is_generative_model and is_pooling_model:
                 if is_generative_task:
-                    self.runner = "generate"
-                    self.convert = "auto"
+                    runner = "generate"
+                    convert = "auto"
+                    msg_hint = ("Please replace this option with `--runner "
+                                "generate` to continue using this model "
+                                "as a generative model.")
+                elif is_pooling_task:
+                    runner = "pooling"
+                    convert = "auto"
+                    msg_hint = ("Please replace this option with `--runner "
+                                "pooling` to continue using this model "
+                                "as a pooling model.")
+                else:  # task == "auto"
+                    pass
+            elif is_generative_model or is_pooling_model:
+                if is_generative_task:
+                    runner = "generate"
+                    convert = "auto"
                     msg_hint = "Please remove this option"
                 elif is_pooling_task:
-                    self.runner = "pooling"
-                    self.convert = _task_to_convert(self.task)
+                    runner = "pooling"
+                    convert = _task_to_convert(self.task)
                     msg_hint = ("Please replace this option with `--convert "
-                                f"{self.convert}` to continue "
-                                "adapting this generative model into a "
-                                "pooling model.")
+                                f"{convert}` to continue using this model "
+                                "as a pooling model.")
                 else:  # task == "auto"
-                    self.runner = "auto"
-                    self.convert = "auto"
-                    msg_hint = "Please remove this option."
-            elif not is_generative_model and is_pooling_model:
-                if is_generative_task:
-                    # Pooling -> Generative not supported
-                    self.runner = "generate"
-                    self.convert = "auto"
-                    msg_hint = "Please remove this option."
-                elif is_pooling_task:
-                    self.runner = "pooling"
-                    self.convert = _task_to_convert(self.task)
-                    msg_hint = ("Please replace this option with `--convert "
-                                f"{self.convert}` to continue "
-                                "using this pooling model.")
-                else:  # task == "auto"
-                    self.runner = "auto"
-                    self.convert = "auto"
-                    msg_hint = "Please remove this option."
-            elif is_generative_model and is_pooling_model:
-                if is_generative_task:
-                    self.runner = "auto"
-                    self.convert = "auto"
-                    msg_hint = ("Please replace this option with `--runner "
-                                "generate` to continue using this model as a "
-                                "generative model.")
-                elif is_pooling_task:
-                    self.runner = "auto"
-                    self.convert = "auto"
-                    msg_hint = ("Please replace this option with `--runner "
-                                "pooling` to continue using this model as a "
-                                "pooling model.")
-                else:  # task == "auto"
-                    self.runner = "auto"
-                    self.convert = "auto"
-                    msg_hint = "Please remove this option."
+                    pass
             else:
                 raise AssertionError("The model should be a generative or "
                                      "pooling model when task is set to "
                                      f"{self.task!r}.")
+
+            self.runner = runner
+            self.convert = convert
 
             msg = f"{msg_prefix} {msg_hint}"
             warnings.warn(msg, DeprecationWarning, stacklevel=2)
