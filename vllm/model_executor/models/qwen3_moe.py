@@ -414,7 +414,8 @@ class Qwen3MoeModel(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts)
+            num_experts=self.config.num_experts,
+            num_redundant_experts=self.num_redundant_experts)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -431,15 +432,6 @@ class Qwen3MoeModel(nn.Module):
         ignore_suffixes = (".bias", "_bias", ".k_scale", "_k_scale",
                            ".v_scale", "_v_scale", ".weight_scale",
                            "_weight_scale", ".input_scale", "_input_scale")
-
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
-            num_redundant_experts=self.num_redundant_experts)
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -493,7 +485,8 @@ class Qwen3MoeModel(nn.Module):
 
                     # Skip loading extra parameters for GPTQ/modelopt models.
                     if name_mapped.endswith(
-                            ignore_suffixes) and name not in params_dict:
+                            ignore_suffixes
+                    ) and name_mapped not in params_dict:
                         continue
 
                     param = params_dict[name_mapped]
@@ -620,6 +613,24 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
                 logical_to_physical_map=logical_to_physical_map,
                 logical_replica_count=logical_replica_count,
             )
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = (num_physical_experts -
+                                      self.num_logical_experts)
+        for layer in self.model.layers:
+            if isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
+                moe = layer.mlp
+                moe.n_local_physical_experts = num_local_physical_experts
+                moe.n_physical_experts = num_physical_experts
+                moe.n_redundant_experts = self.num_redundant_experts
+                moe.experts.update_expert_map()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
