@@ -1468,8 +1468,12 @@ class ModelConfig:
 
         return self.multimodal_config
 
-    def try_get_generation_config(self) -> dict[str, Any]:
-        if self.generation_config in ("auto", "vllm"):
+    def maybe_get_generation_config(self) -> dict[str, Any]:
+        if self.generation_config == "vllm":
+            return {}
+
+        config = None
+        if self.generation_config == "auto":
             config = try_get_generation_config(
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
@@ -1481,10 +1485,10 @@ class ModelConfig:
                 trust_remote_code=self.trust_remote_code,
             )
 
-        if config is None:
-            return {}
+        if config is not None:
+            return config.to_diff_dict()
 
-        return config.to_diff_dict()
+        return {}
 
     def get_diff_sampling_param(self) -> dict[str, Any]:
         """

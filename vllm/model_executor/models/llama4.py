@@ -520,7 +520,7 @@ class Llama4ForCausalLM(LlamaForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         # update temperature tuning config from generation config
-        gen_config = vllm_config.model_config.try_get_generation_config()
+        gen_config = vllm_config.model_config.maybe_get_generation_config()
         gen_config.update(vllm_config.model_config.override_generation_config)
         # enable temperature tuning by default when max_model_len > 32K
         default_attn_temperature_tuning = \

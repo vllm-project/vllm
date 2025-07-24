@@ -254,7 +254,7 @@ class LLMEngine:
 
         self.seq_counter = Counter()
         self.generation_config_fields = (
-            self.model_config.try_get_generation_config())
+            self.model_config.maybe_get_generation_config())
 
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer,
