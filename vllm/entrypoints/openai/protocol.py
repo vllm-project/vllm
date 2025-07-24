@@ -1006,7 +1006,7 @@ class CompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
-            additional_heads=True,
+            additional_heads=self.use_chunkwise_beam_search,
             )
 
     def to_streaming_params(self, ) -> StreamingParams:
