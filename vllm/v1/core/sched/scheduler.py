@@ -252,6 +252,7 @@ class Scheduler(SchedulerInterface):
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
+                    last_req = self.running[-1]
                     if self.policy == SchedulingPolicy.PRIORITY:
                         # Check if all the preceding requests have been scheduled.
                         if req_index == len(scheduled_running_reqs):
@@ -272,7 +273,7 @@ class Scheduler(SchedulerInterface):
                         preempted_req = self.running.pop()
 
                     if preempted_req == request:
-                        if preempted_req == self.running[-1]:
+                        if preempted_req == last_req:
                             if len(self.waiting) > 0:
                                 self._preempt_request(request)
                                 preempted_reqs.append(request)
