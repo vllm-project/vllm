@@ -69,8 +69,8 @@ flashinfer_trtllm_fp8_block_scale_moe = _lazy_import_wrapper(
 flashinfer_cutlass_fused_moe = _lazy_import_wrapper("flashinfer.fused_moe",
                                                     "cutlass_fused_moe")
 fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
-block_scale_interleave = _lazy_import_wrapper("flashinfer",
-                                              "block_scale_interleave")
+nvfp4_block_scale_interleave = _lazy_import_wrapper(
+    "flashinfer", "nvfp4_block_scale_interleave")
 
 # Special case for autotune since it returns a context manager
 autotune = _lazy_import_wrapper(
@@ -95,7 +95,7 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
     required_functions = [
         ("flashinfer.fused_moe", "cutlass_fused_moe"),
         ("flashinfer", "fp4_quantize"),
-        ("flashinfer", "block_scale_interleave"),
+        ("flashinfer", "nvfp4_block_scale_interleave"),
     ]
 
     for module_name, attr_name in required_functions:
@@ -110,7 +110,7 @@ __all__ = [
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
     "fp4_quantize",
-    "block_scale_interleave",
+    "nvfp4_block_scale_interleave",
     "autotune",
     "has_flashinfer_moe",
     "has_flashinfer_cutlass_fused_moe",
