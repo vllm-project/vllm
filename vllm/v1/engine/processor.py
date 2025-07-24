@@ -45,7 +45,7 @@ class Processor:
         self.tokenizer = tokenizer
 
         self.generation_config_fields = (
-            self.model_config.maybe_get_generation_config())
+            self.model_config.get_diff_sampling_param())
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer,
                                                     mm_registry)

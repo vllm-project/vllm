@@ -1468,7 +1468,7 @@ class ModelConfig:
 
         return self.multimodal_config
 
-    def maybe_get_generation_config(self) -> dict[str, Any]:
+    def get_diff_sampling_param(self) -> dict[str, Any]:
         """
         Get the generation configuration to use for this model.
 
@@ -1511,21 +1511,6 @@ class ModelConfig:
             return generation_config.to_diff_dict()
 
         return {}
-
-    def get_diff_sampling_param(self) -> dict[str, Any]:
-        """
-        This method returns a dictionary containing the parameters
-        that differ from the default sampling parameters. If
-        `generation_config` is `"vllm"`, an empty dictionary is returned.
-
-        Returns:
-            dict[str, Any]: A dictionary with the differing sampling
-            parameters, if `generation_config` is `"vllm"` an empty dictionary.
-        """
-        if self.generation_config == "vllm":
-            config = {}
-        else:
-            config = self.try_get_generation_config()
 
         # Overriding with given generation config
         config.update(self.override_generation_config)
