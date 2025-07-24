@@ -8,8 +8,9 @@ from vllm.v1.request import Request
 from opentelemetry import trace
 
 tracer = init_tracer(
-                "vllm.entrypoints.openai.serving_completion",
-                "http://localhost:4317")
+    "vllm.entrypoints.openai.serving_completion",
+    "http://localhost:4317")
+
 
 def trace_streaming_completion(tracer_attr='tracer'):
     """
@@ -18,43 +19,49 @@ def trace_streaming_completion(tracer_attr='tracer'):
     """
 
     def decorator(func):
+        @wraps(func)
         async def wrapper(self, request: CompletionRequest, raw_request: Request | None = None):
             ctx = extract_trace_context(dict(raw_request.headers)) if raw_request else None
-            parent_span = tracer.start_span("chunkwise_beam_completion", context=ctx)
 
-            # keep the span current until we’re done
-            scope = trace.use_span(parent_span, end_on_exit=False)
+            with tracer.start_span("chunkwise_beam_completion", context=ctx) as parent_span:
+                try:
+                    parent_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS, request.max_tokens)
+                    parent_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_N, request.n)
+                    if hasattr(request, "request_id"):
+                        parent_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, request.request_id)
 
-            try:
-                parent_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS, request.max_tokens)
-                parent_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_N, request.n)
-                if hasattr(request, "request_id"):
-                    parent_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, request.request_id)
+                    gen = await func(self, request, raw_request)
 
-                gen = await func(self, request, raw_request)
-                if isinstance(gen, ErrorResponse):
-                    parent_span.end()
-                    scope.__exit__(None, None, None)
-                    return gen
+                    # If it's an error response, return it immediately
+                    if isinstance(gen, ErrorResponse):
+                        return gen
 
-                async def traced_generator():
-                    with trace.use_span(parent_span, end_on_exit=False):
-                        with tracer.start_as_current_span("chunk_generation"):
-                            async for item in gen:
-                                yield item
+                    async def traced_generator():
+                        """Wrapped generator that handles errors properly"""
+                        try:
+                            with trace.use_span(parent_span, end_on_exit=False):
+                                with tracer.start_as_current_span("chunk_generation") as chunk_span:
+                                    chunk_count = 0
+                                    async for item in gen:
+                                        chunk_count += 1
+                                        yield item
+                                    chunk_span.set_attribute("chunks_generated", chunk_count)
+                        except Exception as e:
+                            # Record the exception in the parent span
+                            parent_span.record_exception(e)
+                            parent_span.set_status(trace.Status(trace.StatusCode.ERROR, str(e)))
+                            raise
+                        finally:
+                            # Ensure any cleanup in the original generator happens
+                            if hasattr(gen, 'aclose'):
+                                await gen.aclose()
 
+                    return traced_generator()
 
-                    # now it’s safe to close the parent
-                    parent_span.end()
-                    scope.__exit__(None, None, None)
-
-                return traced_generator()
-
-            except Exception as e:
-                parent_span.record_exception(e)
-                parent_span.end()
-                scope.__exit__(type(e), e, e.__traceback__)
-                raise
+                except Exception as e:
+                    parent_span.record_exception(e)
+                    parent_span.set_status(trace.Status(trace.StatusCode.ERROR, str(e)))
+                    raise
 
         return wrapper
 
@@ -79,6 +86,7 @@ def trace_async_method(span_name: Optional[str] = None, tracer_attr='tracer'):
                     return result
                 except Exception as e:
                     span.record_exception(e)
+                    span.set_status(trace.Status(trace.StatusCode.ERROR, str(e)))
                     raise
 
         return wrapper
