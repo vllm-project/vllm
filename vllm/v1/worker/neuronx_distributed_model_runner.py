@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 import torch
 from neuronx_distributed_inference.modules.generation.sampling import (
@@ -30,7 +30,7 @@ class ModelInputForNeuron:
     """
     Model input for NeuronX Distributed Inference model runner.
     """
-    request_ids: Optional[List[str]] = None
+    request_ids: Optional[list[str]] = None
     input_tokens: Optional[torch.Tensor] = None
     position_ids: Optional[torch.Tensor] = None
     input_block_ids: Optional[torch.Tensor] = None
@@ -50,15 +50,15 @@ class ModelInputForNeuron:
 # is not frozen.
 @dataclass
 class IntermediateInputData:
-    request_ids: List[str] = field(default_factory=list)
-    input_tokens: List[int] = field(default_factory=list)
-    position_ids: List[int] = field(default_factory=list)
-    input_block_ids: List[int] = field(default_factory=list)
-    full_context_lens: List[int] = field(default_factory=list)
-    computed_context_lens: List[int] = field(default_factory=list)
-    slot_mapping: List[int] = field(default_factory=list)
-    block_tables: List[List[int]] = field(default_factory=list)
-    prefill_completion_state: List[bool] = field(default_factory=list)
+    request_ids: list[str] = field(default_factory=list)
+    input_tokens: list[int] = field(default_factory=list)
+    position_ids: list[int] = field(default_factory=list)
+    input_block_ids: list[int] = field(default_factory=list)
+    full_context_lens: list[int] = field(default_factory=list)
+    computed_context_lens: list[int] = field(default_factory=list)
+    slot_mapping: list[int] = field(default_factory=list)
+    block_tables: list[list[int]] = field(default_factory=list)
+    prefill_completion_state: list[bool] = field(default_factory=list)
 
 
 class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
@@ -127,7 +127,7 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
-        # Not required for NeuronX Distributed Inference. To satisfy the interface.
+        # Not required for NxD Inference.
         return
 
     def load_model(self) -> None:
@@ -145,7 +145,7 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
-        logger.debug(f"scheduler_output: {scheduler_output}")
+        logger.debug("scheduler_output: %s", scheduler_output)
 
         # Update cached state
         self._update_states(scheduler_output)
@@ -153,9 +153,10 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
             # Return empty ModelRunnerOutput if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
 
-        # _prepare_model_input converts the scheduler output to ModelInputForNeuron
+        # _prepare_model_input converts the scheduler output to
+        # ModelInputForNeuron
         model_input = self._prepare_model_input(scheduler_output)
-        logger.debug(f"model_input: {model_input}")
+        logger.debug("model_input: %s", model_input)
 
         is_mllama = self.model.architecture == "MllamaForConditionalGeneration"
 
@@ -173,7 +174,7 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
         return self._generate_model_runner_output(sampler_outputs)
 
     def _generate_model_runner_output(
-            self, sampler_outputs: Optional[List[SamplerOutput]]
+            self, sampler_outputs: Optional[list[SamplerOutput]]
     ) -> ModelRunnerOutput:
         if sampler_outputs is None:
             return EMPTY_MODEL_RUNNER_OUTPUT
@@ -187,11 +188,31 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
         else:
             raise NotImplementedError("spec decode is not supported yet")
 
+        for req_idx, sampled_ids in enumerate(valid_sampled_token_ids):
+            if not sampled_ids:
+                continue
+
+            start_idx = self.input_batch.num_tokens_no_spec[req_idx]
+            end_idx = start_idx + len(sampled_ids)
+            assert end_idx <= self.max_model_len, (
+                "Sampled token IDs exceed the max model length. "
+                f"Total number of tokens: {end_idx} > max_model_len: "
+                f"{self.max_model_len}")
+
+            self.input_batch.token_ids_cpu[req_idx,
+                                           start_idx:end_idx] = sampled_ids
+            self.input_batch.num_tokens_no_spec[req_idx] = end_idx
+            self.input_batch.num_tokens[req_idx] = end_idx
+            req_id = self.input_batch.req_ids[req_idx]
+            req_state = self.requests[req_id]
+            req_state.output_token_ids.extend(sampled_ids)
+
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
-            # TODO: support the following fields. currently they are hardcoded to None
+            # TODO: support the following fields. currently they
+            # are hardcoded to None
             spec_token_ids=None,
             logprobs=None,
             prompt_logprobs_dict={},
@@ -340,7 +361,7 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
         self,
         model_input: ModelInputForNeuron,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
         hidden_states = self.model(
             input_ids=model_input.input_tokens,
             position_ids=model_input.position_ids,
@@ -363,7 +384,7 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
         self,
         model_input: ModelInputForNeuron,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[list[SamplerOutput]]:
 
         raise NotImplementedError("MLLAMA is not supported yet")
 
@@ -391,13 +412,12 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
         This function is used to prepare the inputs for chunked prefill.
         It needs to treat prefill and decoding requests differently.
           *  For NewRequestData, it is guaranteed to be a prefill request.
-          *  For CachedRequestData, it can be a prefill request or a decoding request. 
-          The way to tell if it is a prefill request is to check if the number of 
-          computed tokens is less than the number of context tokens.
+          *  For CachedRequestData, it can be a prefill request or a 
+          decoding request. 
         """
         data = IntermediateInputData()
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
-        logger.debug(f"num_scheduled_tokens: {num_scheduled_tokens}")
+        logger.debug("num_scheduled_tokens: %s", num_scheduled_tokens)
 
         for request_data in scheduler_output.scheduled_new_reqs:
             self._process_new_request_for_chunked_prefill(
@@ -405,13 +425,8 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
 
         request_data = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(request_data.req_ids):
-            if request_data.num_computed_tokens[
-                    i] < request_data.num_context_tokens[i]:
-                self._process_cached_prefill_request_for_chunked_prefill(
-                    request_data, i, num_scheduled_tokens[req_id], data)
-            else:
-                self._process_cached_decoding_request_for_chunked_prefill(
-                    request_data, i, data)
+            self._process_cached_request_for_chunked_prefill(
+                request_data, i, num_scheduled_tokens[req_id], data)
 
         return data
 
@@ -441,7 +456,7 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
         data.prefill_completion_state.append(
             end >= len(request_data.prompt_token_ids))
 
-    def _process_cached_prefill_request_for_chunked_prefill(
+    def _process_cached_request_for_chunked_prefill(
             self, request_data: CachedRequestData, index: int,
             num_scheduled_tokens: int, data: IntermediateInputData) -> None:
         req_id = request_data.req_ids[index]
@@ -452,7 +467,11 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
         start = request_data.num_computed_tokens[index]
         end = start + num_scheduled_tokens
 
-        data.input_tokens.extend(request_data.new_token_ids[index])
+        if num_scheduled_tokens > 1:
+            resumed_prompt_tokens = state.prompt_token_ids[start:end - 1]
+            data.input_tokens.extend(resumed_prompt_tokens)
+
+        data.input_tokens.append(state.output_token_ids[-1])
         data.position_ids.extend(range(start, end))
         data.input_block_ids.append(0)
 
@@ -466,30 +485,7 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
         data.full_context_lens.append(end)
         data.computed_context_lens.append(start)
         data.prefill_completion_state.append(
-            end >= request_data.num_context_tokens[index])
-
-    def _process_cached_decoding_request_for_chunked_prefill(
-            self, request_data: CachedRequestData, index: int,
-            data: IntermediateInputData) -> None:
-        req_id = request_data.req_ids[index]
-        data.request_ids.append(req_id)
-        state = self.requests[req_id]
-        block_table = copy.deepcopy(state.block_ids)[0]
-
-        position = request_data.num_computed_tokens[index]
-        data.input_tokens.append(request_data.new_token_ids[index][0])
-        data.position_ids.append(position)
-        data.input_block_ids.append(0)
-
-        block_number = block_table[position // self.cache_config.block_size]
-        offset = position % self.cache_config.block_size
-        data.slot_mapping.append(block_number * self.cache_config.block_size +
-                                 offset)
-
-        data.block_tables.append(block_table)
-        data.full_context_lens.append(position + 1)
-        data.computed_context_lens.append(position)
-        data.prefill_completion_state.append(True)
+            end >= len(state.prompt_token_ids))
 
     def _finalize_chunked_prefill_inputs(
         self,
@@ -549,20 +545,23 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
         hidden_states: torch.Tensor,
         model_input: ModelInputForNeuron,
     ):
-        # The following logic reorders the model output to match the incoming request order
-        # First obtain the order of requests processed by Neuron hardware
+        # The following logic reorders the model output to match the
+        # incoming request order. First obtain the order of requests
+        # processed by Neuron hardware
         request_id_order = {
             request_id: idx
             for idx, request_id in enumerate(model_input.request_ids)
         }
 
-        # Identify the correct indices for each request in the original input batch based on request ids
+        # Identify the correct indices for each request in the original
+        # input batch based on request ids
         reorder_indices = torch.tensor([
             request_id_order[request_id]
             for request_id in self.input_batch.req_ids
         ])
 
-        # Reorder along the batch dimension to restore outputs into the original request order
+        # Reorder along the batch dimension to restore outputs into the
+        # original request order
         hidden_states = hidden_states[reorder_indices]
 
         # Sample the next token.

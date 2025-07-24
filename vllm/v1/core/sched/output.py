@@ -93,7 +93,6 @@ class CachedRequestData:
     new_token_ids: list[list[int]]
     new_block_ids: list[tuple[list[int], ...]]
     num_computed_tokens: list[int]
-    num_context_tokens: list[int]
 
     @property
     def num_reqs(self) -> int:
@@ -107,7 +106,6 @@ class CachedRequestData:
             new_token_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
-            num_context_tokens=[],
         )
 
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A Neuron worker class."""
-from typing import Optional, Set
+from typing import Optional
 
 import torch.nn as nn
 
@@ -120,5 +120,5 @@ class NeuronWorker(WorkerBase):
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_runner.pin_lora(lora_id)
 
-    def list_loras(self) -> Set[int]:
+    def list_loras(self) -> set[int]:
         return self.model_runner.list_loras()

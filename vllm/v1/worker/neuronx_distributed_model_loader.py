@@ -25,7 +25,7 @@ import shutil
 from contextlib import contextmanager
 from math import ceil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 import regex as re
 import torch
@@ -296,8 +296,8 @@ def _get_neuron_model_cls(architecture: str):
             raise KeyError
     except KeyError:
         raise ValueError(
-            f"Model {architecture} is not supported on Neuron for now. Supported models: {list(MODEL_TYPES.keys())}"
-        )
+            f"Model {architecture} is not supported on Neuron for now. "
+            "Supported models: {list(MODEL_TYPES.keys())}")
 
 
 def get_neuron_model(model_config: ModelConfig, cache_config: CacheConfig,
@@ -378,7 +378,7 @@ def _get_default_neuron_config(model_config: ModelConfig,
 
 def _validate_neuron_config(cache_config: CacheConfig,
                             scheduler_config: SchedulerConfig,
-                            neuron_config: Dict):
+                            neuron_config: dict):
     if cache_config.enable_prefix_caching:
         assert neuron_config.get("is_prefix_caching", False)
         assert neuron_config.get("is_block_kv_layout", False)

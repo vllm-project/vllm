@@ -17,7 +17,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.platforms import current_platform
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -627,7 +626,6 @@ class Scheduler(SchedulerInterface):
         new_token_ids: list[list[int]] = []
         new_block_ids: list[tuple[list[int], ...]] = []
         num_computed_tokens: list[int] = []
-        num_context_tokens: list[int] = []
 
         use_connector = self.connector is not None
         for req in itertools.chain(running_reqs, resumed_reqs):
@@ -638,7 +636,7 @@ class Scheduler(SchedulerInterface):
             # TODO: current Neuron implementation relies on the sampled tokens
             # from the prior iteration (previous behavior). Revisit and find
             # another way to retreive this.
-            if self.use_pp or current_platform.is_neuron():
+            if self.use_pp:
                 # When using PP, the scheduler sends the sampled tokens back,
                 # because there's no direct communication between the first-
                 # stage worker and the last-stage worker. Otherwise, we don't
@@ -654,7 +652,7 @@ class Scheduler(SchedulerInterface):
                 new_token_ids.append([])
             new_block_ids.append(req_to_new_block_ids[req_id])
             num_computed_tokens.append(req.num_computed_tokens)
-            num_context_tokens.append(len(req.prompt_token_ids))
+            # num_context_tokens.append(len(req.prompt_token_ids))
         # Because resumed_reqs is usually empty, it is more efficient to do
         # in-place appending so that we don't need to allocate a new list.
         resumed_from_preemption = [False] * len(running_reqs)
@@ -666,7 +664,7 @@ class Scheduler(SchedulerInterface):
             new_token_ids=new_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
-            num_context_tokens=num_context_tokens,
+            # num_context_tokens=num_context_tokens,
         )
 
     def _try_schedule_encoder_inputs(

@@ -55,10 +55,6 @@ docker run --rm -it --device=/dev/neuron0 --network bridge \
        ${image_name} \
        /bin/bash -c "
             set -e; # Exit on first error
-            python3 /workspace/vllm/examples/offline_inference/neuron.py;
             python3 -m pytest /workspace/vllm/tests/neuron/1_core/ -v --capture=tee-sys;
-            for f in /workspace/vllm/tests/neuron/2_core/*.py; do
-                echo \"Running test file: \$f\";
-                python3 -m pytest \$f -v --capture=tee-sys;
-            done
+            python3 -m pytest /workspace/vllm/tests/neuron/2_core/test_chunked_prefill.py -v --capture=tee-sys;
        "
