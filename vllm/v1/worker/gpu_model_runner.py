@@ -1545,8 +1545,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 bonus_token_ids,
                 sampling_metadata,
                 posterior_alpha=self.speculative_config.posterior_alpha,
-                thinking_states=thinking_states
-            )
+                thinking_states=thinking_states)
             sampler_output.sampled_token_ids = output_token_ids
 
         num_nans_in_logits = {}

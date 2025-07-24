@@ -7,8 +7,9 @@ import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterable
-from transformers import AutoTokenizer
 from typing import Any, Callable, Optional, Union
+
+from transformers import AutoTokenizer
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
@@ -160,16 +161,15 @@ class Scheduler(SchedulerInterface):
                 self.num_lookahead_tokens = self.num_spec_tokens
 
             if self.relaxed_thinking:
-                assert speculative_config.posterior_alpha, \
-                    ValueError("No posterior_alpha specified.")
-                assert 0 < speculative_config.posterior_alpha < 1, \
-                    ValueError("Invalid posterior_alpha, the value " \
-                               "should be in range (0, 1).")
-                assert speculative_config.reasoning_parser, \
-                    ValueError("No reasoning_parser specified.")
-                logger.info(
-                    f"Enable relaxed thinking, posterior_alpha="
-                    f"{speculative_config.posterior_alpha}.")
+                if not speculative_config.posterior_alpha:
+                    raise ValueError("No posterior_alpha specified.")
+                if not (0 < speculative_config.posterior_alpha < 1):
+                    raise ValueError("Invalid posterior_alpha, the value "
+                                     "should be in range (0, 1).")
+                if not speculative_config.reasoning_parser :
+                    raise ValueError("No reasoning_parser specified.")
+                logger.info(f"Enable relaxed thinking, posterior_alpha="
+                            f"{speculative_config.posterior_alpha}.")
                 try:
                     reasoning_parser = (
                         ReasoningParserManager.get_reasoning_parser(
@@ -185,8 +185,18 @@ class Scheduler(SchedulerInterface):
                 reasoning_parser = reasoning_parser(tokenizer=tokenizer)
                 logger.info(f"Use reasoning parser {reasoning_parser}.")
                 
-                self.think_start_token_id = reasoning_parser.start_token_id
-                self.think_end_token_id = reasoning_parser.end_token_id
+                if speculative_config.reasoning_parser == 'deepseek_r1':
+                    self.think_start_token_id = \
+                        reasoning_parser.start_token_id
+                    self.think_end_token_id = reasoning_parser.end_token_id
+                elif speculative_config.reasoning_parser == 'qwen3':
+                    self.think_start_token_id = \
+                        reasoning_parser.think_start_token_id
+                    self.think_end_token_id = \
+                        reasoning_parser.think_end_token_id
+                else:
+                    raise ValueError("Invalid reasoning_parser, options "
+                                     "are 'deepseek_r1', 'qwen3'.")
 
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
@@ -969,8 +979,7 @@ class Scheduler(SchedulerInterface):
                     request=request,
                     new_token_id=output_token_id,
                     think_start_token_id=self.think_start_token_id,
-                    think_end_token_id=self.think_end_token_id
-                )
+                    think_end_token_id=self.think_end_token_id)
 
             request.append_output_token_ids(output_token_id)
 
