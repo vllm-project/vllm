@@ -127,7 +127,7 @@ class AsyncLLM(EngineClient):
         if self.log_stats:
             self.logger_manager = StatLoggerManager(
                 vllm_config=vllm_config,
-                engine_idxs=self.engine_core.engine_ranks,
+                engine_idxs=self.engine_core.engine_ranks_managed,
                 custom_stat_loggers=stat_loggers,
             )
             self.logger_manager.log_engine_initialized()
