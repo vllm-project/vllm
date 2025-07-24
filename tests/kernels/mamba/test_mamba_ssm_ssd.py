@@ -196,7 +196,7 @@ def generate_continuous_batched_examples(example_lens_by_batch,
 def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size,
                                          itype):
 
-    # this tests the kernels on a single example (no batching)
+    # this tests the kernels on a single example (bs=1)
 
     # TODO: the bfloat16 case requires higher thresholds. To be investigated
 
@@ -231,18 +231,19 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size,
     A = A.squeeze(0)
     B = B.squeeze(0)
     C = C.squeeze(0)
-    Y, final_state = mamba_chunk_scan_combined_varlen(X,
-                                               dt,
-                                               A,
-                                               B,
-                                               C,
-                                               chunk_size,
-                                               D=None,
-                                               cu_seqlens=cu_seqlens,
-                                               seq_idx=seq_idx,
-                                               chunk_indices=chunk_indices,
-                                               chunk_offsets=chunk_offsets,
-                                               )
+    Y, final_state = mamba_chunk_scan_combined_varlen(
+        X,
+        dt,
+        A,
+        B,
+        C,
+        chunk_size,
+        D=None,
+        cu_seqlens=cu_seqlens,
+        seq_idx=seq_idx,
+        chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
+    )
 
     # just test the last in sequence
     torch.testing.assert_close(Y[-1], Y_min[0, -1], atol=atol, rtol=rtol)
