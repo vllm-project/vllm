@@ -13,12 +13,13 @@ before returning them.
 
 If the model doesn't implement this interface, you can set `--convert` which tells vLLM
 to convert the model into a pooling model.
+vLLM can also automatically detect models to convert based on their architecture name.
 
-| `--convert` | Model type           | Supported pooling tasks       |
-|-------------|----------------------|-------------------------------|
-| `embed`     | Embedding model      | `encode`, `embed`             |
-| `classify`  | Classification model | `encode`, `classify`, `score` |
-| `reward`    | Reward model         | `encode`                      |
+| `--convert` | Automatically converted architectures         | Model type           | Supported pooling tasks       |
+|-------------|-----------------------------------------------|----------------------|-------------------------------|
+| `embed`     | `*ForTextEncoding`, `*EmbeddingModel`         | Embedding model      | `encode`, `embed`             |
+| `classify`  | `*For*Classification`, `*ClassificationModel` | Classification model | `encode`, `classify`, `score` |
+| `reward`    | `*ForRewardModeling`, `*RewardModel`          | Reward model         | `encode`                      |
 
 For model architectures that support both generation and pooling, you should set `--runner pooling`
 to use the model as a pooling model.

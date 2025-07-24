@@ -434,7 +434,6 @@ See [this page](./pooling_models.md) for more information on how to use pooling 
 | `Qwen3Model`<sup>C</sup>, `Qwen3ForCausalLM`<sup>C</sup> | Qwen3-based | `Qwen/Qwen3-Embedding-0.6B`, etc. | ✅︎ | ✅︎ | ✅︎ |
 | `RobertaModel`, `RobertaForMaskedLM` | RoBERTa-based | `sentence-transformers/all-roberta-large-v1`, etc. | | | |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* | \* |
-| `*ForTextEncoding`<sup>C</sup>, `*EmbeddingModel`<sup>C</sup>, etc. | Transformers embedding models | N/A | \* | \* | \* |
 
 <sup>C</sup> You should set `--convert embed` to load the model as an embedding model in vLLM.  
 \* Feature support is the same as that of the original model.
@@ -466,7 +465,6 @@ of the whole prompt are extracted from the normalized hidden state corresponding
 | `Qwen2ForRewardModel` | Qwen2-based | `Qwen/Qwen2.5-Math-RM-72B`, etc. | ✅︎ | ✅︎ | ✅︎ |
 | `Qwen2ForProcessRewardModel` | Qwen2-based | `Qwen/Qwen2.5-Math-PRM-7B`, etc. | ✅︎ | ✅︎ | ✅︎ |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* | \* |
-| `*ForRewardModeling`<sup>C</sup>, `*RewardModel`<sup>C</sup>, etc. | Transformers reward models | N/A | \* | \* | \* |
 
 <sup>C</sup> You should set `--convert reward` to load the model as a reward model in vLLM.  
 \* Feature support is the same as that of the original model.
@@ -485,7 +483,6 @@ If your model is not in the above list, we will try to automatically convert the
 | `JambaForSequenceClassification` | Jamba | `ai21labs/Jamba-tiny-reward-dev`, etc. | ✅︎ | ✅︎ | |
 | `GPT2ForSequenceClassification` | GPT2 | `nie3e/sentiment-polish-gpt2-small` | | | ✅︎ |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* | \* |
-| `*ForSequenceClassification`<sup>C</sup>, etc. | Transformers classification models | N/A | \* | \* | \* |
 
 <sup>C</sup> You should set `--convert classify` to load the model as an classification model in vLLM.  
 \* Feature support is the same as that of the original model.
@@ -503,7 +500,6 @@ If your model is not in the above list, we will try to automatically convert the
 | `Qwen3ForSequenceClassification` | Qwen3-based | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. | ✅︎ | ✅︎ | ✅︎ |
 | `RobertaForSequenceClassification` | RoBERTa-based | `cross-encoder/quora-roberta-base`, etc. | | | |
 | `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc. | | | |
-| `*ForSequenceClassification`<sup>C</sup>, etc. | Transformers classification models | N/A | \* | \* | \* |
 
 <sup>C</sup> You should set `--convert classify` to load the model as an classification model in vLLM.  
 \* Feature support is the same as that of the original model.
@@ -728,7 +724,6 @@ The following table lists those that are tested in vLLM.
 | `LlavaNextForConditionalGeneration`<sup>C</sup> | LLaVA-NeXT-based | T / I | `royokong/e5-v` | | | |
 | `Phi3VForCausalLM`<sup>C</sup> | Phi-3-Vision-based | T + I | `TIGER-Lab/VLM2Vec-Full` | 🚧 | ✅︎ | |
 | `*ForConditionalGeneration`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | \* | N/A | \* | \* | \* |
-| `*EmbeddingModel`<sup>C</sup>, etc. | Transformers embedding models | \* | N/A | \* | \* | \* |
 
 <sup>C</sup> You should set `--convert embed` to load the model as an embedding model in vLLM.  
 \* Feature support is the same as that of the original model.
@@ -740,7 +735,6 @@ The following table lists those that are tested in vLLM.
 | Architecture                        | Models             | Inputs   | Example HF Models        | [LoRA][lora-adapter]   | [PP][distributed-serving]   | [V1](gh-issue:8779)   |
 |-------------------------------------|--------------------|----------|--------------------------|------------------------|-----------------------------|-----------------------|
 | `JinaVLForSequenceClassification` | JinaVL-based | T + I<sup>E+</sup> | `jinaai/jina-reranker-m0`, etc. | | | ✅︎ |
-| `*ForSequenceClassification`<sup>C</sup>, etc. | Transformers classification models | \* | N/A | \* | \* | \* |
 
 <sup>C</sup> You should set `--convert classify` to load the model as an classification model in vLLM.  
 \* Feature support is the same as that of the original model.
