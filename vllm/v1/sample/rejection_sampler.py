@@ -53,7 +53,7 @@ class RejectionSampler(nn.Module):
         # [batch_size, 1]
         bonus_token_ids: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        posterior_alpha: float = 1.0,
+        posterior_alpha: Optional[float] = 1.0,
         thinking_states: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         '''
@@ -151,7 +151,7 @@ def rejection_sample(
     # [batch_size, 1]
     bonus_token_ids: torch.Tensor,
     sampling_metadata: SamplingMetadata,
-    posterior_alpha: float = 1.0,
+    posterior_alpha: Optional[float] = 1.0,
     thinking_states: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     assert draft_token_ids.ndim == 1
@@ -230,9 +230,9 @@ def rejection_sample(
         recovered_token_ids,
         uniform_probs,
         is_greedy,
+        posterior_alpha,
         thinking_states,
         thinking_states is None,
-        posterior_alpha,
         max_spec_len,
         vocab_size,
         NO_DRAFT_PROBS=draft_probs is None,
@@ -497,9 +497,9 @@ def rejection_random_sample_kernel(
     recovered_token_ids_ptr,  # [num_tokens]
     uniform_probs_ptr,  # [num_tokens]
     is_greedy_ptr,  # [batch_size]
+    posterior_alpha,
     thinking_states_ptr,  # [batch_size],
     NO_THINKING_STATES: tl.constexpr,
-    posterior_alpha,
     max_spec_len,
     vocab_size,
     NO_DRAFT_PROBS: tl.constexpr,

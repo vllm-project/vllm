@@ -2669,7 +2669,7 @@ class SpeculativeConfig:
     """The parallel configuration for the draft model initialized internal."""
 
     # params for relaxed thinking
-    posterior_alpha: Optional[float] = None
+    posterior_alpha: Optional[float] = 1.0
     """The alpha value for the posterior distribution in speculative decoding.
     Used when relaxed thinking is enabled."""
     relaxed_thinking: Optional[bool] = False
