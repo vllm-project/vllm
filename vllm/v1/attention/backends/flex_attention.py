@@ -3,7 +3,7 @@
 """Attention layer with FlashAttention."""
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Optional
 
 import torch
 from torch.nn.attention.flex_attention import (BlockMask, _mask_mod_signature,
@@ -14,17 +14,14 @@ from torch.nn.attention.flex_attention import (BlockMask, _mask_mod_signature,
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType,
                                               is_quantized_kv_cache)
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.block_table import BlockTable
 
 logger = init_logger(__name__)
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 create_block_mask_compiled = torch.compile(create_block_mask,
                                            fullgraph=True,
@@ -41,6 +38,10 @@ def _offsets_to_doc_ids_tensor(offsets: torch.Tensor) -> torch.Tensor:
 
 class FlexAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.float32]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
@@ -257,36 +258,34 @@ class FlexAttentionMetadata:
 class FlexAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlexAttentionMetadata]):
 
-    def __init__(self, runner: "GPUModelRunner", kv_cache_spec: AttentionSpec,
-                 block_table: BlockTable):
-        model_config = runner.model_config
+    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
+                 device: torch.device):
+        self.model_config = vllm_config.model_config
+        self.parallel_config = vllm_config.parallel_config
+        self.cache_config = vllm_config.cache_config
 
-        self.runner = runner
-        self.num_heads_q = model_config.get_num_attention_heads(
-            runner.parallel_config)
-        self.num_heads_kv = model_config.get_num_kv_heads(
-            runner.parallel_config)
-        self.headdim = model_config.get_head_size()
+        self.num_heads_q = self.model_config.get_num_attention_heads(
+            vllm_config.parallel_config)
+        self.num_heads_kv = self.model_config.get_num_kv_heads(
+            vllm_config.parallel_config)
+        self.headdim = self.model_config.get_head_size()
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
-        self.block_table = block_table
+        self.device = device
 
-    def build(self, common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata):
+    def build(self,
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata,
+              fast_build: bool = False) -> FlexAttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
 
-        max_seq_len = self.runner.seq_lens_np[:num_reqs].max()
+        max_seq_len = int(common_attn_metadata.seq_lens_cpu.max())
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
-
-        block_table = self.block_table
-        block_table_tensor = block_table.get_device_tensor()[:num_reqs]
-        block_table.slot_mapping[:num_actual_tokens].copy_(
-            block_table.slot_mapping_cpu[:num_actual_tokens],
-            non_blocking=True)
-        slot_mapping = block_table.slot_mapping[:num_actual_tokens]
+        block_table_tensor = common_attn_metadata.block_table_tensor
+        slot_mapping = common_attn_metadata.slot_mapping
 
         use_cascade = common_prefix_len > 0
         cu_prefix_query_lens = None
@@ -296,17 +295,15 @@ class FlexAttentionMetadataBuilder(
             raise NotImplementedError("Not yet my friend")
 
         block_size = self.kv_cache_spec.block_size
-        max_possible_seq_len = self.runner.model_config.max_model_len
-        total_cache_tokens = (self.runner.cache_config.num_gpu_blocks *
-                              block_size)
+        max_possible_seq_len = self.model_config.max_model_len
+        total_cache_tokens = self.cache_config.num_gpu_blocks * block_size
 
         inverse_block_table = physical_to_logical_mapping(
-            block_table_tensor, self.runner.cache_config.num_gpu_blocks)
+            block_table_tensor, self.cache_config.num_gpu_blocks)
 
         # Get the original offset tensor
-        offset_tensor = torch.tensor(
-            self.runner.input_batch.num_computed_tokens_cpu[:num_reqs]).to(
-                self.runner.device, non_blocking=True)
+        offset_tensor = common_attn_metadata.num_computed_tokens_cpu.to(
+            self.device, non_blocking=True)
 
         out = FlexAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -345,15 +342,10 @@ class FlexAttentionImpl(AttentionImpl):
         alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
     ) -> None:
-        if blocksparse_params is not None:
-            # TODO we should support this :think
-            raise ValueError(
-                "FlashAttention does not support block-sparse attention.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)

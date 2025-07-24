@@ -337,7 +337,6 @@ async def main(args):
         model_config=model_config,
         base_model_paths=base_model_paths,
         lora_modules=None,
-        prompt_adapters=None,
     )
     openai_serving_chat = OpenAIServingChat(
         engine,
@@ -348,7 +347,7 @@ async def main(args):
         chat_template=None,
         chat_template_content_format="auto",
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-    ) if model_config.runner_type == "generate" else None
+    ) if "generate" in model_config.supported_tasks else None
     openai_serving_embedding = OpenAIServingEmbedding(
         engine,
         model_config,
@@ -356,17 +355,19 @@ async def main(args):
         request_logger=request_logger,
         chat_template=None,
         chat_template_content_format="auto",
-    ) if model_config.task == "embed" else None
+    ) if "embed" in model_config.supported_tasks else None
 
-    enable_serving_reranking = (model_config.task == "classify" and getattr(
-        model_config.hf_config, "num_labels", 0) == 1)
+    enable_serving_reranking = ("classify" in model_config.supported_tasks
+                                and getattr(model_config.hf_config,
+                                            "num_labels", 0) == 1)
 
-    openai_serving_scores = (ServingScores(
+    openai_serving_scores = ServingScores(
         engine,
         model_config,
         openai_serving_models,
         request_logger=request_logger,
-    ) if (model_config.task == "embed" or enable_serving_reranking) else None)
+    ) if ("embed" in model_config.supported_tasks
+          or enable_serving_reranking) else None
 
     tracker = BatchProgressTracker()
     logger.info("Reading batch from %s...", args.input_file)

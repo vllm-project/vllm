@@ -3,8 +3,10 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Optional, TypedDict, Union
+from contextlib import nullcontext
+from typing import Optional, TypedDict, Union, cast
 
+import numpy as np
 import torch
 from torch import nn
 from transformers import (BatchFeature, WhisperConfig, WhisperFeatureExtractor,
@@ -12,8 +14,11 @@ from transformers import (BatchFeature, WhisperConfig, WhisperFeatureExtractor,
 from transformers.models.whisper.modeling_whisper import sinusoids
 
 from vllm.attention import Attention, AttentionType
-from vllm.config import CacheConfig, VllmConfig
+from vllm.attention.layer import MultiHeadAttention
+from vllm.config import (CacheConfig, ModelConfig, SpeechToTextConfig,
+                         VllmConfig)
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -23,6 +28,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
@@ -33,6 +39,7 @@ from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.transformers_utils.processor import cached_get_processor
 
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
                          SupportsTranscription, SupportsV0Only)
@@ -174,6 +181,7 @@ class WhisperAttention(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        standalone_encoder: bool = False,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -209,16 +217,24 @@ class WhisperAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-            attn_type=self.attn_type,
-        )
+        if standalone_encoder:
+            self.attn = MultiHeadAttention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                num_kv_heads=self.num_kv_heads,
+            )
+        else:
+            self.attn = Attention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.attn",
+                attn_type=self.attn_type,
+            )
 
     def _init_qkv(
         self,
@@ -353,7 +369,11 @@ class WhisperMLP(nn.Module):
 
 class WhisperEncoderLayer(nn.Module):
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self,
+                 *,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 is_standalone_encoder: bool = False):
         super().__init__()
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
@@ -367,6 +387,7 @@ class WhisperEncoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
+            standalone_encoder=is_standalone_encoder,
         )
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.mlp = WhisperMLP(
@@ -458,10 +479,16 @@ class WhisperDecoderLayer(nn.Module):
 
 class WhisperEncoder(nn.Module):
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self,
+                 *,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 is_standalone_encoder: bool = False,
+                 init_in_fp32: bool = False):
         super().__init__()
         config = vllm_config.model_config.hf_config
         embed_dim = config.d_model
+        self.is_standalone_encoder = is_standalone_encoder
         self.num_mel_bins = config.num_mel_bins
         self.max_source_positions = config.max_source_positions
         self.embed_scale = (math.sqrt(embed_dim)
@@ -476,17 +503,25 @@ class WhisperEncoder(nn.Module):
                                kernel_size=3,
                                stride=2,
                                padding=1)
-        self.embed_positions = nn.Embedding(self.max_source_positions,
-                                            embed_dim)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.encoder_layers,
             lambda prefix: WhisperEncoderLayer(vllm_config=vllm_config,
-                                               prefix=f"{prefix}.layers"),
+                                               prefix=f"{prefix}.layers",
+                                               is_standalone_encoder=
+                                               is_standalone_encoder),
             prefix=f"{prefix}.layers",
         )
         self.layer_norm = nn.LayerNorm(config.d_model)
 
-        with torch.no_grad():
+        maybe_fp32_init_ctx = set_default_torch_dtype(
+            torch.float32) if init_in_fp32 else nullcontext()
+
+        with (
+                torch.no_grad(),
+                maybe_fp32_init_ctx,
+        ):
+            self.embed_positions = nn.Embedding(self.max_source_positions,
+                                                embed_dim)
             self.embed_positions.weight.copy_(
                 sinusoids(*self.embed_positions.weight.shape))
 
@@ -495,8 +530,10 @@ class WhisperEncoder(nn.Module):
         for features in input_features:
             embeds = nn.functional.gelu(self.conv1(features))
             embeds = nn.functional.gelu(self.conv2(embeds))
-            embeds = embeds.permute(1, 0)
-            embeds = embeds + self.embed_positions.weight[:embeds.size(0), :]
+            embeds = embeds.transpose(-1, -2)
+            embeds = (embeds +
+                      self.embed_positions.weight[:embeds.size(-2), :]).to(
+                          embeds.dtype)
             hidden_states.append(embeds)
         hidden_states = torch.cat(hidden_states)
 
@@ -634,7 +671,14 @@ class WhisperProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self,
                          sampling_rate: Optional[int] = None
                          ) -> WhisperProcessor:
-        return self.ctx.get_hf_processor(WhisperProcessor)
+        # HACK: Transformers 4.53.0 has issue with whisper tokenizer to
+        # initialize processor. We use a monkeypatch to fix it here.
+        # See: https://github.com/vllm-project/vllm/issues/20224
+        processor_class = WhisperProcessor
+        tokenizer_class = ("WhisperTokenizer", "WhisperTokenizerFast")
+        if processor_class.tokenizer_class != tokenizer_class:
+            processor_class.tokenizer_class = tokenizer_class
+        return self.ctx.get_hf_processor(processor_class)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": 1}
@@ -761,6 +805,9 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         ".fc2.": ".mlp.fc2."
     })
 
+    # Whisper only supports audio-conditioned generation.
+    supports_transcription_only = True
+
     @classmethod
     def validate_language(cls, language: str) -> bool:
         if language in ISO639_1_SUPPORTED_LANGS:
@@ -778,11 +825,28 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
                              f"or {list(ISO639_1_OTHER_LANGS.values())}")
 
     @classmethod
-    def get_decoder_prompt(cls, language: str, task_type: str,
-                           prompt: str) -> str:
-        return ((f"<|prev|>{prompt}" if prompt else "") +
-                f"<|startoftranscript|><|{language}|>" +
-                f"<|{task_type}|><|notimestamps|>")
+    def get_generation_prompt(
+            cls,
+            audio: np.ndarray,
+            model_config: ModelConfig,  # not needed here
+            stt_config: SpeechToTextConfig,
+            language: str,
+            task_type: str,
+            request_prompt: str) -> PromptType:
+        prompt = {
+            "encoder_prompt": {
+                # Whisper does not support encoder prompt.
+                "prompt": "",
+                "multi_modal_data": {
+                    "audio": (audio, stt_config.sample_rate),
+                },
+            },
+            "decoder_prompt":
+            ((f"<|prev|>{request_prompt}" if request_prompt else "") +
+             f"<|startoftranscript|><|{language}|>" +
+             f"<|{task_type}|><|notimestamps|>")
+        }
+        return cast(PromptType, prompt)
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
@@ -790,6 +854,30 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
             return None
 
         raise ValueError("Only audio modality is supported")
+
+    @classmethod
+    def get_speech_to_text_config(cls, model_config: ModelConfig,
+                                  task_type: str) -> SpeechToTextConfig:
+        processor = cached_get_processor(model_config.model)
+
+        return SpeechToTextConfig(
+            max_audio_clip_s=processor.feature_extractor.chunk_length,
+            sample_rate=processor.feature_extractor.sampling_rate,
+        )
+
+    @classmethod
+    def get_num_audio_tokens(cls, audio_duration_s: float,
+                             stt_config: SpeechToTextConfig,
+                             model_config: ModelConfig) -> Optional[int]:
+        processor = cached_get_processor(model_config.model)
+        hop_length = processor.feature_extractor.hop_length
+        assert hop_length is not None
+        # NOTE(NickLucche) user can't pass encoder
+        # prompts directly at least not to Whisper.
+        # One indicator of the encoder amount of processing
+        # is the log-mel spectogram length.
+        return math.ceil(audio_duration_s * stt_config.sample_rate /
+                         hop_length)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

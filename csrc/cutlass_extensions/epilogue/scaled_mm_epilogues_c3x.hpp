@@ -195,7 +195,7 @@ struct ScaledEpilogueBias
       cutlass::epilogue::fusion::Sm90EVT<Compute0, ScaleB, Accum>;
 
   using Compute1 = cutlass::epilogue::fusion::Sm90Compute<
-      cutlass::multiply_add, ElementD, float,
+      cutlass::homogeneous_multiply_add, ElementD, float,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
  public:
@@ -238,7 +238,7 @@ struct ScaledEpilogueColumnBias
       cutlass::epilogue::fusion::Sm90EVT<Compute0, ScaleB, Accum>;
 
   using Compute1 = cutlass::epilogue::fusion::Sm90Compute<
-      cutlass::multiply_add, ElementD, float,
+      cutlass::homogeneous_multiply_add, ElementD, float,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
  public:
@@ -295,7 +295,7 @@ struct ScaledEpilogueBiasAzp
       cutlass::epilogue::fusion::Sm90EVT<ComputeScaleB, ScaleB, EVTComputeAzp>;
 
   using ComputeScaleBiasA = cutlass::epilogue::fusion::Sm90Compute<
-      cutlass::multiply_add, ElementD, float,
+      cutlass::homogeneous_multiply_add, ElementD, float,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
  public:
@@ -371,7 +371,7 @@ struct ScaledEpilogueBiasAzpToken
       cutlass::epilogue::fusion::Sm90EVT<ComputeScaleB, ScaleB, EVTComputeAcc>;
 
   using ComputeScaleBiasA = cutlass::epilogue::fusion::Sm90Compute<
-      cutlass::multiply_add, ElementD, float,
+      cutlass::homogeneous_multiply_add, ElementD, float,
       cutlass::FloatRoundStyle::round_to_nearest>;
 
  public:

@@ -61,14 +61,6 @@ V1_SUPPORTED_MODELS = [
     "tiiuae/Falcon-H1-0.5B-Base",
 ]
 
-ATTN_BLOCK_SIZES = {
-    "ibm-ai-platform/Bamba-9B-v1": 528,
-    "Zyphra/Zamba2-1.2B-instruct": 80,
-    "nvidia/Nemotron-H-8B-Base-8K": 528,
-    "ibm-granite/granite-4.0-tiny-preview": 400,
-    "tiiuae/Falcon-H1-0.5B-Base": 800,
-}
-
 # Avoid OOM
 MAX_NUM_SEQS = 4
 
@@ -105,11 +97,6 @@ def test_models(
             example_prompts, max_tokens, num_logprobs)
 
     if model in V1_SUPPORTED_MODELS:
-        if model in HYBRID_MODELS and model in ATTN_BLOCK_SIZES:
-            block_size = ATTN_BLOCK_SIZES[model]
-        else:
-            block_size = 16
-
         with monkeypatch.context() as m:
             m.setenv("VLLM_USE_V1", "1")
             if model in HYBRID_MODELS:
@@ -117,9 +104,7 @@ def test_models(
                 m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
             with vllm_runner(model,
                              max_num_seqs=MAX_NUM_SEQS,
-                             enforce_eager=True,
-                             enable_prefix_caching=False,
-                             block_size=block_size) as vllm_model:
+                             enable_prefix_caching=False) as vllm_model:
                 vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
                     example_prompts, max_tokens, num_logprobs)
     else:
@@ -289,7 +274,7 @@ def test_models_preemption_recompute(
     Tests that outputs are identical with and w/o preemptions (recompute).
     """
     with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-        scheduler = vllm_model.model.llm_engine.scheduler[0]
+        scheduler = vllm_model.llm.llm_engine.scheduler[0]
         scheduler.ENABLE_ARTIFICIAL_PREEMPT = True
         preempt_vllm_outputs = vllm_model.generate_greedy(
             example_prompts, max_tokens)
