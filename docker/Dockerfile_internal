@@ -5,7 +5,13 @@ RUN pip uninstall -y vllm
 RUN VLLM_USE_PRECOMPILED=1 pip install /mnt/vllm
 RUN rm -rf /mnt/vllm
 RUN python3 -c "import vllm; print('Custom vLLM loaded successfully')"
-RUN pip install --upgrade     "opentelemetry-api==1.26.0"     "opentelemetry-sdk==1.26.0"     "opentelemetry-exporter-gcp-trace==1.7.0"     "google-cloud-trace==1.7.1"
+RUN python3 -m pip install --no-cache-dir --upgrade \
+      opentelemetry-api==1.26.0 \
+      opentelemetry-sdk==1.26.0 \
+      opentelemetry-exporter-gcp-trace==1.7.0 \
+      opentelemetry-exporter-otlp==1.26.0 \
+      opentelemetry-semantic-conventions-ai==0.4.1 \
+      google-cloud-trace==1.7.1
 
 
 ENV HF_HOME=/huggingface/cache
