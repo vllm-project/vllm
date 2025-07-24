@@ -675,7 +675,11 @@ class ModelConfig:
                                                    self.convert)
 
         if self.runner_type == "generate" and not is_generative_model:
-            raise ValueError("This model does not support `--runner generate`")
+            generate_converts = _RUNNER_CONVERTS["generate"]
+            if self.convert_type not in generate_converts:
+                # Currently we don't have any converters for generative models
+                raise ValueError(
+                    "This model does not support `--runner generate`.")
         if self.runner_type == "pooling" and not is_pooling_model:
             pooling_converts = _RUNNER_CONVERTS["pooling"]
             if self.convert_type not in pooling_converts:
