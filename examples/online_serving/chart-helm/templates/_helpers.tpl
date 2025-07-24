@@ -90,6 +90,12 @@ livenessProbe:
 {{-       toYaml . | nindent 2 }}
 {{-     end }}
 {{-   end }}
+{{-   if .Values.startupProbe  }}
+startupProbe:
+{{-     with .Values.startupProbe }}
+{{-       toYaml . | nindent 2 }}
+{{-     end }}
+{{-   end }}
 {{- end }}
 
 {{/*
