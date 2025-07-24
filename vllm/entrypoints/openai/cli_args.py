@@ -222,13 +222,6 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default=False,
         help="Run in headless mode. See multi-node data parallel "
         "documentation for more details.")
-    parser.add_argument(
-        "--data-parallel-start-rank",
-        "-dpr",
-        type=int,
-        default=0,
-        help="Starting data parallel rank for secondary nodes. "
-        "Requires --headless.")
     parser.add_argument("--api-server-count",
                         "-asc",
                         type=int,

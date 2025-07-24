@@ -45,11 +45,6 @@ class ServeSubcommand(CLISubcommand):
         if args.headless or args.api_server_count < 1:
             run_headless(args)
         else:
-            if args.data_parallel_start_rank:
-                raise ValueError(
-                    "data_parallel_start_rank is only applicable "
-                    "in headless mode. "
-                    "Add --headless flag to enable headless mode.")
             if args.api_server_count > 1:
                 run_multi_api_server(args)
             else:
@@ -86,13 +81,14 @@ def run_headless(args: argparse.Namespace):
     # Create the EngineConfig.
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
     usage_context = UsageContext.OPENAI_API_SERVER
-    vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    vllm_config = engine_args.create_engine_config(usage_context=usage_context,
+                                                   headless=True)
 
     if not envs.VLLM_USE_V1:
         raise ValueError("Headless mode is only supported for V1")
 
-    if engine_args.data_parallel_rank is not None:
-        raise ValueError("data_parallel_rank is not applicable in "
+    if engine_args.data_parallel_hybrid_lb:
+        raise ValueError("data_parallel_hybrid_lb is not applicable in "
                          "headless mode")
 
     parallel_config = vllm_config.parallel_config
@@ -122,7 +118,7 @@ def run_headless(args: argparse.Namespace):
     engine_manager = CoreEngineProcManager(
         target_fn=EngineCoreProc.run_engine_core,
         local_engine_count=local_engine_count,
-        start_index=args.data_parallel_start_rank,
+        start_index=vllm_config.parallel_config.data_parallel_rank,
         local_start_index=0,
         vllm_config=vllm_config,
         local_client=False,
@@ -168,6 +164,11 @@ def run_multi_api_server(args: argparse.Namespace):
                 "Multi-model preprocessor cache will be disabled for"
                 " api_server_count > 1")
             model_config.disable_mm_preprocessor_cache = True
+
+        if vllm_config.parallel_config.data_parallel_hybrid_lb:
+            raise NotImplementedError(
+                "Hybrid load balancing with --api-server-count > 0"
+                "is not yet supported.")
 
     executor_class = Executor.get_class(vllm_config)
     log_stats = not engine_args.disable_log_stats

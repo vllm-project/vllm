@@ -1908,8 +1908,16 @@ class ParallelConfig:
     """Backend to use for data parallel, either "mp" or "ray"."""
     data_parallel_external_lb: bool = False
     """Whether to use "external" DP LB mode. Applies only to online serving
-    and when data_parallel_size > 0. Set implicitly when
-    data_parallel_rank is provided explicitly to vllm serve."""
+    and when data_parallel_size > 0. This is useful for a "one-pod-per-rank"
+    wide-EP setup in Kuberentes. Set implicitly when --data-parallel-rank
+    is provided explicitly to vllm serve."""
+    data_parallel_hybrid_lb: bool = False
+    """Whether to use "hybrid" DP LB mode. Applies only to online serving
+    and when data_parallel_size > 0. Enables running an AsyncLLM
+    and API server on a "per-node" basis where vLLM load balances
+    between local data parallel ranks, but an external LB balances
+    between vLLM nodes/replicas. Set explicitly in conjunction with 
+    --data-parallel-start-rank."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False
