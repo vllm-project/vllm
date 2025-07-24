@@ -192,6 +192,62 @@ class KVCacheManager:
 
         return KVCacheBlocks(computed_blocks), num_new_computed_tokens
 
+    def get_num_computed_tokens(self, request: Request) -> int:
+        """Get the number of computed (cached) tokens of one req for scheduling.
+        This function is used for shortest prefill first schedulign policy.
+        It does not have to be accurate.
+        Args:
+            request: The request to get the computed tokens.
+        Returns:
+            An integer, containing the number of computed tokens.
+        """
+
+        # Prefix caching is disabled or
+        # When the request requires prompt logprobs, we skip prefix caching.
+        if (not self.enable_caching
+                or (request.sampling_params is not None
+                    and request.sampling_params.prompt_logprobs is not None)):
+            return 0
+
+        # The block hashes for the request may already be computed
+        # if the scheduler has tried to schedule the request before.
+        block_hashes = self.req_to_block_hashes[request.request_id]
+        if not block_hashes:
+            assert self.block_size is not None
+            block_hashes = hash_request_tokens(self.caching_hash_fn,
+                                               self.block_size, request)
+            self.req_to_block_hashes[request.request_id] = block_hashes
+
+        # Do binary search to find the # of cache hit tokens.
+        # This works when all prefix tokens are stored in the cache.
+        # NOTE(Kuntai): this only works for full attention. Need to modify
+        # for sliding window attention.
+        left = 0
+        right = len(block_hashes) - 1
+        ans = -1
+
+        # NOTE(Kuntai): we fall back to `get_computed_blocks`
+        # if there are multiple types of attentions.
+        try:
+            pool = self.coordinator.single_type_managers[0].block_pool
+        except AttributeError:
+            return self.get_computed_blocks(request)[1]
+
+        while left <= right:
+            mid = (left + right) // 2
+            block_hash = block_hashes[mid]
+            if pool.get_cached_block(block_hash, [0]):
+                ans = mid
+                left = mid + 1
+            else:
+                right = mid - 1
+
+        assert self.block_size is not None, (
+            "Block size musts be set when estimating the number of computed "
+            "tokens.")
+
+        return (ans + 1) * self.block_size
+
     def allocate_slots(
         self,
         request: Request,

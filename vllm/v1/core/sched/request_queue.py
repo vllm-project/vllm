@@ -9,6 +9,7 @@ from collections import deque
 from collections.abc import Iterable, Iterator
 from enum import Enum
 
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.request import Request
 
 
@@ -16,6 +17,7 @@ class SchedulingPolicy(Enum):
     """Enum for scheduling policies."""
     FCFS = "fcfs"
     PRIORITY = "priority"
+    SHORTEST_PREFILL_FIRST = "shortest_prefill_first"
 
 
 class RequestQueue(ABC):
@@ -214,11 +216,94 @@ class PriorityRequestQueue(RequestQueue):
         return reversed(list(self))
 
 
-def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:
+class ShortestPrefillFirstRequestQueue(RequestQueue):
+
+    def __init__(self, kv_cache_manager: KVCacheManager) -> None:
+        self._requests: list[Request] = []
+        self._kv_cache_manager = kv_cache_manager
+        assert self._kv_cache_manager is not None
+
+    def add_request(self, request: Request) -> None:
+        """Add a request to the queue according to priority policy."""
+        self._requests.append(request)
+
+    def get_num_cache_miss_tokens(self, request: Request) -> int:
+        """Get the number of cache miss tokens of one request.
+        We use number of cache miss tokens as the proxy for the prefill time.
+        Empirically it has >98% pearson correlation with the prefill time
+        and is enough for scheduling.
+        """
+        num_computed_tokens = \
+            self._kv_cache_manager.get_num_computed_tokens(request)
+        num_cache_miss_tokens = request.num_tokens - num_computed_tokens
+        return num_cache_miss_tokens
+
+    def peek_request(self) -> Request:
+        """Pop a request from the queue according to priority policy."""
+        if not self._requests:
+            raise IndexError("peek / pop from empty queue")
+
+        min_num_cache_miss_tokens = float('inf')
+        min_request: Request | None = None
+
+        for request in self._requests:
+            num_cache_miss_tokens = self.get_num_cache_miss_tokens(request)
+            if num_cache_miss_tokens < min_num_cache_miss_tokens:
+                min_num_cache_miss_tokens = num_cache_miss_tokens
+                min_request = request
+
+        if min_request is None:
+            raise IndexError("peek / pop from empty queue")
+
+        return min_request
+
+    def pop_request(self) -> Request:
+        request = self.peek_request()
+        self._requests.remove(request)
+        return request
+
+    def prepend_request(self, request: Request) -> None:
+        self.add_request(request)
+
+    def prepend_requests(self, requests: RequestQueue) -> None:
+        for request in requests:
+            self.add_request(request)
+
+    def remove_request(self, request: Request) -> None:
+        self._requests.remove(request)
+
+    def remove_requests(self, requests: Iterable[Request]) -> None:
+        requests_to_remove = set(requests)
+        self._requests = [
+            req for req in self._requests if req not in requests_to_remove
+        ]
+
+    def __bool__(self) -> bool:
+        return bool(self._requests)
+
+    def __len__(self) -> int:
+        return len(self._requests)
+
+    def __iter__(self) -> Iterator[Request]:
+        copy_requests = [(self.get_num_cache_miss_tokens(req), req)
+                         for req in self._requests]
+        heapq.heapify(copy_requests)
+        while copy_requests:
+            _, request = heapq.heappop(copy_requests)
+            yield request
+
+    def __reversed__(self) -> Iterator[Request]:
+        return reversed(self._requests)
+
+
+def create_request_queue(policy: SchedulingPolicy,
+                         kv_cache_manager: KVCacheManager) -> RequestQueue:
     """Create request queue based on scheduling policy."""
     if policy == SchedulingPolicy.PRIORITY:
         return PriorityRequestQueue()
     elif policy == SchedulingPolicy.FCFS:
         return FCFSRequestQueue()
+    elif policy == SchedulingPolicy.SHORTEST_PREFILL_FIRST:
+        return ShortestPrefillFirstRequestQueue(kv_cache_manager)
     else:
         raise ValueError(f"Unknown scheduling policy: {policy}")
