@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import Union
 
 import regex as re
+
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
