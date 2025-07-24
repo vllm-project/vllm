@@ -16,6 +16,7 @@ import torch
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.datastructures import Headers
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from typing_extensions import TypeIs
 
 if sys.version_info >= (3, 12):
@@ -525,8 +526,13 @@ class OpenAIServing:
             if (isinstance(message, dict) and "content" in message
                     and isinstance(message["content"], list)):
                 for content_dict in message["content"]:
-                    if "type" in content_dict:
-                        message_types.add(content_dict["type"].split("_")[0])
+                    # Check if content_dict has a "type" key and it's a string
+                    if isinstance(content_dict, dict):
+                        type_value = content_dict.get("type")
+                        if isinstance(type_value, str):
+                            # Split on "_" and take the first part
+                            base_type = type_value.split("_")[0]
+                            message_types.add(base_type)
         return message_types
 
     async def _normalize_prompt_text_to_input(
@@ -900,12 +906,23 @@ class OpenAIServing:
                 **_chat_template_kwargs,
             )
         else:
-            request_prompt = apply_hf_chat_template(
-                tokenizer=tokenizer,
-                conversation=conversation,
-                model_config=model_config,
-                **_chat_template_kwargs,
-            )
+            # Type check for apply_hf_chat_template which only accepts
+            # PreTrainedTokenizer or PreTrainedTokenizerFast
+            if isinstance(tokenizer,
+                          (PreTrainedTokenizer, PreTrainedTokenizerFast)):
+                request_prompt = apply_hf_chat_template(
+                    tokenizer=tokenizer,
+                    conversation=conversation,
+                    model_config=model_config,
+                    **_chat_template_kwargs,
+                )
+            else:
+                # For other tokenizer types, we need to handle this differently
+                # This shouldn't happen in normal operation, but we handle it
+                # for type safety
+                raise ValueError(
+                    f"Unsupported tokenizer type for HF chat template: "
+                    f"{type(tokenizer)}")
 
         mm_data = await mm_data_future
 
@@ -935,9 +952,16 @@ class OpenAIServing:
             # For MistralTokenizer
             assert is_list_of(request_prompt, int), (
                 "Prompt has to be either a string or a list of token ids")
-            prompt_inputs = TextTokensPrompt(
-                prompt=tokenizer.decode(request_prompt),
-                prompt_token_ids=request_prompt)
+            # Type check for decode method
+            if hasattr(tokenizer, 'decode'):
+                decoded_prompt = tokenizer.decode(request_prompt)
+            else:
+                # Fallback for tokenizers without decode method
+                raise ValueError(
+                    f"Tokenizer {type(tokenizer)} does not support "
+                    f"decode method")
+            prompt_inputs = TextTokensPrompt(prompt=decoded_prompt,
+                                             prompt_token_ids=request_prompt)
 
         engine_prompt = EngineTokensPrompt(
             prompt_token_ids=prompt_inputs["prompt_token_ids"])
@@ -997,7 +1021,9 @@ class OpenAIServing:
         elif isinstance(inputs, list):
             prompt_token_ids = inputs
         elif 'prompt_embeds' in inputs:
-            prompt_embeds = inputs.get("prompt_embeds")
+            # Cast to proper type for log_inputs
+            prompt_embeds = cast(Optional[torch.Tensor],
+                                 inputs.get("prompt_embeds"))
         else:
             prompt = inputs["prompt"]
             prompt_token_ids = inputs["prompt_token_ids"]
@@ -1046,7 +1072,13 @@ class OpenAIServing:
 
         if logprob.decoded_token is not None:
             return logprob.decoded_token
-        return tokenizer.decode(token_id)
+
+        # Type check for decode method
+        if hasattr(tokenizer, 'decode'):
+            return tokenizer.decode(token_id)
+        else:
+            # Fallback for tokenizers without decode method
+            return f"token_id:{token_id}"
 
     def _is_model_supported(self, model_name: Optional[str]) -> bool:
         if not model_name:
