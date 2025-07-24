@@ -18,8 +18,7 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.mamba.mamba2_metadata import (Mamba2Metadata,
-                                                              update_metadata)
+from vllm.model_executor.layers.mamba.mamba2_metadata import Mamba2Metadata
 from vllm.model_executor.layers.mamba.mamba_utils import (
     extra_groups_for_head_shards, get_mamba_state_shape)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
@@ -587,8 +586,6 @@ class MambaMixer2(MambaBase, CustomOp):
             #   pointed to by "state_indices_tensor"
             x = hidden_states_B_C_p.transpose(
                 0, 1)  # this is the form that causal-conv see
-            if mamba2_metadata.cu_seqlen is None:
-                mamba2_metadata = update_metadata(x, mamba2_metadata)
             hidden_states_B_C_p = causal_conv1d_fn(
                 x,
                 conv_weights,

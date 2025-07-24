@@ -4,9 +4,11 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
+import numpy as np
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
@@ -16,42 +18,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
-
-
-def _query_start_loc_to_chunk_indices_offsets(query_start_loc: torch.Tensor,
-                                              chunk_size: int,
-                                              total_seqlens: int):
-
-    cu_seqlens = query_start_loc[1:]  # remove prepended 0
-
-    # outputs will have length expansion of chunks that do not divide
-    # chunk_size
-    N = math.ceil(total_seqlens / chunk_size) + (cu_seqlens[:-1] % chunk_size
-                                                 > 0).sum()
-    chunk_indices = torch.arange(N,
-                                 dtype=torch.int,
-                                 device=query_start_loc.device)
-    chunk_offsets = torch.zeros((N, ),
-                                dtype=torch.int,
-                                device=query_start_loc.device)
-
-    p = 0  # num of insertions
-    for s, e in zip(cu_seqlens[:-1], cu_seqlens[1:]):
-
-        # if does not divide chunk_size, then there is one chunk insertion
-        p += (s % chunk_size > 0)
-
-        # get the dimensions
-        # - the + 1 for _e is to shift the boundary by one chunk
-        # - this shifting is not needed if chunk_size divides e
-        _s, _e = s // chunk_size + p, e // chunk_size + p + (e % chunk_size
-                                                             > 0)
-
-        # adjust indices and offsets
-        chunk_indices[_s:_e] -= p
-        chunk_offsets[_s] = s % chunk_size
-
-    return chunk_indices, chunk_offsets
 
 
 class Mamba2AttentionBackend(AttentionBackend):
@@ -80,7 +46,6 @@ class Mamba2AttentionMetadata:
 
     state_indices_tensor: torch.Tensor  # shape: [batch,]
     nums_dict: Optional[dict] = None
-    cu_seqlen: Optional[int] = None
     batch_ptr: Optional[torch.tensor] = None
     token_chunk_offset_ptr: Optional[torch.tensor] = None
 
@@ -169,4 +134,95 @@ class Mamba2AttentionMetadataBuilder(
             chunk_offsets=chunk_offsets,
             state_indices_tensor=state_indices_tensor,
         )
-        return attn_metadata
+        return update_metadata(
+            attn_metadata) if num_prefills > 0 else attn_metadata
+
+
+def _query_start_loc_to_chunk_indices_offsets(query_start_loc: torch.Tensor,
+                                              chunk_size: int,
+                                              total_seqlens: int):
+
+    cu_seqlens = query_start_loc[1:]  # remove prepended 0
+
+    # outputs will have length expansion of chunks that do not divide
+    # chunk_size
+    N = math.ceil(total_seqlens / chunk_size) + (cu_seqlens[:-1] % chunk_size
+                                                 > 0).sum()
+    chunk_indices = torch.arange(N,
+                                 dtype=torch.int,
+                                 device=query_start_loc.device)
+    chunk_offsets = torch.zeros((N, ),
+                                dtype=torch.int,
+                                device=query_start_loc.device)
+
+    p = 0  # num of insertions
+    for s, e in zip(cu_seqlens[:-1], cu_seqlens[1:]):
+
+        # if does not divide chunk_size, then there is one chunk insertion
+        p += (s % chunk_size > 0)
+
+        # get the dimensions
+        # - the + 1 for _e is to shift the boundary by one chunk
+        # - this shifting is not needed if chunk_size divides e
+        _s, _e = s // chunk_size + p, e // chunk_size + p + (e % chunk_size
+                                                             > 0)
+
+        # adjust indices and offsets
+        chunk_indices[_s:_e] -= p
+        chunk_offsets[_s] = s % chunk_size
+
+    return chunk_indices, chunk_offsets
+
+
+# update_metadata computes metadata required by triton conv1d kernel
+# NOTE: argument type is removed for now to prevent circular dependency
+#       V0 metadata will eventually be obsolete and we can add back
+#       the correct type by then
+def update_metadata(mamba2_metadata):
+    # TODO: add has_attr assertions
+
+    seqlens = mamba2_metadata.query_start_loc_p.diff().to('cpu')
+    nums_dict = {}  # type: ignore
+    for BLOCK_M in [8]:  # cover all BLOCK_M values
+        nums = -(-seqlens // BLOCK_M)
+        nums_dict[BLOCK_M] = {}
+        nums_dict[BLOCK_M]['nums'] = nums
+        nums_dict[BLOCK_M]['tot'] = nums.sum().item()
+        mlist = torch.from_numpy(np.repeat(np.arange(len(nums)), nums))
+        nums_dict[BLOCK_M]['mlist'] = mlist
+        mlist_len = len(nums_dict[BLOCK_M]['mlist'])
+        nums_dict[BLOCK_M]['mlist_len'] = mlist_len
+        MAX_NUM_PROGRAMS = max(1024, mlist_len) * 2
+        offsetlist = []  # type: ignore
+        for idx, num in enumerate(nums):
+            offsetlist.extend(range(num))
+        offsetlist = torch.tensor(offsetlist, dtype=torch.int32)
+        nums_dict[BLOCK_M]['offsetlist'] = offsetlist
+
+        if mamba2_metadata.batch_ptr is None:
+            # Update default value after class definition
+            #mamba2_metadata.MAX_NUM_PROGRAMS *= 2
+            mamba2_metadata.batch_ptr = torch.full((MAX_NUM_PROGRAMS, ),
+                                                   PAD_SLOT_ID,
+                                                   dtype=torch.int32,
+                                                   device='cuda')
+            mamba2_metadata.token_chunk_offset_ptr = torch.full(
+                (MAX_NUM_PROGRAMS, ),
+                PAD_SLOT_ID,
+                dtype=torch.int32,
+                device='cuda')
+        else:
+            if mamba2_metadata.batch_ptr.nelement() < MAX_NUM_PROGRAMS:
+                mamba2_metadata.batch_ptr.resize_(MAX_NUM_PROGRAMS).fill_(
+                    PAD_SLOT_ID)
+                mamba2_metadata.token_chunk_offset_ptr.resize_(  # type: ignore
+                    MAX_NUM_PROGRAMS).fill_(PAD_SLOT_ID)
+
+        mamba2_metadata.batch_ptr[0:mlist_len].copy_(mlist)
+        mamba2_metadata.token_chunk_offset_ptr[  # type: ignore
+            0:mlist_len].copy_(offsetlist)
+        nums_dict[BLOCK_M]['batch_ptr'] = mamba2_metadata.batch_ptr
+        nums_dict[BLOCK_M]['token_chunk_offset_ptr'] = (
+            mamba2_metadata.token_chunk_offset_ptr)  # type: ignore
+    mamba2_metadata.nums_dict = nums_dict
+    return mamba2_metadata
