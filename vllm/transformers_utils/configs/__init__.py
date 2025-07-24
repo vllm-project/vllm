@@ -7,12 +7,11 @@ from vllm.transformers_utils.configs.dbrx import DbrxConfig
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 from vllm.transformers_utils.configs.exaone import ExaoneConfig
+from vllm.transformers_utils.configs.exaone4 import Exaone4Config
 # RWConfig is for the original tiiuae/falcon-40b(-instruct) and
 # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
 # `FalconConfig` class from the official HuggingFace transformers library.
 from vllm.transformers_utils.configs.falcon import RWConfig
-from vllm.transformers_utils.configs.h2ovl import H2OVLChatConfig
-from vllm.transformers_utils.configs.internvl import InternVLChatConfig
 from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig
 from vllm.transformers_utils.configs.medusa import MedusaConfig
@@ -24,6 +23,7 @@ from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 from vllm.transformers_utils.configs.mpt import MPTConfig
 from vllm.transformers_utils.configs.nemotron import NemotronConfig
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
+from vllm.transformers_utils.configs.nemotron_vl import Nemotron_Nano_VL_Config
 from vllm.transformers_utils.configs.nvlm_d import NVLM_D_Config
 from vllm.transformers_utils.configs.ovis import OvisConfig
 from vllm.transformers_utils.configs.skyworkr1v import SkyworkR1VChatConfig
@@ -38,12 +38,11 @@ __all__ = [
     "DeepseekVLV2Config",
     "MPTConfig",
     "RWConfig",
-    "H2OVLChatConfig",
-    "InternVLChatConfig",
     "JAISConfig",
     "MedusaConfig",
     "EAGLEConfig",
     "ExaoneConfig",
+    "Exaone4Config",
     "MiniMaxText01Config",
     "MiniMaxVL01Config",
     "MllamaConfig",
@@ -52,6 +51,7 @@ __all__ = [
     "KimiVLConfig",
     "NemotronConfig",
     "NemotronHConfig",
+    "Nemotron_Nano_VL_Config",
     "NVLM_D_Config",
     "OvisConfig",
     "SkyworkR1VChatConfig",

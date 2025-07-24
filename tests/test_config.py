@@ -2,47 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import MISSING, Field, asdict, dataclass, field
-from typing import Literal, Union
 
 import pytest
 
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (LoadConfig, ModelConfig, PoolerConfig, VllmConfig,
-                         config, get_field)
+                         get_field, update_config)
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
-
-
-class _TestConfig1:
-    pass
-
-
-@dataclass
-class _TestConfig2:
-    a: int
-    """docstring"""
-
-
-@dataclass
-class _TestConfig3:
-    a: int = 1
-
-
-@dataclass
-class _TestConfig4:
-    a: Union[Literal[1], Literal[2]] = 1
-    """docstring"""
-
-
-@pytest.mark.parametrize(("test_config", "expected_error"), [
-    (_TestConfig1, "must be a dataclass"),
-    (_TestConfig2, "must have a default"),
-    (_TestConfig3, "must have a docstring"),
-    (_TestConfig4, "must use a single Literal"),
-])
-def test_config(test_config, expected_error):
-    with pytest.raises(Exception, match=expected_error):
-        config(test_config)
 
 
 def test_compile_config_repr_succeeds():
@@ -79,15 +46,43 @@ def test_get_field():
     assert c.default_factory is MISSING
 
 
+@dataclass
+class _TestNestedConfig:
+    a: _TestConfigFields = field(
+        default_factory=lambda: _TestConfigFields(a=0))
+
+
+def test_update_config():
+    # Simple update
+    config1 = _TestConfigFields(a=0)
+    new_config1 = update_config(config1, {"a": 42})
+    assert new_config1.a == 42
+    # Nonexistent field
+    with pytest.raises(AssertionError):
+        new_config1 = update_config(config1, {"nonexistent": 1})
+    # Nested update with dataclass
+    config2 = _TestNestedConfig()
+    new_inner_config = _TestConfigFields(a=1, c="new_value")
+    new_config2 = update_config(config2, {"a": new_inner_config})
+    assert new_config2.a == new_inner_config
+    # Nested update with dict
+    config3 = _TestNestedConfig()
+    new_config3 = update_config(config3, {"a": {"c": "new_value"}})
+    assert new_config3.a.c == "new_value"
+    # Nested update with invalid type
+    with pytest.raises(AssertionError):
+        new_config3 = update_config(config3, {"a": "new_value"})
+
+
 @pytest.mark.parametrize(
     ("model_id", "expected_runner_type", "expected_task"),
     [
         ("distilbert/distilgpt2", "generate", "generate"),
         ("intfloat/multilingual-e5-small", "pooling", "embed"),
         ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
-        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "score"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "classify"),
         ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "reward"),
-        ("openai/whisper-small", "transcription", "transcription"),
+        ("openai/whisper-small", "generate", "transcription"),
     ],
 )
 def test_auto_task(model_id, expected_runner_type, expected_task):
@@ -102,14 +97,83 @@ def test_auto_task(model_id, expected_runner_type, expected_task):
     )
 
     assert config.runner_type == expected_runner_type
+
+    if config.runner_type == "pooling":
+        assert config.task == expected_task
+    else:
+        assert expected_task in config.supported_tasks
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_runner_type", "expected_task"),
+    [
+        ("distilbert/distilgpt2", "pooling", "embed"),
+        ("intfloat/multilingual-e5-small", "pooling", "embed"),
+        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "classify"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "embed"),
+        ("openai/whisper-small", "pooling", "embed"),
+    ],
+)
+def test_score_task(model_id, expected_runner_type, expected_task):
+    config = ModelConfig(
+        model_id,
+        task="score",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+    )
+
+    assert config.runner_type == expected_runner_type
+    assert config.task == expected_task
+
+
+@pytest.mark.parametrize(("model_id", "expected_runner_type", "expected_task"),
+                         [
+                             ("Qwen/Qwen2.5-1.5B-Instruct", "draft", "auto"),
+                         ])
+def test_draft_task(model_id, expected_runner_type, expected_task):
+    config = ModelConfig(
+        model_id,
+        runner="draft",
+        tokenizer=model_id,
+        seed=0,
+        dtype="float16",
+    )
+
+    assert config.runner_type == expected_runner_type
+    assert config.task == expected_task
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_runner_type", "expected_task"),
+    [
+        ("openai/whisper-small", "generate", "transcription"),
+    ],
+)
+def test_transcription_task(model_id, expected_runner_type, expected_task):
+    config = ModelConfig(
+        model_id,
+        task="transcription",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+    )
+
+    assert config.runner_type == expected_runner_type
     assert config.task == expected_task
 
 
 @pytest.mark.parametrize(("model_id", "bad_task"), [
     ("Qwen/Qwen2.5-Math-RM-72B", "generate"),
+    ("Qwen/Qwen3-0.6B", "transcription"),
 ])
 def test_incorrect_task(model_id, bad_task):
-    with pytest.raises(ValueError, match=r"does not support the .* task"):
+    with pytest.raises(ValueError, match=r"does not support task=.*"):
         ModelConfig(
             model_id,
             task=bad_task,
@@ -445,6 +509,8 @@ def test_load_config_pt_load_map_location(pt_load_map_location):
         ("BAAI/bge-reranker-base", None, 512, False),
         ("BAAI/bge-reranker-base", 256, 256, False),
         ("BAAI/bge-reranker-base", 513, 512, True),
+        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", None, 131072, False),
+        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", 131073, 131072, True),
     ])
 def test_get_and_verify_max_len(model_id, max_model_len, expected_max_len,
                                 should_raise):

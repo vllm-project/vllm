@@ -1,20 +1,45 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+import tempfile
+import textwrap
 import time
-import uuid
-from collections import defaultdict
-from typing import Optional
 from unittest.mock import patch
 
 import pytest
+import ray
 
+from vllm import LLM
+from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     KVConnectorRole, NixlAgentMetadata, NixlConnector, NixlConnectorMetadata,
     NixlConnectorWorker)
 from vllm.forward_context import ForwardContext
+from vllm.mocks.mock_nixl_connector import FakeNixlWrapper
+from vllm.sampling_params import SamplingParams
 
 from .utils import create_request, create_scheduler, create_vllm_config
+
+
+def _make_stub_pkg() -> str:
+    """Return a directory that makes
+       `from nixl._api import nixl_agent` resolve to our FakeNixlWrapper."""
+    td = tempfile.mkdtemp()
+    pkg_root = os.path.join(td, "nixl", "_api")
+    os.makedirs(pkg_root, exist_ok=True)
+
+    stub = textwrap.dedent("""\
+        # Forward the real FakeNixlWrapper that the driver already defined.
+        print("In fake package")
+        from vllm.mocks.mock_nixl_connector import FakeNixlWrapper as nixl_agent
+    """)
+    with open(os.path.join(pkg_root, "__init__.py"), "w") as f:
+        f.write(stub)
+
+    # touch parent package
+    open(os.path.join(td, "nixl", "__init__.py"), "w").close()
+    return td
 
 
 def test_basic_interface():
@@ -41,9 +66,9 @@ def test_basic_interface():
     assert kv_connector_metadata is not None
     assert isinstance(kv_connector_metadata, NixlConnectorMetadata)
 
-    assert len(kv_connector_metadata.requests) == 1
-    assert request_id in kv_connector_metadata.requests
-    req_meta = kv_connector_metadata.requests[request_id]
+    assert len(kv_connector_metadata.reqs_to_recv) == 1
+    assert request_id in kv_connector_metadata.reqs_to_recv
+    req_meta = kv_connector_metadata.reqs_to_recv[request_id]
 
     for block_id, block in zip(
             req_meta.local_block_ids, scheduler.kv_cache_manager.coordinator.
@@ -78,81 +103,10 @@ def test_prompt_less_than_block_size():
     kv_connector_metadata = scheduler_output.kv_connector_metadata
     assert kv_connector_metadata is not None
     assert isinstance(kv_connector_metadata, NixlConnectorMetadata)
-    assert len(kv_connector_metadata.requests) == 0
+    assert len(kv_connector_metadata.reqs_to_recv) == 0
 
     # This request should be scheduled regularly.
     assert len(scheduler_output.scheduled_new_reqs) == 1
-
-
-class FakeNixlWrapper:
-    """Mock implementation of NixlWrapper for testing.
-    
-    We don't inherit from nixl._api.nixl_agent because nixl may not be
-    installed.
-    """
-
-    AGENT_METADATA = b"fake_agent_metadata"
-    REMOTE_AGENT_NAME = "remote_agent"
-
-    def __init__(self, agent_name: str, *args, **kwargs):
-        self._cycles_before_xfer_done = 0
-        self._check_xfer_state_cycles: defaultdict[int, int] = defaultdict(
-            lambda: 0)
-
-    def get_reg_descs(self, caches_data, memory_type: str) -> list:
-        return [str(uuid.uuid4()) for _ in caches_data]
-
-    def register_memory(self, descs) -> None:
-        pass
-
-    def get_xfer_descs(self, blocks_data, memory_type: str) -> list:
-        return [str(uuid.uuid4()) for _ in blocks_data]
-
-    def prep_xfer_dlist(self, agent_name: str, descs: list) -> int:
-        return uuid.uuid4().int
-
-    def get_agent_metadata(self) -> bytes:
-        return self.AGENT_METADATA
-
-    def add_remote_agent(self, agent_metadata: bytes) -> str:
-        return self.REMOTE_AGENT_NAME
-
-    def get_new_notifs(self) -> dict[str, list[bytes]]:
-        # Used to collect done_sending, which we don't test yet.
-        return {}
-
-    def check_xfer_state(self, handle: int) -> str:
-        if self._check_xfer_state_cycles[
-                handle] >= self._cycles_before_xfer_done:
-            return "DONE"
-        self._check_xfer_state_cycles[handle] += 1
-        return "PROC"
-
-    def release_xfer_handle(self, handle: int) -> None:
-        pass
-
-    def send_notif(self, agent_name: str, notif_msg: bytes) -> None:
-        pass
-
-    def make_prepped_xfer(self,
-                          xfer_type: str,
-                          local_xfer_side_handle: int,
-                          local_block_descs_ids: list[int],
-                          remote_xfer_side_handle: int,
-                          remote_block_descs_ids: list[int],
-                          notif_msg: Optional[bytes] = None) -> int:
-        return uuid.uuid4().int
-
-    def transfer(self, handle: int) -> str:
-        return "PROC"
-
-    ############################################################
-    # Follow are for changing the behavior during testing.
-    ############################################################
-
-    def set_cycles_before_xfer_done(self, cycles: int):
-        """Set the number of cycles before a transfer is considered done."""
-        self._cycles_before_xfer_done = cycles
 
 
 class FakeNixlConnectorWorker(NixlConnectorWorker):
@@ -163,8 +117,8 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         super().__init__(*args, **kwargs)
         self._hand_shake_latency = hand_shake_latency
 
-    def _nixl_handshake(self, host: str, port: int,
-                        remote_tp_size: int) -> dict[int, str]:
+    def _nixl_handshake(self, host: str, port: int, remote_tp_size: int,
+                        expected_engine_id: str) -> dict[int, str]:
         # Mimic slow _nixl_handshake, as well as bypass zmq communication.
         time.sleep(self._hand_shake_latency)
         # These should've been done in register_kv_caches(), called by
@@ -173,6 +127,8 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         self.block_len = self.slot_size_bytes * self.block_size
         self.num_blocks = 1
         self.dst_num_blocks[self.engine_id] = self.num_blocks
+
+        assert expected_engine_id == self.REMOTE_ENGINE_ID
 
         remote_agent_name = self.add_remote_agent(
             NixlAgentMetadata(
@@ -371,3 +327,86 @@ class TestNixlHandshake:
                 if cnt_finished_reqs == total_reqs:
                     return
         raise TimeoutError("Took too long to complete async handshake.")
+
+
+# NOTE: resource cleanup in mp backend is a bit finicky, so the order in which
+# we put here is important. First run ray, it will clean up the resources, then
+# the rest of the tests.
+@pytest.mark.parametrize("distributed_executor_backend", ["ray", None])
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+    FakeNixlWrapper)
+def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
+    """
+    Test lifecycle of an aborted Remote Prefill request hitting the timeout.
+    -----> P 
+            |  {process request}
+     <-/--- |  {result is NOT delivered, eg proxy is down}
+            |
+            |
+            |  {eventually free blocks}
+    """
+    model_name = "Qwen/Qwen3-0.6B"
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="NixlConnector",
+        kv_role="kv_both",
+    )
+    timeout = 6
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", str(timeout))
+
+    # Build runtime_env only if we’re using Ray
+    if distributed_executor_backend == "ray":
+        runtime_env = {
+            "working_dir": _make_stub_pkg(),  # ship stub package
+            "env_vars": {
+                "VLLM_NIXL_ABORT_REQUEST_TIMEOUT": str(timeout),
+            },
+        }
+        ray.init(runtime_env=runtime_env)
+
+    llm = LLM(
+        model=model_name,
+        enforce_eager=True,
+        gpu_memory_utilization=0.5,
+        kv_transfer_config=kv_transfer_config,
+        distributed_executor_backend=distributed_executor_backend,
+    )
+    remote_prefill_opts = {
+        "do_remote_decode": True,
+        "do_remote_prefill": False,
+        "remote_engine_id": None,
+        "remote_block_ids": None,
+        "remote_host": None,
+        "remote_port": None,
+    }
+    # Simulate sidecar request
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=1,
+        extra_args={"kv_transfer_params": remote_prefill_opts})
+    scheduler = llm.llm_engine.engine_core.engine_core.scheduler
+    req_to_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0].req_to_blocks
+
+    padding = "Just making this request a little longer so that we're sure "
+    "we're not hitting the small-request lower bound beneath which we don't "
+    "actually trigger the whole kv transfer, but rather just recompute the "
+    "blocks on D."
+    _ = llm.generate([f"What is the capital of Japan? {padding}"],
+                     sampling_params)
+
+    # Request finished but not freed
+    assert '0' in scheduler.finished_req_ids and '0' in req_to_blocks
+    # Some other request, 0 still not freed
+    _ = llm.generate([f"What is the capital of Italy? {padding}"],
+                     sampling_params)
+    assert '0' in req_to_blocks
+    assert '1' in scheduler.finished_req_ids and '1' in req_to_blocks
+
+    # Wait for timeout and trigger another scheduler loop
+    time.sleep(timeout)
+    _ = llm.generate([f"What is the capital of France? {padding}"],
+                     sampling_params)
+    # Request-0 times out and is cleared!
+    assert '0' not in req_to_blocks

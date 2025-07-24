@@ -1,7 +1,4 @@
----
-title: Automatic Prefix Caching
----
-[](){ #design-automatic-prefix-caching }
+# Automatic Prefix Caching
 
 The core idea of [PagedAttention](https://blog.vllm.ai/2023/06/20/vllm.html) is to partition the KV cache of each request into KV Blocks. Each block contains the attention keys and values for a fixed number of tokens. The PagedAttention algorithm allows these blocks to be stored in non-contiguous physical memory so that we can eliminate memory fragmentation by allocating the memory on demand.
 

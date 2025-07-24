@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
@@ -12,7 +13,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
     P2pNcclEngine)
 from vllm.distributed.parallel_state import get_world_group
-from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -237,32 +237,16 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         assert self.p2p_nccl_engine is not None
 
-        def extract_kv_from_layer(
-            layer: torch.Tensor,
-            slot_mapping: torch.Tensor,
-        ) -> torch.Tensor:
-            """Extract the KV cache from the layer.
-
-            Assume the shape of the layer is (2, num_pages, page_size, xxx)
-            if MLA is not used, and (num_pages, page_size, xxx) otherwise.
-            """
-            if isinstance(attn_metadata, MLACommonMetadata):
-                num_pages, page_size = layer.shape[0], layer.shape[1]
-                return layer.reshape(num_pages * page_size, -1)[slot_mapping,
-                                                                ...]
-            num_pages, page_size = layer.shape[1], layer.shape[2]
-            return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping,
-                                                               ...]
-
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, P2pNcclConnectorMetadata)
         for request in connector_metadata.requests:
             request_id = request.request_id
             ip, port = self.parse_request_id(request_id, True)
             remote_address = ip + ":" + str(port + self._rank)
-            kv_cache = extract_kv_from_layer(kv_layer, request.slot_mapping)
-            self.p2p_nccl_engine.send_tensor(request_id + "#" + layer_name,
-                                             kv_cache, remote_address)
+            self.p2p_nccl_engine.send_tensor(
+                request_id + "#" + layer_name, kv_layer, remote_address,
+                request.slot_mapping,
+                isinstance(attn_metadata, MLACommonMetadata))
 
     def wait_for_save(self):
         if self.is_producer:
@@ -285,9 +269,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         assert self.p2p_nccl_engine is not None
 
-        forward_context: ForwardContext = get_forward_context()
+        no_compile_layers = (
+            self._vllm_config.compilation_config.static_forward_context)
         return self.p2p_nccl_engine.get_finished(finished_req_ids,
-                                                 forward_context)
+                                                 no_compile_layers)
 
     # ==============================
     # Scheduler-side methods
@@ -371,56 +356,51 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                  block_size=self._block_size)
                 self._requests_need_load.pop(new_req.req_id)
 
-        for cached_req in scheduler_output.scheduled_cached_reqs:
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        for i, req_id in enumerate(cached_reqs.req_ids):
+            num_computed_tokens = cached_reqs.num_computed_tokens[i]
+            new_block_ids = cached_reqs.new_block_ids[i]
+            resumed_from_preemption = cached_reqs.resumed_from_preemption[i]
+
             if self.is_producer:
                 num_scheduled_tokens = (
-                    scheduler_output.num_scheduled_tokens)[cached_req.req_id]
-                num_tokens = (num_scheduled_tokens +
-                              cached_req.num_computed_tokens)
-                assert cached_req.req_id in self.chunked_prefill
-                block_ids = cached_req.new_block_ids[0]
-                if not cached_req.resumed_from_preemption:
-                    block_ids = (self.chunked_prefill[cached_req.req_id][0] +
-                                 block_ids)
-                prompt_token_ids = self.chunked_prefill[cached_req.req_id][1]
+                    scheduler_output.num_scheduled_tokens)[req_id]
+                num_tokens = (num_scheduled_tokens + num_computed_tokens)
+                assert req_id in self.chunked_prefill
+                block_ids = new_block_ids[0]
+                if not resumed_from_preemption:
+                    block_ids = (self.chunked_prefill[req_id][0] + block_ids)
+                prompt_token_ids = self.chunked_prefill[req_id][1]
                 # the request's prompt is chunked prefill again
                 if num_tokens < len(prompt_token_ids):
-                    self.chunked_prefill[cached_req.req_id] = (
-                        block_ids, prompt_token_ids)
+                    self.chunked_prefill[req_id] = (block_ids,
+                                                    prompt_token_ids)
                     continue
                 # the request's prompt is all prefilled finally
-                meta.add_request(request_id=cached_req.req_id,
+                meta.add_request(request_id=req_id,
                                  token_ids=prompt_token_ids,
                                  block_ids=block_ids,
                                  block_size=self._block_size)
-                self.chunked_prefill.pop(cached_req.req_id, None)
+                self.chunked_prefill.pop(req_id, None)
                 continue
 
             # NOTE(rob): here we rely on the resumed requests being
             # the first N requests in the list scheduled_cache_reqs.
-            if not cached_req.resumed_from_preemption:
+            if not resumed_from_preemption:
                 break
-            if cached_req.req_id in self._requests_need_load:
-                request, _ = self._requests_need_load.pop(cached_req.req_id)
-                total_tokens = cached_req.num_computed_tokens + 1
+            if req_id in self._requests_need_load:
+                request, _ = self._requests_need_load.pop(req_id)
+                total_tokens = num_computed_tokens + 1
                 token_ids = request.all_token_ids[:total_tokens]
 
                 # NOTE(rob): For resumed req, new_block_ids is all
                 # of the block_ids for the request.
-                block_ids = cached_req.new_block_ids[0]
+                block_ids = new_block_ids[0]
 
-                meta.add_request(request_id=cached_req.req_id,
+                meta.add_request(request_id=req_id,
                                  token_ids=token_ids,
                                  block_ids=block_ids,
                                  block_size=self._block_size)
-
-        # Requests loaded asynchronously are not in the scheduler_output.
-        # for request_id in self._requests_need_load:
-        #     request, block_ids = self._requests_need_load[request_id]
-        #     meta.add_request(request_id=request.request_id,
-        #                      token_ids=request.prompt_token_ids,
-        #                      block_ids=block_ids,
-        #                      block_size=self._block_size)
 
         self._requests_need_load.clear()
         return meta

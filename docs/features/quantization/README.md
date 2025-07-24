@@ -1,7 +1,4 @@
----
-title: Quantization
----
-[](){ #quantization-index }
+# Quantization
 
 Quantization trades off model precision for smaller memory footprint, allowing large models to be run on a wider range of devices.
 
@@ -13,6 +10,7 @@ Contents:
 - [BitBLAS](bitblas.md)
 - [GGUF](gguf.md)
 - [GPTQModel](gptqmodel.md)
+- [INC](inc.md)
 - [INT4 W4A16](int4.md)
 - [INT8 W8A8](int8.md)
 - [FP8 W8A8](fp8.md)
