@@ -431,7 +431,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Install DeepGEMM from source
 ARG DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
-ARG DEEPGEMM_GIT_REF="main"
+ARG DEEPGEMM_GIT_REF="187656694f7f69e3e7975617a68bc3387680a7e1"
 RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
   . /etc/environment
     git clone --depth 1 --recursive --shallow-submodules \
