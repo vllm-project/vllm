@@ -147,6 +147,7 @@ class Pooler(nn.Module, ABC):
             pooling=base_pooler.pooling,
             classifier=classifier,
             act_fn=base_pooler.head.activation,
+            activation=pooler_config.activation,
         )
 
     @abstractmethod
@@ -482,8 +483,6 @@ class LambdaPoolerActivation(PoolerActivation):
 
 
 class PoolerHead(nn.Module):
-    # embed use this class
-    # Classify & Score seems not to use this class
 
     @classmethod
     def from_config(cls, pooler_config: ResolvedPoolingConfig) -> "PoolerHead":
@@ -509,17 +508,7 @@ class PoolerHead(nn.Module):
         else:
             pooled_data = pooled_data.to(torch.float32)
 
-        if isinstance(pooling_metadata, V0PoolingMetadata):
-            pooling_params = [
-                pooling_param
-                for _, pooling_param in pooling_metadata.seq_groups
-            ]
-        else:
-            assert isinstance(pooled_data, list)
-            pooling_params = [
-                pooling_param
-                for pooling_param in pooling_metadata.pooling_params
-            ]
+        pooling_params = _get_pooling_params(pooling_metadata)
 
         # for matryoshka representation
         dimensions_list = [
@@ -700,12 +689,14 @@ class ClassifierPooler(Pooler):
         pooling: PoolingFn,
         classifier: ClassifierFn,
         act_fn: PoolerActivation,
+        activation: bool = True,
     ) -> None:
         super().__init__()
 
         self.pooling = pooling
         self.classifier = classifier
         self.act_fn = act_fn
+        self.activation = activation
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"classify", "score"}
@@ -725,7 +716,24 @@ class ClassifierPooler(Pooler):
         else:
             pooled_output = [self.classifier(data) for data in pooled_data]
 
-        scores = self.act_fn(pooled_output)
+        pooling_params = _get_pooling_params(pooling_metadata)
+
+        activation_list = [
+            pooling_param.activation
+            or (pooling_param.activation is None and self.activation)
+            for pooling_param in pooling_params
+        ]
+
+        if len(set(activation_list)) == 1:
+            if activation_list[0]:
+                scores = self.act_fn(pooled_output)
+            else:
+                scores = pooled_output
+        else:
+            scores = [
+                self.act_fn(vecs) if f else vecs
+                for vecs, f in zip(pooled_output, activation_list)
+            ]
 
         return build_output(scores)
 
@@ -781,3 +789,15 @@ class DispatchPooler(Pooler):
             offset += num_items
 
         return PoolerOutput(outputs)
+
+
+def _get_pooling_params(pooling_metadata: PoolingMetadata):
+    if isinstance(pooling_metadata, V0PoolingMetadata):
+        pooling_params = [
+            pooling_param for _, pooling_param in pooling_metadata.seq_groups
+        ]
+    else:
+        pooling_params = [
+            pooling_param for pooling_param in pooling_metadata.pooling_params
+        ]
+    return pooling_params

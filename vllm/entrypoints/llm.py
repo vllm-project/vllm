@@ -1217,6 +1217,8 @@ class LLM:
         /,
         *,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        pooling_params: Optional[Union[PoolingParams,
+            Sequence[PoolingParams]]] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[ClassificationRequestOutput]:
@@ -1252,6 +1254,7 @@ class LLM:
         items = self.encode(
             prompts,
             use_tqdm=use_tqdm,
+            pooling_params=pooling_params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
             pooling_task="classify",
@@ -1266,6 +1269,7 @@ class LLM:
         text_2: list[Union[str, TextPrompt, TokensPrompt]],
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        pooling_params: Optional[PoolingParams] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[ScoringRequestOutput]:
@@ -1302,6 +1306,7 @@ class LLM:
         data_2: Union[list[str], list[ScoreContentPartParam]],
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        pooling_params: Optional[PoolingParams] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[ScoringRequestOutput]:
@@ -1313,7 +1318,11 @@ class LLM:
         if len(data_1) == 1:
             data_1 = data_1 * len(data_2)
 
-        pooling_params = PoolingParams(task="score")
+        if pooling_params is None:
+            pooling_params = PoolingParams(task="score")
+        else:
+            pooling_params.task = "score"
+
         tokenization_kwargs: dict[str, Any] = {}
         _validate_truncation_size(self.llm_engine.model_config.max_model_len,
                                   truncate_prompt_tokens, tokenization_kwargs)
@@ -1380,6 +1389,7 @@ class LLM:
         *,
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        pooling_params: Optional[PoolingParams] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[ScoringRequestOutput]:
@@ -1504,6 +1514,7 @@ class LLM:
                 data_2,  # type: ignore[arg-type]
                 truncate_prompt_tokens,
                 use_tqdm,
+                pooling_params,
                 lora_request,
                 prompt_adapter_request)
         else:
@@ -1513,6 +1524,7 @@ class LLM:
                 data_2,  # type: ignore[arg-type]
                 truncate_prompt_tokens,
                 use_tqdm,
+                pooling_params,
                 lora_request,
                 prompt_adapter_request)
 

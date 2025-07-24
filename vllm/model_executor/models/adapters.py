@@ -194,6 +194,7 @@ def as_seq_cls_model(cls: _T) -> _T:
                     classifier=self._classifier,
                     act_fn=ClassifierPooler.act_fn_for_seq_cls(
                         vllm_config.model_config),
+                    activation=pooler_config.activation,
                 ),
                 "score":
                 ClassifierPooler(
@@ -201,6 +202,7 @@ def as_seq_cls_model(cls: _T) -> _T:
                     classifier=self._classifier,
                     act_fn=ClassifierPooler.act_fn_for_cross_encoder(
                         vllm_config.model_config),
+                    activation=pooler_config.activation,
                 ),
             })
 

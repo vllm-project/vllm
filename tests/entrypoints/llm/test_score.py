@@ -10,9 +10,7 @@ import torch.nn.functional as F
 from vllm import LLM, PoolingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 
-MODEL_NAME = "intfloat/multilingual-e5-small"
-
-prompts = ["The chef prepared a delicious meal."]
+MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 
 
 @pytest.fixture(autouse=True)
@@ -43,21 +41,27 @@ def llm():
 
 
 @pytest.mark.skip_global_cleanup
-def test_normalize(llm: LLM):
+def test_activation(llm: LLM):
 
-    def get_outputs(normalize):
-        outputs = llm.embed(prompts,
-                            pooling_params=PoolingParams(normalize=normalize))
-        return torch.tensor([x.outputs.embedding for x in outputs])
+    def get_outputs(activation):
+        text_1 = "What is the capital of France?"
+        text_2 = "The capital of France is Paris."
 
-    default = get_outputs(normalize=None)
-    w_normal = get_outputs(normalize=True)
-    wo_normal = get_outputs(normalize=False)
+        outputs = llm.score(
+            text_1,
+            text_2,
+            pooling_params=PoolingParams(activation=activation))
+        return torch.tensor([x.outputs.score for x in outputs])
 
-    assert torch.allclose(default, w_normal,
-                          atol=1e-2), "Default should use normal."
-    assert not torch.allclose(w_normal, wo_normal,
-                              atol=1e-2), "wo_normal should not use normal."
+    default = get_outputs(activation=None)
+    w_activation = get_outputs(activation=True)
+    wo_activation = get_outputs(activation=False)
+
+    assert torch.allclose(default, w_activation,
+                          atol=1e-2), "Default should use activation."
+    assert not torch.allclose(
+        w_activation, wo_activation,
+        atol=1e-2), "wo_activation should not use activation."
     assert torch.allclose(
-        w_normal, F.normalize(wo_normal, p=2, dim=-1),
-        atol=1e-2), "w_normal should be close to normal(wo_normal)."
+        F.sigmoid(wo_activation), w_activation, atol=1e-2
+    ), "w_activation should be close to activation(wo_activation)."

@@ -1333,7 +1333,7 @@ class ScoreRequest(OpenAIBaseModel):
     text_1: Union[list[str], str, ScoreMultiModalParam]
     text_2: Union[list[str], str, ScoreMultiModalParam]
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
-    softmax: Optional[bool] = None
+    activation: Optional[bool] = None
 
     # --8<-- [start:score-extra-params]
 
@@ -1353,7 +1353,7 @@ class ScoreRequest(OpenAIBaseModel):
     # --8<-- [end:score-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(softmax=self.softmax)
+        return PoolingParams(activation=self.activation)
 
 
 class RerankRequest(OpenAIBaseModel):
@@ -1362,7 +1362,7 @@ class RerankRequest(OpenAIBaseModel):
     documents: Union[list[str], ScoreMultiModalParam]
     top_n: int = Field(default_factory=lambda: 0)
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
-    softmax: Optional[bool] = None
+    activation: Optional[bool] = None
 
     # --8<-- [start:rerank-extra-params]
 
@@ -1382,7 +1382,7 @@ class RerankRequest(OpenAIBaseModel):
     # --8<-- [end:rerank-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(softmax=self.softmax)
+        return PoolingParams(activation=self.activation)
 
 
 class RerankDocument(BaseModel):
@@ -1519,7 +1519,7 @@ class ClassificationRequest(OpenAIBaseModel):
     input: Union[list[str], str]
     truncate_prompt_tokens: Optional[int] = None
     user: Optional[str] = None
-    softmax: Optional[bool] = None
+    activation: Optional[bool] = None
 
     # --8<-- [start:classification-extra-params]
     priority: int = Field(
@@ -1533,7 +1533,7 @@ class ClassificationRequest(OpenAIBaseModel):
     # --8<-- [end:classification-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(softmax=self.softmax)
+        return PoolingParams(activation=self.activation)
 
 
 class ClassificationData(OpenAIBaseModel):

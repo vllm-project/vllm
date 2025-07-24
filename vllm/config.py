@@ -3281,6 +3281,11 @@ class PoolerConfig:
     to ``True`` for classification outputs.
     """
 
+    activation: Optional[bool] = True
+    """
+    Whether to apply activation function to the pooled outputs. 
+    """
+
     step_tag_id: Optional[int] = None
     """
     If set, only the score corresponding to the ``step_tag_id`` in the

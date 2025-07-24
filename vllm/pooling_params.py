@@ -24,8 +24,9 @@ class PoolingParams(
                     if model support matryoshka representation.
         softmax: Whether to using softmax,
                  None means using the model's default
-        normalize: normalize: Whether to using softmax,
+        normalize: Whether to using normalize,
                    None means using the model's default
+        activation: Whether to using activation function
     """
 
     dimensions: Optional[int] = None
@@ -33,6 +34,8 @@ class PoolingParams(
     softmax: Optional[bool] = None
 
     normalize: Optional[bool] = None
+
+    activation: Optional[bool] = None
 
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
 
@@ -48,6 +51,7 @@ class PoolingParams(
             dimensions=self.dimensions,
             softmax=self.softmax,
             normalize=self.normalize,
+            activation=self.activation,
             task=self.task,
             requires_token_ids=self.requires_token_ids,
         )
@@ -91,6 +95,7 @@ class PoolingParams(
                 f"task={self.task}, "
                 f"softmax={self.softmax}, "
                 f"normalize={self.normalize}, "
+                f"activation={self.activation}, "
                 f"requires_token_ids={self.requires_token_ids})")
 
     def __post_init__(self) -> None:

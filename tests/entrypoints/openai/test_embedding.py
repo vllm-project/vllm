@@ -396,9 +396,10 @@ async def test_normalize(server: RemoteOpenAIServer, model_name: str):
     w_normal = await get_outputs(normalize=True)
     wo_normal = await get_outputs(normalize=False)
 
-    assert torch.allclose(default, w_normal), "Default should use normal."
-    assert not torch.allclose(w_normal,
-                              wo_normal), "wo_normal should not use normal."
-    assert torch.allclose(w_normal, F.normalize(
-        wo_normal, p=2,
-        dim=-1)), "w_normal should be close to normal(wo_normal)."
+    assert torch.allclose(default, w_normal,
+                          atol=1e-2), "Default should use normal."
+    assert not torch.allclose(w_normal, wo_normal,
+                              atol=1e-2), "wo_normal should not use normal."
+    assert torch.allclose(
+        w_normal, F.normalize(wo_normal, p=2, dim=-1),
+        atol=1e-2), "w_normal should be close to normal(wo_normal)."

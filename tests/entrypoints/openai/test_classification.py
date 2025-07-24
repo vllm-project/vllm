@@ -4,6 +4,7 @@
 import pytest
 import requests
 import torch
+import torch.nn.functional as F
 
 from vllm.entrypoints.openai.protocol import ClassificationResponse
 
@@ -186,28 +187,28 @@ async def test_invocations(server: RemoteOpenAIServer):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_softmax(server: RemoteOpenAIServer, model_name: str):
+async def test_activation(server: RemoteOpenAIServer, model_name: str):
     input_text = ["This product was excellent and exceeded my expectations"]
 
-    async def get_outputs(softmax):
-
+    async def get_outputs(activation):
         response = requests.post(server.url_for("classify"),
                                  json={
                                      "model": model_name,
                                      "input": input_text,
-                                     "softmax": softmax
+                                     "activation": activation
                                  })
-
         outputs = response.json()
         return torch.tensor([x['probs'] for x in outputs["data"]])
 
-    default = await get_outputs(softmax=None)
-    w_softmax = await get_outputs(softmax=True)
-    wo_softmax = await get_outputs(softmax=False)
+    default = await get_outputs(activation=None)
+    w_activation = await get_outputs(activation=True)
+    wo_activation = await get_outputs(activation=False)
 
-    assert torch.allclose(default, w_softmax), "Default should use softmax."
-    assert not torch.allclose(w_softmax,
-                              wo_softmax), "wo_softmax should not use softmax."
+    assert torch.allclose(default, w_activation,
+                          atol=1e-2), "Default should use activation."
+    assert not torch.allclose(
+        w_activation, wo_activation,
+        atol=1e-2), "wo_activation should not use activation."
     assert torch.allclose(
-        w_softmax,
-        wo_softmax), "w_softmax should be close to softmax(wo_softmax)."
+        F.softmax(wo_activation, dim=-1), w_activation, atol=1e-2
+    ), "w_activation should be close to activation(wo_activation)."

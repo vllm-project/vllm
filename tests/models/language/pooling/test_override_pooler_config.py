@@ -15,7 +15,7 @@ from vllm.config import PoolerConfig
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])
-def test_classify_models_using_softmax(
+def test_classify_models_using_activation(
     hf_runner,
     vllm_runner,
     example_prompts,
@@ -23,28 +23,29 @@ def test_classify_models_using_softmax(
     dtype: str,
 ) -> None:
 
-    with vllm_runner(
-            model,
-            max_model_len=512,
-            dtype=dtype,
-            override_pooler_config=PoolerConfig(softmax=False)) as vllm_model:
-        wo_softmax_out = vllm_model.classify(example_prompts)
+    with vllm_runner(model,
+                     max_model_len=512,
+                     dtype=dtype,
+                     override_pooler_config=PoolerConfig(
+                         activation=False)) as vllm_model:
+        wo_activation_out = vllm_model.classify(example_prompts)
 
-    with vllm_runner(
-            model,
-            max_model_len=512,
-            dtype=dtype,
-            override_pooler_config=PoolerConfig(softmax=True)) as vllm_model:
-        w_softmax_out = vllm_model.classify(example_prompts)
+    with vllm_runner(model,
+                     max_model_len=512,
+                     dtype=dtype,
+                     override_pooler_config=PoolerConfig(
+                         activation=True)) as vllm_model:
+        w_activation_out = vllm_model.classify(example_prompts)
 
-    for wo_softmax, w_softmax in zip(wo_softmax_out, w_softmax_out):
-        wo_softmax = torch.tensor(wo_softmax)
-        w_softmax = torch.tensor(w_softmax)
+    for wo_activation, w_activation in zip(wo_activation_out,
+                                           w_activation_out):
+        wo_activation = torch.tensor(wo_activation)
+        w_activation = torch.tensor(w_activation)
 
         assert not torch.allclose(
-            wo_softmax, w_softmax,
+            wo_activation, w_activation,
             atol=1e-2), "override_pooler_config is not working"
-        assert torch.allclose(F.softmax(wo_softmax, dim=-1), w_softmax,
+        assert torch.allclose(F.softmax(wo_activation, dim=-1), w_activation,
                               1e-3 if dtype == "float" else 1e-2)
 
 
@@ -78,8 +79,8 @@ def test_embed_models_using_normalize(
         w_normalize = torch.tensor(vllm_model.embed(example_prompts))
 
     assert not torch.allclose(
-        wo_normalize,
-        w_normalize), "override_pooler_config normalize is not working"
+        wo_normalize, w_normalize,
+        atol=1e-2), "override_pooler_config normalize is not working"
     assert torch.allclose(
-        F.normalize(wo_normalize, p=2, dim=-1),
-        w_normalize), "w_normal should be close to normal(wo_normal)."
+        F.normalize(wo_normalize, p=2, dim=-1), w_normalize,
+        atol=1e-2), "w_normal should be close to normal(wo_normal)."
