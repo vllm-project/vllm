@@ -53,6 +53,8 @@ class RejectionSampler(nn.Module):
         # [batch_size, 1]
         bonus_token_ids: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        posterior_alpha: float = 1.0,
+        thinking_states: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         '''
         Args:
@@ -101,6 +103,8 @@ class RejectionSampler(nn.Module):
             target_probs,
             bonus_token_ids,
             sampling_metadata,
+            posterior_alpha,
+            thinking_states,
         )
         return output_token_ids
 
@@ -147,6 +151,8 @@ def rejection_sample(
     # [batch_size, 1]
     bonus_token_ids: torch.Tensor,
     sampling_metadata: SamplingMetadata,
+    posterior_alpha: float = 1.0,
+    thinking_states: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     assert draft_token_ids.ndim == 1
     assert draft_probs is None or draft_probs.ndim == 2
@@ -224,6 +230,9 @@ def rejection_sample(
         recovered_token_ids,
         uniform_probs,
         is_greedy,
+        thinking_states,
+        thinking_states is None,
+        posterior_alpha,
         max_spec_len,
         vocab_size,
         NO_DRAFT_PROBS=draft_probs is None,
@@ -488,6 +497,9 @@ def rejection_random_sample_kernel(
     recovered_token_ids_ptr,  # [num_tokens]
     uniform_probs_ptr,  # [num_tokens]
     is_greedy_ptr,  # [batch_size]
+    thinking_states_ptr,  # [batch_size],
+    NO_THINKING_STATES: tl.constexpr,
+    posterior_alpha,
     max_spec_len,
     vocab_size,
     NO_DRAFT_PROBS: tl.constexpr,
@@ -505,6 +517,11 @@ def rejection_random_sample_kernel(
     end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
     num_draft_tokens = end_idx - start_idx
 
+    if NO_THINKING_STATES:
+        thinking_state = False
+    else:
+        thinking_state = tl.load(thinking_states_ptr + req_idx)
+
     rejected = False
     for pos in range(num_draft_tokens):
         if not rejected:
@@ -519,9 +536,15 @@ def rejection_random_sample_kernel(
                                   (start_idx + pos) * vocab_size +
                                   draft_token_id)
             uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
+
+            if thinking_state:
+                threshold = target_prob / (posterior_alpha * draft_prob)
+            else:
+                threshold = target_prob / draft_prob
+
             # NOTE(woosuk): While the draft probability should never be 0,
             # we check it to avoid NaNs. If it happens to be 0, we reject.
-            if draft_prob > 0 and target_prob / draft_prob >= uniform_prob:
+            if draft_prob > 0 and threshold >= uniform_prob:
                 # Accept.
                 token_id = draft_token_id
             else:

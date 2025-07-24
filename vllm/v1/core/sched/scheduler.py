@@ -7,7 +7,8 @@ import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Any, Optional, Union
+from transformers import AutoTokenizer
+from typing import Any, Callable, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
@@ -17,6 +18,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -25,7 +28,7 @@ from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
 from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
                                               create_request_queue)
-from vllm.v1.core.sched.utils import check_stop
+from vllm.v1.core.sched.utils import check_stop, maybe_update_thinking_state
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -142,6 +145,12 @@ class Scheduler(SchedulerInterface):
 
         speculative_config = vllm_config.speculative_config
 
+        self.relaxed_thinking = speculative_config.relaxed_thinking
+        self.think_start_token_id = None
+        self.think_end_token_id = None
+        reasoning_parser: Optional[Callable[[AnyTokenizer],
+                                            ReasoningParser]] = None
+
         self.use_eagle = False
         self.num_spec_tokens = self.num_lookahead_tokens = 0
         if speculative_config:
@@ -149,6 +158,35 @@ class Scheduler(SchedulerInterface):
             if speculative_config.use_eagle():
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
+
+            if self.relaxed_thinking:
+                assert speculative_config.posterior_alpha, \
+                    ValueError("No posterior_alpha specified.")
+                assert 0 < speculative_config.posterior_alpha < 1, \
+                    ValueError("Invalid posterior_alpha, the value " \
+                               "should be in range (0, 1).")
+                assert speculative_config.reasoning_parser, \
+                    ValueError("No reasoning_parser specified.")
+                logger.info(
+                    f"Enable relaxed thinking, posterior_alpha="
+                    f"{speculative_config.posterior_alpha}.")
+                try:
+                    reasoning_parser = (
+                        ReasoningParserManager.get_reasoning_parser(
+                            speculative_config.reasoning_parser))
+                    assert reasoning_parser is not None
+                except Exception as e:
+                    raise TypeError(
+                        f"{speculative_config.reasoning_parser=} has " \
+                         "not been registered") from e
+                
+                tokenizer = AutoTokenizer.from_pretrained(
+                    self.vllm_config.model_config.tokenizer)
+                reasoning_parser = reasoning_parser(tokenizer=tokenizer)
+                logger.info(f"Use reasoning parser {reasoning_parser}.")
+                
+                self.think_start_token_id = reasoning_parser.start_token_id
+                self.think_end_token_id = reasoning_parser.end_token_id
 
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
@@ -626,6 +664,7 @@ class Scheduler(SchedulerInterface):
         new_token_ids: list[list[int]] = []
         new_block_ids: list[tuple[list[int], ...]] = []
         num_computed_tokens: list[int] = []
+        thinking_states: list[bool] = []
 
         use_connector = self.connector is not None
         for req in itertools.chain(running_reqs, resumed_reqs):
@@ -649,6 +688,7 @@ class Scheduler(SchedulerInterface):
                 new_token_ids.append([])
             new_block_ids.append(req_to_new_block_ids[req_id])
             num_computed_tokens.append(req.num_computed_tokens)
+            thinking_states.append(req.thinking_state)
         # Because resumed_reqs is usually empty, it is more efficient to do
         # in-place appending so that we don't need to allocate a new list.
         resumed_from_preemption = [False] * len(running_reqs)
@@ -660,6 +700,7 @@ class Scheduler(SchedulerInterface):
             new_token_ids=new_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
+            thinking_states=thinking_states,
         )
 
     def _try_schedule_encoder_inputs(
@@ -923,6 +964,14 @@ class Scheduler(SchedulerInterface):
         # to return empty token ids for the request.
         stopped = False
         for num_new, output_token_id in enumerate(new_token_ids, 1):
+            if self.relaxed_thinking:
+                maybe_update_thinking_state(
+                    request=request,
+                    new_token_id=output_token_id,
+                    think_start_token_id=self.think_start_token_id,
+                    think_end_token_id=self.think_end_token_id
+                )
+
             request.append_output_token_ids(output_token_id)
 
             # Check for stop and update request state.

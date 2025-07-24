@@ -2668,6 +2668,16 @@ class SpeculativeConfig:
         ParallelConfig] = None  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
 
+    # params for relaxed thinking
+    posterior_alpha: Optional[float] = None
+    """The alpha value for the posterior distribution in speculative decoding.
+    Used when relaxed thinking is enabled."""
+    relaxed_thinking: Optional[bool] = False
+    """Whether to enable relaxed thinking."""
+    reasoning_parser: Optional[str] = None
+    """Reasoning Parser to parse think_start_token_id and think_end_token_id.
+    Used when relaxed thinking is enabled."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
