@@ -28,7 +28,7 @@ torchvision==0.22.1
 transformers_stream_generator # required for qwen-vl test
 mamba_ssm # required for plamo2 test
 matplotlib # required for qwen-vl test
-mistral_common[opencv] >= 1.8.0 # required for voxtral test
+mistral_common[image,audio] >= 1.8.2 # required for voxtral test
 num2words # required for smolvlm test
 open_clip_torch==2.32.0 # Required for nemotron_vl test
 opencv-python-headless >= 4.11.0 # required for video test
@@ -54,3 +54,4 @@ runai-model-streamer==0.11.0
 runai-model-streamer-s3==0.11.0
 fastsafetensors>=0.1.10
 pydantic>=2.10 # 2.9 leads to error on python 3.10
+terratorch==1.1rc2 # required for PrithviMAE test
