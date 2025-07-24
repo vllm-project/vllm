@@ -13,7 +13,7 @@ before returning them.
 
 ## Configuration
 
-### Model Runner (`--runner`)
+### Model Runner
 
 Run a model in pooling mode via the option `--runner pooling`.
 
@@ -28,11 +28,11 @@ Run a model in pooling mode via the option `--runner pooling`.
     via `--convert` (see below) if the model in vLLM does not implement
     the [VllmModelForPooling][vllm.model_executor.models.VllmModelForPooling] interface.
 
-### Model Conversion (`--convert`)
+### Model Conversion
 
-vLLM can adapt models for various pooling tasks via the option `--convert <...>`.
+vLLM can adapt models for various pooling tasks via the option `--convert <type>`.
 
-If `--runner pooling` has been set but the model does not implement the
+If `--runner pooling` has been set (manually or automatically) but the model does not implement the
 [VllmModelForPooling][vllm.model_executor.models.VllmModelForPooling] interface,
 vLLM will attempt to automatically convert the model according to the architecture names
 shown in the table below.
@@ -44,7 +44,7 @@ shown in the table below.
 | `*ForRewardModeling`, `*RewardModel`          | `reward`    | `encode`                      |
 
 !!! tip
-    You can explicitly set `--convert <...>` to specify how to convert the model.
+    You can explicitly set `--convert <type>` to specify how to convert the model.
 
 ### Pooling Tasks
 
