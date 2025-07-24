@@ -435,11 +435,11 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
   . /etc/environment
     # Check if TORCH_CUDA_ARCH_LIST contains 9.0 or 10.0 (with optional 'a' suffix)
     if echo "${TORCH_CUDA_ARCH_LIST}" | grep -E "(9\.0a?|10\.0a?)" > /dev/null; then
-        git clone --depth 1 --recursive --shallow-submodules \
-            --branch ${DEEPGEMM_GIT_REF} \
+        git clone --recursive --shallow-submodules \
             ${DEEPGEMM_GIT_REPO} deepgemm
         echo "🏗️  Building DeepGEMM"
         pushd deepgemm
+            git checkout ${DEEPGEMM_GIT_REF}
             # Build DeepGEMM
             # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)
             rm -rf build dist
