@@ -42,8 +42,7 @@ class MambaStateShapeCalculator:
         # contiguous along 'dim' axis
         conv_state_shape = (conv_kernel - 1, divide(conv_dim, tp_world_size))
         if not use_v1:
-            conv_state_shape = (divide(conv_dim,
-                                       tp_world_size), conv_kernel - 1)
+            conv_state_shape = conv_state_shape[1], conv_state_shape[0]
 
         # These are not TP-ed as they depend on A, dt_bias, D
         # - they are typically small
