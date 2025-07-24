@@ -2818,27 +2818,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     dtype = kv_cache_spec.dtype
                     num_element_per_page = (kv_cache_spec.page_size_bytes //
                                             get_dtype_size(dtype))
-                    state_tensors = []
-                    storage_offset = 0
 
                     if kv_cache_spec.mamba_type == "mamba1":
                         state_tensors = self._create_mamba1_state_tensors(
-                            raw_tensor, dtype, kv_cache_spec.shapes,
-                            storage_offset)
+                            raw_tensor=raw_tensor,
+                            dtype=dtype,
+                            shapes=kv_cache_spec.shapes)
                     else:
-                        # Handle other mamba types
-                        for shape in kv_cache_spec.shapes:
-                            target_shape = (num_blocks, *shape)
-                            stride = torch.empty(target_shape).stride()
-                            target_stride = (num_element_per_page, *stride[1:])
-                            tensor = torch.as_strided(
-                                raw_tensor.view(dtype),
-                                size=target_shape,
-                                stride=target_stride,
-                                storage_offset=storage_offset,
-                            )
-                            storage_offset += stride[0]
-                            state_tensors.append(tensor)
+                        state_tensors = self._create_mamba2_state_tensors(
+                            raw_tensor=raw_tensor,
+                            shapes=kv_cache_spec.shapes,
+                            num_blocks=num_blocks,
+                            num_element_per_page=num_element_per_page,
+                            dtype=dtype)
 
                     kv_caches[layer_name] = state_tensors
                 else:
@@ -3084,9 +3076,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             common_attn_metadata=common_metadata,
         )
 
-    def _create_mamba1_state_tensors(
-            self, raw_tensor: torch.Tensor, dtype: torch.dtype, shapes: tuple,
-            storage_offset: int) -> list[torch.Tensor]:
+    def _create_mamba1_state_tensors(self, raw_tensor: torch.Tensor,
+                                     dtype: torch.dtype,
+                                     shapes: tuple) -> list[torch.Tensor]:
+        storage_offset = 0
         conv_state_shape, temporal_state_shape = shapes
         num_sequences = len(self.seq_lens)
 
@@ -3115,3 +3108,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
 
         return [conv_state, temporal_state]
+
+    def _create_mamba2_state_tensors(self, raw_tensor: torch.Tensor,
+                                     shapes: tuple, num_blocks: int,
+                                     num_element_per_page: int,
+                                     dtype: torch.dtype) -> list[torch.Tensor]:
+        state_tensors = []
+        storage_offset = 0
+
+        for shape in shapes:
+            target_shape = (num_blocks, *shape)
+            stride = torch.empty(target_shape).stride()
+            target_stride = (num_element_per_page, *stride[1:])
+            tensor = torch.as_strided(
+                raw_tensor.view(dtype),
+                size=target_shape,
+                stride=target_stride,
+                storage_offset=storage_offset,
+            )
+            storage_offset += stride[0]
+            state_tensors.append(tensor)
+
+        return state_tensors
