@@ -26,6 +26,7 @@ from pydantic import (ConfigDict, SkipValidation, TypeAdapter, field_validator,
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.distributed import ProcessGroup, ReduceOp
+from transformers import GenerationConfig
 from typing_extensions import Self, runtime_checkable
 
 import vllm.envs as envs
@@ -1470,47 +1471,30 @@ class ModelConfig:
 
     def get_diff_sampling_param(self) -> dict[str, Any]:
         """
-        Get the generation configuration to use for this model.
-
-        If `self.generation_config` is set to:
-        
-        - `"vllm"` - an empty dictionary is returned, indicating that the
-          default vLLM generation configuration should be used.
-        - `"auto"` - the generation configuration is automatically fetched from
-          the Hugging Face model config or the specified path.
-        - set to a specific path - the generation configuration is fetched from
-          that path.
-
-        If the configuration is fetched, it is returned as a dictionary
-        containing only the fields that differ from the default vLLM generation
-        configuration.
-
-        If no configuration is found, an empty dictionary is returned.
+        This method returns a dictionary containing the parameters
+        that differ from the default sampling parameters. If
+        `generation_config` is `"vllm"`, an empty dictionary is returned.
 
         Returns:
-            generation_config (dict[str, Any]): A dictionary containing the
-              generation configuration.
+            dict[str, Any]: A dictionary with the differing sampling
+            parameters, if `generation_config` is `"vllm"` an empty dictionary.
         """
-        if self.generation_config == "vllm":
-            return {}
-
-        generation_config = None
         if self.generation_config == "auto":
-            generation_config = try_get_generation_config(
+            config = try_get_generation_config(
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.revision,
             )
-        else:
-            generation_config = try_get_generation_config(
+        elif self.generation_config != "vllm":
+            config = try_get_generation_config(
                 self.generation_config,
                 trust_remote_code=self.trust_remote_code,
             )
+        else:
+            config = {}
 
-        if generation_config is not None:
-            return generation_config.to_diff_dict()
-
-        return {}
+        if isinstance(config, GenerationConfig):
+            config = config.to_diff_dict()
 
         # Overriding with given generation config
         config.update(self.override_generation_config)
