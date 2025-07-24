@@ -5,6 +5,10 @@ import copy
 import itertools
 
 import torch
+import triton
+import triton.language as tl
+from typing import Optional, List, Dict
+import pandas as pd
 from weight_shapes import WEIGHT_SHAPES
 
 from vllm import _custom_ops as ops
@@ -26,6 +30,104 @@ PROVIDER_CFGS = {
 }
 
 _enabled = [k for k, v in PROVIDER_CFGS.items() if v["enabled"]]
+
+
+def benchmark_nvfp4_gemm_enhanced(
+    m: int,
+    n: int,
+    k: int,
+    use_cutlass: bool = True,
+    use_triton: bool = True,
+    dtype: torch.dtype = torch.float16
+) -> List[Dict]:
+    results = []
+    
+    device = torch.device('cuda')
+    compute_capability = torch.cuda.get_device_capability(device)
+    sm_version = compute_capability[0] * 10 + compute_capability[1]
+    
+    print(f"Device SM version: {sm_version}")
+    
+    a = torch.randn(m, k, device=device, dtype=dtype)
+    b = torch.randn(k, n, device=device, dtype=dtype)
+    
+    if use_cutlass and sm_version == 100:
+        try:
+            from vllm.experimental.kernels import cutlass_fp8_gemm
+            
+            for _ in range(10):
+                out_cutlass = cutlass_fp8_gemm(a, b)
+            
+            torch.cuda.synchronize()
+            
+            import time
+            num_iterations = 100
+            start = time.time()
+            
+            for _ in range(num_iterations):
+                out_cutlass = cutlass_fp8_gemm(a, b)
+            
+            torch.cuda.synchronize()
+            end = time.time()
+            
+            elapsed_ms = (end - start) * 1000 / num_iterations
+            flops = 2 * m * n * k
+            tflops = flops / (elapsed_ms / 1000) / 1e12
+            
+            results.append({
+                'implementation': 'CUTLASS',
+                'elapsed_ms': elapsed_ms,
+                'tflops': tflops,
+                'm': m,
+                'n': n,
+                'k': k,
+                'sm_version': sm_version
+            })
+            
+        except ImportError:
+            print("CUTLASS implementation not available")
+    
+    if use_triton:
+        triton_result = benchmark_triton_nvfp4_gemm(m, n, k, dtype)
+        triton_result.update({
+            'implementation': 'Triton',
+            'm': m,
+            'n': n,
+            'k': k,
+            'sm_version': sm_version
+        })
+        results.append(triton_result)
+    
+    for _ in range(10):
+        out_ref = torch.matmul(a, b)
+    
+    torch.cuda.synchronize()
+    
+    import time
+    num_iterations = 100
+    start = time.time()
+    
+    for _ in range(num_iterations):
+        out_ref = torch.matmul(a, b)
+    
+    torch.cuda.synchronize()
+    end = time.time()
+    
+    elapsed_ms = (end - start) * 1000 / num_iterations
+    flops = 2 * m * n * k
+    tflops = flops / (elapsed_ms / 1000) / 1e12
+    
+    results.append({
+        'implementation': 'PyTorch (FP16)',
+        'elapsed_ms': elapsed_ms,
+        'tflops': tflops,
+        'm': m,
+        'n': n,
+        'k': k,
+        'sm_version': sm_version
+    })
+    
+    return results
 
 
 def _quant_weight_nvfp4(b: torch.Tensor, device: str):
