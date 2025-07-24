@@ -567,10 +567,7 @@ async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
 
 
 @pytest.mark.asyncio
-async def test_logits_bias(client: openai.AsyncOpenAI, is_v1_server: bool):
-    if not is_v1_server:
-        pytest.skip("Logit bias is only supported in v1 engine")
-
+async def test_logits_bias(client: openai.AsyncOpenAI):
     prompt = "Hello, my name is"
     max_tokens = 5
     tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
@@ -617,11 +614,7 @@ async def test_logits_bias(client: openai.AsyncOpenAI, is_v1_server: bool):
 
 
 @pytest.mark.asyncio
-async def test_allowed_token_ids(client: openai.AsyncOpenAI,
-                                 is_v1_server: bool):
-    if not is_v1_server:
-        pytest.skip("Allowed token IDs are only supported in v1 engine")
-
+async def test_allowed_token_ids(client: openai.AsyncOpenAI):
     prompt = "Hello, my name is"
     max_tokens = 1
     tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
