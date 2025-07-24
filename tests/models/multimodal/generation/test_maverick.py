@@ -23,6 +23,8 @@ from transformers import (AutoConfig, AutoProcessor, AutoTokenizer,
 
 from vllm import LLM, SamplingParams
 
+from ....utils import multi_gpu_test
+
 # Sample prompts for testing
 PROMPTS: list[str] = [
     "Hello, my name is",
@@ -541,6 +543,7 @@ def run_reduced_model(model_path: str,
         print("-" * 40)
 
 
+@multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "original_model_name,text_layers,num_experts,vision_layers,",
     [("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", 4, 4, 2)])

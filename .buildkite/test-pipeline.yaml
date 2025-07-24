@@ -718,6 +718,7 @@ steps:
   - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
   - VLLM_USE_V1=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s kv_transfer/test_disagg.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
+  - pytest -v -s models/multimodal/generation/test_maverick.py
 
 - label: Plugin Tests (2 GPUs) # 40min
   mirror_hardwares: [amdexperimental]
