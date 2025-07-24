@@ -195,7 +195,17 @@ class KVCacheManager:
     def get_num_computed_tokens(self, request: Request) -> int:
         """Get the number of computed (cached) tokens of one req for scheduling.
         This function is used for shortest prefill first schedulign policy.
-        It does not have to be accurate.
+
+        NOTE: This function will be called for all requests for all 
+        scheduling steps so it needs to be efficient. We use binary search
+        to accelerate the process of getting number of computed tokens.
+
+        NOTE: We do not use existing `get_computed_blocks` because it is too 
+        slow. 
+
+        NOTE: The exact number of computed tokens returned by this function
+        is only used for scheduling and doethus s not have to be accurate.
+
         Args:
             request: The request to get the computed tokens.
         Returns:
@@ -218,7 +228,7 @@ class KVCacheManager:
                                                self.block_size, request)
             self.req_to_block_hashes[request.request_id] = block_hashes
 
-        # Do binary search to find the # of cache hit tokens.
+        # Do binary search to find the # of cache hit tokens with low cost.
         # This works when all prefix tokens are stored in the cache.
         # NOTE(Kuntai): this only works for full attention. Need to modify
         # for sliding window attention.
