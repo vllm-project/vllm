@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizationConfig)
-    from vllm.model_executor.model_loader import BaseModelLoader
+    from vllm.model_executor.model_loader import LoadFormats
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
     ConfigType = type[DataclassInstance]
@@ -78,6 +78,7 @@ else:
     QuantizationConfig = Any
     QuantizationMethods = Any
     BaseModelLoader = Any
+    LoadFormats = Any
     TensorizerConfig = Any
     ConfigType = type
     HfOverrides = Union[dict[str, Any], Callable[[type], type]]
@@ -219,6 +220,8 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
+LogprobsMode = Literal["raw_logprobs", "raw_logits", "processed_logprobs",
+                       "processed_logits"]
 
 
 @config
@@ -316,6 +319,13 @@ class ModelConfig:
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
     OpenAI Chat Completions API."""
+    logprobs_mode: LogprobsMode = "raw_logprobs"
+    """Indicates the content returned in the logprobs and prompt_logprobs.
+    Supported mode:
+    1) raw_logprobs, 2) processed_logprobs, 3) raw_logits, 4) processed_logits.
+    Raw means the values before applying logit processors, like bad words.
+    Processed means the values after applying such processors.
+    """
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
@@ -642,6 +652,8 @@ class ModelConfig:
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
         self.multimodal_config = self._init_multimodal_config()
+        self.model_supports_multimodal_raw_input = (
+            self.registry.supports_multimodal_raw_input(self.architectures))
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
 
@@ -1234,10 +1246,10 @@ class ModelConfig:
         return self.get_hf_config_sliding_window()
 
     def get_vocab_size(self) -> int:
-        return self.hf_text_config.vocab_size
+        return getattr(self.hf_text_config, "vocab_size", 0)
 
     def get_hidden_size(self) -> int:
-        return self.hf_text_config.hidden_size
+        return getattr(self.hf_text_config, "hidden_size", 0)
 
     @property
     def is_deepseek_mla(self) -> bool:
@@ -1762,29 +1774,12 @@ class CacheConfig:
             logger.warning("Possibly too large swap space. %s", msg)
 
 
-class LoadFormat(str, enum.Enum):
-    AUTO = "auto"
-    PT = "pt"
-    SAFETENSORS = "safetensors"
-    NPCACHE = "npcache"
-    DUMMY = "dummy"
-    TENSORIZER = "tensorizer"
-    SHARDED_STATE = "sharded_state"
-    GGUF = "gguf"
-    BITSANDBYTES = "bitsandbytes"
-    MISTRAL = "mistral"
-    RUNAI_STREAMER = "runai_streamer"
-    RUNAI_STREAMER_SHARDED = "runai_streamer_sharded"
-    FASTSAFETENSORS = "fastsafetensors"
-
-
 @config
 @dataclass
 class LoadConfig:
     """Configuration for loading the model weights."""
 
-    load_format: Union[str, LoadFormat,
-                       "BaseModelLoader"] = LoadFormat.AUTO.value
+    load_format: Union[str, LoadFormats] = "auto"
     """The format of the model weights to load:\n
     - "auto" will try to load the weights in the safetensors format and fall
     back to the pytorch bin format if safetensors format is not available.\n
@@ -1805,7 +1800,8 @@ class LoadConfig:
     - "gguf" will load weights from GGUF format files (details specified in
     https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).\n
     - "mistral" will load weights from consolidated safetensors files used by
-    Mistral models."""
+    Mistral models.
+    - Other custom values can be supported via plugins."""
     download_dir: Optional[str] = None
     """Directory to download and load the weights, default to the default
     cache directory of Hugging Face."""
@@ -1853,10 +1849,7 @@ class LoadConfig:
         return hash_str
 
     def __post_init__(self):
-        if isinstance(self.load_format, str):
-            load_format = self.load_format.lower()
-            self.load_format = LoadFormat(load_format)
-
+        self.load_format = self.load_format.lower()
         if self.ignore_patterns is not None and len(self.ignore_patterns) > 0:
             logger.info(
                 "Ignoring the following patterns when downloading weights: %s",
@@ -1897,8 +1890,16 @@ class ParallelConfig:
     """Backend to use for data parallel, either "mp" or "ray"."""
     data_parallel_external_lb: bool = False
     """Whether to use "external" DP LB mode. Applies only to online serving
-    and when data_parallel_size > 0. Set implicitly when
-    data_parallel_rank is provided explicitly to vllm serve."""
+    and when data_parallel_size > 0. This is useful for a "one-pod-per-rank"
+    wide-EP setup in Kuberentes. Set implicitly when --data-parallel-rank
+    is provided explicitly to vllm serve."""
+    data_parallel_hybrid_lb: bool = False
+    """Whether to use "hybrid" DP LB mode. Applies only to online serving
+    and when data_parallel_size > 0. Enables running an AsyncLLM
+    and API server on a "per-node" basis where vLLM load balances
+    between local data parallel ranks, but an external LB balances
+    between vLLM nodes/replicas. Set explicitly in conjunction with 
+    --data-parallel-start-rank."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False
@@ -2108,6 +2109,15 @@ class ParallelConfig:
                 raise ValueError(
                     "num_redundant_experts must be non-negative, but got "
                     f"{self.num_redundant_experts}.")
+            if not self.enable_expert_parallel:
+                raise ValueError(
+                    "enable_expert_parallel must be True to use EPLB.")
+            if self.tensor_parallel_size * self.data_parallel_size <= 1:
+                raise ValueError(
+                    "EPLB requires tensor_parallel_size or data_parallel_size "
+                    f"to be greater than 1, but got "
+                    f"TP={self.tensor_parallel_size},DP={self.data_parallel_size}."
+                )
         else:
             if self.num_redundant_experts != 0:
                 raise ValueError(
@@ -2128,10 +2138,11 @@ class ParallelConfig:
             elif (current_platform.is_cuda()
                   and cuda_device_count_stateless() < self.world_size):
                 if not ray_found:
-                    raise ValueError("Unable to load Ray which is "
+                    raise ValueError("Unable to load Ray: "
+                                     f"{ray_utils.ray_import_err}. Ray is "
                                      "required for multi-node inference, "
                                      "please install Ray with `pip install "
-                                     "ray`.") from ray_utils.ray_import_err
+                                     "ray`.")
                 backend = "ray"
             elif self.data_parallel_backend == "ray":
                 logger.info("Using ray distributed inference because "
@@ -3120,59 +3131,6 @@ class LoRAConfig:
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
-
-
-@config
-@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
-class PromptAdapterConfig:
-    """Configuration for PromptAdapters."""
-
-    max_prompt_adapters: int = 1
-    """Max number of PromptAdapters in a batch."""
-    max_prompt_adapter_token: int = 0
-    """Max number of PromptAdapters tokens."""
-    max_cpu_prompt_adapters: Optional[int] = None
-    """Maximum number of PromptAdapters to store in CPU memory. Must be >= than
-    `max_prompt_adapters`."""
-    prompt_adapter_dtype: Union[torch.dtype, str] = "auto"
-    """Data type for PromptAdapter. If auto, will default to base model dtype.
-    """
-
-    def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
-        """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
-        return hash_str
-
-    def __post_init__(self):
-
-        if self.max_prompt_adapters < 1:
-            raise ValueError(f"max_prompt_adapters "
-                             f"({self.max_prompt_adapters}) must be >= 1.")
-        if self.max_prompt_adapter_token == 0:
-            raise ValueError("max_prompt_adapter_token must be set.")
-        if self.max_cpu_prompt_adapters is None:
-            self.max_cpu_prompt_adapters = self.max_prompt_adapters
-
-    def verify_with_model_config(self, model_config: ModelConfig):
-        if self.prompt_adapter_dtype == "auto":
-            self.prompt_adapter_dtype = model_config.dtype
-        elif isinstance(self.prompt_adapter_dtype, str):
-            self.prompt_adapter_dtype = getattr(torch,
-                                                self.prompt_adapter_dtype)
 
 
 @config
@@ -4381,8 +4339,6 @@ class VllmConfig:
     """Decoding configuration."""
     observability_config: Optional[ObservabilityConfig] = None
     """Observability configuration."""
-    prompt_adapter_config: Optional[PromptAdapterConfig] = None
-    """Prompt adapter configuration."""
     quant_config: Optional[QuantizationConfig] = None
     """Quantization configuration."""
     compilation_config: CompilationConfig = field(
@@ -4477,10 +4433,6 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.observability_config:
             vllm_factors.append(self.observability_config.compute_hash())
-        else:
-            vllm_factors.append("None")
-        if self.prompt_adapter_config:
-            vllm_factors.append(self.prompt_adapter_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.quant_config:
@@ -4590,9 +4542,6 @@ class VllmConfig:
         if self.lora_config is not None:
             self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
-        if self.prompt_adapter_config is not None:
-            self.prompt_adapter_config.verify_with_model_config(
-                self.model_config)
 
         if self.quant_config is None and self.model_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(

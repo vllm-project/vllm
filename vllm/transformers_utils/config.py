@@ -37,6 +37,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              MiniMaxText01Config,
                                              MiniMaxVL01Config, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
+                                             Nemotron_Nano_VL_Config,
                                              NemotronConfig, NVLM_D_Config,
                                              OvisConfig, RWConfig,
                                              SkyworkR1VChatConfig, SolarConfig,
@@ -80,6 +81,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "dbrx": DbrxConfig,
     "deepseek_vl_v2": DeepseekVLV2Config,
     "kimi_vl": KimiVLConfig,
+    "Llama_Nemotron_Nano_VL": Nemotron_Nano_VL_Config,
     "mpt": MPTConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
