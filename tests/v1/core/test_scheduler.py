@@ -1863,7 +1863,10 @@ def test_priority_scheduling_preemption_victim_iterator_order():
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in priority_requests],
-        req_id_to_index={req.request_id: i for i, req in enumerate(priority_requests)},
+        req_id_to_index={
+            req.request_id: i
+            for i, req in enumerate(priority_requests)
+        },
         sampled_token_ids=[[15] for _ in priority_requests],
         spec_token_ids=None,
         logprobs=None,
@@ -1892,7 +1895,10 @@ def test_priority_scheduling_preemption_victim_iterator_order():
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in merge_requests],
-        req_id_to_index={req.request_id: i for i, req in enumerate(merge_requests)},
+        req_id_to_index={
+            req.request_id: i
+            for i, req in enumerate(merge_requests)
+        },
         sampled_token_ids=[[1] for _ in merge_requests],
         spec_token_ids=None,
         logprobs=None,
@@ -1900,8 +1906,8 @@ def test_priority_scheduling_preemption_victim_iterator_order():
         pooler_output=[],
     )
     scheduler.update_from_output(output, model_output)
-    # When allocating resources to the fourth request, preemption is triggered. 
-    # At this time, the request with the lowest priority (request.id = 5) will be preempted, freeing up 2 blocks, 
+    # When allocating resources to the fourth request, preemption is triggered.
+    # At this time, the request with the lowest priority (request.id = 5) will be preempted, freeing up 2 blocks,
     # which exactly meets the resource allocation requirements for request.id = 4 and request.id = 5.
     output = scheduler.schedule()
 
