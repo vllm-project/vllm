@@ -467,13 +467,14 @@ class EngineCoreProc(EngineCore):
         For DP>1 with internal loadbalancing this is with the shared front-end
         process which may reside on a different node.
 
-        For DP>1 with external loadbalancing, two handshakes are performed:
+        For DP>1 with external or hybrid loadbalancing, two handshakes are
+        performed:
             - With the rank 0 front-end process which retrieves the
               DP Coordinator ZMQ addresses and DP process group address.
             - With the colocated front-end process which retrieves the
               client input/output socket addresses.
-        with the exception of the rank 0 engine itself which doesn't require
-        the second handshake.
+        with the exception of the rank 0 and colocated engines themselves which
+        don't require the second handshake.
 
         Here, "front-end" process can mean the process containing the engine
         core client (which is the API server process in the case the API
@@ -482,15 +483,18 @@ class EngineCoreProc(EngineCore):
         """
         input_ctx = zmq.Context()
         is_local = local_client and client_handshake_address is None
+        headless = not local_client
         handshake = self._perform_handshake(input_ctx, handshake_address,
-                                            identity, is_local, vllm_config,
+                                            identity, is_local, headless,
+                                            vllm_config,
                                             vllm_config.parallel_config)
         if client_handshake_address is None:
             with handshake as addresses:
                 yield addresses
         else:
+            assert local_client
             local_handshake = self._perform_handshake(
-                input_ctx, client_handshake_address, identity, local_client,
+                input_ctx, client_handshake_address, identity, True, False,
                 vllm_config)
             with handshake as addresses, local_handshake as client_addresses:
                 addresses.inputs = client_addresses.inputs
@@ -507,6 +511,7 @@ class EngineCoreProc(EngineCore):
         handshake_address: str,
         identity: bytes,
         local_client: bool,
+        headless: bool,
         vllm_config: VllmConfig,
         parallel_config_to_update: Optional[ParallelConfig] = None,
     ) -> Generator[EngineZmqAddresses, None, None]:
@@ -518,6 +523,7 @@ class EngineCoreProc(EngineCore):
                              bind=False) as handshake_socket:
             # Register engine with front-end.
             addresses = self.startup_handshake(handshake_socket, local_client,
+                                               headless,
                                                parallel_config_to_update)
             yield addresses
 
@@ -531,6 +537,7 @@ class EngineCoreProc(EngineCore):
                 msgspec.msgpack.encode({
                     "status": "READY",
                     "local": local_client,
+                    "headless": headless,
                     "num_gpu_blocks": num_gpu_blocks,
                     "dp_stats_address": dp_stats_address,
                 }))
@@ -539,6 +546,7 @@ class EngineCoreProc(EngineCore):
     def startup_handshake(
         handshake_socket: zmq.Socket,
         local_client: bool,
+        headless: bool,
         parallel_config: Optional[ParallelConfig] = None,
     ) -> EngineZmqAddresses:
 
@@ -547,6 +555,7 @@ class EngineCoreProc(EngineCore):
             msgspec.msgpack.encode({
                 "status": "HELLO",
                 "local": local_client,
+                "headless": headless,
             }))
 
         # Receive initialization message.
