@@ -101,6 +101,11 @@ class CudagraphDispatcher:
         assert batch_descriptor.is_uniform is not None, \
             "is_uniform is required for cudagraph dispatching."
 
+        # always treat is_uniform=False if cudagraph_separate_routine disabled.
+        if not self.compilation_config.cudagraph_separate_routine:
+            batch_descriptor = BatchDescriptor(
+                num_tokens=batch_descriptor.num_tokens, is_uniform=False)
+
         # check if key exists for full cudagraph
         if batch_descriptor in self.cudagraph_keys[CUDAGraphMode.FULL]:
             return CUDAGraphMode.FULL, batch_descriptor

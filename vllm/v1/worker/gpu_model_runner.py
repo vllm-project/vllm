@@ -1937,7 +1937,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ]:
             self.model = CUDAGraphWrapper(self.model,
                                           self.vllm_config,
-                                          runtime_mode=CUDAGraphMode.FULL
+                                          runtime_mode=CUDAGraphMode.FULL)
 
     def reload_weights(self) -> None:
         assert getattr(self, "model", None) is not None, \
