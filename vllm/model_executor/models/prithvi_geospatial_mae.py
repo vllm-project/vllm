@@ -103,7 +103,7 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
         mm_kwargs = {}
 
         for k, v in mm_data.items():
-            if isinstance(v,dict) and k == "image":
+            if isinstance(v, dict) and k == "image":
                 mm_kwargs.update(v)
             else:
                 mm_kwargs[k] = v
