@@ -16,12 +16,12 @@ def CEILDIV(x, y):
     return (x + y - 1) // y
 
 
-def sample_data(num_experts, max_loras, M, topk_num):
+def sample_data(num_experts, max_loras, num_tokens, topk_num):
 
-    topk_ids = torch.zeros((M, topk_num), dtype=torch.int32)
-    token_lora_mapping = torch.zeros((M,), dtype=torch.int32)
+    topk_ids = torch.zeros((num_tokens, topk_num), dtype=torch.int32)
+    token_lora_mapping = torch.zeros((num_tokens,), dtype=torch.int32)
 
-    for i in range(M):
+    for i in range(num_tokens):
         pool = list(range(num_experts))
         random.shuffle(pool)
         for j in range(topk_num):
@@ -31,7 +31,7 @@ def sample_data(num_experts, max_loras, M, topk_num):
     return topk_ids.to('cuda'), token_lora_mapping.to('cuda')
 
 
-@pytest.mark.parametrize("M", [100, 200, 1024, 4096])  #81920
+@pytest.mark.parametrize("num_tokens", [100, 200, 1024, 4096])  #81920
 @pytest.mark.parametrize("topk_num", [6])
 @pytest.mark.parametrize("num_experts", [64, 128])
 @pytest.mark.parametrize("max_loras", [64])
@@ -41,8 +41,8 @@ def test_moe_lora_align_block_size(M, topk_num, num_experts, max_loras,
 
     #sample data
     random.seed(1)
-    topk_ids, token_lora_mapping = sample_data(num_experts, max_loras, M,
-                                               topk_num)
+    topk_ids, token_lora_mapping = sample_data(num_experts, max_loras,
+                                               topk_num, topk_num)
 
     # compute paddings
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
