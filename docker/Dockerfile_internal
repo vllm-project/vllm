@@ -1,11 +1,21 @@
 FROM us-central1-docker.pkg.dev/character-ai/vllm/vllm-forked:d0ab76f as builder
 COPY . /mnt/vllm
 
-# Install without build isolation to preserve existing binaries
-RUN pip install --no-build-isolation --no-deps /mnt/vllm --force-reinstall
+# Find the vLLM installation directory
+RUN VLLM_PATH=$(python3 -c "import vllm; print(vllm.__path__[0])") && \
+    echo "vLLM installed at: $VLLM_PATH" && \
+    # Only replace Python files, keep compiled binaries
+    find /mnt/vllm/vllm -name "*.py" -exec cp {} $VLLM_PATH/ \; && \
+    # Handle subdirectories
+    cd /mnt/vllm && \
+    find vllm -name "*.py" | while read file; do \
+        mkdir -p "$VLLM_PATH/$(dirname "$file")" 2>/dev/null || true; \
+        cp "$file" "$VLLM_PATH/$file"; \
+    done
 
 RUN rm -rf /mnt/vllm
 RUN python3 -c "import vllm; print('Custom vLLM loaded successfully')"
+
 RUN python3 -m pip install --no-cache-dir --upgrade \
       opentelemetry-api==1.26.0 \
       opentelemetry-sdk==1.26.0 \
