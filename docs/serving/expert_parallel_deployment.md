@@ -8,9 +8,9 @@ EP is typically coupled with Data Parallelism (DP). While DP can be used indepen
 
 Before using EP, you need to install the necessary dependencies. We are actively working on making this easier in the future:
 
-1. **Install DeepEP and pplx-kernels**: Set up host environment following vLLM's guide for EP kernels [here](https://github.com/vllm-project/vllm/tree/main/tools/ep_kernels).
+1. **Install DeepEP and pplx-kernels**: Set up host environment following vLLM's guide for EP kernels [here](gh-file:tools/ep_kernels).
 2. **Install DeepGEMM library**: Follow the [official instructions](https://github.com/deepseek-ai/DeepGEMM#installation).
-3. **For disaggregated serving**: Install UCX and NIXL following the [script](https://github.com/vllm-project/vllm/blob/main/tools/install_nixl.sh).
+3. **For disaggregated serving**: Install UCX and NIXL following the [script](gh-file:tools/install_nixl.sh).
 
 ### Backend Selection Guide
 
@@ -164,7 +164,7 @@ For production deployments requiring strict SLA guarantees for time-to-first-tok
 
 ### Setup Steps
 
-1. **Install KV Connector**: Install NIXL using the [installation script](https://github.com/vllm-project/vllm/blob/main/tools/install_nixl.sh)
+1. **Install KV Connector**: Install NIXL using the [installation script](gh-file:tools/install_nixl.sh)
 
 2. **Configure Both Instances**: Add this flag to both prefill and decode instances:
    ```bash
