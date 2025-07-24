@@ -635,7 +635,7 @@ class AllReduceFusionPass(VllmInductorPass):
                 "Flashinfer is not installed or comm module not found, "
                 "skipping allreduce fusion pass")
             return
-        if not current_platform.has_capability(90):
+        if not current_platform.has_device_capability(90):
             logger.warning(
                 "Flashinfer fusions are only available for sm90 and above, "
                 "skipping allreduce fusion pass")
