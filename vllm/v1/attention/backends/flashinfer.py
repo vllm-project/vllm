@@ -262,13 +262,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
-            if is_cudnn_supported(self.kv_cache_spec.head_size):
-                dtype = torch.int8
-            else:
-                dtype = torch.uint8
             self._workspace_buffer = torch.empty(
                 FLASHINFER_WORKSPACE_BUFFER_SIZE,
-                dtype=dtype,
+                dtype=torch.uint8,
                 device=self.device)
         return self._workspace_buffer
 
@@ -667,33 +663,14 @@ class FlashInferImpl(AttentionImpl):
             )
         elif num_prefill_tokens > 0 and is_cudnn_supported(
                 attn_metadata.head_dim):
-            (total_num_pages, _, page_size, num_kv_heads,
-             head_dim) = kv_cache.shape
 
-            # Validate dimensions match expected head_dim
-            assert head_dim == self.head_size, (
-                f"KV cache head_dim {head_dim} != expected {self.head_size}")
-
-            k_cache = kv_cache[:, 0].as_strided(
-                (total_num_pages, num_kv_heads, page_size, head_dim), (
-                    kv_cache.stride(0),
-                    head_dim,
-                    num_kv_heads * head_dim,
-                    1,
-                ))
-            v_cache = kv_cache[:, 1].as_strided(
-                (total_num_pages, num_kv_heads, page_size, head_dim), (
-                    kv_cache.stride(0),
-                    head_dim,
-                    num_kv_heads * head_dim,
-                    1,
-                ))
             output[num_decode_tokens:], _ = cudnn_batch_prefill_with_kv_cache(
                 q=query[num_decode_tokens:],
-                k_cache=k_cache,
-                v_cache=v_cache,
+                k_cache=kv_cache_permute[:, 0],
+                v_cache=kv_cache_permute[:, 1],
                 scale=self.scale,
-                workspace_buffer=attn_metadata.workspace_buffer,
+                workspace_buffer=attn_metadata.workspace_buffer.view(
+                    torch.int8),
                 max_token_per_sequence=attn_metadata.max_query_len,
                 max_sequence_kv=attn_metadata.max_seq_len,
                 block_tables=attn_metadata.
