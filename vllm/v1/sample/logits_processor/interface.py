@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
-from vllm import PoolingParams, SamplingParams
+from vllm import SamplingParams
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -23,8 +23,7 @@ class MoveDirectionality(Enum):
 
 # (prompt_tok_ids, index, params, output_tok_ids) tuples for new
 # requests added to the batch.
-AddedRequest = tuple[list[int], int, Union[SamplingParams, PoolingParams],
-                     list[int]]
+AddedRequest = tuple[list[int], int, Union[SamplingParams], list[int]]
 
 # (index 1, index 2, directionality) tuples representing
 # one-way moves or two-way swaps of requests in batch
