@@ -741,10 +741,12 @@ class ModelConfig:
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
 
-        self.is_attention_free = self._init_attention_free()
-        self.is_hybrid = self._init_is_hybrid()
-        self.has_noops = self._init_has_noops()
-        self.has_inner_state = self._init_has_inner_state()
+        self.is_attention_free = self.registry.is_attention_free_model(
+            architectures)
+        self.is_hybrid = self.registry.is_hybrid_model(architectures)
+        self.has_noops = self.registry.is_noops_model(architectures)
+        self.has_inner_state = self.registry.model_has_inner_state(
+            architectures)
 
         if (not current_platform.is_neuron() and self.override_neuron_config):
             raise ValueError(
@@ -898,19 +900,6 @@ class ModelConfig:
             return pooler_config
 
         return None
-
-    def _init_attention_free(self) -> bool:
-        return self.registry.is_attention_free_model(self.architectures)
-
-    def _init_is_hybrid(self) -> bool:
-        return self.registry.is_hybrid_model(self.architectures)
-
-    def _init_has_noops(self) -> bool:
-        architectures = getattr(self.hf_config, "architectures", [])
-        return self.registry.is_noops_model(architectures)
-
-    def _init_has_inner_state(self) -> bool:
-        return self.registry.model_has_inner_state(self.architectures)
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = cast(TokenizerMode, self.tokenizer_mode.lower())
@@ -1644,7 +1633,7 @@ class ModelConfig:
 
     @property
     def is_cross_encoder(self) -> bool:
-        return (self.registry.is_cross_encoder_model(self.architecture)
+        return (self.registry.is_cross_encoder_model(self.architectures)
                 or self.convert_type == "classify")
 
     @property
@@ -4856,6 +4845,9 @@ class VllmConfig:
         self.scheduler_config.max_model_len = max_model_len
 
     def try_verify_and_update_config(self):
+        if self.model_config is None:
+            return
+
         architecture = self.model_config.architecture
         if architecture is None:
             return

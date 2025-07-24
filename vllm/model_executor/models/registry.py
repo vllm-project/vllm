@@ -554,6 +554,10 @@ class _ModelRegistry:
         if model_config is None:
             return architecture
 
+        # Force transformers impl
+        if model_config.model_impl == ModelImpl.TRANSFORMERS:
+            return self._resolve_transformers(architecture, model_config)
+
         for suffix, (default_runner_type,
                      default_convert_type) in SUFFIX_TO_DEFAULTS:
             if (model_config.runner_type == default_runner_type
@@ -561,37 +565,25 @@ class _ModelRegistry:
                     and architecture.endswith(suffix)):
                 return architecture.replace(suffix, "ForCausalLM")
 
+        # Fallback to transformers impl
         if architecture not in self.models:
-            architecture = self._resolve_transformers(architecture,
-                                                      model_config)
+            return self._resolve_transformers(architecture, model_config)
 
         return architecture
 
-    def normalize_archs(
+    def _normalize_archs(
         self,
-        architectures: Union[str, list[str]],
+        architectures: list[str],
         *,
         model_config: Optional[ModelConfig] = None,
     ) -> list[str]:
-        if isinstance(architectures, str):
-            architectures = [architectures]
         if not architectures:
             logger.warning("No model architectures are specified")
 
-        normalized_archs = [
+        return [
             self._normalize_arch(arch, model_config=model_config)
             for arch in architectures
         ]
-
-        # NOTE(Isotr0py): Be careful of architectures' order!
-        # Make sure Transformers backend architecture is at the end of the
-        # list, otherwise pooling models automatic conversion will fail!
-        for arch in normalized_archs:
-            if arch.startswith("TransformersFor"):
-                normalized_archs.remove(arch)
-                normalized_archs.append(arch)
-
-        return normalized_archs
 
     def inspect_model_cls(
         self,
@@ -599,11 +591,14 @@ class _ModelRegistry:
         *,
         model_config: Optional[ModelConfig] = None,
     ) -> tuple[_ModelInfo, str]:
-        architectures = self.normalize_archs(architectures,
-                                             model_config=model_config)
+        if isinstance(architectures, str):
+            architectures = [architectures]
 
-        for arch in architectures:
-            model_info = self._try_inspect_model_cls(arch)
+        normalized_archs = self._normalize_archs(architectures,
+                                                 model_config=model_config)
+
+        for arch, normalized_arch in zip(architectures, normalized_archs):
+            model_info = self._try_inspect_model_cls(normalized_arch)
             if model_info is not None:
                 return (model_info, arch)
 
@@ -615,11 +610,14 @@ class _ModelRegistry:
         *,
         model_config: Optional[ModelConfig] = None,
     ) -> tuple[type[nn.Module], str]:
-        architectures = self.normalize_archs(architectures,
-                                             model_config=model_config)
+        if isinstance(architectures, str):
+            architectures = [architectures]
 
-        for arch in architectures:
-            model_cls = self._try_load_model_cls(arch)
+        normalized_archs = self._normalize_archs(architectures,
+                                                 model_config=model_config)
+
+        for arch, normalized_arch in zip(architectures, normalized_archs):
+            model_cls = self._try_load_model_cls(normalized_arch)
             if model_cls is not None:
                 return (model_cls, arch)
 
