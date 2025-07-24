@@ -12,12 +12,13 @@ import sys
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Set
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Callable, Optional, TypeVar, Union
 
 import torch.nn as nn
 
+from vllm.config import SUFFIX_TO_DEFAULTS, ModelConfig, ModelImpl
 from vllm.logger import init_logger
 
 from .interfaces import (has_inner_state, has_noops, is_attention_free,
@@ -461,6 +462,16 @@ class _ModelRegistry:
                 f"Model architectures {architectures} failed "
                 "to be inspected. Please check the logs for more details.")
 
+        for arch in architectures:
+            if arch in _PREVIOUSLY_SUPPORTED_MODELS:
+                previous_version = _PREVIOUSLY_SUPPORTED_MODELS[arch]
+
+                raise ValueError(
+                    f"Model architecture {arch} was supported in vLLM until "
+                    f"v{previous_version}, and is not supported anymore. "
+                    "Please use an older version of vLLM if you want to "
+                    "use this model architecture.")
+
         raise ValueError(
             f"Model architectures {architectures} are not supported for now. "
             f"Supported architectures: {all_supported_archs}")
@@ -473,64 +484,123 @@ class _ModelRegistry:
         return _try_load_model_cls(model_arch, self.models[model_arch])
 
     def _try_inspect_model_cls(self, model_arch: str) -> Optional[_ModelInfo]:
-        if model_arch in self.models:
-            return _try_inspect_model_cls(model_arch, self.models[model_arch])
+        if model_arch not in self.models:
+            return None
 
-        if model_arch.endswith("ForSequenceClassification"):
-            causal_lm_arch = model_arch.replace("ForSequenceClassification",
-                                                "ForCausalLM")
-            if causal_lm_arch not in self.models:
-                return None
+        return _try_inspect_model_cls(model_arch, self.models[model_arch])
 
-            info = _try_inspect_model_cls(causal_lm_arch,
-                                          self.models[causal_lm_arch])
+    def _resolve_transformers(self, architecture: str,
+                              model_config: ModelConfig):
+        if architecture in _TRANSFORMERS_BACKEND_MODELS:
+            return architecture
+        if model_config.model_impl == ModelImpl.VLLM:
+            return architecture
 
-            info = _ModelInfo(**dict(
-                asdict(info), **{
-                    "architecture": model_arch,
-                    "supports_cross_encoding": True
-                }))
-            return info
+        import transformers
+        from transformers.dynamic_module_utils import (
+            get_class_from_dynamic_module)
 
-        return None
+        auto_map: dict[str, str] = getattr(model_config.hf_config, "auto_map",
+                                           None) or dict()
+        # Make sure that config class is always initialized before model class,
+        # otherwise the model class won't be able to access the config class,
+        # the expected auto_map should have correct order like:
+        # "auto_map": {
+        #     "AutoConfig": "<your-repo-name>--<config-name>",
+        #     "AutoModel": "<your-repo-name>--<config-name>",
+        #     "AutoModelFor<Task>": "<your-repo-name>--<config-name>",
+        # },
+        auto_modules = {
+            name:
+            get_class_from_dynamic_module(module,
+                                          model_config.model,
+                                          revision=model_config.revision)
+            for name, module in sorted(auto_map.items(), key=lambda x: x[0])
+        }
+        model_module = getattr(transformers, architecture, None)
 
-    def _normalize_archs(
+        if model_module is None:
+            if "AutoModel" not in auto_map:
+                if model_config.model_impl == ModelImpl.AUTO:
+                    return architecture
+
+                raise ValueError(
+                    f"Cannot find model module. {architecture!r} is not a "
+                    "registered model in the Transformers library (only "
+                    "relevant if the model is meant to be in Transformers) "
+                    "and 'AutoModel' is not present in the model config's "
+                    "'auto_map' (relevant if the model is custom).")
+
+            model_module = auto_modules["AutoModel"]
+
+        if not model_module.is_backend_compatible():
+            if model_config.model_impl == ModelImpl.AUTO:
+                return architecture
+
+            raise ValueError(
+                f"The Transformers implementation of {architecture!r} "
+                "is not compatible with vLLM.")
+
+        return model_config._get_transformers_backend_cls()
+
+    def _normalize_arch(
+        self,
+        architecture: str,
+        *,
+        model_config: Optional[ModelConfig],
+    ) -> str:
+        if architecture in self.models:
+            return architecture
+        if model_config is None:
+            return architecture
+
+        for suffix, (default_runner_type,
+                     default_convert_type) in SUFFIX_TO_DEFAULTS:
+            if (model_config.runner_type == default_runner_type
+                    and model_config.convert_type == default_convert_type
+                    and architecture.endswith(suffix)):
+                return architecture.replace(suffix, "ForCausalLM")
+
+        if architecture not in self.models:
+            architecture = self._resolve_transformers(architecture,
+                                                      model_config)
+
+        return architecture
+
+    def normalize_archs(
         self,
         architectures: Union[str, list[str]],
+        *,
+        model_config: Optional[ModelConfig] = None,
     ) -> list[str]:
         if isinstance(architectures, str):
             architectures = [architectures]
         if not architectures:
             logger.warning("No model architectures are specified")
 
-        # filter out support architectures
-        normalized_arch = list(
-            filter(lambda model: model in self.models, architectures))
-
-        # try automatic conversion in adapters.py
-        for arch in architectures:
-            if not arch.endswith("ForSequenceClassification"):
-                continue
-            causal_lm_arch = arch.replace("ForSequenceClassification",
-                                          "ForCausalLM")
-            if causal_lm_arch in self.models:
-                normalized_arch.append(arch)
+        normalized_archs = [
+            self._normalize_arch(arch, model_config=model_config)
+            for arch in architectures
+        ]
 
         # NOTE(Isotr0py): Be careful of architectures' order!
         # Make sure Transformers backend architecture is at the end of the
         # list, otherwise pooling models automatic conversion will fail!
-        for arch in normalized_arch:
+        for arch in normalized_archs:
             if arch.startswith("TransformersFor"):
-                normalized_arch.remove(arch)
-                normalized_arch.append(arch)
+                normalized_archs.remove(arch)
+                normalized_archs.append(arch)
 
-        return normalized_arch
+        return normalized_archs
 
     def inspect_model_cls(
         self,
         architectures: Union[str, list[str]],
+        *,
+        model_config: Optional[ModelConfig] = None,
     ) -> tuple[_ModelInfo, str]:
-        architectures = self._normalize_archs(architectures)
+        architectures = self.normalize_archs(architectures,
+                                             model_config=model_config)
 
         for arch in architectures:
             model_info = self._try_inspect_model_cls(arch)
@@ -542,8 +612,11 @@ class _ModelRegistry:
     def resolve_model_cls(
         self,
         architectures: Union[str, list[str]],
+        *,
+        model_config: Optional[ModelConfig] = None,
     ) -> tuple[type[nn.Module], str]:
-        architectures = self._normalize_archs(architectures)
+        architectures = self.normalize_archs(architectures,
+                                             model_config=model_config)
 
         for arch in architectures:
             model_cls = self._try_load_model_cls(arch)
@@ -555,92 +628,131 @@ class _ModelRegistry:
     def is_text_generation_model(
         self,
         architectures: Union[str, list[str]],
+        *,
+        model_config: Optional[ModelConfig] = None,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures)
+        model_cls, _ = self.inspect_model_cls(architectures,
+                                              model_config=model_config)
         return model_cls.is_text_generation_model
 
     def is_pooling_model(
         self,
         architectures: Union[str, list[str]],
+        *,
+        model_config: Optional[ModelConfig] = None,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures)
+        model_cls, _ = self.inspect_model_cls(architectures,
+                                              model_config=model_config)
         return model_cls.is_pooling_model
 
     def is_cross_encoder_model(
         self,
         architectures: Union[str, list[str]],
+        *,
+        model_config: Optional[ModelConfig] = None,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures)
+        model_cls, _ = self.inspect_model_cls(architectures,
+                                              model_config=model_config)
         return model_cls.supports_cross_encoding
 
     def is_multimodal_model(
         self,
         architectures: Union[str, list[str]],
+        *,
+        model_config: Optional[ModelConfig] = None,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures)
+        model_cls, _ = self.inspect_model_cls(architectures,
+                                              model_config=model_config)
         return model_cls.supports_multimodal
 
     def supports_multimodal_raw_input(
         self,
         architectures: Union[str, list[str]],
+        *,
+        model_config: Optional[ModelConfig] = None,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures)
+        model_cls, _ = self.inspect_model_cls(architectures,
+                                              model_config=model_config)
         return model_cls.supports_multimodal_raw_input
 
     def is_pp_supported_model(
         self,
         architectures: Union[str, list[str]],
+        *,
+        model_config: Optional[ModelConfig] = None,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures)
+        model_cls, _ = self.inspect_model_cls(architectures,
+                                              model_config=model_config)
         return model_cls.supports_pp
 
     def model_has_inner_state(
         self,
         architectures: Union[str, list[str]],
+        *,
+        model_config: Optional[ModelConfig] = None,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures)
+        model_cls, _ = self.inspect_model_cls(architectures,
+                                              model_config=model_config)
         return model_cls.has_inner_state
 
     def is_attention_free_model(
         self,
         architectures: Union[str, list[str]],
+        *,
+        model_config: Optional[ModelConfig] = None,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures)
+        model_cls, _ = self.inspect_model_cls(architectures,
+                                              model_config=model_config)
         return model_cls.is_attention_free
 
     def is_hybrid_model(
         self,
         architectures: Union[str, list[str]],
+        *,
+        model_config: Optional[ModelConfig] = None,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures)
+        model_cls, _ = self.inspect_model_cls(architectures,
+                                              model_config=model_config)
         return model_cls.is_hybrid
 
     def is_noops_model(
         self,
         architectures: Union[str, list[str]],
+        *,
+        model_config: Optional[ModelConfig] = None,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures)
+        model_cls, _ = self.inspect_model_cls(architectures,
+                                              model_config=model_config)
         return model_cls.has_noops
 
     def is_transcription_model(
         self,
         architectures: Union[str, list[str]],
+        *,
+        model_config: Optional[ModelConfig] = None,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures)
+        model_cls, _ = self.inspect_model_cls(architectures,
+                                              model_config=model_config)
         return model_cls.supports_transcription
 
     def is_transcription_only_model(
         self,
         architectures: Union[str, list[str]],
+        *,
+        model_config: Optional[ModelConfig] = None,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures)
+        model_cls, _ = self.inspect_model_cls(architectures,
+                                              model_config=model_config)
         return model_cls.supports_transcription_only
 
     def is_v1_compatible(
         self,
         architectures: Union[str, list[str]],
+        *,
+        model_config: Optional[ModelConfig] = None,
     ) -> bool:
-        model_cls, _ = self.inspect_model_cls(architectures)
+        model_cls, _ = self.inspect_model_cls(architectures,
+                                              model_config=model_config)
         return not model_cls.supports_v0_only
 
 

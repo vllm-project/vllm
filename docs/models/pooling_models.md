@@ -17,16 +17,9 @@ before returning them.
 
 Run a model in pooling mode via the option `--runner pooling`.
 
-!!! note
-    It is recommended to always set `--runner pooling` because `--runner auto` (the default)
-    automatically resolves to `--runner generate` for models that implement the
-    [VllmModelForTextGeneration][vllm.model_executor.models.VllmModelForTextGeneration] interface,
-    even if they also implement the
-    [VllmModelForPooling][vllm.model_executor.models.VllmModelForPooling] interface.
-
-    Moreover, setting `--runner pooling` will automatically trigger model conversion
-    via `--convert` (see below) if the model in vLLM does not implement
-    the [VllmModelForPooling][vllm.model_executor.models.VllmModelForPooling] interface.
+!!! tip
+    There is no need to set this option in the vast majority of cases as vLLM can automatically
+    detect the model runner to use via `--runner auto`.
 
 ### Model Conversion
 

@@ -13,9 +13,8 @@ which are then passed through [Sampler][vllm.model_executor.layers.Sampler] to o
 Run a model in generation mode via the option `--runner generate`.
 
 !!! tip
-    There is no need to set this option because `--runner auto` (the default)
-    automatically resolves to `--runner generate` for models that support the
-    [VllmModelForTextGeneration][vllm.model_executor.models.VllmModelForTextGeneration] interface.
+    There is no need to set this option in the vast majority of cases as vLLM can automatically
+    detect the model runner to use via `--runner auto`.
 
 ## Offline Inference
 
