@@ -1,0 +1,24 @@
+FROM vault.habana.ai/gaudi-docker/1.21.0/ubuntu24.04/habanalabs/pytorch-installer-2.6.0:latest
+
+COPY ./ /workspace/vllm
+
+WORKDIR /workspace/vllm
+
+RUN pip install --upgrade pip && \
+    pip install -v -r requirements-hpu.txt
+
+ENV no_proxy=localhost,127.0.0.1
+ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
+ENV VLLM_SKIP_WARMUP=true
+ENV VLLM_USE_V1=1
+
+RUN VLLM_TARGET_DEVICE=hpu python3 setup.py install
+
+# install development dependencies (for testing)
+RUN python3 -m pip install -e tests/vllm_test_utils
+
+WORKDIR /workspace/
+
+RUN ln -s /workspace/vllm/tests && ln -s /workspace/vllm/examples && ln -s /workspace/vllm/benchmarks
+
+ENTRYPOINT ["bash"]

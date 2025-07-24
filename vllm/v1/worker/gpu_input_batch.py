@@ -226,6 +226,8 @@ class InputBatch:
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
 
+        self.req_type: dict[str, str] = {}
+
     @property
     def req_ids(self) -> list[str]:
         # None elements should only be present transiently
