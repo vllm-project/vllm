@@ -23,21 +23,18 @@ from vllm.platforms import current_platform
 
 
 def swizzle_mxfp4(quant_tensor, scale):
-    if current_platform.is_cuda():
-        # FIXME add swizzling later after triton fix
-        # max_batched_tokens = get_current_vllm_config().scheduler_config.max_num_batched_tokens
-        # num_warps = 8 if max_batched_tokens <= 512 else 8
-        # value_layout, value_layout_opts = layout.make_default_matmul_mxfp4_w_layout(mx_axis=1)
-        # scale_layout, scale_layout_opts = layout.make_default_matmul_mxfp4_w_scale_layout(
-        #     mx_axis=1, num_warps=num_warps)
-        value_layout, value_layout_opts = layout.StridedLayout, dict()
-        scale_layout, scale_layout_opts = layout.StridedLayout, dict()
-        if torch.cuda.get_device_capability()[0] == 10:
-            constraints = {
-                "is_persistent": True,
-                "epilogue_subtile": 1,
-            }
-            opt_flags.update_opt_flags_constraints(constraints)
+    num_warps = 8
+    value_layout, value_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
+        mx_axis=1)
+    scale_layout, scale_layout_opts = layout.make_default_matmul_mxfp4_w_scale_layout(
+        mx_axis=1, num_warps=num_warps)
+    if current_platform.is_cuda() and \
+        torch.cuda.get_device_capability()[0] == 10:
+        constraints = {
+            "is_persistent": True,
+            "epilogue_subtile": 1,
+        }
+        opt_flags.update_opt_flags_constraints(constraints)
     quant_tensor = quant_tensor.transpose(-2, -1)
     scale = scale.transpose(-2, -1)
     quant_tensor = convert_layout(wrap_torch_tensor(quant_tensor, dtype=FP4),
