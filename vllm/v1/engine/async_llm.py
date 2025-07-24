@@ -286,6 +286,7 @@ class AsyncLLM(EngineClient):
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
+        arrival_time: Optional[float] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -317,6 +318,7 @@ class AsyncLLM(EngineClient):
                 prompt_adapter_request=prompt_adapter_request,
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
+                arrival_time=arrival_time,
             )
 
             # The output_handler task pushes items into the queue.
