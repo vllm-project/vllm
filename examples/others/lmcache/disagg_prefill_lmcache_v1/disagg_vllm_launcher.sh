@@ -15,6 +15,14 @@ else
     MODEL=$2
 fi
 
+# The prefillers and decoders in LMCache use the same hash seed for all chunk keys.
+# This seed must be aligned so that decoders can identify and retrieve KV cache
+# entries stored by prefillers.
+#
+# WARNING: Using a fixed hash seed is insecure and makes the application vulnerable to
+# denial-of-service attacks. In a production environment, this should be set to a
+# secure random value. This is set to a fixed value for demonstration purposes only.
+export PYTHONHASHSEED=${VLLM_PYTHON_HASH_SEED:-123}
 
 if [[ $1 == "prefiller" ]]; then
     # Prefiller listens on port 8100
