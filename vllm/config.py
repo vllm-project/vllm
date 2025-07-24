@@ -680,6 +680,11 @@ class ModelConfig:
         self.supported_tasks = self._get_supported_tasks(
             architectures, self.runner_type, self.convert_type)
 
+        _, arch = self.registry.inspect_model_cls(self.architectures,
+                                                  model_config=self)
+        self._architecture = arch
+        logger.info("Resolved architecture: %s", arch)
+
         self.pooler_config = self._init_pooler_config()
 
         self.dtype = _get_and_verify_dtype(
@@ -799,9 +804,7 @@ class ModelConfig:
     @cached_property
     def architecture(self) -> str:
         """The architecture vllm actually used."""
-        _, arch = self.registry.inspect_model_cls(self.architectures,
-                                                  model_config=self)
-        return arch
+        return self._architecture
 
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
                                           tokenizer: str) -> None:
@@ -4853,7 +4856,7 @@ class VllmConfig:
         self.scheduler_config.max_model_len = max_model_len
 
     def try_verify_and_update_config(self):
-        architecture = getattr(self.model_config, "architecture", None)
+        architecture = self.model_config.architecture
         if architecture is None:
             return
 
