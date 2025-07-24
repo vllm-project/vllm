@@ -678,15 +678,10 @@ class FlashInferImpl(AttentionImpl):
                             query=decode_query,
                             kv_cache=kv_cache_permute,
                             workspace_buffer=attn_metadata.workspace_buffer,
-                            num_heads=self.num_heads,
-                            num_kv_heads=self.num_kv_heads,
-                            scale=self.scale,
                             block_tables=block_tables_decode,
                             seq_lens=seq_lens_decode,
-                            block_size=attn_metadata.page_size,
                             max_seq_len=attn_metadata.max_seq_len,
-                            kv_cache_dtype=self.kv_cache_dtype,
-                            k_scale=layer._k_scale_float,
-                            v_scale=layer._v_scale_float,
+                            bmm1_scale=layer._k_scale_float * self.scale,
+                            bmm2_scale=layer._v_scale_float,
                         ))
         return output_padded
