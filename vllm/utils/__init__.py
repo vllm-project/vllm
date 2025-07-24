@@ -58,6 +58,7 @@ import numpy as np
 import numpy.typing as npt
 import psutil
 import regex as re
+import setproctitle
 import torch
 import torch.types
 import yaml
@@ -128,10 +129,6 @@ STR_NOT_IMPL_ENC_DEC_BACKEND = ("XFormers and Flash-Attention are the only "
                                 "backends currently supported with encoder/"
                                 "decoder models.")
 
-STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER = ("Prompt adapters are not "
-                                       "currently supported with encoder/"
-                                       "decoder models.")
-
 # Efficiently import all enc/dec error strings
 # rather than having to import all of the above
 STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
@@ -145,7 +142,6 @@ STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
     "STR_NOT_IMPL_ENC_DEC_MM": STR_NOT_IMPL_ENC_DEC_MM,
     "STR_NOT_IMPL_ENC_DEC_SPEC_DEC": STR_NOT_IMPL_ENC_DEC_SPEC_DEC,
     "STR_NOT_IMPL_ENC_DEC_BACKEND": STR_NOT_IMPL_ENC_DEC_BACKEND,
-    "STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER": STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER,
 }
 
 # Constants related to forcing the attention backend selection
@@ -3283,3 +3279,16 @@ def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available."""
 
     return _has_module("deep_gemm")
+
+
+def bind_process_name(name: str, suffix: str = "") -> None:
+    """Bind the process name to a specific name with an optional suffix.
+
+    Args:
+        name: The base name to bind the process to.
+        suffix: An optional suffix to append to the base name.
+    """
+    name = f"{envs.VLLM_PROCESS_NAME_PREFIX}::{name}"
+    if suffix:
+        name = f"{name}_{suffix}"
+    setproctitle.setproctitle(name)
