@@ -526,6 +526,7 @@ class NixlConnectorWorker:
         self.backend_name = backend.get_name()
         attn_backend = backend_name_to_enum(self.backend_name)
         self._use_flashinfer = attn_backend == _Backend.FLASHINFER_VLLM_V1
+        self._use_flashattn = attn_backend == _Backend.FLASH_ATTN_VLLM_V1
         self._use_pallas_v1 = attn_backend == _Backend.PALLAS_VLLM_V1
         logger.debug("Detected attention backend %s", self.backend_name)
 
@@ -716,8 +717,8 @@ class NixlConnectorWorker:
                 self.slot_size_bytes = kv_elem_size * kv_latent_dim
             else:
                 # [2 (k and v), num_blocks, ...]
-                if self._use_flashinfer:
-                    # FlashInfer swaps 2<->num_blocks dimensions.
+                if self._use_flashinfer or self._use_flashattn:
+                    # FlashInfer and FlashAttn swaps 2<->num_blocks dimensions.
                     self.num_blocks = first_kv_cache.shape[0]
                     block_rank = 4  # [2, block_size, kv_heads, head_dim]
                 else:
@@ -753,13 +754,14 @@ class NixlConnectorWorker:
         # are non-contiguous (it's not locally guaranteed that they will be)
         # Disadvantage is that the encoded NixlAgentMetadata is now larger
         # (roughly 8KB vs 5KB).
-        # Conversely for FlashInfer, K and V are transferred in the same tensor
-        # to better exploit the memory layout (ie num_blocks is the first dim).
+        # Conversely for FlashInfer and FlashAttn, K and V are transferred
+        # in the same tensor to better exploit the memory layout (ie
+        # num_blocks is the first dim).
         for cache_or_caches in xfer_buffers.values():
             # Normalize to always be a list of caches
             cache_list = [cache_or_caches] if use_mla \
                          or self._use_pallas_v1 or self._use_flashinfer \
-                         else cache_or_caches
+                         or self._use_flashattn else cache_or_caches
             for cache in cache_list:
                 base_addr = cache.data_ptr()
                 region_len = self.num_blocks * self.block_len
@@ -916,8 +918,8 @@ class NixlConnectorWorker:
         else:
             remote_block_size = nixl_agent_meta.block_len // (
                 self.slot_size_bytes * tp_ratio)
-            if self._use_flashinfer:
-                # Account for joint KV in FlashInfer.
+            if self._use_flashinfer or self._use_flashattn:
+                # Account for joint KV in FlashInfer and FlashAttn.
                 remote_block_size //= 2
 
             assert nixl_agent_meta.block_len == self.block_len * tp_ratio, (
