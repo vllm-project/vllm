@@ -3771,11 +3771,6 @@ class DecodingConfig:
         return hash_str
 
     def __post_init__(self):
-        valid_guided_backends = get_args(GuidedDecodingBackend)
-
-        if self.backend not in valid_guided_backends:
-            raise ValueError(f"Invalid backend '{self.backend}',"
-                             f" must be one of {valid_guided_backends}")
         if (self.disable_any_whitespace
                 and self.backend not in ("xgrammar", "guidance")):
             raise ValueError("disable_any_whitespace is only supported for "
