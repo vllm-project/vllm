@@ -253,33 +253,55 @@ class Scheduler(SchedulerInterface):
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     if self.policy == SchedulingPolicy.PRIORITY:
+                        # Check if all the preceding requests have been scheduled.
+                        if req_index == len(scheduled_running_reqs):
+                            no_schedule_running_reqs = self.running[req_index:]
+                        else:
+                            scheduled_running_reqs_set = set(
+                                scheduled_running_reqs)
+                            no_schedule_running_reqs = [
+                                req for req in self.running
+                                if req not in scheduled_running_reqs_set
+                            ]
                         preempted_req = max(
-                            self.running,
+                            no_schedule_running_reqs,
                             key=lambda r: (r.priority, r.arrival_time),
                         )
                         self.running.remove(preempted_req)
                     else:
                         preempted_req = self.running.pop()
 
-                    self.kv_cache_manager.free(preempted_req)
-                    preempted_req.status = RequestStatus.PREEMPTED
-                    preempted_req.num_computed_tokens = 0
-                    if self.log_stats:
-                        preempted_req.record_event(
-                            EngineCoreEventType.PREEMPTED, scheduled_timestamp)
-
-                    self.waiting.prepend_request(preempted_req)
-                    preempted_reqs.append(preempted_req)
                     if preempted_req == request:
-                        # No more request to preempt.
-                        can_schedule = False
+                        if preempted_req == self.running[-1]:
+                            if len(self.waiting) > 0:
+                                self._preempt_request(request)
+                                preempted_reqs.append(request)
+                            else:
+                                self.running.append(request)
+                            # The request is the last one with the lowest priority.
+                            # Exit the scheduling loop.
+                            can_schedule = 0
+                            break
+                        # Preempt the request and proceed to iteratively schedule subsequent higher-priority requests.
+                        self._preempt_request(request)
+                        preempted_reqs.append(request)
+                        # Continue to schedule the subsequent requests with higher priority
+                        can_schedule = 1
                         break
+                    else:
+                        self._preempt_request(preempted_req)
+                        preempted_reqs.append(preempted_req) 
+  
                 else:
                     # The request can be scheduled.
-                    can_schedule = True
+                    can_schedule = 2
                     break
-            if not can_schedule:
+
+            if can_schedule == 0:
                 break
+            elif can_schedule == 1:
+                req_index += 1
+                continue
             assert new_blocks is not None
 
             # Schedule the request.
@@ -579,6 +601,11 @@ class Scheduler(SchedulerInterface):
         if events:
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
+        if preempted_reqs:
+            if self.policy == SchedulingPolicy.PRIORITY:
+                self.running = sorted(
+                    self.running, key=lambda r: (r.priority, r.arrival_time)
+                )
 
         self._update_after_schedule(scheduler_output)
         return scheduler_output
@@ -1020,6 +1047,14 @@ class Scheduler(SchedulerInterface):
             self._free_blocks(request)
 
         return kv_xfer_params
+
+    def _preempt_request(self, request: Request, timestamp: Optional[float] = None):
+        self.kv_cache_manager.free(request)
+        request.status = RequestStatus.PREEMPTED
+        request.num_computed_tokens = 0
+        if self.log_stats:
+            request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
+        self.waiting.prepend_request(request)
 
     def _free_blocks(self, request: Request):
         assert request.is_finished()
