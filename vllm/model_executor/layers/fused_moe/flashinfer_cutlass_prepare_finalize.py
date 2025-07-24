@@ -11,7 +11,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
     extract_required_args, moe_kernel_quantize_input)
-from vllm.utils.flashinfer import block_scale_interleave
+from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
 def get_local_sizes(local_tokens):
@@ -92,7 +92,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                            dim=0,
                                            sizes=get_local_sizes(local_tokens))
             a1_m, a1_n = a1q.shape
-            a1q_scale = block_scale_interleave(a1q_scale)
+            a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
