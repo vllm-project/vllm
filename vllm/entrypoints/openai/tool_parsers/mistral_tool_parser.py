@@ -80,7 +80,7 @@ class MistralToolParser(ToolParser):
 
         # initialize properties used for state when parsing tool calls in
         # streaming mode
-        self.current_tool_id: int = -1
+        self.current_tool_index: int = -1
         self.streaming_state: StreamingState = \
             StreamingState.WAITING_FOR_TOOL_START
 
@@ -263,7 +263,7 @@ class MistralToolParser(ToolParser):
         if self.streaming_state not in [
                 StreamingState.PARSING_NAME, StreamingState.PARSING_ARGUMENTS
         ] and delta_text.startswith(self.bot_token):
-            self.current_tool_id += 1
+            self.current_tool_index += 1
             tool_id = MistralToolCall.generate_random_id()
             self.streaming_state = StreamingState.PARSING_NAME
             delta_text = delta_text.replace(self.bot_token, "", 1)
@@ -282,7 +282,7 @@ class MistralToolParser(ToolParser):
                 self.current_tool_name += delta_text
                 if tool_id is not None:
                     return [
-                        DeltaToolCall(index=self.current_tool_id,
+                        DeltaToolCall(index=self.current_tool_index,
                                       type="function",
                                       id=tool_id)
                     ]
@@ -302,7 +302,7 @@ class MistralToolParser(ToolParser):
             if delta_function_name or delta_arguments:
                 ret += [
                     DeltaToolCall(
-                        index=self.current_tool_id,
+                        index=self.current_tool_index,
                         type="function",
                         id=tool_id,
                         function=DeltaFunctionCall(
@@ -355,7 +355,7 @@ class MistralToolParser(ToolParser):
         content = None
         delta_tool_calls: list[DeltaToolCall] = []
         current_tool_call: DeltaToolCall = DeltaToolCall(
-            index=self.current_tool_id, )
+            index=self.current_tool_index, )
         current_tool_call_modified = False
         if self.bot_token in delta_text:
             # this is the first tool call
@@ -446,9 +446,9 @@ class MistralToolParser(ToolParser):
                 if current_tool_call_modified:
                     delta_tool_calls.append(current_tool_call)
                 current_tool_call_modified = True
-                self.current_tool_id += 1
+                self.current_tool_index += 1
                 current_tool_call = DeltaToolCall(
-                    index=self.current_tool_id,
+                    index=self.current_tool_index,
                     id=MistralToolCall.generate_random_id(),
                 )
             if current_tool_call.function is None:
