@@ -241,6 +241,8 @@ class KVCacheManager:
         try:
             pool = self.coordinator.single_type_managers[0].block_pool
         except AttributeError:
+            # This LLM has multiple types of attentions.
+            # Use get_computed_blocks instead.
             return self.get_computed_blocks(request)[1]
 
         while left <= right:
