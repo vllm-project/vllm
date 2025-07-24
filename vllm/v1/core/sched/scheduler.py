@@ -633,9 +633,6 @@ class Scheduler(SchedulerInterface):
             req_ids.append(req_id)
             num_tokens = (num_scheduled_tokens[req_id] -
                           len(spec_decode_tokens.get(req_id, ())))
-            # TODO: current Neuron implementation relies on the sampled tokens
-            # from the prior iteration (previous behavior). Revisit and find
-            # another way to retreive this.
             if self.use_pp:
                 # When using PP, the scheduler sends the sampled tokens back,
                 # because there's no direct communication between the first-
@@ -652,7 +649,6 @@ class Scheduler(SchedulerInterface):
                 new_token_ids.append([])
             new_block_ids.append(req_to_new_block_ids[req_id])
             num_computed_tokens.append(req.num_computed_tokens)
-            # num_context_tokens.append(len(req.prompt_token_ids))
         # Because resumed_reqs is usually empty, it is more efficient to do
         # in-place appending so that we don't need to allocate a new list.
         resumed_from_preemption = [False] * len(running_reqs)
@@ -664,7 +660,6 @@ class Scheduler(SchedulerInterface):
             new_token_ids=new_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
-            # num_context_tokens=num_context_tokens,
         )
 
     def _try_schedule_encoder_inputs(
