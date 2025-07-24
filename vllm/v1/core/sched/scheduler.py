@@ -7,7 +7,7 @@ import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Any, Callable, Optional, Union
+from typing import Any, Optional, Union
 
 from transformers import AutoTokenizer
 
@@ -20,7 +20,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -146,7 +145,7 @@ class Scheduler(SchedulerInterface):
 
         speculative_config = vllm_config.speculative_config
 
-        self.relaxed_thinking = speculative_config.relaxed_thinking
+        self.relaxed_thinking = False
         self.think_start_token_id = None
         self.think_end_token_id = None
         reasoning_parser: ReasoningParser = None
@@ -159,6 +158,7 @@ class Scheduler(SchedulerInterface):
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
 
+            self.relaxed_thinking = speculative_config.relaxed_thinking
             if self.relaxed_thinking:
                 if not speculative_config.posterior_alpha:
                     raise ValueError("No posterior_alpha specified.")
@@ -167,8 +167,8 @@ class Scheduler(SchedulerInterface):
                                      "should be in range (0, 1).")
                 if not speculative_config.reasoning_parser:
                     raise ValueError("No reasoning_parser specified.")
-                logger.info(f"Enable relaxed thinking, posterior_alpha="
-                            f"{speculative_config.posterior_alpha}.")
+                logger.info("Enable relaxed thinking, posterior_alpha=", \
+                            speculative_config.posterior_alpha)
                 tokenizer = AutoTokenizer.from_pretrained(
                     self.vllm_config.model_config.tokenizer)
                 try:
@@ -181,7 +181,7 @@ class Scheduler(SchedulerInterface):
                         f"{speculative_config.reasoning_parser} has " \
                          "not been registered") from e
                 
-                logger.info(f"Use reasoning parser {reasoning_parser}.")
+                logger.info("Use reasoning parser:", reasoning_parser)
                 
                 if speculative_config.reasoning_parser == 'deepseek_r1':
                     self.think_start_token_id = \
