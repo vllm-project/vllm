@@ -46,8 +46,8 @@ def llm():
 def test_activation(llm: LLM):
 
     def get_outputs(activation):
-        outputs = llm.classify(prompts,
-                               pooling_params=PoolingParams(activation=activation))
+        outputs = llm.classify(
+            prompts, pooling_params=PoolingParams(activation=activation))
         return torch.tensor([x.outputs.probs for x in outputs])
 
     default = get_outputs(activation=None)
