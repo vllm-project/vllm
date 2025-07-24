@@ -62,7 +62,6 @@ class TPUWorker:
         self.scheduler_config = vllm_config.scheduler_config
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
 
         self.parallel_config.rank = rank
@@ -264,6 +263,9 @@ class TPUWorker:
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
+
+    def reload_weights(self) -> None:
+        self.model_runner.reload_weights()
 
     def compile_or_warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
