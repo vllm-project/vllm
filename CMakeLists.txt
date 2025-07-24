@@ -635,7 +635,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                      "in CUDA target architectures.")
     endif()
   endif()
-  
+
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
     set(SRCS "csrc/quantization/cutlass_w8a8/moe/blockwise_scaled_group_mm_sm100.cu")
@@ -842,8 +842,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       "csrc/moe/moe_permute_unpermute_op.cu")
 
   set_gencode_flags_for_srcs(
-    SRCS "${MARLIN_PERMUTE_SRC}"
-    CUDA_ARCHS "${MOE_PERMUTE_ARCHS}")
+    SRCS "${MOE_PERMUTE_SRC}"
+    CUDA_ARCHS "${CUDA_ARCHS}")
 
   list(APPEND VLLM_MOE_EXT_SRC "${MOE_PERMUTE_SRC}")
 endif()
