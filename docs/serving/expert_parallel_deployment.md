@@ -4,10 +4,11 @@ vLLM supports expert parallelism (EP), which allows experts in Mixture-of-Expert
 
 EP is typically coupled with attention data parallelism (DP). While DP can be used independently of EP, EP is more efficient when used in conjunction with DP. You can read more about data parallelism [here](data_parallel_deployment.md).
 
-In order to use EP, you need to install the necessary dependencies:
+In order to use EP, you need to install the necessary dependencies, we are actively working on making this easier in the future:
+
 1. Install DeepEP and pplx-kernels, and set up host environment following vLLM's guide for EP kernels [here](https://github.com/vllm-project/vllm/tree/main/tools/ep_kernels).
 2. Install DeepGEMM library following the [instructions](https://github.com/deepseek-ai/DeepGEMM#installation).
-3. For PD set up, install UCX and NIXL following the [script](https://github.com/vllm-project/vllm/blob/main/tools/install_nixl.sh).
+3. For Prefill/Decode (PD) disaggregated serving set up, install UCX and NIXL following the [script](https://github.com/vllm-project/vllm/blob/main/tools/install_nixl.sh).
 
 ## Enabling EP on Single Node
 
@@ -30,8 +31,8 @@ VLLM_ALL2ALL_BACKEND=pplx VLLM_USE_DEEP_GEMM=1 vllm serve deepseek-ai/DeepSeek-V
 
 For multi-node deployment, we recommend using DeepEP communication kernel. It has two modes:
 
-- `deepep_high_throughput`: This mode is suitable for high-throughput scenarios where prefill dominates. It does not support CUDA graph with padding and utilizes groupped gemm with continous layout kernel.
-- `deepep_low_latency`: This mode is suitable for low-latency scenarios where decode dominates. It supports CUDA graph with padding and utilizes groupped gemm with masked layout kernel.
+- `deepep_high_throughput`: This mode is suitable for high-throughput scenarios where prefill dominates. It does not support CUDA graph with padding and utilizes grouped gemm with continuous layout kernel.
+- `deepep_low_latency`: This mode is suitable for low-latency scenarios where decode dominates. It supports CUDA graph with padding and utilizes grouped gemm with masked layout kernel.
 
 When deploying in multi-node environment, you need to run one launch command per node. The following command will serve a `DeepSeek-V3-0324` model on 2 nodes, using `deepep_low_latency` mode:
 
@@ -71,7 +72,7 @@ You can configure `--api-server-count` to scale out the number of API servers to
 While MoE models are typically trained to have each experts receive similar amount of tokens; in practice, the distribution of tokens across experts can be very skewed.
 vLLM provides a expert parallel load balancer (EPLB) to reshuffle the expert mapping across each EP ranks to even the load across experts.
 
-You can enable it by setting the flag `--enable-eplb` flag. *Currently only DeepSeek V3 architecture and `deepep_low_latency` backend is supported.*
+You can enable it by setting the flag `--enable-eplb` flag. *Currently only DeepSeek V3 architecture is supported*. 
 When this flag is turned on, vLLM will collect the load statistics with every forward pass and periodically rebalance them.
 
 The following flags are available to configure the EPLB:
@@ -80,7 +81,7 @@ The following flags are available to configure the EPLB:
 - `--eplb-log-balancedness`: This flag controls whether to log the balancedness of the load across experts. Balancedness is defined as the average tokens per expert divided by the maximum tokens for a given expert.
 - `--num-redundant-experts`: This flag controls the number of global redundant experts to keep in the model. By default, each EP rank will only have `NUM_TOTAL_EXPERTS / NUM_EP_RANKS` experts. Setting this flag to a non-zero value will allow each EP rank to have `(NUM_TOTAL_EXPERTS + NUM_REDUNDANT_EXPERTS) / NUM_EP_RANKS` experts.
 
-The following command will serve a `DeepSeek-V3-0324` with EPLB enabled on single node. For multi-node deployment, you can just add the flags each *each* node's `vllm serve` command.
+The following command will serve a `DeepSeek-V3-0324` with EPLB enabled on single node. For multi-node deployment, you can just add the flags to each node's `vllm serve` command.
 
 ```bash
 VLLM_ALL2ALL_BACKEND=pplx VLLM_USE_DEEP_GEMM=1 vllm serve deepseek-ai/DeepSeek-V3-0324 \
@@ -95,11 +96,11 @@ VLLM_ALL2ALL_BACKEND=pplx VLLM_USE_DEEP_GEMM=1 vllm serve deepseek-ai/DeepSeek-V
 
 ## Enabling EP on Multi-Node with Disaggregated Serving
 
-For production deployment where maintaining SLA for time-to-first-token latency and inter-token latency is critical, you can use disaggregated serving to scale out prefill and decode seperately.
+For production deployment where maintaining SLA for time-to-first-token latency and inter-token latency is critical, you can use disaggregated serving to scale out prefill and decode separately.
 
 For prefill instance, you can use the `VLLM_ALL2ALL_BACKEND=deepep_high_throughput` mode to scale out prefill. For decode instance, you can use the `VLLM_ALL2ALL_BACKEND=deepep_low_latency` mode to scale out decode.
 
-To connect the two instances, you need to configure vLLM to use a KV connector for KV cache transfer, for example, to use NIXL, install it with our script [here](https://github.com/vllm-project/vllm/blob/main/tools/install_nixl.sh) and add the following flag to the both instances:
+To connect the two instances, you need to configure vLLM to use a KV connector for KV cache transfer, for example, to use NIXL, install it with our script [here](https://github.com/vllm-project/vllm/blob/main/tools/install_nixl.sh) and add the following flag to both instances:
 
 ```bash
 --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
@@ -154,6 +155,7 @@ print(response)
 # Pass the kv_transfer_params from prefill to decode
 decode_response = decode_client.completions.create(
     model=model,
+    # This prompt is ignored when kv_transfer_params is present
     prompt="A robot may not injure a human being",
     extra_body={"kv_transfer_params": response.kv_transfer_params},
     extra_headers={
