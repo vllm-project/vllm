@@ -2659,10 +2659,10 @@ class SpeculativeConfig:
     """The parallel configuration for the draft model initialized internal."""
 
     # params for relaxed thinking
-    posterior_alpha: Optional[float] = 1.0
+    posterior_alpha: float = 1.0
     """The alpha value for the posterior distribution in speculative decoding.
     Used when relaxed thinking is enabled."""
-    relaxed_thinking: Optional[bool] = False
+    relaxed_thinking: bool = False
     """Whether to enable relaxed thinking."""
     reasoning_parser: Optional[str] = None
     """Reasoning Parser to parse think_start_token_id and think_end_token_id.

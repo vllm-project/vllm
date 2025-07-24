@@ -180,9 +180,9 @@ class Scheduler(SchedulerInterface):
                     raise TypeError(
                         f"{speculative_config.reasoning_parser} has " \
                          "not been registered") from e
-                
+
                 logger.info("Use reasoning parser:", reasoning_parser)
-                
+
                 if speculative_config.reasoning_parser == 'deepseek_r1':
                     self.think_start_token_id = \
                         reasoning_parser.start_token_id
