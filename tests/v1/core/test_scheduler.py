@@ -1311,7 +1311,7 @@ def create_requests_with_priority(
         max_tokens: int = 16,
         stop_token_ids: Optional[list[int]] = None,
         prompt_logprobs: Optional[int] = None,
-        request_ids: list[str] = None):
+        request_ids: Optional[list[str]] = None):
     """Create requests with specified priorities and arrival times."""
     assert len(priorities) == num_requests
     if arrival_times is not None:
