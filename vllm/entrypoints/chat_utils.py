@@ -151,6 +151,27 @@ class CustomChatCompletionContentSimpleVideoParam(TypedDict, total=False):
     video_url: Required[str]
 
 
+class CustomThinkCompletionContentParam(TypedDict, total=False):
+    """A Think Completion Content Param that accepts a plain text and a boolean.
+
+    Example:
+    {
+        "thinking": "I am thinking about the answer",
+        "closed": True,
+        "type": "thinking"
+    }
+    """
+
+    thinking: Required[str]
+    """The thinking content."""
+
+    closed: bool
+    """Whether the thinking is closed."""
+
+    type: Required[Literal["thinking"]]
+    """The thinking type."""
+
+
 ChatCompletionContentPartParam: TypeAlias = Union[
     OpenAIChatCompletionContentPartParam, ChatCompletionContentPartAudioParam,
     ChatCompletionContentPartInputAudioParam,
@@ -159,7 +180,8 @@ ChatCompletionContentPartParam: TypeAlias = Union[
     CustomChatCompletionContentSimpleImageParam,
     ChatCompletionContentPartImageEmbedsParam,
     CustomChatCompletionContentSimpleAudioParam,
-    CustomChatCompletionContentSimpleVideoParam, str]
+    CustomChatCompletionContentSimpleVideoParam, str,
+    CustomThinkCompletionContentParam]
 
 
 class CustomChatCompletionMessageParam(TypedDict, total=False):
@@ -938,6 +960,7 @@ _ImageEmbedsParser = partial(cast, ChatCompletionContentPartImageEmbedsParam)
 _InputAudioParser = partial(cast, ChatCompletionContentPartInputAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
 _PILImageParser = partial(cast, CustomChatCompletionContentPILImageParam)
+_ThinkParser = partial(cast, CustomThinkCompletionContentParam)
 # Need to validate url objects
 _ImageParser = TypeAdapter(ChatCompletionContentPartImageParam).validate_python
 _AudioParser = TypeAdapter(ChatCompletionContentPartAudioParam).validate_python
@@ -954,6 +977,8 @@ MM_PARSER_MAP: dict[
 ] = {
     "text":
     lambda part: _TextParser(part).get("text", None),
+    "thinking":
+    lambda part: _ThinkParser(part).get("thinking", None),
     "input_text":
     lambda part: _TextParser(part).get("text", None),
     "input_image":
@@ -1100,7 +1125,7 @@ def _parse_chat_message_content_part(
             "with empty / unparsable content.", part, part_type)
         return None
 
-    if part_type in ("text", "input_text", "refusal"):
+    if part_type in ("text", "input_text", "refusal", "thinking"):
         str_content = cast(str, content)
         if wrap_dicts:
             return {'type': 'text', 'text': str_content}
