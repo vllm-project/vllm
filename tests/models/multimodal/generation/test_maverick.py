@@ -72,6 +72,26 @@ def run_maverick_serving(model: str):
         raise
 
 
+def get_rope_layers_config(model_path: str) -> list[int]:
+    """
+    Get the interleaved RoPE configuration from HuggingFace config
+
+    Args:
+        model_path: Path to the local directory containing the reduced
+            Maverick model checkpoint
+
+    Returns:
+        List of 0 or 1 indicating whether each layer uses RoPE and local attn
+        0 indicates that RoPE is not used while 1 indicates that RoPE is used.
+    """
+    config_path = Path(model_path) / "config.json"
+    model_config = json.loads(config_path.read_text())
+    text_config = model_config["text_config"]
+    no_rope_layers = text_config["no_rope_layers"]
+    print(f"Found no_rope_layers: {no_rope_layers}")
+    return no_rope_layers
+
+
 def create_reduced_maverick_model(
     original_model_name:
     str = "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
@@ -80,7 +100,7 @@ def create_reduced_maverick_model(
     num_experts: int = 4,
     vision_layers: int = 2,
     force_recreate: bool = False,
-) -> tuple[str, list[int]]:
+) -> str:
     """
     Create a reduced-layer version of the Maverick model.
 
@@ -93,21 +113,12 @@ def create_reduced_maverick_model(
         force_recreate: Whether to recreate if output_dir already exists
 
     Returns:
-        Tuple of:
-        - Path to the created reduced model directory
-        - List of 0 or 1 indicating whether each layer uses RoPE and local attn
-          0 indicates that RoPE is not used while 1 indicates that RoPE is used.
+        Path to the created reduced model directory
     """
 
     print(
         f"Creating reduced Maverick model with {text_layers} text layers and "
         f"{vision_layers} vision layers...")
-
-    print("Loading original model configuration...")
-    original_config = AutoConfig.from_pretrained(original_model_name,
-                                                 trust_remote_code=True)
-    text_config = original_config.to_dict()["text_config"]
-    no_rope_layers = text_config["no_rope_layers"]
 
     # Create output directory
     output_path = Path(output_dir)
@@ -117,11 +128,14 @@ def create_reduced_maverick_model(
         else:
             print(f"Output directory {output_dir} already exists. "
                   "Use --force-recreate to overwrite.")
-            return str(output_path), no_rope_layers
+            return str(output_path)
 
     output_path.mkdir(parents=True, exist_ok=True)
 
     try:
+        print("Loading original model configuration...")
+        original_config = AutoConfig.from_pretrained(original_model_name,
+                                                     trust_remote_code=True)
         print("Creating reduced configuration...")
         reduced_config = create_reduced_config(original_config, text_layers,
                                                num_experts, vision_layers)
@@ -149,7 +163,7 @@ def create_reduced_maverick_model(
             print(f"Could not copy generation config: {e}")
 
         print(f"Successfully created reduced Maverick model at {output_path}")
-        return str(output_path), no_rope_layers
+        return str(output_path)
 
     except Exception as e:
         print(f"Error creating reduced model: {e}")
@@ -586,7 +600,7 @@ def test_dummy_maverick(
     monkeypatch.setenv("VLLM_USE_V1", "1")
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
-    model_path, rope_layers = create_reduced_maverick_model(
+    model_path = create_reduced_maverick_model(
         original_model_name=original_model_name,
         output_dir=output_dir,
         text_layers=text_layers,
@@ -596,6 +610,8 @@ def test_dummy_maverick(
     )
 
     print(f"\nReduced model created successfully at: {model_path}")
+
+    rope_layers = get_rope_layers_config(model_path)
 
     llm = LLM(
         model=model_path,
