@@ -472,7 +472,7 @@ class Qwen3MoeModel(nn.Module):
                     if is_pp_missing_parameter(name_mapped, self):
                         continue
                     # Skip loading extra parameters for GPTQ/modelopt models.
-                    if name.endswith(
+                    if name_mapped.endswith(
                             ignore_suffixes) and name not in params_dict:
                         continue
                     param = params_dict[name_mapped]
@@ -597,8 +597,18 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
         num_physical_experts: int,
         num_local_physical_experts: int,
     ) -> None:
-        # TODO: Support Qwen3 MoE elastic expert parallel
-        ...
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = (num_physical_experts -
+                                      self.num_logical_experts)
+        for layer in self.model.layers:
+            if isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
+                moe = layer.mlp
+                moe.n_local_physical_experts = num_local_physical_experts
+                moe.n_physical_experts = num_physical_experts
+                moe.n_redundant_experts = self.num_redundant_experts
+                moe.experts.update_expert_map()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
