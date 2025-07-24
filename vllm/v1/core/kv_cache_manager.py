@@ -194,7 +194,7 @@ class KVCacheManager:
 
     def get_num_computed_tokens(self, request: Request) -> int:
         """Get the number of computed (cached) tokens of one req for scheduling.
-        This function is used for shortest prefill first schedulign policy.
+        This function is used for shortest prefill first scheduling policy.
 
         NOTE: This function will be called for all requests for all 
         scheduling steps so it needs to be efficient. We use binary search
@@ -204,7 +204,7 @@ class KVCacheManager:
         slow. 
 
         NOTE: The exact number of computed tokens returned by this function
-        is only used for scheduling and doethus s not have to be accurate.
+        is only used for scheduling and thus does not have to be accurate.
 
         Args:
             request: The request to get the computed tokens.
