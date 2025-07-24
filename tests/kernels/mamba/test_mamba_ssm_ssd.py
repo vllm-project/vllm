@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
-    mamba_chunk_scan_combined)
+    mamba_chunk_scan_combined_varlen)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mamba2_attn import (
     _query_start_loc_to_chunk_indices_offsets)
@@ -179,8 +179,13 @@ def generate_continuous_batched_examples(example_lens_by_batch,
             IND_S = [x % full_length for x in IND_E]
         IND_E = [end_boundary(x + y) for x, y in zip(IND_S, spec)]
 
+        # varlen has implicit batch=1
+        dt2 = dt2.squeeze(0)
+        X2 = X2.squeeze(0)
+        B2 = B2.squeeze(0)
+        C2 = C2.squeeze(0)
         yield ([Y_min[s, IND_S[s]:IND_E[s]] for s in range(num_examples)],
-               cu_seqlens, seq_idx.unsqueeze(0), (A, dt2, X2, B2, C2))
+               cu_seqlens, seq_idx, (A, dt2, X2, B2, C2))
 
 
 @pytest.mark.parametrize("itype",
@@ -212,23 +217,40 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size,
 
     Y_min, final_state_min = ssd_minimal_discrete(X * dt.unsqueeze(-1), A * dt,
                                                   B, C, chunk_size)
+
+    cu_seqlens = torch.tensor((0, seqlen), device='cuda').cumsum(dim=0)
+    seq_idx = torch.zeros(seqlen, dtype=torch.int32, device=cu_seqlens.device)
+
+    chunk_indices, chunk_offsets = \
+            _query_start_loc_to_chunk_indices_offsets(
+                cu_seqlens, chunk_size, cu_seqlens[-1])
+
+    # varlen has implicit batch=1
+    X = X.squeeze(0)
+    dt = dt.squeeze(0)
+    A = A.squeeze(0)
+    B = B.squeeze(0)
+    C = C.squeeze(0)
     Y = torch.empty_like(X)
-    final_state = mamba_chunk_scan_combined(X,
-                                            dt,
-                                            A,
-                                            B,
-                                            C,
-                                            chunk_size,
-                                            D=None,
-                                            return_final_states=True,
-                                            out=Y)
+    final_state = mamba_chunk_scan_combined_varlen(X,
+                                               dt,
+                                               A,
+                                               B,
+                                               C,
+                                               chunk_size,
+                                               D=None,
+                                               cu_seqlens=cu_seqlens,
+                                               seq_idx=seq_idx,
+                                               chunk_indices=chunk_indices,
+                                               chunk_offsets=chunk_offsets,
+                                               out=Y)
 
     # just test the last in sequence
-    torch.testing.assert_close(Y[:, -1], Y_min[:, -1], atol=atol, rtol=rtol)
+    torch.testing.assert_close(Y[-1], Y_min[0, -1], atol=atol, rtol=rtol)
 
     # just test the last head
     # NOTE, in the kernel we always cast states to fp32
-    torch.testing.assert_close(final_state[:, -1],
+    torch.testing.assert_close(final_state[:, -1].to(torch.float32),
                                final_state_min[:, -1].to(torch.float32),
                                atol=atol,
                                rtol=rtol)
@@ -293,7 +315,7 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
                 cu_seqlens, chunk_size, cu_seqlens[-1])
 
         Y = torch.empty_like(X)
-        new_states = mamba_chunk_scan_combined(
+        new_states = mamba_chunk_scan_combined_varlen(
             X,
             dt,
             A,
@@ -305,7 +327,6 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
             seq_idx=seq_idx,
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,
-            return_varlen_states=True,
             initial_states=states,
             out=Y,
         )
@@ -314,7 +335,7 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
         for i in range(num_examples):
 
             # just test one dim and dstate
-            Y_eg = Y[0, cu_seqlens[i]:cu_seqlens[i + 1], 0, 0]
+            Y_eg = Y[cu_seqlens[i]:cu_seqlens[i + 1], 0, 0]
             Y_min_eg = Y_min[i][:, 0, 0]
             torch.testing.assert_close(Y_eg, Y_min_eg, atol=atol, rtol=rtol)
 
