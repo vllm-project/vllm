@@ -242,10 +242,15 @@ class MistralToolParser(ToolParser):
                     delta_text.split(self.bot_token)[1:])
 
         delta_tool_calls = self._generate_delta_tool_call(delta_text)
-        delta = DeltaMessage(
-            content=additional_content,
-            tool_calls=delta_tool_calls,
-        )
+        if not additional_content and len(delta_tool_calls) == 0:
+            return None
+
+        delta = DeltaMessage()
+        if additional_content:
+            delta.content = additional_content
+        if len(delta_tool_calls) > 0:
+            delta.tool_calls = delta_tool_calls
+        
         # HACK: serving_chat.py inspects the internal state of tool parsers
         # when determining it's final streaming delta, automatically
         # adding autocompleted JSON.
@@ -265,7 +270,6 @@ class MistralToolParser(ToolParser):
                 StreamingState.PARSING_NAME, StreamingState.PARSING_ARGUMENTS
         ] and delta_text.startswith(self.bot_token):
             self.current_tool_index += 1
-            tool_id = MistralToolCall.generate_random_id()
             self.streaming_state = StreamingState.PARSING_NAME
             delta_text = delta_text.replace(self.bot_token, "", 1)
         if self.streaming_state == StreamingState.PARSING_NAME:
@@ -274,6 +278,7 @@ class MistralToolParser(ToolParser):
             # The name stops where the arguments start
             # And the arguments start with the `{` char
             if "{" in delta_text:
+                tool_id = MistralToolCall.generate_random_id()
                 delta_function_name = delta_text.split("{")[0]
                 self.current_tool_name += delta_function_name
                 delta_text = delta_text[len(delta_function_name):]
@@ -281,14 +286,7 @@ class MistralToolParser(ToolParser):
             else:
                 # we want to send the tool name once it's complete
                 self.current_tool_name += delta_text
-                if tool_id is not None:
-                    return [
-                        DeltaToolCall(index=self.current_tool_index,
-                                      type="function",
-                                      id=tool_id)
-                    ]
-                else:
-                    return []
+                return []
         if self.streaming_state == StreamingState.PARSING_ARGUMENTS:
             next_function_text = None
             if self.bot_token in delta_text:
@@ -300,7 +298,7 @@ class MistralToolParser(ToolParser):
             else:
                 delta_arguments = delta_text
             ret = []
-            if delta_function_name or delta_arguments:
+            if self.current_tool_name or delta_arguments:
                 ret += [
                     DeltaToolCall(
                         index=self.current_tool_index,
