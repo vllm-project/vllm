@@ -429,6 +429,25 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/build.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
+# Install DeepGEMM from source
+ARG DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
+ARG DEEPGEMM_GIT_REF="main"
+RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
+  . /etc/environment
+    git clone --depth 1 --recursive --shallow-submodules \
+        --branch ${DEEPGEMM_GIT_REF} \
+        ${DEEPGEMM_GIT_REPO} deepgemm
+    echo "🏗️  Building DeepGEMM"
+    pushd deepgemm
+        # Build DeepGEMM
+        rm -rf build dist
+        rm -rf *.egg-info
+        python3 setup.py bdist_wheel
+        uv pip install --system dist/*.whl
+    popd
+    rm -rf deepgemm
+BASH
+
 #################### vLLM installation IMAGE ####################
 
 #################### TEST IMAGE ####################
