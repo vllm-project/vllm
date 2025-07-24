@@ -233,8 +233,8 @@ class EmbeddingMixin(OpenAIServing):
                         "its chunk (similar to sliding window attention), "
                         "which changes token representations before pooling. "
                         "While MEAN pooling provides a reasonable "
-                        "approximation "
-                        "through weighted averaging aggregation, other pooling "
+                        "approximation through weighted averaging aggregation, "
+                        "other pooling "
                         "types use different aggregation strategies that "
                         "further approximate the original behavior. Set "
                         "'allow_non_mean_chunking: true' in pooler config "
@@ -316,8 +316,7 @@ class EmbeddingMixin(OpenAIServing):
             self._log_inputs(chunk_request_id,
                              chunk_request_prompt,
                              params=pooling_params,
-                             lora_request=ctx.lora_request,
-                             prompt_adapter_request=ctx.prompt_adapter_request)
+                             lora_request=ctx.lora_request)
 
             # Create generator for this chunk
             generator = self.engine_client.encode(
@@ -468,12 +467,10 @@ class EmbeddingMixin(OpenAIServing):
                 # Normal processing for short prompts or non-token prompts
                 request_id_item = f"{ctx.request_id}-{i}"
 
-                self._log_inputs(
-                    request_id_item,
-                    request_prompt,
-                    params=pooling_params,
-                    lora_request=ctx.lora_request,
-                    prompt_adapter_request=ctx.prompt_adapter_request)
+                self._log_inputs(request_id_item,
+                                 request_prompt,
+                                 params=pooling_params,
+                                 lora_request=ctx.lora_request)
 
                 # Mypy has an existing bug related to inferring the variance
                 # of TypedDicts with `builtins.enumerate`:
