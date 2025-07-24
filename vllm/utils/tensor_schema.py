@@ -17,9 +17,6 @@ class TensorShape:
         self.dims = dims
         self.dynamic_dims = dynamic_dims if dynamic_dims else set()
 
-    def __class_getitem__(cls, item):
-        return cls
-
     def resolve(self, **bindings: dict[str,
                                        int]) -> tuple[Union[int, str], ...]:
         resolved = []
@@ -59,6 +56,9 @@ class TensorSchema:
 
         if validate:
             self.validate()
+
+    def __getitem__(self, item) -> Any:
+        return getattr(self, item)
 
     def _match_shape_with_dynamic(self, actual: tuple[int, ...],
                                   reference: tuple[int, ...],
