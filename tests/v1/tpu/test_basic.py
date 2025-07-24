@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 MODELS = [
     "Qwen/Qwen2.5-1.5B-Instruct",
+    "Qwen/Qwen1.5-MoE-A2.7B",
     # TODO: Enable this models with v6e
     # "Qwen/Qwen2-7B-Instruct",
     # "meta-llama/Llama-3.1-8B",
