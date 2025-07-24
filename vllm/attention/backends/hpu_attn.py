@@ -136,6 +136,13 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     cross_block_groups: Optional[torch.Tensor] = None
     cross_block_usage: Optional[torch.Tensor] = None
     cross_attn_bias: Optional[torch.Tensor] = None
+    window_block_list: Optional[torch.Tensor] = None
+    window_slot_mapping: Optional[torch.Tensor] = None
+    window_block_mapping: Optional[torch.Tensor] = None
+    window_block_groups: Optional[torch.Tensor] = None
+    window_block_usage: Optional[torch.Tensor] = None
+    window_attn_bias: Optional[torch.Tensor] = None
+    use_window_sdpa: Optional[bool] = None
 
 
 @dataclass
@@ -386,7 +393,6 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         HPUFusedSDPA = kernels.fsdpa()
         self.fused_scaled_dot_product_attention = None if HPUFusedSDPA is None \
             else ModuleFusedSDPA(HPUFusedSDPA)
-
         self.prefill_impl = get_config().prompt_attn_impl
         self.use_contiguous_pa = get_config().use_contiguous_pa
         if alibi_slopes is not None:
@@ -533,6 +539,27 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             block_list = attn_metadata.block_list if attn_metadata \
                 and attn_metadata.block_list is not None else None
 
+            common_args = self.common_attention_args(block_list, key_cache,
+                                                     value_cache,
+                                                     attn_metadata.block_size)
+
+            if self.sliding_window:
+                if attn_metadata.window_attn_bias is not None:
+                    attn_bias = attn_metadata.window_attn_bias
+
+                if attn_metadata.use_window_sdpa:
+                    attn_bias = attn_metadata.attn_bias
+                    window_size = (self.sliding_window, 0)
+                    common_args['window_size'] = window_size
+                    # TODO: Currently HPU doesn't support GQA for FusedSDPA
+                    # with causal + window, so repeat KV so QKV are all the
+                    # same shape.
+                    if query_shape != kv_shape:
+                        repeat_kv = self.num_heads // self.num_kv_heads
+                        key = key.repeat_interleave(repeat_kv, dim=1)
+                        value = value.repeat_interleave(repeat_kv, dim=1)
+                        kv_shape = query_shape
+
             out = ops.prompt_attention(
                 impl=self.prefill_impl,
                 query=query.view(query_shape),
@@ -542,12 +569,22 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                 attn_bias=attn_bias,
                 position_bias=position_bias,
                 valid_seq_lengths=attn_metadata.seq_lens_tensor,
-                **self.common_attention_args(block_list, key_cache,
-                                             value_cache,
-                                             attn_metadata.block_size))
+                **common_args)
+
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             # Decoding run.
+            if not self.sliding_window:
+                block_list = attn_metadata.block_list
+                block_groups = attn_metadata.block_groups
+                block_mapping = attn_metadata.block_mapping
+                attn_bias = attn_metadata.attn_bias
+            else:
+                block_list = attn_metadata.window_block_list
+                block_groups = attn_metadata.window_block_groups
+                block_mapping = attn_metadata.window_block_mapping
+                attn_bias = attn_metadata.window_attn_bias
+
             self.position_bias = None
             alibi_blocks = getattr(attn_metadata, 'alibi_blocks', None)
             if self.alibi_slopes is not None and alibi_blocks is not None:
@@ -563,12 +600,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
             output = HPUPagedAttention.forward_decode(
                 query=query,
-                block_mapping=attn_metadata.block_mapping,
-                block_bias=attn_metadata.attn_bias,
-                block_groups=attn_metadata.block_groups,
+                block_mapping=block_mapping,
+                block_bias=attn_bias,
+                block_groups=block_groups,
                 position_bias=self.position_bias,
-                **self.common_attention_args(attn_metadata.block_list,
-                                             key_cache, value_cache,
+                **self.common_attention_args(block_list, key_cache,
+                                             value_cache,
                                              attn_metadata.block_size))
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)

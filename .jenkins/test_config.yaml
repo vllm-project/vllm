@@ -42,6 +42,11 @@ stages:
       #  command: >-
       #    export PT_HPU_LAZY_MODE=1 && export VLLM_USE_V1=1 && export VLLM_CONTIGUOUS_PA=false && 
       #    cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-small.txt -t 1
+      - name: v0_gsm8k_g3_gemma3_tp1
+        flavor: g3.s
+        command: >-
+          export PT_HPU_LAZY_MODE=1 &&
+          cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-gemma.txt -t 1
       - name: v1_gsm8k_small_g3_tp2
         flavor: g3.s
         command: >-
@@ -266,6 +271,12 @@ stages:
           cd .jenkins/vision &&
           PT_HPU_LAZY_MODE=1
           bash run-tests.sh -c configs/models-llama4-scout.txt -t 2
+      - name: multimodal_gemma3_g3_tp1_ep
+        flavor: g3.s
+        command: >-
+          cd .jenkins/vision &&
+          PT_HPU_LAZY_MODE=1
+          bash run-tests.sh -c configs/models-gemma.txt -t 1
   - name: tests_int4_quantization
     steps:
       - name: test_awq

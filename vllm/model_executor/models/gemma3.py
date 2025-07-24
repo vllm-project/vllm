@@ -32,7 +32,8 @@ from vllm.model_executor.layers.activation import GeluAndMul
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
-                                               RowParallelLinear)
+                                               RowParallelLinear,
+                                               SplitQKVParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -41,6 +42,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
@@ -125,16 +127,28 @@ class Gemma3Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = config.query_pre_attn_scalar**-0.5
+        self.split_qkv = cache_config.split_qkv
 
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=config.attention_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
-        )
+        if self.split_qkv:
+            self.qkv_proj = SplitQKVParallelLinear(
+                hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                bias=config.attention_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
+        else:
+            self.qkv_proj = QKVParallelLinear(
+                hidden_size,
+                self.head_dim,
+                self.total_num_heads,
+                self.total_num_kv_heads,
+                bias=config.attention_bias,
+                quant_config=quant_config,
+                prefix=f"{prefix}.qkv_proj",
+            )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -188,8 +202,12 @@ class Gemma3Attention(nn.Module):
         hidden_states: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        if self.split_qkv:
+            q, k, v, _ = self.qkv_proj(hidden_states)
+        else:
+            qkv, _ = self.qkv_proj(hidden_states)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
+                                dim=-1)
 
         q = q.unflatten(-1, (self.num_heads, self.head_dim))
         q = self.q_norm(q)
@@ -201,7 +219,10 @@ class Gemma3Attention(nn.Module):
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
 
-        if not kwargs.get("has_images", False):
+        if current_platform.is_hpu() or not kwargs.get("has_images", False):
+            # In HPU, naive_attn_with_masks is no longer needed since
+            # sliding_window is supported in hpu_attn.
+
             # Fast path for text-only inputs. The performance for the text-only
             # inputs are not affected by the naive attention below.
             output, _ = self.o_proj(attn_output)
@@ -375,6 +396,7 @@ class Gemma3Model(nn.Module):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
+        self.split_qkv = cache_config.split_qkv
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         # NOTE(woosuk): Only apply the normalizer to the output of
@@ -416,14 +438,25 @@ class Gemma3Model(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
+        if not self.split_qkv:
+            stacked_params_mapping = [
+                # (param_name, shard_name, shard_id)
+                ("qkv_proj", "q_proj", "q"),
+                ("qkv_proj", "k_proj", "k"),
+                ("qkv_proj", "v_proj", "v"),
+                ("gate_up_proj", "gate_proj", 0),
+                ("gate_up_proj", "up_proj", 1),
+            ]
+        else:
+            stacked_params_mapping = [
+                # (param_name, shard_name, shard_id)
+                ("qkv_proj.q_proj", "q_proj", "q"),
+                ("qkv_proj.k_proj", "k_proj", "k"),
+                ("qkv_proj.v_proj", "v_proj", "v"),
+                ("gate_up_proj", "gate_proj", 0),
+                ("gate_up_proj", "up_proj", 1),
+            ]
+
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
@@ -448,7 +481,11 @@ class Gemma3Model(nn.Module):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                if self.split_qkv and (shard_id == "q" or shard_id == "v"
+                                       or shard_id == "k"):
+                    weight_loader(param, loaded_weight)
+                else:
+                    weight_loader(param, loaded_weight, shard_id)
                 break
             else:
                 # Skip loading extra bias for GPTQ models.

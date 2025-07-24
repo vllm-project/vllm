@@ -1,0 +1,6 @@
+model_name: "/mnt/weka/llm/google/gemma-3-4b-it"
+dtype: "bfloat16"
+max_model_len: 32768
+max_num_seqs: 32
+num_prompts: 4
+limit_mm_per_prompt_image: 5
