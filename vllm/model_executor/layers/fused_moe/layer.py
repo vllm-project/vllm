@@ -490,7 +490,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 logical_to_physical_map is not None or \
                 logical_replica_count is not None:
             raise NotImplementedError("Expert load balancing is not supported "
-                                      "for TPU.")
+                                      "for CPU.")
         return layer.cpu_fused_moe(
             layer,
             x,
