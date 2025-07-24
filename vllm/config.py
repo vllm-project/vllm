@@ -1469,24 +1469,46 @@ class ModelConfig:
         return self.multimodal_config
 
     def maybe_get_generation_config(self) -> dict[str, Any]:
+        """
+        Get the generation configuration to use for this model.
+
+        If `self.generation_config` is set to:
+        
+        - `"vllm"` - an empty dictionary is returned, indicating that the
+          default vLLM generation configuration should be used.
+        - `"auto"` - the generation configuration is automatically fetched from
+          the Hugging Face model config or the specified path.
+        - set to a specific path - the generation configuration is fetched from
+          that path.
+
+        If the configuration is fetched, it is returned as a dictionary
+        containing only the fields that differ from the default vLLM generation
+        configuration.
+
+        If no configuration is found, an empty dictionary is returned.
+
+        Returns:
+            generation_config (dict[str, Any]): A dictionary containing the
+              generation configuration.
+        """
         if self.generation_config == "vllm":
             return {}
 
-        config = None
+        generation_config = None
         if self.generation_config == "auto":
-            config = try_get_generation_config(
+            generation_config = try_get_generation_config(
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.revision,
             )
         else:
-            config = try_get_generation_config(
+            generation_config = try_get_generation_config(
                 self.generation_config,
                 trust_remote_code=self.trust_remote_code,
             )
 
-        if config is not None:
-            return config.to_diff_dict()
+        if generation_config is not None:
+            return generation_config.to_diff_dict()
 
         return {}
 
