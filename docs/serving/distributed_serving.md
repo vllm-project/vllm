@@ -76,7 +76,7 @@ bash run_cluster.sh \
                 <HEAD_NODE_IP> \
                 --worker \
                 /path/to/the/huggingface/home/in/this/node \
-                -e VLLM_HOST_IP=<HEAD_NODE_IP>
+                -e VLLM_HOST_IP=<WORKER_NODE_IP>
 ```
 
 Note that `VLLM_HOST_IP` is unique for each worker. Keep the shells running these commands open; closing any shell terminates the cluster. Ensure that all nodes can communicate with each other through their IP addresses.
