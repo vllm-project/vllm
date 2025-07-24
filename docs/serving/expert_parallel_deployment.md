@@ -113,7 +113,7 @@ While MoE models are typically trained so that each expert receives a similar nu
 
 ### Configuration
 
-Enable EPLB with the `--enable-eplb` flag. 
+Enable EPLB with the `--enable-eplb` flag.
 
 !!! note "Model Support"
     Currently only DeepSeek V3 architecture is supported.
@@ -167,9 +167,9 @@ For production deployments requiring strict SLA guarantees for time-to-first-tok
 1. **Install KV Connector**: Install NIXL using the [installation script](gh-file:tools/install_nixl.sh)
 
 2. **Configure Both Instances**: Add this flag to both prefill and decode instances:
-   ```bash
-   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-   ```
+```bash
+--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+```
 
 3. **Client Orchestration**: Use the client-side script below to coordinate prefill/decode operations. We are actively working on routing solutions.
 
