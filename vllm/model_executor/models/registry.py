@@ -254,7 +254,11 @@ _SPECULATIVE_DECODING_MODELS = {
     # "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
 }
 
-_TRANSFORMERS_MODELS = {
+_TRANSFORMERS_SUPPORTED_MODELS = {
+    "Emu3ForConditionalGeneration": ("transformers", "TransformersForMultimodalLM"),  # noqa: E501
+}
+
+_TRANSFORMERS_BACKEND_MODELS = {
     "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"), # noqa: E501
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
 }
@@ -266,7 +270,8 @@ _VLLM_MODELS = {
     **_CROSS_ENCODER_MODELS,
     **_MULTIMODAL_MODELS,
     **_SPECULATIVE_DECODING_MODELS,
-    **_TRANSFORMERS_MODELS,
+    **_TRANSFORMERS_SUPPORTED_MODELS,
+    **_TRANSFORMERS_BACKEND_MODELS,
 }
 
 # This variable is used as the args for subprocess.run(). We
