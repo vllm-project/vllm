@@ -128,10 +128,6 @@ STR_NOT_IMPL_ENC_DEC_BACKEND = ("XFormers and Flash-Attention are the only "
                                 "backends currently supported with encoder/"
                                 "decoder models.")
 
-STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER = ("Prompt adapters are not "
-                                       "currently supported with encoder/"
-                                       "decoder models.")
-
 # Efficiently import all enc/dec error strings
 # rather than having to import all of the above
 STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
@@ -145,7 +141,6 @@ STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
     "STR_NOT_IMPL_ENC_DEC_MM": STR_NOT_IMPL_ENC_DEC_MM,
     "STR_NOT_IMPL_ENC_DEC_SPEC_DEC": STR_NOT_IMPL_ENC_DEC_SPEC_DEC,
     "STR_NOT_IMPL_ENC_DEC_BACKEND": STR_NOT_IMPL_ENC_DEC_BACKEND,
-    "STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER": STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER,
 }
 
 # Constants related to forcing the attention backend selection
@@ -1383,12 +1378,11 @@ def find_nccl_library() -> str:
 
 prev_set_stream = torch.cuda.set_stream
 
-_current_stream = None
+_current_stream_tls = threading.local()
 
 
 def _patched_set_stream(stream: torch.cuda.Stream) -> None:
-    global _current_stream
-    _current_stream = stream
+    _current_stream_tls.value = stream
     prev_set_stream(stream)
 
 
@@ -1407,16 +1401,16 @@ def current_stream() -> torch.cuda.Stream:
     from C/C++ code.
     """
     from vllm.platforms import current_platform
-    global _current_stream
-    if _current_stream is None:
+    if not hasattr(_current_stream_tls,
+                   "value") or _current_stream_tls.value is None:
         # when this function is called before any stream is set,
         # we return the default stream.
         # On ROCm using the default 0 stream in combination with RCCL
         # is hurting performance. Therefore creating a dedicated stream
         # per process
-        _current_stream = torch.cuda.Stream() if current_platform.is_rocm(
-        ) else torch.cuda.current_stream()
-    return _current_stream
+        _current_stream_tls.value = torch.cuda.Stream(
+        ) if current_platform.is_rocm() else torch.cuda.current_stream()
+    return _current_stream_tls.value
 
 
 def enable_trace_function_call_for_thread(vllm_config: VllmConfig) -> None:
