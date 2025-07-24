@@ -910,22 +910,6 @@ class DPEngineCoreProc(EngineCoreProc):
             logger.debug("Setting kv_transfer_config.engine_id to %s",
                          vllm_config.kv_transfer_config.engine_id)
 
-        from vllm.platforms import current_platform
-        device_control_env_var = current_platform.device_control_env_var
-        world_size = vllm_config.parallel_config.world_size
-        # Set CUDA_VISIBLE_DEVICES or equivalent.
-        try:
-            os.environ[device_control_env_var] = ",".join(
-                str(current_platform.device_id_to_physical_device_id(i))
-                for i in range(local_dp_rank *
-                               world_size, (local_dp_rank + 1) * world_size))
-        except IndexError as e:
-            raise Exception(
-                f"Error setting {device_control_env_var}: "
-                f"local range: [{local_dp_rank * world_size}, "
-                f"{(local_dp_rank + 1) * world_size}) "
-                f"base value: \"{os.getenv(device_control_env_var)}\"") from e
-
         self.dp_rank = dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
 
@@ -1088,13 +1072,40 @@ class DPEngineCoreActor(DPEngineCoreProc):
         vllm_config.parallel_config.data_parallel_rank_local = \
             local_dp_rank
 
-        # Ray sets CUDA_VISIBLE_DEVICES to empty string,
-        # we clean this up to be able to properly initialize
-        # data parallel groups.
-        del os.environ['CUDA_VISIBLE_DEVICES']
+        # Set CUDA_VISIBLE_DEVICES as early as possible in actor life cycle
+        # NOTE: in MP we set CUDA_VISIBLE_DEVICES at process creation time,
+        # and this cannot be done in the same way for Ray because:
+        # 1) Ray manages life cycle of all ray workers (including
+        # DPEngineCoreActor)
+        # 2) Ray sets CUDA_VISIBLE_DEVICES based on num_gpus configuration
+        # To bypass 2, we need to also set
+        # RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES, but vLLM workers created
+        # thereafter would have CUDA_VISIBLE_DEVICES set, which is sticky:
+        # https://github.com/ray-project/ray/blob/e752fc319ddedd9779a0989b6d3613909bad75c9/python/ray/_private/worker.py#L456 # noqa: E501
+        # But vLLM worker assumes visibility into all local GPUs, therefore
+        # this results in incorrect indexing into the GPU ID list.
+        self._set_cuda_visible_devices(vllm_config, local_dp_rank)
 
         super().__init__(vllm_config, local_client, "", executor_class,
                          log_stats)
+
+    def _set_cuda_visible_devices(self, vllm_config: VllmConfig,
+                                  local_dp_rank: int):
+        from vllm.platforms import current_platform
+        device_control_env_var = current_platform.device_control_env_var
+        world_size = vllm_config.parallel_config.world_size
+        # Set CUDA_VISIBLE_DEVICES or equivalent.
+        try:
+            os.environ[device_control_env_var] = ",".join(
+                str(current_platform.device_id_to_physical_device_id(i))
+                for i in range(local_dp_rank *
+                               world_size, (local_dp_rank + 1) * world_size))
+        except IndexError as e:
+            raise Exception(
+                f"Error setting {device_control_env_var}: "
+                f"local range: [{local_dp_rank * world_size}, "
+                f"{(local_dp_rank + 1) * world_size}) "
+                f"base value: \"{os.getenv(device_control_env_var)}\"") from e
 
     def _decorate_logs(self):
         pass
