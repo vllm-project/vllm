@@ -538,6 +538,12 @@ class CudaPlatformBase(Platform):
     def empty_cache(cls):
         torch.cuda.empty_cache()
 
+    @classmethod
+    def get_num_sms(cls, device: torch.device):
+        device_properties = torch.cuda.get_device_properties(device)
+        num_sms = device_properties.multi_processor_count
+        return num_sms
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,

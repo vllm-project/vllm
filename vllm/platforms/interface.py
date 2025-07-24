@@ -597,6 +597,14 @@ class Platform:
     def synchronize(cls):
         torch.accelerator.synchronize()
 
+    @classmethod
+    def get_num_sms(cls, device: torch.device) -> int:
+        """
+        Returns the number of streaming multiprocessors (SMS) on a single GPU.
+        By default we return zero
+        """
+        return 0
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED

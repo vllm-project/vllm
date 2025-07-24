@@ -485,4 +485,11 @@ class RocmPlatform(Platform):
 
     @classmethod
     def synchronize(cls):
+        # leave this in case torch.acceleartor.synchronize() not work.
         torch.cuda.synchronize()
+
+    @classmethod
+    def get_num_sms(cls, device: torch.device):
+        device_properties = torch.cuda.get_device_properties(device)
+        num_sms = device_properties.multi_processor_count
+        return num_sms
