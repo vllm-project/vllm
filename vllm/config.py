@@ -1479,19 +1479,19 @@ class ModelConfig:
             dict[str, Any]: A dictionary with the differing sampling
             parameters, if `generation_config` is `"vllm"` an empty dictionary.
         """
+        config = {}
+
         if self.generation_config == "auto":
             config = try_get_generation_config(
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.revision,
-            )
+            ) or {}
         elif self.generation_config != "vllm":
             config = try_get_generation_config(
                 self.generation_config,
                 trust_remote_code=self.trust_remote_code,
-            )
-        else:
-            config = {}
+            ) or {}
 
         if isinstance(config, GenerationConfig):
             config = config.to_diff_dict()
