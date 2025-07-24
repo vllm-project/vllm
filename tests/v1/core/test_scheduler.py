@@ -1918,10 +1918,10 @@ def test_priority_scheduling_preemption_victim_no_scheduled():
     running_priorities = [req.priority for req in scheduler.running]
     running_req_ids = [req.request_id for req in scheduler.running]
 
-    assert running_priorities == [3, 4, 5, 1]
-    assert running_req_ids == ["1", "2", "3", "4"]
+    assert running_priorities == [1, 3, 4, 5]
+    assert running_req_ids == ["4", "1", "2", "3"]
     assert scheduler.waiting.peek_request().priority == 2
-    assert scheduler.waiting.peek_request().request_id == 5
+    assert scheduler.waiting.peek_request().request_id == "5"
 
 
 def test_priority_scheduling_preemption_victim_subsequent_high():
@@ -1962,7 +1962,7 @@ def test_priority_scheduling_preemption_victim_subsequent_high():
 
     # Add a high priority request.
     high_priority_requests = create_requests_with_priority(
-        num_requests=2,
+        num_requests=1,
         priorities=[1],
         arrival_times=[4.0],
         num_tokens=16,
@@ -2003,8 +2003,7 @@ def test_priority_scheduling_preemption_victim_subsequent_high():
     running_priorities = [req.priority for req in scheduler.running]
     running_req_ids = [req.request_id for req in scheduler.running]
 
-    assert running_priorities == [2, 3, 1]
-    assert running_req_ids == ["1", "2", "4"]
+    assert running_priorities == [1, 2, 3]
+    assert running_req_ids == ["4", "1", "2"]
     assert scheduler.waiting.peek_request().priority == 4
-    assert scheduler.waiting.peek_request().request_id == 3
-
+    assert scheduler.waiting.peek_request().request_id == "3"
