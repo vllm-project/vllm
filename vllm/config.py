@@ -670,14 +670,9 @@ class ModelConfig:
             msg = f"{msg_prefix} {msg_hint}"
             warnings.warn(msg, DeprecationWarning, stacklevel=2)
 
-        self.runner_type: RunnerType = (self._get_default_runner_type(arch) if
-                                        self.runner == "auto" else self.runner)
-        logger.debug("Selected runner type: %s", self.runner_type)
-
-        self.convert_type: ConvertType = (self._get_default_convert_type(
-            arch, self.runner_type) if self.convert == "auto" else
-                                          self.convert)
-        logger.debug("Selected convert type: %s", self.convert_type)
+        self.runner_type = self._get_runner_type(arch, self.runner)
+        self.convert_type = self._get_convert_type(arch, self.runner_type,
+                                                   self.convert)
 
         if self.runner_type == "generate" and not is_generative_model:
             raise ValueError("This model does not support `--runner generate`")
@@ -929,11 +924,18 @@ class ModelConfig:
         self.tokenizer_mode = tokenizer_mode
 
     def _get_default_runner_type(self, architecture: str) -> RunnerType:
-        if self.registry.is_cross_encoder_model(architecture):
-            return "pooling"
+        registry = self.registry
 
-        model_id = self.model
-        if get_pooling_config(model_id, self.revision):
+        if architecture in registry.get_supported_archs():
+            if registry.is_text_generation_model(architecture):
+                return "generate"
+            if registry.is_pooling_model(architecture):
+                return "pooling"
+
+            raise RuntimeError(f"Registered architecture ({architecture}) "
+                               "should be a generative or pooling model")
+
+        if get_pooling_config(self.model, self.revision):
             return "pooling"
 
         for suffix, runner_type in SUFFIX_TO_RUNNER_TYPE:
@@ -942,11 +944,37 @@ class ModelConfig:
 
         return "generate"
 
+    def _get_runner_type(
+        self,
+        architecture: str,
+        runner: RunnerOption,
+    ) -> RunnerType:
+        if runner != "auto":
+            return runner
+
+        runner_type = self._get_default_runner_type(architecture)
+
+        logger.info(
+            "Resolved `--runner auto` to `--runner %s`. "
+            "Pass the value explicitly to silence this message.", runner_type)
+
+        return runner_type
+
     def _get_default_convert_type(
         self,
         architecture: str,
         runner_type: RunnerType,
     ) -> ConvertType:
+        registry = self.registry
+
+        if architecture in registry.get_supported_archs():
+            if runner_type == "generate" and registry.is_text_generation_model(
+                    architecture):
+                return "none"
+            if runner_type == "pooling" and registry.is_pooling_model(
+                    architecture):
+                return "none"
+
         if self.registry.is_cross_encoder_model(architecture):
             return "classify"
 
@@ -958,6 +986,24 @@ class ModelConfig:
             return "embed"
 
         return "none"
+
+    def _get_convert_type(
+        self,
+        architecture: str,
+        runner_type: RunnerType,
+        convert: ConvertOption,
+    ) -> ConvertType:
+        if convert != "auto":
+            return convert
+
+        convert_type = self._get_default_convert_type(architecture,
+                                                      runner_type)
+
+        logger.info(
+            "Resolved `--convert auto` to `--convert %s`. "
+            "Pass the value explicitly to silence this message.", convert_type)
+
+        return convert_type
 
     def _get_supported_generation_tasks(
         self,
