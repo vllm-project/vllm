@@ -45,7 +45,6 @@ from vllm.outputs import (ClassificationRequestOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput, RequestOutput,
                           ScoringRequestOutput)
 from vllm.pooling_params import PoolingParams, PoolingTask
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
@@ -318,7 +317,6 @@ class LLM:
         *,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
     ) -> list[RequestOutput]:
@@ -334,7 +332,6 @@ class LLM:
         prompt_token_ids: Optional[list[int]] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
     ) -> list[RequestOutput]:
@@ -350,7 +347,6 @@ class LLM:
         prompt_token_ids: Optional[list[list[int]]] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
     ) -> list[RequestOutput]:
@@ -367,7 +363,6 @@ class LLM:
         prompt_token_ids: list[int],
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
     ) -> list[RequestOutput]:
@@ -384,7 +379,6 @@ class LLM:
         prompt_token_ids: list[list[int]],
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
     ) -> list[RequestOutput]:
@@ -399,7 +393,6 @@ class LLM:
         prompt_token_ids: Union[list[int], list[list[int]]],
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
     ) -> list[RequestOutput]:
@@ -419,7 +412,6 @@ class LLM:
         prompt_token_ids: Optional[Union[list[int], list[list[int]]]] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         guided_options_request: Optional[Union[LLMGuidedOptions,
                                                GuidedDecodingRequest]] = None,
         priority: Optional[list[int]] = None,
@@ -444,8 +436,6 @@ class LLM:
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-            prompt_adapter_request: Prompt Adapter request to use for
-                generation, if any.
             priority: The priority of the requests, if any.
                 Only applicable when priority scheduling policy is enabled.
 
@@ -511,7 +501,6 @@ class LLM:
             params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
             guided_options=guided_options_request,
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
@@ -967,7 +956,6 @@ class LLM:
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         pooling_task: PoolingTask = "encode",
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[PoolingRequestOutput]:
@@ -984,7 +972,6 @@ class LLM:
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         pooling_task: PoolingTask = "encode",
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[PoolingRequestOutput]:
@@ -1001,7 +988,6 @@ class LLM:
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         pooling_task: PoolingTask = "encode",
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[PoolingRequestOutput]:
@@ -1019,7 +1005,6 @@ class LLM:
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         pooling_task: PoolingTask = "encode",
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[PoolingRequestOutput]:
@@ -1037,7 +1022,6 @@ class LLM:
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         pooling_task: PoolingTask = "encode",
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[PoolingRequestOutput]:
@@ -1053,7 +1037,6 @@ class LLM:
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         pooling_task: PoolingTask = "encode",
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[PoolingRequestOutput]:
@@ -1074,7 +1057,6 @@ class LLM:
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         pooling_task: PoolingTask = "encode",
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[PoolingRequestOutput]:
@@ -1096,8 +1078,6 @@ class LLM:
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-            prompt_adapter_request: Prompt Adapter request to use for
-                generation, if any.
             pooling_task: Override the pooling task to use.
 
         Returns:
@@ -1154,7 +1134,6 @@ class LLM:
             use_tqdm=use_tqdm,
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
-            prompt_adapter_request=prompt_adapter_request,
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
@@ -1171,7 +1150,6 @@ class LLM:
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[EmbeddingRequestOutput]:
         """
         Generate an embedding vector for each prompt.
@@ -1191,8 +1169,6 @@ class LLM:
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-            prompt_adapter_request: Prompt Adapter request to use for
-                generation, if any.
 
         Returns:
             A list of `EmbeddingRequestOutput` objects containing the
@@ -1209,7 +1185,6 @@ class LLM:
             use_tqdm=use_tqdm,
             pooling_params=pooling_params,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
             pooling_task="embed",
         )
 
@@ -1222,7 +1197,6 @@ class LLM:
         *,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[ClassificationRequestOutput]:
         """
         Generate class logits for each prompt.
@@ -1240,8 +1214,6 @@ class LLM:
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-            prompt_adapter_request: Prompt Adapter request to use for
-                generation, if any.
 
         Returns:
             A list of `ClassificationRequestOutput` objects containing the
@@ -1257,7 +1229,6 @@ class LLM:
             prompts,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
             pooling_task="classify",
         )
 
@@ -1271,7 +1242,6 @@ class LLM:
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[ScoringRequestOutput]:
 
         encoded_output: list[PoolingRequestOutput] = self.encode(
@@ -1279,7 +1249,6 @@ class LLM:
             truncate_prompt_tokens=truncate_prompt_tokens,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
             pooling_task="embed",
         )
 
@@ -1307,7 +1276,6 @@ class LLM:
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[ScoringRequestOutput]:
 
         if isinstance(tokenizer, MistralTokenizer):
@@ -1365,7 +1333,6 @@ class LLM:
             params=pooling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
@@ -1385,7 +1352,6 @@ class LLM:
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> list[ScoringRequestOutput]:
         """Generate similarity scores for all pairs `<text,text_pair>` or
           `<multi-modal data, multi-modal data pair>`.
@@ -1416,8 +1382,6 @@ class LLM:
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-            prompt_adapter_request: Prompt Adapter request to use for
-                generation, if any.
 
         Returns:
             A list of `ScoringRequestOutput` objects containing the
@@ -1508,8 +1472,7 @@ class LLM:
                 data_2,  # type: ignore[arg-type]
                 truncate_prompt_tokens,
                 use_tqdm,
-                lora_request,
-                prompt_adapter_request)
+                lora_request)
         else:
             return self._embedding_score(
                 tokenizer,
@@ -1517,8 +1480,7 @@ class LLM:
                 data_2,  # type: ignore[arg-type]
                 truncate_prompt_tokens,
                 use_tqdm,
-                lora_request,
-                prompt_adapter_request)
+                lora_request)
 
     def start_profile(self) -> None:
         self.llm_engine.start_profile()
@@ -1629,7 +1591,6 @@ class LLM:
         *,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
-        prompt_adapter_request: Optional[PromptAdapterRequest],
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         guided_options: Optional[GuidedDecodingRequest] = None,
         priority: Optional[list[int]] = None,
@@ -1675,7 +1636,6 @@ class LLM:
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request[i] if isinstance(
                     lora_request, Sequence) else lora_request,
-                prompt_adapter_request=prompt_adapter_request,
                 priority=priority[i] if priority else 0,
             )
 
@@ -1685,7 +1645,6 @@ class LLM:
         params: Union[SamplingParams, PoolingParams],
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
         request_id = str(next(self.request_counter))
@@ -1695,7 +1654,6 @@ class LLM:
             params,
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
-            prompt_adapter_request=prompt_adapter_request,
             priority=priority,
         )
 
