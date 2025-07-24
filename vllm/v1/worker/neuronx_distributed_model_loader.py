@@ -25,7 +25,7 @@ import shutil
 from contextlib import contextmanager
 from math import ceil
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 import regex as re
 import torch
@@ -79,7 +79,7 @@ class NeuronModelBase(nn.Module):
 
         # Lazy initialized
         self.model: nn.Module
-        self.kv_caches: Optional[List[Any]] = None
+        self.kv_caches: Optional[list[Any]] = None
         self.neuron_config: NeuronConfig
         self.is_reorder_needed: bool
         self.architecture: str
@@ -118,14 +118,16 @@ class NeuronModelBase(nn.Module):
     @contextmanager
     def _reordered(self, input_block_ids: torch.Tensor, **tensor_inputs):
         """
-        Context manager that yields reordered input_block_ids, inputs, and a restore function.
-        Automatically restores output to original order if needed.
+        Context manager that yields reordered input_block_ids, inputs, and a 
+        restore function. Automatically restores output to original order 
+        if needed.
         
-        [NOTE] This is MANADATORY for contiguous kv cache as it will impact the output accuracy.
+        [NOTE] This is MANADATORY for contiguous kv cache as it will impact 
+        the output accuracy.
         
         TODO: This sequence id reordering is better to live in NxD-Inference.
         """
-        logger.debug(f"is_reorder_needed: {self.is_reorder_needed}")
+        logger.debug("is_reorder_needed: %s", self.is_reorder_needed)
         if self.is_reorder_needed:
             sorted_ids, sorted_indices = torch.sort(input_block_ids)
             reordered_inputs = {
@@ -164,9 +166,9 @@ class NeuronModelBase(nn.Module):
                                       kwargs)
             return True, compiled_model_path, config
         except (FileNotFoundError, ValueError) as e:
-            logger.warning(f"Exception: {e}")
-            logger.warning(
-                f"Failed to load from {compiled_model_path}. Recompiling...")
+            logger.warning("Exception: %s", e)
+            logger.warning("Failed to load from %s. Recompiling...",
+                           compiled_model_path)
             return False, compiled_model_path, config
 
     def _get_compiled_model_path(self, model_name_or_path: str,
@@ -267,8 +269,6 @@ class NeuronCausalLM(NeuronModelBase):
 
 
 def _get_model_configs(config: PretrainedConfig) -> str:
-    logger.debug(f"PretrainedConfig: {config}")
-
     archs = getattr(config, "architectures", [])
     num_key_value_heads = getattr(config, "num_key_value_heads", None)
     head_dim = getattr(config, "head_dim", None)
@@ -296,8 +296,9 @@ def _get_neuron_model_cls(architecture: str):
             raise KeyError
     except KeyError:
         raise ValueError(
-            f"Model {architecture} is not supported on Neuron for now. "
-            "Supported models: {list(MODEL_TYPES.keys())}")
+            "Model %s is not supported on Neuron for now. "
+            "Supported models: %s", architecture,
+            list(MODEL_TYPES.keys())) from None
 
 
 def get_neuron_model(model_config: ModelConfig, cache_config: CacheConfig,
