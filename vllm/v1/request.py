@@ -16,6 +16,7 @@ from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
+    from vllm.v1.core.kv_cache_utils import BlockHash
 
 
 class Request:
@@ -81,6 +82,8 @@ class Request:
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: Optional[str] = cache_salt
+
+        self.block_hashes: list[BlockHash] = []
 
         # Multi-modal related
         self.mm_positions = multi_modal_placeholders or []

@@ -25,8 +25,10 @@ from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import make_zmq_socket, resolve_obj_by_qualname
-from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
+from vllm.utils import (get_hash_fn_by_name, make_zmq_socket,
+                        resolve_obj_by_qualname)
+from vllm.v1.core.kv_cache_utils import (BlockHash, get_kv_cache_config,
+                                         hash_request_tokens,
                                          unify_kv_cache_configs)
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -134,6 +136,20 @@ class EngineCore:
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
 
+        self._maybe_hash_request_tokens: (
+            Callable)[[Request], list[BlockHash]] = lambda req: []
+        if (self.vllm_config.cache_config.enable_prefix_caching
+                or self.scheduler.get_kv_connector()):
+
+            hash_function = get_hash_fn_by_name(
+                self.vllm_config.cache_config.prefix_caching_hash_algo)
+            block_size = self.vllm_config.cache_config.block_size
+
+            def maybe_hash_request_tokens(req: Request) -> list[BlockHash]:
+                return hash_request_tokens(hash_function, block_size, req)
+
+            self._maybe_hash_request_tokens = maybe_hash_request_tokens
+
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
         start = time.time()
@@ -222,6 +238,8 @@ class EngineCore:
                 not self.scheduler.get_kv_connector()):
             logger.warning("Got kv_transfer_params, but no KVConnector found. "
                            "Disabling KVTransfer for this request.")
+
+        req.block_hashes = self._maybe_hash_request_tokens(req)
 
         self.scheduler.add_request(req)
 
