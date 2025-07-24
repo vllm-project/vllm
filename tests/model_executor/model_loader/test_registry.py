@@ -6,7 +6,6 @@ from torch import nn
 
 from vllm.config import LoadConfig, ModelConfig
 from vllm.model_executor.model_loader import (get_model_loader,
-                                              get_supported_load_formats,
                                               register_model_loader)
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 
@@ -27,7 +26,6 @@ class CustomModelLoader(BaseModelLoader):
 
 def test_register_model_loader():
     load_config = LoadConfig(load_format="custom_load_format")
-    assert load_config.load_format in get_supported_load_formats()
     assert isinstance(get_model_loader(load_config), CustomModelLoader)
 
 

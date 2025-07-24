@@ -23,6 +23,8 @@ from vllm.model_executor.model_loader.utils import (
 
 logger = init_logger(__name__)
 
+# Reminder: Please update docstring in `LoadConfig`
+# if a new load format is added here
 LoadFormats = Literal[
     "auto",
     "bitsandbytes",
@@ -99,14 +101,10 @@ def register_model_loader(load_format: str):
     return _wrapper
 
 
-def get_supported_load_formats() -> set[str]:
-    return set(_LOAD_FORMAT_TO_MODEL_LOADER.keys())
-
-
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
     load_format = load_config.load_format
-    if load_format not in get_supported_load_formats():
+    if load_format not in _LOAD_FORMAT_TO_MODEL_LOADER:
         raise ValueError(f"Load format `{load_format}` is not supported")
     return _LOAD_FORMAT_TO_MODEL_LOADER[load_format](load_config)
 
@@ -127,7 +125,6 @@ __all__ = [
     "get_architecture_class_name",
     "get_model_architecture",
     "get_model_cls",
-    "get_supported_load_formats",
     "register_model_loader",
     "BaseModelLoader",
     "BitsAndBytesModelLoader",
