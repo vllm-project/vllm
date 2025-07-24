@@ -230,6 +230,7 @@ if flashinfer_comm is not None:
                 quant_out=None,
                 scale_out=None,
                 layout_code=None,
+                scale_factor=None,
             )
         else:
             allreduce_out = tensor_model_parallel_all_reduce(allreduce_in)
