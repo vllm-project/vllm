@@ -985,6 +985,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Used to force set up loopback IP
     "VLLM_LOOPBACK_IP":
     lambda: os.getenv("VLLM_LOOPBACK_IP", ""),
+
+    # Used to set the process name prefix for vLLM processes.
+    # This is useful for debugging and monitoring purposes.
+    # The default value is "VLLM".
+    "VLLM_PROCESS_NAME_PREFIX":
+    lambda: os.getenv("VLLM_PROCESS_NAME_PREFIX", "VLLM"),
 }
 
 # --8<-- [end:env-vars-definition]
