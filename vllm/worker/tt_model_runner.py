@@ -157,6 +157,10 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             self.max_cross_blocks = (self.model.max_cross_attn_tokens //
                                      self.cache_config.block_size)
 
+        is_dp = (self.model_config.override_tt_config
+                 and self.model_config.override_tt_config.get(
+                     "data_parallel", 1) > 1)
+
         # Detect if the model is a TG Llama to use DP KV cache
         # vLLM doesn't know which blocks correspond to which DP device pool so
         # may allocate non-local blocks to a user. To avoid bad output because
@@ -168,13 +172,12 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         if ("Llama" in self.model_config.model
                 and "70B" in self.model_config.model
                 and self.device_config.device.get_num_devices() == 32
-                and (self.model_config.override_tt_config.get(
-                    "data_parallel", 1) == 1)):
+                and not is_dp):
             self.llama_tg = True
         else:
             self.llama_tg = False
 
-        if self.llama_tg:
+        if self.llama_tg or is_dp:
             self.dp_kv_cache = True
         else:
             self.dp_kv_cache = False
@@ -778,7 +781,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             next_token_ids = self._sample_tokens(
                 next_logits, model_input.tt_sampling_params)
         else:
-            next_token_ids = tt_out
+            next_token_ids = tt_out[:model_input.unpadded_batch_size]
         if not is_decode or not self.async_torch_proc:
             return next_token_ids
         else:
