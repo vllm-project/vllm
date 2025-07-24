@@ -6,7 +6,6 @@
 
 # ruff: noqa: E501,SIM102
 
-import torch
 from packaging import version
 
 from vllm.triton_utils import tl, triton
@@ -112,6 +111,7 @@ def _chunk_scan_fwd_kernel(
     # Pointers to matrices
     cb_ptr,
     x_ptr,
+    z_ptr,
     out_ptr,
     dt_ptr,
     dA_cumsum_ptr,
@@ -137,6 +137,9 @@ def _chunk_scan_fwd_kernel(
     stride_x_seqlen: tl.constexpr,
     stride_x_head: tl.constexpr,
     stride_x_hdim: tl.constexpr,
+    stride_z_seqlen: tl.constexpr,
+    stride_z_head: tl.constexpr,
+    stride_z_hdim: tl.constexpr,
     stride_out_seqlen: tl.constexpr,
     stride_out_head: tl.constexpr,
     stride_out_hdim: tl.constexpr,
@@ -163,6 +166,7 @@ def _chunk_scan_fwd_kernel(
     IS_CAUSAL: tl.constexpr,
     HAS_D: tl.constexpr,
     D_HAS_HDIM: tl.constexpr,
+    HAS_Z: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -385,6 +389,16 @@ def _chunk_scan_fwd_kernel(
                              other=0.0).to(tl.float32)
         acc += x_residual * D
 
+    if HAS_Z:
+        z_ptr += c_idx * chunk_size * stride_z_seqlen + pid_h * stride_z_head
+        z_ptrs = z_ptr + (stride_z_seqlen * offs_out_m[:, None] +
+                          stride_z_hdim * offs_out_n[None, :])
+        z = tl.load(z_ptrs,
+                    mask=(offs_out_m[:, None] < chunk_size_limit) &
+                    (offs_out_n[None, :] < hdim),
+                    other=0.0).to(tl.float32)
+        acc *= z * tl.sigmoid(z)
+
     out_ptr += c_idx * chunk_size * stride_out_seqlen + pid_h * stride_out_head
     out_ptrs = out_ptr + (stride_out_seqlen * offs_out_m[:, None] +
                           offs_out_n[None, :] * stride_out_hdim)
@@ -410,7 +424,6 @@ def _chunk_scan_fwd(
     out=None,
 ):
     assert seq_idx is not None, "this implementation requires seq_idx"
-    assert z is None, "this implementation doesn't support z"
 
     seqlen, nheads, headdim = x.shape
     _, nchunks, chunk_size = dt.shape
@@ -420,6 +433,8 @@ def _chunk_scan_fwd(
     assert cb.shape == (nchunks, ngroups, chunk_size, chunk_size)
     if D is not None:
         assert D.shape == (nheads, headdim) or D.shape == (nheads, )
+    if z is not None:
+        assert z.shape == x.shape
     assert dt.shape == (nheads, nchunks, chunk_size)
     assert dA_cumsum.shape == (nheads, nchunks, chunk_size)
     assert states.shape == (nchunks, nheads, headdim, dstate)
@@ -438,14 +453,18 @@ def _chunk_scan_fwd(
             headdim, META['BLOCK_SIZE_N']), nchunks
         if chunk_offsets is None else len(chunk_offsets), nheads)
 
+    z_strides = ((z.stride(0), z.stride(1), z.stride(2)) if z is not None else
+                 (0, 0, 0))
     initial_states_strides = ((initial_states.stride(0),
                                initial_states.stride(1),
                                initial_states.stride(2),
                                initial_states.stride(3))
                               if initial_states is not None else (0, 0, 0, 0))
+
     _chunk_scan_fwd_kernel[grid](
         cb_ptr=cb,
         x_ptr=x,
+        z_ptr=z,
         out_ptr=out,
         dt_ptr=dt,
         dA_cumsum_ptr=dA_cumsum,
@@ -469,6 +488,9 @@ def _chunk_scan_fwd(
         stride_x_seqlen=x.stride(0),
         stride_x_head=x.stride(1),
         stride_x_hdim=x.stride(2),
+        stride_z_seqlen=z_strides[0],
+        stride_z_head=z_strides[1],
+        stride_z_hdim=z_strides[2],
         stride_out_seqlen=out.stride(0),
         stride_out_head=out.stride(1),
         stride_out_hdim=out.stride(2),
@@ -494,6 +516,7 @@ def _chunk_scan_fwd(
         IS_CAUSAL=True,
         HAS_D=D is not None,
         D_HAS_HDIM=D.dim() == 2 if D is not None else True,
+        HAS_Z=z is not None,
         BLOCK_SIZE_DSTATE=max(triton.next_power_of_2(dstate), 16),
         IS_TRITON_22=TRITON_22,
         HAS_INITSTATES=initial_states is not None,
