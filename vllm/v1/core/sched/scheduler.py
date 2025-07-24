@@ -149,8 +149,7 @@ class Scheduler(SchedulerInterface):
         self.relaxed_thinking = speculative_config.relaxed_thinking
         self.think_start_token_id = None
         self.think_end_token_id = None
-        reasoning_parser: Optional[Callable[[AnyTokenizer],
-                                            ReasoningParser]] = None
+        reasoning_parser: ReasoningParser = None
 
         self.use_eagle = False
         self.num_spec_tokens = self.num_lookahead_tokens = 0
@@ -166,23 +165,22 @@ class Scheduler(SchedulerInterface):
                 if not (0 < speculative_config.posterior_alpha < 1):
                     raise ValueError("Invalid posterior_alpha, the value "
                                      "should be in range (0, 1).")
-                if not speculative_config.reasoning_parser :
+                if not speculative_config.reasoning_parser:
                     raise ValueError("No reasoning_parser specified.")
                 logger.info(f"Enable relaxed thinking, posterior_alpha="
                             f"{speculative_config.posterior_alpha}.")
+                tokenizer = AutoTokenizer.from_pretrained(
+                    self.vllm_config.model_config.tokenizer)
                 try:
-                    reasoning_parser = (
+                    reasoning_parser = \
                         ReasoningParserManager.get_reasoning_parser(
-                            speculative_config.reasoning_parser))
+                            speculative_config.reasoning_parser)(tokenizer)
                     assert reasoning_parser is not None
                 except Exception as e:
                     raise TypeError(
-                        f"{speculative_config.reasoning_parser=} has " \
+                        f"{speculative_config.reasoning_parser} has " \
                          "not been registered") from e
                 
-                tokenizer = AutoTokenizer.from_pretrained(
-                    self.vllm_config.model_config.tokenizer)
-                reasoning_parser = reasoning_parser(tokenizer=tokenizer)
                 logger.info(f"Use reasoning parser {reasoning_parser}.")
                 
                 if speculative_config.reasoning_parser == 'deepseek_r1':
