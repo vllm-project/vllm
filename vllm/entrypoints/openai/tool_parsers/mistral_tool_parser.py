@@ -250,7 +250,7 @@ class MistralToolParser(ToolParser):
             delta.content = additional_content
         if len(delta_tool_calls) > 0:
             delta.tool_calls = delta_tool_calls
-        
+
         # HACK: serving_chat.py inspects the internal state of tool parsers
         # when determining it's final streaming delta, automatically
         # adding autocompleted JSON.
@@ -451,8 +451,7 @@ class MistralToolParser(ToolParser):
                 self.current_tool_index += 1
                 self.current_tool_id = MistralToolCall.generate_random_id()
                 current_tool_call = DeltaToolCall(
-                    index=self.current_tool_index,
-                )
+                    index=self.current_tool_index, )
             if current_tool_call.function is None:
                 current_tool_call.function = DeltaFunctionCall()
 
@@ -495,8 +494,6 @@ class MistralToolParser(ToolParser):
         # is set to tool_calls when at least one tool is called.
         if delta_tool_calls and not self.prev_tool_call_arr:
             self.prev_tool_call_arr = [{"arguments": {}}]
-
-
 
         if content or len(delta_tool_calls) > 0:
             delta_message = DeltaMessage()
