@@ -143,6 +143,7 @@ class HPUAttentionMetadata(HPUPagedAttentionMetadata, AttentionMetadata):
     window_block_usage: Optional[torch.Tensor] = None
     window_attn_bias: Optional[torch.Tensor] = None
     use_window_sdpa: Optional[bool] = None
+    sliding_window_right: Optional[int] = None
 
 
 @dataclass
@@ -425,6 +426,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.sliding_window = sliding_window
+
         self.prompt_position_bias = None
         self.prev_attn = None
         self.alibi_slopes = None
@@ -569,7 +571,8 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
 
                 if attn_metadata.use_window_sdpa:
                     attn_bias = attn_metadata.attn_bias
-                    window_size = (self.sliding_window, 0)
+                    window_size = (self.sliding_window,
+                                   attn_metadata.sliding_window_right)
                     common_args['window_size'] = window_size
                     # TODO: Currently HPU doesn't support GQA for FusedSDPA
                     # with causal + window, so repeat KV so QKV are all the

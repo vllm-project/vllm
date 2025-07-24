@@ -367,6 +367,7 @@ batch size is often at its maximum, making large-batch HPU graphs critical to ca
 - `VLLM_HANDLE_TOPK_DUPLICATES`: if ``true`` - handles duplicates outside top-k. The default is `false`.
 - `VLLM_CONFIG_HIDDEN_LAYERS`: configures how many hidden layers to run in a HPUGraph for model splitting among hidden layers when TP is 1. It helps to improve throughput by reducing inter-token latency limitations in some models. The default is `1`.
 - `VLLM_SKIP_WARMUP`: if `true`, warm-up is skipped. The default is `false`.
+- `VLLM_FUSEDSDPA_SLIDE_RIGHT`:  right sliding window size when fusedsdpa used with sliding window. It helps with memory and performance when long context is used. The default is `0`. Example: for sliding window of size 1024, set VLLM_FUSEDSDPA_SLIDE_RIGHT=1024
 
 > [!TIP]
 > When a deployed workload does not utilize the full context that a model can handle, it is good practice to limit the maximum values upfront based on the input and output token lengths that will be generated after serving the vLLM server.
