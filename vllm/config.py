@@ -3729,7 +3729,7 @@ GuidedDecodingBackend = Literal["auto", "xgrammar", "guidance", "outlines"]
 class DecodingConfig:
     """Dataclass which contains the decoding strategy of the engine."""
 
-    backend: GuidedDecodingBackend = "auto" if envs.VLLM_USE_V1 else "xgrammar"
+    backend: GuidedDecodingBackend = "auto"
     """Which engine will be used for guided decoding (JSON schema / regex etc)
     by default. With "auto", we will make opinionated choices based on request
     contents and what the backend libraries currently support, so the behavior
