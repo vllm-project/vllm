@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 
 import pytest
 import torch
@@ -16,8 +15,6 @@ from vllm.utils.deep_gemm import calc_diff
 
 from .test_deepgemm import make_block_quant_fp8_weights
 
-os.environ["VLLM_USE_DEEP_GEMM"] = "1"
-
 BLOCK_SIZE = [128, 128]
 
 
@@ -30,6 +27,8 @@ BLOCK_SIZE = [128, 128]
 def test_batched_deepgemm_vs_triton(E: int, T: int, K: int, N: int, topk: int,
                                     monkeypatch):
     """Compare BatchedDeepGemmExperts to BatchedTritonExperts."""
+
+    monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1")
 
     device = "cuda"
     w1, w2, w1_s, w2_s = make_block_quant_fp8_weights(E, N, K, BLOCK_SIZE)
