@@ -2677,8 +2677,9 @@ class MemoryProfilingResult:
 
 @contextlib.contextmanager
 def memory_profiling(
-        baseline_snapshot: MemorySnapshot,
-        weights_memory: int) -> Generator[MemoryProfilingResult, None, None]:
+        baseline_snapshot: MemorySnapshot, weights_memory: int,
+        vllm_config: VllmConfig
+) -> Generator[MemoryProfilingResult, None, None]:
     """Memory profiling context manager.
     baseline_snapshot: the memory snapshot before the current vLLM instance.
     weights_memory: memory used by PyTorch when loading the model weights.
@@ -2749,7 +2750,28 @@ def memory_profiling(
     result.torch_peak_increase = diff_profile.torch_peak
     result.non_torch_increase = diff_from_create.non_torch_memory
     result.profile_time = diff_profile.timestamp
-    result.non_kv_cache_memory = result.non_torch_increase + result.torch_peak_increase + result.weights_memory  # noqa
+
+    # include all non_torch_memory after profile instead of
+    # only the increase
+    non_torch_memory = result.after_profile.non_torch_memory
+
+    peak_activation_memory = result.torch_peak_increase
+
+    # cudagraph memory
+    # an arbitrary factor to estimate the cudagraph memory usage
+    cudagraph_memory_factor = 4
+    # peak_activation_memory is measured with max_num_batched_tokens
+    # but max_capture_size is the maximum batch size for cudagraph
+    # capture. So we scale peak_activation_memory and give some
+    # buffers via cudagraph_memory_factor.
+    estimated_cudagraph_memory = peak_activation_memory * (
+        vllm_config.compilation_config.max_capture_size /
+        vllm_config.scheduler_config.max_num_batched_tokens
+    ) * cudagraph_memory_factor
+    cudagraph_memory = (estimated_cudagraph_memory
+                        if vllm_config.compilation_config.use_cudagraph else 0)
+
+    result.non_kv_cache_memory = non_torch_memory + peak_activation_memory + cudagraph_memory + result.weights_memory  # noqa
 
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L630 # noqa: E501

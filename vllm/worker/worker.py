@@ -254,7 +254,9 @@ class Worker(LocalOrDistributedWorkerBase):
         # of the model.
         with memory_profiling(
                 self.baseline_snapshot,
-                weights_memory=self.model_runner.model_memory_usage) as result:
+                weights_memory=self.model_runner.model_memory_usage,
+                vllm_config=self.vllm_config,
+        ) as result:
             self.model_runner.profile_run()
 
         self._assert_memory_footprint_increased_during_profiling()

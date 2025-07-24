@@ -240,8 +240,9 @@ class Worker(WorkerBase):
         # of the model.
         with memory_profiling(
                 self.init_snapshot,
-                weights_memory=int(
-                    self.model_runner.model_memory_usage)) as profile_result:
+                weights_memory=int(self.model_runner.model_memory_usage),
+                vllm_config=self.vllm_config,
+        ) as profile_result:
             self.model_runner.profile_run()
 
         free_gpu_memory = profile_result.after_profile.free_memory
