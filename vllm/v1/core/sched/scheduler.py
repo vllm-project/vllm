@@ -260,6 +260,7 @@ class Scheduler(SchedulerInterface):
                         preempted_index = self.running.index(preempted_req)
                         if preempted_index <= req_index:
                             req_index -= 1
+                            scheduled_running_reqs.remove(preempted_req)
                         self.running.pop(preempted_index)
                     else:
                         preempted_req = self.running.pop()
