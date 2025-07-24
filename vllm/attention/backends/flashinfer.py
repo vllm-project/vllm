@@ -1163,7 +1163,7 @@ class FlashInferImpl(AttentionImpl):
                 )
             else:
                 workspace_buffer = (
-                    decode_meta.decode_wrapper._int_workspace_buffer)
+                    decode_meta.decode_wrapper._float_workspace_buffer)
                 assert FlashInferState.get_kv_cache_layout() == "HND"
                 decode_output = trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
