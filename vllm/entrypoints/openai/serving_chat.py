@@ -93,8 +93,7 @@ class OpenAIServingChat(OpenAIServing):
             tool_parser_name=tool_parser, enable_auto_tools=enable_auto_tools)
 
         self.exclude_tools_when_tool_choice_none = (
-            exclude_tools_when_tool_choice_none
-        )
+            exclude_tools_when_tool_choice_none)
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
