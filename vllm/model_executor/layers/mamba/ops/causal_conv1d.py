@@ -417,7 +417,6 @@ def causal_conv1d_fn(
     args = None
     out = torch.empty_like(x)
     if metadata is not None:
-        # cu_seqlen = x.shape[1]
         nums_dict = metadata.nums_dict
         args = nums_dict
         batch_ptr = metadata.batch_ptr
@@ -820,7 +819,6 @@ def causal_conv1d_update(
     cache_seqlens: Optional[torch.Tensor] = None,
     conv_state_indices: Optional[torch.Tensor] = None,
     pad_slot_id: int = PAD_SLOT_ID,
-    metadata=None,
     validate_data=False,
 ):
     """
