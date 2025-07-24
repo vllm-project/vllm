@@ -124,7 +124,7 @@ def main():
 
     # Clean up the processes
     store_process.join()
-    retrieve_process.terminate()
+    retrieve_process.join()
     lmcache_server_process.terminate()
     lmcache_server_process.wait()
 
