@@ -549,14 +549,15 @@ class _ModelRegistry:
         *,
         model_config: Optional[ModelConfig],
     ) -> str:
-        if architecture in self.models:
-            return architecture
         if model_config is None:
             return architecture
 
         # Force transformers impl
         if model_config.model_impl == ModelImpl.TRANSFORMERS:
             return self._resolve_transformers(architecture, model_config)
+
+        if architecture in self.models:
+            return architecture
 
         for suffix, (default_runner_type,
                      default_convert_type) in SUFFIX_TO_DEFAULTS:
