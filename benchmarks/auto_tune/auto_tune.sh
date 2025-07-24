@@ -127,7 +127,7 @@ run_benchmark() {
     bm_log="$LOG_FOLDER/bm_log_${max_num_seqs}_${max_num_batched_tokens}_requestrate_inf.txt"
     prefix_len=$(( INPUT_LEN * MIN_CACHE_HIT_PCT / 100 ))
 adjusted_input_len=$(( INPUT_LEN - prefix_len ))
-    vllm3 bench serve \
+    vllm bench serve \
         --backend vllm \
         --model $MODEL  \
         --dataset-name random \
