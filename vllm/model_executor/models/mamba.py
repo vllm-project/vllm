@@ -253,7 +253,7 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
                                       intermediate_tensors, inputs_embeds)
 
         return hidden_states
-    
+
     @classmethod
     def get_mamba_state_shape_from_config(
         cls,
@@ -263,10 +263,10 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
         hf_config = vllm_config.model_config.hf_config
 
         return MambaStateShapeCalculator.mamba1_state_shape(
-                    tp_world_size=parallel_config.tensor_parallel_size,
-                    intermediate_size=hf_config.intermediate_size,
-                    state_size=hf_config.state_size,
-                    conv_kernel=hf_config.conv_kernel)
+            tp_world_size=parallel_config.tensor_parallel_size,
+            intermediate_size=hf_config.intermediate_size,
+            state_size=hf_config.state_size,
+            conv_kernel=hf_config.conv_kernel)
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         return self.mamba_cache.copy_inputs_before_cuda_graphs(

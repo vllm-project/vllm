@@ -2825,7 +2825,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         state_tensors = self._create_mamba1_state_tensors(
                             raw_tensor, dtype, kv_cache_spec.shapes,
                             storage_offset)
-                        state_tensors.extend(state_tensors)
                     else:
                         # Handle other mamba types
                         for shape in kv_cache_spec.shapes:
