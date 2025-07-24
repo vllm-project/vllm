@@ -1620,7 +1620,6 @@ async def init_app_state(
         model_config=model_config,
         base_model_paths=base_model_paths,
         lora_modules=lora_modules,
-        prompt_adapters=args.prompt_adapters,
     )
     await state.openai_serving_models.init_static_loras()
     state.openai_serving_responses = OpenAIServingResponses(
