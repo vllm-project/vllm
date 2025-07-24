@@ -234,9 +234,14 @@ class EngineCore:
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
-    def execute_model(self, scheduler_output: SchedulerOutput):
+    def execute_model_with_error_logging(
+        self,
+        model_fn: Callable[[SchedulerOutput], ModelRunnerOutput],
+        scheduler_output: SchedulerOutput,
+    ) -> ModelRunnerOutput:
+        """Execute the model and log detailed info on failure."""
         try:
-            return self.model_executor.execute_model(scheduler_output)
+            return model_fn(scheduler_output)
         except Exception as err:
             # We do not want to catch BaseException here since we're only
             # interested in dumping info when the exception is due to an
@@ -259,7 +264,9 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
-        model_output = self.execute_model(scheduler_output)
+        model_output = self.execute_model_with_error_logging(
+            self.model_executor.execute_model,  # type: ignore
+            scheduler_output)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output)  # type: ignore
 
@@ -306,8 +313,11 @@ class EngineCore:
         # so we need more work.
         if not scheduled_batch and not self.batch_queue.empty():
             future, scheduler_output = self.batch_queue.get_nowait()
+
             # Blocking until the first result is available.
-            model_output = future.result()
+            model_output = self.execute_model_with_error_logging(
+                lambda _: future.result(), scheduler_output)
+
             self.batch_queue.task_done()
             engine_core_outputs = (self.scheduler.update_from_output(
                 scheduler_output, model_output))
@@ -467,13 +477,14 @@ class EngineCoreProc(EngineCore):
         For DP>1 with internal loadbalancing this is with the shared front-end
         process which may reside on a different node.
 
-        For DP>1 with external loadbalancing, two handshakes are performed:
+        For DP>1 with external or hybrid loadbalancing, two handshakes are
+        performed:
             - With the rank 0 front-end process which retrieves the
               DP Coordinator ZMQ addresses and DP process group address.
             - With the colocated front-end process which retrieves the
               client input/output socket addresses.
-        with the exception of the rank 0 engine itself which doesn't require
-        the second handshake.
+        with the exception of the rank 0 and colocated engines themselves which
+        don't require the second handshake.
 
         Here, "front-end" process can mean the process containing the engine
         core client (which is the API server process in the case the API
@@ -482,15 +493,18 @@ class EngineCoreProc(EngineCore):
         """
         input_ctx = zmq.Context()
         is_local = local_client and client_handshake_address is None
+        headless = not local_client
         handshake = self._perform_handshake(input_ctx, handshake_address,
-                                            identity, is_local, vllm_config,
+                                            identity, is_local, headless,
+                                            vllm_config,
                                             vllm_config.parallel_config)
         if client_handshake_address is None:
             with handshake as addresses:
                 yield addresses
         else:
+            assert local_client
             local_handshake = self._perform_handshake(
-                input_ctx, client_handshake_address, identity, local_client,
+                input_ctx, client_handshake_address, identity, True, False,
                 vllm_config)
             with handshake as addresses, local_handshake as client_addresses:
                 addresses.inputs = client_addresses.inputs
@@ -507,6 +521,7 @@ class EngineCoreProc(EngineCore):
         handshake_address: str,
         identity: bytes,
         local_client: bool,
+        headless: bool,
         vllm_config: VllmConfig,
         parallel_config_to_update: Optional[ParallelConfig] = None,
     ) -> Generator[EngineZmqAddresses, None, None]:
@@ -518,6 +533,7 @@ class EngineCoreProc(EngineCore):
                              bind=False) as handshake_socket:
             # Register engine with front-end.
             addresses = self.startup_handshake(handshake_socket, local_client,
+                                               headless,
                                                parallel_config_to_update)
             yield addresses
 
@@ -531,6 +547,7 @@ class EngineCoreProc(EngineCore):
                 msgspec.msgpack.encode({
                     "status": "READY",
                     "local": local_client,
+                    "headless": headless,
                     "num_gpu_blocks": num_gpu_blocks,
                     "dp_stats_address": dp_stats_address,
                 }))
@@ -539,6 +556,7 @@ class EngineCoreProc(EngineCore):
     def startup_handshake(
         handshake_socket: zmq.Socket,
         local_client: bool,
+        headless: bool,
         parallel_config: Optional[ParallelConfig] = None,
     ) -> EngineZmqAddresses:
 
@@ -547,6 +565,7 @@ class EngineCoreProc(EngineCore):
             msgspec.msgpack.encode({
                 "status": "HELLO",
                 "local": local_client,
+                "headless": headless,
             }))
 
         # Receive initialization message.
@@ -891,22 +910,6 @@ class DPEngineCoreProc(EngineCoreProc):
             logger.debug("Setting kv_transfer_config.engine_id to %s",
                          vllm_config.kv_transfer_config.engine_id)
 
-        from vllm.platforms import current_platform
-        device_control_env_var = current_platform.device_control_env_var
-        world_size = vllm_config.parallel_config.world_size
-        # Set CUDA_VISIBLE_DEVICES or equivalent.
-        try:
-            os.environ[device_control_env_var] = ",".join(
-                str(current_platform.device_id_to_physical_device_id(i))
-                for i in range(local_dp_rank *
-                               world_size, (local_dp_rank + 1) * world_size))
-        except IndexError as e:
-            raise Exception(
-                f"Error setting {device_control_env_var}: "
-                f"local range: [{local_dp_rank * world_size}, "
-                f"{(local_dp_rank + 1) * world_size}) "
-                f"base value: \"{os.getenv(device_control_env_var)}\"") from e
-
         self.dp_rank = dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
 
@@ -1069,13 +1072,40 @@ class DPEngineCoreActor(DPEngineCoreProc):
         vllm_config.parallel_config.data_parallel_rank_local = \
             local_dp_rank
 
-        # Ray sets CUDA_VISIBLE_DEVICES to empty string,
-        # we clean this up to be able to properly initialize
-        # data parallel groups.
-        del os.environ['CUDA_VISIBLE_DEVICES']
+        # Set CUDA_VISIBLE_DEVICES as early as possible in actor life cycle
+        # NOTE: in MP we set CUDA_VISIBLE_DEVICES at process creation time,
+        # and this cannot be done in the same way for Ray because:
+        # 1) Ray manages life cycle of all ray workers (including
+        # DPEngineCoreActor)
+        # 2) Ray sets CUDA_VISIBLE_DEVICES based on num_gpus configuration
+        # To bypass 2, we need to also set
+        # RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES, but vLLM workers created
+        # thereafter would have CUDA_VISIBLE_DEVICES set, which is sticky:
+        # https://github.com/ray-project/ray/blob/e752fc319ddedd9779a0989b6d3613909bad75c9/python/ray/_private/worker.py#L456 # noqa: E501
+        # But vLLM worker assumes visibility into all local GPUs, therefore
+        # this results in incorrect indexing into the GPU ID list.
+        self._set_cuda_visible_devices(vllm_config, local_dp_rank)
 
         super().__init__(vllm_config, local_client, "", executor_class,
                          log_stats)
+
+    def _set_cuda_visible_devices(self, vllm_config: VllmConfig,
+                                  local_dp_rank: int):
+        from vllm.platforms import current_platform
+        device_control_env_var = current_platform.device_control_env_var
+        world_size = vllm_config.parallel_config.world_size
+        # Set CUDA_VISIBLE_DEVICES or equivalent.
+        try:
+            os.environ[device_control_env_var] = ",".join(
+                str(current_platform.device_id_to_physical_device_id(i))
+                for i in range(local_dp_rank *
+                               world_size, (local_dp_rank + 1) * world_size))
+        except IndexError as e:
+            raise Exception(
+                f"Error setting {device_control_env_var}: "
+                f"local range: [{local_dp_rank * world_size}, "
+                f"{(local_dp_rank + 1) * world_size}) "
+                f"base value: \"{os.getenv(device_control_env_var)}\"") from e
 
     def _decorate_logs(self):
         pass
