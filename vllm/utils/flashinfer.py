@@ -90,7 +90,6 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
     """Return ``True`` if FlashInfer CUTLASS fused MoE is available."""
     if not has_flashinfer_moe():
         return False
-
     # Check if all required functions are available
     required_functions = [
         ("flashinfer.fused_moe", "cutlass_fused_moe"),
@@ -98,6 +97,24 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
         ("flashinfer", "block_scale_interleave"),
     ]
 
+    for module_name, attr_name in required_functions:
+        mod = _get_submodule(module_name)
+        if not mod or not hasattr(mod, attr_name):
+            return False
+    return True
+
+
+@functools.cache
+def has_flashinfer_trtllm_fused_moe() -> bool:
+    """Return ``True`` if FlashInfer TensorRT-LLM fused MoE is available."""
+    if not has_flashinfer_moe():
+        return False
+
+    required_functions = [
+        ("flashinfer.fused_moe", "trtllm_fp4_block_scale_moe"),
+        ("flashinfer", "fp4_quantize"),
+        ("flashinfer", "fp4_swizzle_blockscale"),
+    ]
     for module_name, attr_name in required_functions:
         mod = _get_submodule(module_name)
         if not mod or not hasattr(mod, attr_name):

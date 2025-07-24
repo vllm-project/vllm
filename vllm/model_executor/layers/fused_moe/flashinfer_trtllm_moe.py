@@ -10,36 +10,36 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import extract_required_args
-from vllm.utils.flashinfer import (flashinfer_cutlass_fused_moe,
-                                   has_flashinfer_cutlass_fused_moe)
+from vllm.utils.flashinfer import (has_flashinfer_trtllm_fused_moe,
+                                   trtllm_fp4_block_scale_moe)
 
 logger = init_logger(__name__)
 
 
-def is_valid_flashinfer_cutlass_fused_moe(hidden_states: torch.Tensor,
-                                          w1: torch.Tensor,
-                                          w2: torch.Tensor) -> bool:
+def is_valid_flashinfer_trtllm_fused_moe(hidden_states: torch.Tensor,
+                                         w1: torch.Tensor,
+                                         w2: torch.Tensor) -> bool:
     """
-    Check if the given problem size is supported by the FlashInfer CUTLASS MoE 
+    Check if the given problem size is supported by the FlashInfer TRTLLM MoE 
     kernel.
     """
-    if not has_flashinfer_cutlass_fused_moe():
-        logger.debug_once("FlashInferExperts disabled: "
-                          "flashinfer_cutlass_fused_moe not available.")
+    if not has_flashinfer_trtllm_fused_moe():
+        logger.debug_once("FlashInferExpertsTRTLLM disabled: "
+                          "flashinfer_trtllm_fused_moe not available.")
         return False
     # Data type checks
     if (w1.dtype != torch.uint8 or w2.dtype != torch.uint8
             or hidden_states.dtype
             not in [torch.float32, torch.float16, torch.bfloat16]):
         logger.debug_once(
-            "FlashInferExperts disabled: w1/w2 must be torch.uint8 "
+            "FlashInferExpertsTRTLLM disabled: w1/w2 must be torch.uint8 "
             f"(got w1={w1.dtype}, w2={w2.dtype}), hidden_states must be "
             f"float32, float16, or bfloat16 (got {hidden_states.dtype}).")
         return False
     return True
 
 
-class FlashInferExpertsCUTLASS(mk.FusedMoEPermuteExpertsUnpermute):
+class FlashInferExpertsTRTLLM(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
@@ -160,7 +160,7 @@ class FlashInferExpertsCUTLASS(mk.FusedMoEPermuteExpertsUnpermute):
         g1_alphas, g2_alphas, a1_gscale, a2_gscale, out_dtype = (
             extract_required_args(extra_expert_args, required_keys))
 
-        # Flashinfer CUTLASS kernel takes scalar global scales,
+        # Flashinfer TRTLLM kernel takes scalar global scales,
         # min because inv_scale.
         assert self.use_nvfp4_w4a4 is True, ("Only nvfp4 quantization is "
                                              "currently supported.")
@@ -180,13 +180,15 @@ class FlashInferExpertsCUTLASS(mk.FusedMoEPermuteExpertsUnpermute):
             w2_scale.view(torch.int32),
             g2_alphas,
         ]
-        _ = flashinfer_cutlass_fused_moe(
-            input=hidden_states,
-            token_selected_experts=topk_ids.to(torch.int),
-            token_final_scales=topk_weights,
+        out = trtllm_fp4_block_scale_moe(
+            routing_logits,
+            routing_bias,
+            hidden_states,
+            topk_ids.to(torch.int),
+            topk_weights,
             # FlashInfer API requires weight to be long for nvfp4
-            fc1_expert_weights=w1.view(torch.long),
-            fc2_expert_weights=w2.view(torch.long),
+            w1.view(torch.long),
+            w2.view(torch.long),
             output_dtype=out_dtype,
             quant_scales=quant_scales,
             input_sf=a1q_scale,
@@ -196,3 +198,29 @@ class FlashInferExpertsCUTLASS(mk.FusedMoEPermuteExpertsUnpermute):
             ep_rank=self.ep_rank,
             output=output,
         )
+        output.copy_(out)
+
+    return get_trtllm_moe_sm100_module().trtllm_fp4_block_scale_moe(
+        routing_logits,
+        routing_bias,
+        hidden_states,
+        hidden_states_scale,
+        gemm1_weights,
+        gemm1_weights_scale,
+        gemm2_weights,
+        gemm2_weights_scale,
+        output1_scale_scalar,
+        output1_scale_gate_scalar,
+        output2_scale_scalar,
+        num_experts,
+        top_k,
+        n_group,
+        topk_group,
+        intermediate_size,
+        local_expert_offset,
+        local_num_experts,
+        routed_scaling_factor,
+        tile_tokens_dim,
+        routing_method_type,
+        do_finalize,
+    )

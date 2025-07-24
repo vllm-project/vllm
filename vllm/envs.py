@@ -122,6 +122,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
+    VLLM_FLASHINFER_MOE_BACKEND: str = "flashinfer_moe_high_throughput"
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -911,6 +912,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "deepep_low_latency", use deepep low-latency kernels
     "VLLM_ALL2ALL_BACKEND":
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
+
+    # Flashinfer MoE backend for vllm's fused mixture of expert
+    # Available options:
+    # - "flashinfer_moe_low_latency": use TRTLLM kernels
+    # - "flashinfer_moe_high_throughput": use CUTLASS kernels
+    "VLLM_FLASHINFER_MOE_BACKEND":
+    lambda: os.getenv("VLLM_FLASHINFER_MOE_BACKEND",
+                      "flashinfer_moe_high_throughput"),
 
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
