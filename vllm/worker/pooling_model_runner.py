@@ -45,12 +45,16 @@ class PoolingModelRunner(
                          is_driver_worker=is_driver_worker)
 
     def unload_to_meta(self):
-        """Forward to underlying model runner."""
-        return self.model.unload_to_meta()
+        """Forward unload to underlying model."""
+        if hasattr(self.model, "unload_to_meta"):
+            return self.model.unload_to_meta()
+        raise RuntimeError("Underlying model does not support unload_to_meta")
 
     def reload_from_pinned(self, tensor_dict):
-        """Forward to underlying model runner."""
-        return self.model.load_state_dict(tensor_dict, strict=True, assign=True)
+        """Forward reload to underlying model."""
+        if hasattr(self.model, "load_state_dict"):
+            return self.model.load_state_dict(tensor_dict, strict=True, assign=True)
+        raise RuntimeError("Underlying model does not support reload_from_pinned")
 
     @torch.inference_mode()
     def execute_model(
