@@ -491,7 +491,17 @@ class MistralToolParser(ToolParser):
         if delta_tool_calls and not self.prev_tool_call_arr:
             self.prev_tool_call_arr = [{"arguments": {}}]
 
-        return DeltaMessage(content=content, tool_calls=delta_tool_calls)
+
+
+        if content or len(delta_tool_calls) > 0:
+            delta_message = DeltaMessage()
+            if content:
+                delta_message.content = content
+            if len(delta_tool_calls) > 0:
+                delta_message.tool_calls = delta_tool_calls
+            return delta_message
+        else:
+            return None
 
     def _split_delta(
         self,
