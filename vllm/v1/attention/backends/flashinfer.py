@@ -653,7 +653,6 @@ class FlashInferImpl(AttentionImpl):
             assert prefill_wrapper._logits_soft_cap == (self.logits_soft_cap
                                                         or 0.0)
             assert prefill_wrapper._sm_scale == self.scale
-
             prefill_wrapper.run(
                 prefill_query,
                 kv_cache_permute,
@@ -663,7 +662,6 @@ class FlashInferImpl(AttentionImpl):
             )
         elif num_prefill_tokens > 0 and is_cudnn_supported(
                 attn_metadata.head_dim):
-
             output[num_decode_tokens:], _ = cudnn_batch_prefill_with_kv_cache(
                 q=query[num_decode_tokens:],
                 k_cache=kv_cache_permute[:, 0],
