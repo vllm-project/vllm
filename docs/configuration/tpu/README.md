@@ -21,11 +21,13 @@ This approach serves as a general rule of thumb.
 
 #### Latency-throughput tradeoff
 
-As with rightsizing the number of chips for your workload, consider adjusting `--max-num-seqs` to fine-tune the latency-throughput balance. Decreasing `--max-num-seqs` in increments of 128 and/or increasing the number of chips can help reduce latency.
+As with rightsizing the number of chips for your workload, consider adjusting `--max-num-seqs` to fine-tune the latency-throughput balance. Decreasing `--max-num-seqs` and/or increasing the number of chips can help reduce latency.
 
 `--max-num-seqs` defines the number of concurrent decode slots, effectively limiting the number of requests the server can process tokens for simultaneously. Increasing this value allows the server to pre-allocate more HBM to handle a higher number of concurrent requests, which can maximize overall throughput. However, this often increases the end-to-end (e2e) latency per request.
 
 Therefore, carefully tuning `--max-num-seqs` is crucial to achieving the desired balance between latency and throughput for your specific workload.
+
+In a similar way, `--max-num-batch-tokens` can be adjusted down to improve latency, or adjusted up to improve throughput.
 
 #### Compilation and Caching
 
@@ -38,7 +40,7 @@ Although the first compilation can take some time, for all subsequent server lau
 Use `VLLM_XLA_CACHE_PATH` environment variable to write to shareable storage for future launches. 
 
 #### Reducing compilation time
-This initial compilation time ranges significantly and is impacted by many of the arguments discussed in this optimization doc. Factors that influence the length of time to compile are things like model size and `--max-model-len`. Other arguments you can tune are things like `VLLM_TPU_MOST_MODEL_LEN`. 
+This initial compilation time ranges significantly and is impacted by many of the arguments discussed in this optimization doc. Factors that influence the length of time to compile are things like model size and `--max-num-batch-tokens`. Other arguments you can tune are things like `VLLM_TPU_MOST_MODEL_LEN`. 
 
 ### **Optimize based on your data**
 
@@ -48,7 +50,7 @@ This initial compilation time ranges significantly and is impacted by many of th
 
 If most of your requests are shorter than the maximum model length but you still need to accommodate occasional longer requests, setting a high maximum model length can negatively impact performance. In these cases, you can try introducing most model len by specifying the `VLLM_TPU_MOST_MODEL_LEN` environment variable.
 
-For example, 1% requests are 32k length and 99% requests are 2k length. You can pass 32k into `--max-model-len 32000` and use `VLLM_TPU_MOST_MODEL_LEN=2000`.
+For example, 1% requests are 32k length and 99% requests are 2k length. You can pass 32k into `--max-model-len 32768` and use `VLLM_TPU_MOST_MODEL_LEN=2048`.
 
 The requests get subdivided into max-model-len and most-model-len categories, for the latter category, we can gain better performance since the server can process more requests at a time.
 
