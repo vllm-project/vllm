@@ -1336,7 +1336,7 @@ def create_requests_with_priority(
             mm_position = None
             mm_inputs = None
         request = Request(
-            request_id=f"{i}",
+            request_id=request_ids[i],
             prompt_token_ids=[i] * num_tokens,
             sampling_params=sampling_params,
             pooling_params=None,
