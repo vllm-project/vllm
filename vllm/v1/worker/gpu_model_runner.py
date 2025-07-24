@@ -336,7 +336,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if len(self.kv_cache_config.kv_cache_groups) == 0:
             return
 
-        for i in range(1, len(self.kv_cache_config.kv_cache_groups)):
+        for i in range(0, len(self.kv_cache_config.kv_cache_groups)):
             self.attn_metadata_builders[i].reorder_batch(
                 self.input_batch, scheduler_output)
 
