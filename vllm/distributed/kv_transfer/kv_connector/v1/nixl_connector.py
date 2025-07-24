@@ -821,6 +821,7 @@ class NixlConnectorWorker:
             requests = self._transfering_req_meta[req]
             for request_id, reqmeta in requests.items():
                 assert len(reqmeta.local_block_ids) == len(reqmeta.remote_block_ids)
+                logger.info(f'get_finished in NIXL: {request_id=}|{reqmeta=}')
                 for i, local_block_id in enumerate(reqmeta.local_block_ids): 
                     #print(f'buke get_finished: {local_block_id=}||{len(self.kv_caches_cpu)=}')
                     for idx, (layer, kv_layer) in enumerate(self.kv_caches_cpu.items()):
@@ -833,6 +834,7 @@ class NixlConnectorWorker:
                         self.kv_caches_hpu[layer][1][start:end].copy_(v[start:end], non_blocking = False)
             k00,v00 = self.kv_caches_hpu['model.layers.0.self_attn.attn']
             del self._transfering_req_meta[req]
+            
             logger.debug(f'buke: get_finished hpu: {k00.shape=}|{k00.sum(dim=[1,2])[100:400]=}')
             logger.debug(
                 "Rank %s, get_finished: %s requests done sending "
