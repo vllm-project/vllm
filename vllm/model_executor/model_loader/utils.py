@@ -26,7 +26,7 @@ from vllm.model_executor.models.adapters import (as_embedding_model,
                                                  as_seq_cls_model)
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.model_executor.models.registry import (_PREVIOUSLY_SUPPORTED_MODELS,
-                                                 _TRANSFORMERS_MODELS)
+                                                 _TRANSFORMERS_BACKEND_MODELS)
 from vllm.utils import is_pin_memory_available
 
 logger = init_logger(__name__)
@@ -178,7 +178,7 @@ def resolve_transformers_arch(model_config: ModelConfig,
             "happen.")
 
     for i, arch in enumerate(architectures):
-        if arch in _TRANSFORMERS_MODELS:
+        if arch in _TRANSFORMERS_BACKEND_MODELS:
             continue
 
         if model_config.model_impl == ModelImpl.AUTO:
@@ -241,7 +241,7 @@ def get_model_architecture(
 
     vllm_supported_archs = ModelRegistry.get_supported_archs()
     is_supported = lambda arch: (arch in vllm_supported_archs and arch not in
-                                 _TRANSFORMERS_MODELS)
+                                 _TRANSFORMERS_BACKEND_MODELS)
     vllm_not_supported = not any(is_supported(arch) for arch in architectures)
 
     if vllm_not_supported:
