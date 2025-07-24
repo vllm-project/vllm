@@ -100,8 +100,8 @@ The common practice is to set the tensor parallel size to the number of GPUs in 
 
 ```bash
 vllm serve /path/to/the/model/in/the/container \
-     --tensor-parallel-size 8 \
-     --pipeline-parallel-size 2
+    --tensor-parallel-size 8 \
+    --pipeline-parallel-size 2
 ```
 
 Alternatively, you can set `tensor_parallel_size` to the total number of GPUs in the cluster:
