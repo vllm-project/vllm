@@ -73,9 +73,6 @@ def test_lm_eval_accuracy_v1_engine(model, monkeypatch: pytest.MonkeyPatch):
         if current_platform.is_tpu():
             # Limit compilation time for TPU V1
 
-            # xet doesn't work well for both Qwen/Qwen3-1.7B and
-            # google/gemma-3-1b-it
-            m.setenv("HF_HUB_DISABLE_XET", "1")
             more_args = "max_model_len=2048,max_num_seqs=64"
 
             # Add TP test (if provided)
