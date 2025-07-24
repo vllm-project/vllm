@@ -18,7 +18,7 @@ from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.nano_split import InputInfo, auto_search_and_split, set_forward_hook
+from vllm.compilation.nano_split import InputInfo, NanoOpInfo, prepare_split, prepare_runtime
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config, update_config)
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -810,7 +810,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_reqs = len(req_ids)
         num_tokens = [scheduler_output.num_scheduled_tokens[rid] for rid in req_ids]
         cached_seqlens = self.input_batch.num_computed_tokens_cpu[:num_reqs].tolist()
-        batch_sizes = auto_search_and_split(
+        batch_sizes = prepare_split(
             InputInfo(
                 batch_size=num_reqs,
                 num_tokens=num_tokens,
@@ -851,8 +851,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping = blk_table.slot_mapping[:nano_batch_total_tokens]
 
                 common_attn_metadata = CommonAttentionMetadata(
-                    query_start_loc=self.query_start_loc[start_req_idx:end_req_idx + 1],
-                    query_start_loc_cpu=self.query_start_loc_cpu[start_req_idx:end_req_idx + 1],
+                    query_start_loc=self.query_start_loc[start_req_idx:end_req_idx + 1] - self.query_start_loc[start_req_idx],
+                    query_start_loc_cpu=self.query_start_loc_cpu[start_req_idx:end_req_idx + 1] - self.query_start_loc_cpu[start_req_idx],
                     seq_lens=self.seq_lens[start_req_idx:end_req_idx],
                     seq_lens_cpu=self.seq_lens_cpu[start_req_idx:end_req_idx],
                     num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[start_req_idx:end_req_idx],
@@ -899,11 +899,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_cuda_graphs=True,
             ) for attn_metadata in attn_metadatas
         ]
-        def pre_forward_hook() -> None:
-            pass
-        def pre_op_hook(node_name: str, idx: int, args: tuple, kwargs: dict) -> None:
-            override_forward_context(forward_contexts[idx])
-        set_forward_hook(pre_forward_hook, pre_op_hook)
+
+        @contextmanager
+        def op_hook(op_info: NanoOpInfo):
+            previous_context = get_forward_context()
+            override_forward_context(forward_contexts[op_info.idx])
+            try:
+                yield
+            finally:
+                override_forward_context(previous_context)
+        
+        prepare_runtime(forward_hook=None, op_hook=op_hook)
 
     def _compute_cascade_attn_prefix_len(
         self,

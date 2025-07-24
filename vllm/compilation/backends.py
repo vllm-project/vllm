@@ -234,6 +234,7 @@ def split_graph(graph: fx.GraphModule,
     # split graph by ops
     subgraph_id = 0
     node_to_subgraph_id = {}
+    subgraph_to_tag = {}
     split_op_graphs = []
     for node in graph.graph.nodes:
         if node.op in ("output", "placeholder"):
@@ -242,6 +243,7 @@ def split_graph(graph: fx.GraphModule,
             subgraph_id += 1
             node_to_subgraph_id[node] = subgraph_id
             split_op_graphs.append(subgraph_id)
+            subgraph_to_tag[subgraph_id] = str(node.target)
             subgraph_id += 1
         else:
             node_to_subgraph_id[node] = subgraph_id
@@ -268,6 +270,7 @@ def split_graph(graph: fx.GraphModule,
         module = getattr(split_gm, name)
 
         graph_id = int(name.replace("submod_", ""))
+        setattr(module, "tag", subgraph_to_tag.get(graph_id, ""))
         outputs.append(
             SplitItem(name, graph_id, (graph_id in split_op_graphs), module))
 

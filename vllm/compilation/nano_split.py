@@ -1,7 +1,8 @@
+import contextlib
 import copy
 from dataclasses import dataclass
 import torch
-from typing import Callable, Dict, List, Tuple, Optional, Set
+from typing import Callable, ContextManager, Dict, List, Tuple, Optional, Set
 
 @dataclass
 class InputInfo:
@@ -16,30 +17,43 @@ class NanoBatchSplitConfig:
     batch_sizes: List[int]
 
 
-class HookWrapper(torch.nn.Module):
-    def __init__(self, hook: Callable):
+@dataclass
+class NanoOpInfo:
+    gm: torch.fx.GraphModule
+    submod_name: str
+    tag: str
+    idx: int
+    args: tuple
+    kwargs: dict
+
+
+class NanoOpWrapper(torch.nn.Module):
+    def __init__(self, gm: torch.fx.GraphModule, hook: List[Callable[[NanoOpInfo], ContextManager[None]]]):
         super().__init__()
+        self.gm = gm
         self.hook = hook
-    
-    def forward(self, *args, **kwargs):
-        self.hook(*args, **kwargs)
+
+    def forward(self, submod_name: str, idx: int, args: tuple, kwargs: dict):
+        module = getattr(self.gm, submod_name)
+        tag = getattr(module, "tag", "")
+        with contextlib.ExitStack() as stack:
+            for hook in self.hook:
+                stack.enter_context(hook(NanoOpInfo(self.gm, submod_name, tag, idx, args, kwargs)))
+            output = module(*args, **kwargs)
+        return output
 
 
-class NanoBatchSplit:
-    def __init__(self):
-        self.input_splits: Dict[torch.fx.Node, List[torch.fx.Node]] = {}
-        self.node_splits: Dict[torch.fx.Node, List[torch.fx.Node]] = {}
-        self.weight_nodes: Set[torch.fx.Node] = set()
-        self.splittable_inputs: List[torch.fx.Node] = []
-        self.graph_module: Optional[torch.fx.GraphModule] = None
-        self.original_graph: torch.fx.Graph
-        self.base_graph: Optional[torch.fx.Graph] = None
-        self.new_graph: Optional[torch.fx.Graph] = None
+class NanoSplitManager:
+    def __init__(self, graph_module: torch.fx.GraphModule) -> None:
+        self.graph_module = graph_module
+        self.original_graph = graph_module.graph
+        self.base_graph = torch.fx.Graph()
 
-    def _init_placeholders(self) -> None:
+        # Initialize the base graph
         batch_size: Optional[torch.SymInt] = None
-        assert self.base_graph is not None
-        self.base_graph.call_module("pre_forward_hook", args=())
+        weight_nodes = set()
+        splittable_inputs = []
+        base_graph = torch.fx.Graph()
         for node in self.original_graph.nodes:
             # Skip computation nodes
             if node.op != "placeholder":
@@ -51,16 +65,40 @@ class NanoBatchSplit:
                 if not isinstance(arg, torch.SymInt):
                     raise ValueError("Batch size is not set")
                 batch_size = arg
-            else:
-                shape = node.meta["example_value"].shape
+            elif isinstance(input_tensor := node.meta["example_value"], torch.Tensor):
+                shape = input_tensor.shape
                 if shape[0] == batch_size:
-                    self.splittable_inputs.append(node)
+                    splittable_inputs.append(node)
                     print(f"Found splittable input: {node.name} with shape {shape}")
                 else:
-                    self.weight_nodes.add(node)
+                    weight_nodes.add(node)
                     print(f"Found weight tensor: {node.name} with shape {shape}")
             # Copy all placeholder nodes to the new graph
-            self.base_graph.node_copy(node, arg_transform=lambda n: n)
+            base_graph.node_copy(node, arg_transform=lambda n: n)
+        self.base_graph = base_graph
+        self.splittable_inputs: List[torch.fx.Node] = splittable_inputs
+        self.weight_nodes: Set[torch.fx.Node] = weight_nodes
+    
+        # Nano split preparation
+        self.new_graph: Optional[torch.fx.Graph] = None
+        self.input_splits = {}
+        self.node_splits = {}
+        self.op_wrapper = NanoOpWrapper(self.graph_module, [])
+
+        # Runtime preparation
+        self.cached_config: Optional[NanoBatchSplitConfig] = None
+        self.comm_stream = torch.cuda.Stream()
+        self.comp_stream = torch.cuda.Stream()
+
+
+    def get_callable(self) -> Callable:
+        def _forward(*args, **kwargs):
+            assert self.op_wrapper is not None
+            setattr(self.graph_module, "op_wrapper", self.op_wrapper)
+            output = self.graph_module(*args, **kwargs)
+            delattr(self.graph_module, "op_wrapper")
+            return output
+        return _forward
 
     def _init_input_splits(self, split_indices: List[int]) -> None:
         num_splits = len(split_indices) - 1
@@ -91,14 +129,16 @@ class NanoBatchSplit:
                 orig_vals = list(node.args) + list(node.kwargs.values())
                 new_vals = list(new_args) + list(new_kwargs.values())
                 orig_to_new = {o: n for o, n in zip(orig_vals, new_vals)}
-                # Call pre_op_hook with proper arguments
-                self.new_graph.call_module(
-                    "pre_op_hook",
-                    args=(node.name, split_idx, new_args, new_kwargs),
-                )
-                new_node = self.new_graph.node_copy(
-                    node, arg_transform=lambda n: orig_to_new[n]
-                )
+
+                if node.op == "call_module":
+                    new_node = self.new_graph.call_module(
+                        "op_wrapper",
+                        args=(str(node.target), split_idx, new_args, new_kwargs),
+                    )
+                else:
+                    new_node = self.new_graph.node_copy(
+                        node, arg_transform=lambda n: orig_to_new[n]
+                    )
                 splits.append(new_node)
 
             self.node_splits[node] = splits
@@ -191,7 +231,7 @@ class NanoBatchSplit:
 
         return new_kwargs
 
-    def auto_search_and_split(
+    def prepare_split(
         self,
         input_info: InputInfo,
     ) -> list[int]:
@@ -200,8 +240,8 @@ class NanoBatchSplit:
             batch_sizes = [1]
             split_indices = [0, input_info.num_tokens[0]]
         else:
-            batch_sizes = [1, total_batch_size - 1]
-            split_indices = [0, input_info.num_tokens[0], sum(input_info.num_tokens)]
+            batch_sizes = [total_batch_size // 2, total_batch_size - total_batch_size // 2]
+            split_indices = [0, sum(input_info.num_tokens[:total_batch_size // 2]), sum(input_info.num_tokens)]
         assert self.base_graph is not None
         self.new_graph = copy.deepcopy(self.base_graph)
         self._init_input_splits(split_indices)
@@ -209,16 +249,50 @@ class NanoBatchSplit:
         self._handle_outputs()
         assert self.graph_module is not None
         self.graph_module.graph = self.new_graph
-        print(self.graph_module.code)
-        setattr(self.graph_module, "cached_config", NanoBatchSplitConfig(split_indices, batch_sizes))
+        self.cached_config = NanoBatchSplitConfig(split_indices, batch_sizes)
+        from torch._dynamo.utils import lazy_format_graph_code # type: ignore
+        print(lazy_format_graph_code("after nano split", self.graph_module))
         return batch_sizes
+    
+    def prepare_runtime(
+        self,
+        *,
+        forward_hook: Optional[Callable] = None,
+        op_hook: Optional[Callable[[NanoOpInfo], ContextManager[None]]] = None,
+    ) -> None:
+        assert self.cached_config is not None
+        batch_sizes = self.cached_config.batch_sizes
+        comm_finished = [None for _ in range(len(batch_sizes))]
 
-    def init_callable(self, graph_module: torch.fx.GraphModule) -> Callable:
-        self.base_graph = torch.fx.Graph()
-        self.graph_module = graph_module
-        self.original_graph = graph_module.graph
-        self._init_placeholders()
-        return self.graph_module
+        @contextlib.contextmanager
+        def set_stream(op_info: NanoOpInfo):
+            if op_info.tag == "vllm.all_reduce":
+                torch.cuda.set_stream(self.comm_stream) # type: ignore
+                comm_finished[op_info.idx] = torch.cuda.Event() # type: ignore
+            else:
+                torch.cuda.set_stream(self.comp_stream) # type: ignore
+                if comm_finished[op_info.idx] is not None:
+                    comm_finished[op_info.idx].wait() # type: ignore
+                    comm_finished[op_info.idx] = None
+            try:
+                yield
+            finally:
+                if op_info.tag == "vllm.all_reduce":
+                    comm_finished[op_info.idx].record() # type: ignore
+
+        @contextlib.contextmanager
+        def nvtx_mark(op_info: NanoOpInfo):
+            try:
+                with torch.cuda.nvtx.range(f"op_{op_info.submod_name}_{op_info.tag}_{op_info.idx}"):
+                    yield
+            except Exception as e:
+                print(f"Error in nvtx_mark: {e}")
+                raise e
+            
+        hooks = [] if op_hook is None else [op_hook]
+        self.op_wrapper = NanoOpWrapper(self.graph_module, [set_stream, nvtx_mark] + hooks)
+        if forward_hook is not None:
+            self.graph_module.register_forward_hook(forward_hook)
 
 
 _split_manager = None
@@ -227,23 +301,27 @@ _split_manager = None
 def init_split_manager_and_get_callable(graph_module: torch.fx.GraphModule) -> Callable:
     global _split_manager
     if _split_manager is None:
-        _split_manager = NanoBatchSplit()
-    return _split_manager.init_callable(graph_module)
+        _split_manager = NanoSplitManager(graph_module)
+    return _split_manager.get_callable()
 
 
-def auto_search_and_split(input_info: InputInfo) -> list[int]:
+
+def prepare_split(input_info: InputInfo) -> list[int]:
     global _split_manager
     if _split_manager is None:
         raise ValueError("Split manager not initialized")
-    return _split_manager.auto_search_and_split(input_info)
+    return _split_manager.prepare_split(input_info)
 
 
-def set_forward_hook(
-    pre_forward_hook: Callable[[], None],
-    pre_op_hook: Callable[[str, int, Tuple, Dict], None]
+def prepare_runtime(
+    *,
+    forward_hook: Optional[Callable] = None,
+    op_hook: Optional[Callable[[NanoOpInfo], ContextManager[None]]] = None,
 ) -> None:
     global _split_manager
     if _split_manager is None:
         raise ValueError("Split manager not initialized")
-    setattr(_split_manager.graph_module, "pre_forward_hook", HookWrapper(pre_forward_hook))
-    setattr(_split_manager.graph_module, "pre_op_hook", HookWrapper(pre_op_hook))
+    _split_manager.prepare_runtime(
+        forward_hook=forward_hook,
+        op_hook=op_hook,
+    )
