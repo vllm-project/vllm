@@ -88,7 +88,7 @@ class OpenAIServingCompletion(OpenAIServing):
             self.beam_scorer = BeamScorer(classi_idx=MEOW_CLASSI_IDX)
             self.beam_validator = BeamValidator(classi_idx=MEOW_CLASSI_IDX, classifier_names=MEOW_CLASSI_IDX.keys())
 
-    @trace_streaming_completion()
+    # @trace_streaming_completion()
     async def create_completion_with_chunkwise_beam(
         self,
         request: CompletionRequest,
