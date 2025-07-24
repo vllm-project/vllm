@@ -73,7 +73,7 @@ class ExternalLBServerManager:
                             current_platform.device_control_env_var:
                             ",".join(
                                 str(
-                                    current_platform.atform.
+                                    current_platform.
                                     device_id_to_physical_device_id(i))
                                 for i in range(r * TP_SIZE, (r + 1) * TP_SIZE))
                         })
