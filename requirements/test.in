@@ -28,7 +28,7 @@ torchvision==0.22.1
 transformers_stream_generator # required for qwen-vl test
 mamba_ssm # required for plamo2 test
 matplotlib # required for qwen-vl test
-mistral_common[opencv] >= 1.8.0 # required for voxtral test
+mistral_common[image,audio] >= 1.8.2 # required for voxtral test
 num2words # required for smolvlm test
 open_clip_torch==2.32.0 # Required for nemotron_vl test
 opencv-python-headless >= 4.11.0 # required for video test
