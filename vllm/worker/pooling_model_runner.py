@@ -45,34 +45,12 @@ class PoolingModelRunner(
                          is_driver_worker=is_driver_worker)
 
     def unload_to_meta(self):
-        """Unload all model weights to meta."""
-        for name, param in list(self.model.named_parameters(recurse=True)):
-            if param.device.type == "meta":
-                continue
-            if "rotary_emb" in name.split("."):
-                continue
-            mod = self.model
-            parts = name.split(".")
-            for p in parts[:-1]:
-                mod = getattr(mod, p)
-            setattr(mod, parts[-1],
-                    torch.nn.Parameter(torch.empty_like(param, device="meta")))
-
-        for name, buf in list(self.model.named_buffers(recurse=True)):
-            if buf.device.type == "meta":
-                continue
-            if "rotary_emb" in name.split("."):
-                continue
-            mod = self.model
-            parts = name.split(".")
-            for p in parts[:-1]:
-                mod = getattr(mod, p)
-            setattr(mod, parts[-1],
-                    torch.empty_like(buf, device="meta"))
+        """Forward to underlying model runner."""
+        return self.model.unload_to_meta()
 
     def reload_from_pinned(self, tensor_dict):
-        """Reload weights from preloaded tensors in GPU or pinned CPU memory."""
-        self.model.load_state_dict(tensor_dict, strict=True, assign=True)
+        """Forward to underlying model runner."""
+        return self.model.load_state_dict(tensor_dict, strict=True, assign=True)
 
     @torch.inference_mode()
     def execute_model(
