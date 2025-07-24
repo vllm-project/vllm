@@ -261,24 +261,27 @@ class MistralToolParser(ToolParser):
             self.streaming_state = StreamingState.PARSING_NAME
             delta_text = delta_text.replace(self.bot_token, "", 1)
         if self.streaming_state == StreamingState.PARSING_NAME:
+            if self.current_tool_name is None:
+                    self.current_tool_name = ""
             # The name stops where the arguments start
             # And the arguments start with the `{` char
             if "{" in delta_text:
                 delta_function_name = delta_text.split("{")[0]
+                self.current_tool_name += delta_function_name
                 delta_text = delta_text[len(delta_function_name):]
                 self.streaming_state = StreamingState.PARSING_ARGUMENTS
             else:
-                delta_function_name = delta_text
-                return [
-                    DeltaToolCall(
+                # we want to send the tool name once it's complete
+                self.current_tool_name += delta_text
+                if tool_id is not None:
+                    return [
+                        DeltaToolCall(
                         index=self.current_tool_id,
                         type="function",
-                        id=tool_id,
-                        function=DeltaFunctionCall(
-                            name=delta_function_name).model_dump(
-                                exclude_none=True),
-                    )
-                ]
+                        id=tool_id
+                    )]
+                else:
+                    return []
         if self.streaming_state == StreamingState.PARSING_ARGUMENTS:
             next_function_text = None
             if self.bot_token in delta_text:
@@ -297,11 +300,12 @@ class MistralToolParser(ToolParser):
                         type="function",
                         id=tool_id,
                         function=DeltaFunctionCall(
-                            name=delta_function_name,
+                            name=self.current_tool_name,
                             arguments=delta_arguments).model_dump(
                                 exclude_none=True),
                     )
                 ]
+                self.current_tool_name = None
             if next_function_text:
                 ret += self._generate_delta_tool_call(next_function_text)
             return ret

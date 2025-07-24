@@ -306,7 +306,6 @@ def _test_extract_tool_calls_streaming(tool_parser, tokenizer, model_output,
             if tool_call.index != tool_call_idx:
                 tool_call_idx = tool_call.index
                 function_args_strs.append("")
-                function_names.append("")
                 tool_call_ids.append(None)
 
             # if a tool call ID is streamed, make sure one hasn't been already
@@ -319,7 +318,7 @@ def _test_extract_tool_calls_streaming(tool_parser, tokenizer, model_output,
                 # IN ENTIRETY, exactly one time.
                 if tool_call.function.name:
                     assert isinstance(tool_call.function.name, str)
-                    function_names[tool_call.index] += tool_call.function.name
+                    function_names.append(tool_call.function.name)
 
                 if tool_call.function.arguments:
                     # make sure they're a string and then add them to the list
