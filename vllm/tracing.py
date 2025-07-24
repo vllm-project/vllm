@@ -48,7 +48,7 @@ except ImportError:
 def is_otel_available() -> bool:
     return _is_otel_imported
 
-
+    
 def init_tracer(instrumenting_module_name: str,
                 otlp_traces_endpoint: str) -> Optional[Tracer]:
     if not is_otel_available():
@@ -57,9 +57,10 @@ def init_tracer(instrumenting_module_name: str,
             "a tracer. Ensure OpenTelemetry packages are installed. "
             f"Original error:\n{otel_import_error_traceback}")
     trace_provider = TracerProvider()
-
-    span_exporter = get_span_exporter(otlp_traces_endpoint)
-    trace_provider.add_span_processor(BatchSpanProcessor(span_exporter))
+    from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
+    exporter = CloudTraceSpanExporter(project_id="character-ai")
+    # span_exporter = get_span_exporter(otlp_traces_endpoint)
+    trace_provider.add_span_processor(BatchSpanProcessor(exporter))
     set_tracer_provider(trace_provider)
 
     tracer = trace_provider.get_tracer(instrumenting_module_name)

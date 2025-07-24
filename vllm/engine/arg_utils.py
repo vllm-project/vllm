@@ -469,6 +469,8 @@ class EngineArgs:
     enable_multimodal_encoder_data_parallel: bool = \
         ParallelConfig.enable_multimodal_encoder_data_parallel
 
+    has_additional_heads: bool = ModelConfig.has_additional_heads
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -539,6 +541,7 @@ class EngineArgs:
                                  **model_kwargs["enable_prompt_embeds"])
         model_group.add_argument("--served-model-name",
                                  **model_kwargs["served_model_name"])
+        model_group.add_argument("--has-additional-heads", **model_kwargs["has_additional_heads"])
         # This one is a special case because it is the
         # opposite of ModelConfig.use_async_output_proc
         model_group.add_argument(
@@ -994,6 +997,7 @@ class EngineArgs:
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
+            has_additional_heads=self.has_additional_heads,
         )
 
     def create_load_config(self) -> LoadConfig:

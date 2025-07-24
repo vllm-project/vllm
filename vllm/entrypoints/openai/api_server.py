@@ -597,14 +597,16 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             message="The model does not support Completions API")
 
     try:
-        generator = await handler.create_completion(request, raw_request)
+        if request.use_chunkwise_beam_search:
+            generator = await handler.create_completion_with_chunkwise_beam(request, raw_request)
+        else:
+            generator = await handler.create_completion(request, raw_request)
     except OverflowError as e:
         raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
                             detail=str(e)) from e
     except Exception as e:
         raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
                             detail=str(e)) from e
-
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)

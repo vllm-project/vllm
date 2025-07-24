@@ -22,7 +22,7 @@ from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
-from vllm.sequence import Logprob
+from vllm.sequence import AdditionalHeads, Logprob
 from vllm.streaming_params import StreamingParams
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
@@ -877,6 +877,18 @@ class CompletionRequest(OpenAIBaseModel):
             "Special kind of echo where in the response instead of delta we return the accumulated text"
         )
     )
+    arrival_time: Optional[float] = Field(
+        default=None,
+        description=(
+            "The arrival time of the request. This is used for priority scheduling."
+        )
+    )
+    use_chunkwise_beam_search: Optional[bool] = Field(
+        default=None,
+        description=(
+            "If set to True, chunkwise beam search will be used for the "
+            "completion request. If the model does not support chunkwise beam search, it will raise 400")
+    )
     # doc: end-completion-extra-params
 
     # Default sampling parameters for completion requests
@@ -994,6 +1006,7 @@ class CompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
+            additional_heads=self.use_chunkwise_beam_search,
             )
 
     def to_streaming_params(self, ) -> StreamingParams:
@@ -1253,6 +1266,8 @@ class CompletionResponseChoice(OpenAIBaseModel):
             "including encountering the EOS token"),
     )
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
+    additional_heads: Optional[AdditionalHeads] = None
+    is_filtered: bool = False
 
 
 class CompletionResponse(OpenAIBaseModel):
