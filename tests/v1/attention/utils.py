@@ -66,7 +66,7 @@ def create_common_attn_metadata(
     num_computed_tokens_cpu = torch.tensor(context_lens, dtype=torch.int32)
 
     # Create block table (random for testing)
-    max_blocks = max(batch_spec.seq_lens) // block_size + 1
+    max_blocks = (max(batch_spec.seq_lens) + block_size - 1) // block_size
     block_table_tensor = torch.randint(0,
                                        max_block_idx,
                                        (batch_spec.batch_size, max_blocks),
