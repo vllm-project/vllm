@@ -6,6 +6,7 @@ from collections.abc import Generator
 import gguf
 import torch
 import torch.nn as nn
+from huggingface_hub import hf_hub_download
 from transformers import AutoModelForCausalLM
 
 from vllm.config import LoadConfig, ModelConfig, VllmConfig
@@ -32,8 +33,18 @@ class GGUFModelLoader(BaseModelLoader):
     def _prepare_weights(self, model_name_or_path: str):
         if os.path.isfile(model_name_or_path):
             return model_name_or_path
+        # for raw HTTPS link
+        if model_name_or_path.startswith(
+            ("http://", "https://")) and model_name_or_path.endswith(".gguf"):
+            return hf_hub_download(url=model_name_or_path)
+        # repo id/filename.gguf
+        if "/" in model_name_or_path and model_name_or_path.endswith(".gguf"):
+            repo_id, filename = model_name_or_path.rsplit("/", 1)
+            return hf_hub_download(repo_id=repo_id, filename=filename)
         else:
-            raise ValueError(f"{model_name_or_path} is not a file.")
+            raise ValueError(
+                f"Unrecognised GGUF reference: {model_name_or_path} "
+                "(expected local file, raw URL, or <repo_id>/<filename>.gguf)")
 
     def _get_gguf_weights_map(self, model_config: ModelConfig):
         """
