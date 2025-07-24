@@ -4,8 +4,35 @@
   #include <hip/hip_runtime.h>
 #endif
 
-#if defined(USE_ROCM) && defined(__GFX9__)
-  #define WARP_SIZE 64
+#ifdef USE_ROCM
+struct Utils {
+  static __host__ int get_warp_size() {
+    static bool is_cached = false;
+    static int result;
+
+    if (!is_cached) {
+      int device_id;
+      cudaDeviceProp deviceProp;
+      cudaGetDevice(&device_id);
+      cudaGetDeviceProperties(&deviceProp, device_id);
+
+      result = deviceProp.warpSize;
+      is_cached = true;
+    }
+
+    return result;
+  }
+
+  static __device__ constexpr int get_warp_size() {
+  #ifdef __GFX9__
+    return 64;
+  #else
+    return 32;
+  #endif
+  }
+};
+
+  #define WARP_SIZE Utils::get_warp_size()
 #else
   #define WARP_SIZE 32
 #endif

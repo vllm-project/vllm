@@ -1,0 +1,92 @@
+From 18c0599c2f07ec965132efa25961dc8179c2dda3 Mon Sep 17 00:00:00 2001
+From: Yongji Wu <wuyongji317@gmail.com>
+Date: Tue, 20 May 2025 13:41:12 -0700
+Subject: [PATCH] fix reinit issues due to states not cleaned up
+
+fix double free
+---
+ src/host/init/init.cu                             | 10 ++++++++++
+ .../internal/host/nvshmemi_mem_transport.hpp      | 15 +++++++++++++++
+ src/modules/bootstrap/uid/bootstrap_uid.cpp       |  5 +++++
+ 3 files changed, 30 insertions(+)
+
+diff --git a/src/host/init/init.cu b/src/host/init/init.cu
+index b1c5dbf..1fecb4b 100644
+--- a/src/host/init/init.cu
++++ b/src/host/init/init.cu
+@@ -43,6 +43,8 @@
+ #include "internal/host/nvshmemi_types.h"
+ #include "internal/host/shared_memory.h"
+ #include "internal/host/nvshmemi_symmetric_heap.hpp"
++// eep-dev
++#include "internal/host/nvshmemi_mem_transport.hpp"
+ 
+ extern __constant__ nvshmemi_device_host_state_t nvshmemi_device_state_d;
+ static std::map<void *, int> registered_device_states;
+@@ -1293,6 +1295,14 @@ void nvshmemid_hostlib_finalize(void *device_ctx, void *transport_device_ctx) {
+         /* Multi-init Multi-fini*/
+         nvshmemi_state = NULL;
+         nvshmemi_device_state.nvshmemi_is_nvshmem_initialized = 0;
++        
++        // eep-dev
++        nvshmemi_mem_p2p_transport::destroy_instance();
++        nvshmemi_mem_remote_transport::destroy_instance();
++        free(nvshmemi_default_session);
++        nvshmemi_default_session = nullptr;
++        nvshmemi_device_state.nvshmemi_is_nvshmem_bootstrapped = false;
++        
+         nvshmemi_is_device_state_ready = false;
+     } else
+         nvshmemi_boot_handle.barrier(&nvshmemi_boot_handle);
+diff --git a/src/include/internal/host/nvshmemi_mem_transport.hpp b/src/include/internal/host/nvshmemi_mem_transport.hpp
+index 2495844..e4f408a 100644
+--- a/src/include/internal/host/nvshmemi_mem_transport.hpp
++++ b/src/include/internal/host/nvshmemi_mem_transport.hpp
+@@ -36,6 +36,13 @@ class nvshmemi_mem_p2p_transport final {
+             return p2p_objref_;
+         }
+     }
++    // eep-dev
++    static void destroy_instance(void) {
++        if (p2p_objref_ != nullptr) {
++            delete p2p_objref_;
++            p2p_objref_ = nullptr;
++        }
++    }
+ 
+     void print_mem_handle(int pe_id, int transport_idx, nvshmemi_symmetric_heap &obj);
+ 
+@@ -87,6 +94,14 @@ class nvshmemi_mem_remote_transport final {
+         }
+     }
+ 
++    // eep-dev
++    static void destroy_instance(void) {
++        if (remote_objref_ != nullptr) {
++            delete remote_objref_;
++            remote_objref_ = nullptr;
++        }
++    }
++
+     int gather_mem_handles(nvshmemi_symmetric_heap &obj, uint64_t heap_offset, size_t size);
+     /* On-demand registration and release of memory */
+     int register_mem_handle(nvshmem_mem_handle_t *local_handles, int transport_idx,
+diff --git a/src/modules/bootstrap/uid/bootstrap_uid.cpp b/src/modules/bootstrap/uid/bootstrap_uid.cpp
+index a1fa748..788fa96 100644
+--- a/src/modules/bootstrap/uid/bootstrap_uid.cpp
++++ b/src/modules/bootstrap/uid/bootstrap_uid.cpp
+@@ -630,6 +630,11 @@ int nvshmemi_bootstrap_plugin_pre_init(bootstrap_handle_t* handle, const int abi
+     // Discover the network for bootstrap, if not done previously.
+     // This code needs to be stateful to be able to be called multiple times by the caller
+     BOOTSTRAP_CHECK(bootstrap_net_init());
++    // eep-dev
++    if (handle->pre_init_ops != nullptr) {
++        BOOTSTRAP_PTR_FREE(handle->pre_init_ops);
++        handle->pre_init_ops = nullptr;
++    }
+     if (handle->pre_init_ops == nullptr) {
+         BOOTSTRAP_CALLOC(&handle->pre_init_ops, 1);
+         handle->pre_init_ops->get_unique_id = bootstrap_get_unique_id;
+-- 
+2.43.0
+

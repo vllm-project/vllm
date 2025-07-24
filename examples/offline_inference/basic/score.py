@@ -27,10 +27,10 @@ def main(args: Namespace):
 
     # Create an LLM.
     # You should pass task="score" for cross-encoder models
-    model = LLM(**vars(args))
+    llm = LLM(**vars(args))
 
     # Generate scores. The output is a list of ScoringRequestOutputs.
-    outputs = model.score(text_1, texts_2)
+    outputs = llm.score(text_1, texts_2)
 
     # Print the outputs.
     print("\nGenerated Outputs:\n" + "-" * 60)

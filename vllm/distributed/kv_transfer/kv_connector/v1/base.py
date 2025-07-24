@@ -194,7 +194,7 @@ class KVConnectorBase_V1(ABC):
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens on the worker.
-        The scheduler process (via the MultiprocExecutor) will use this output
+        The scheduler process (via the Executors) will use this output
         to track which workers are done.
 
         Returns:

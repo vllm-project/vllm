@@ -4,7 +4,7 @@
 import dataclasses
 from abc import ABC, abstractmethod
 from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Type,
-                    TypeVar, get_args)
+                    TypeVar)
 
 import torch
 import torch.nn as nn
@@ -190,7 +190,6 @@ class ModelRunnerBase(ABC, Generic[T]):
         self.scheduler_config = vllm_config.scheduler_config
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
 
     # Map of request_id -> generator used for seeded random sampling
@@ -230,10 +229,7 @@ class ModelRunnerBase(ABC, Generic[T]):
         if not is_pooling_model(model):
             return []
 
-        return [
-            task for task in get_args(PoolingTask)
-            if model.pooler.get_pooling_updates(task)
-        ]
+        return list(model.pooler.get_supported_tasks())
 
     def execute_model(
         self,

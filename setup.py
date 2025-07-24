@@ -659,7 +659,8 @@ setup(
         "bench": ["pandas", "datasets"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
-        "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
+        "runai":
+        ["runai-model-streamer >= 0.13.3", "runai-model-streamer-s3", "boto3"],
         "audio": ["librosa", "soundfile",
                   "mistral_common[audio]"],  # Required for audio processing
         "video": []  # Kept for backwards compatibility

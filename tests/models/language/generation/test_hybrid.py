@@ -104,7 +104,6 @@ def test_models(
                 m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
             with vllm_runner(model,
                              max_num_seqs=MAX_NUM_SEQS,
-                             enforce_eager=True,
                              enable_prefix_caching=False) as vllm_model:
                 vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
                     example_prompts, max_tokens, num_logprobs)
@@ -275,7 +274,7 @@ def test_models_preemption_recompute(
     Tests that outputs are identical with and w/o preemptions (recompute).
     """
     with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-        scheduler = vllm_model.model.llm_engine.scheduler[0]
+        scheduler = vllm_model.llm.llm_engine.scheduler[0]
         scheduler.ENABLE_ARTIFICIAL_PREEMPT = True
         preempt_vllm_outputs = vllm_model.generate_greedy(
             example_prompts, max_tokens)

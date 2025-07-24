@@ -43,6 +43,8 @@ def get_env_vars_to_copy(exclude_vars: Optional[set[str]] = None,
         exclude_vars: A set of vllm defined environment variables to exclude
             from copying.
         additional_vars: A set of additional environment variables to copy.
+            If a variable is in both exclude_vars and additional_vars, it will
+            be excluded.
         destination: The destination of the environment variables.
     Returns:
         A set of environment variables to copy.
@@ -52,10 +54,9 @@ def get_env_vars_to_copy(exclude_vars: Optional[set[str]] = None,
 
     env_vars_to_copy = {
         v
-        for v in envs.environment_variables
+        for v in set(envs.environment_variables).union(additional_vars)
         if v not in exclude_vars and v not in RAY_NON_CARRY_OVER_ENV_VARS
     }
-    env_vars_to_copy.update(additional_vars)
 
     to_destination = " to " + destination if destination is not None else ""
 

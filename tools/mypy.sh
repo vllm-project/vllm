@@ -31,7 +31,5 @@ run_mypy vllm/inputs
 run_mypy vllm/lora
 run_mypy vllm/model_executor
 run_mypy vllm/plugins
-run_mypy vllm/prompt_adapter
-run_mypy vllm/spec_decode
 run_mypy vllm/worker
 run_mypy vllm/v1

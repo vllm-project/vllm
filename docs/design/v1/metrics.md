@@ -5,17 +5,17 @@ Ensure the v1 LLM Engine exposes a superset of the metrics available in v0.
 ## Objectives
 
 - Achieve parity of metrics between v0 and v1.
-- The priority use case is accessing these metrics via Prometheus as this is what we expect to be used in production environments.
-- Logging support - i.e. printing metrics to the info log - is provided for more ad-hoc testing, debugging, development, and exploratory use cases.
+- The priority use case is accessing these metrics via Prometheus, as this is what we expect to be used in production environments.
+- Logging support (i.e. printing metrics to the info log) is provided for more ad-hoc testing, debugging, development, and exploratory use cases.
 
 ## Background
 
 Metrics in vLLM can be categorized as follows:
 
-1. Server-level metrics: these are global metrics that track the state and performance of the LLM engine. These are typically exposed as Gauges or Counters in Prometheus.
-2. Request-level metrics: these are metrics that track the characteristics - e.g. size and timing - of individual requests. These are typically exposed as Histograms in Prometheus, and are often the SLO that an SRE monitoring vLLM will be tracking.
+1. Server-level metrics: Global metrics that track the state and performance of the LLM engine. These are typically exposed as Gauges or Counters in Prometheus.
+2. Request-level metrics: Metrics that track the characteristics (e.g. size and timing) of individual requests. These are typically exposed as Histograms in Prometheus and are often the SLOs that an SRE monitoring vLLM will be tracking.
 
-The mental model is that the "Server-level Metrics" explain why the "Request-level Metrics" are what they are.
+The mental model is that server-level metrics help explain the values of request-level metrics.
 
 ### v0 Metrics
 
@@ -61,24 +61,24 @@ These are documented under [Inferencing and Serving -> Production Metrics](../..
 
 ### Grafana Dashboard
 
-vLLM also provides [a reference example](https://docs.vllm.ai/en/latest/examples/prometheus_grafana.html) for how to collect and store these metrics using Prometheus and visualize them using a Grafana dashboard.
+vLLM also provides [a reference example](../../examples/online_serving/prometheus_grafana.md) for how to collect and store these metrics using Prometheus and visualize them using a Grafana dashboard.
 
 The subset of metrics exposed in the Grafana dashboard gives us an indication of which metrics are especially important:
 
-- `vllm:e2e_request_latency_seconds_bucket` - End to end request latency measured in seconds
-- `vllm:prompt_tokens_total` - Prompt Tokens
-- `vllm:generation_tokens_total` - Generation Tokens
-- `vllm:time_per_output_token_seconds` - Inter token latency (Time Per Output Token, TPOT) in second.
+- `vllm:e2e_request_latency_seconds_bucket` - End to end request latency measured in seconds.
+- `vllm:prompt_tokens_total` - Prompt tokens.
+- `vllm:generation_tokens_total` - Generation tokens.
+- `vllm:time_per_output_token_seconds` - Inter-token latency (Time Per Output Token, TPOT) in seconds.
 - `vllm:time_to_first_token_seconds` - Time to First Token (TTFT) latency in seconds.
-- `vllm:num_requests_running` (also, `_swapped` and `_waiting`) - Number of requests in RUNNING, WAITING, and SWAPPED state
+- `vllm:num_requests_running` (also, `_swapped` and `_waiting`) - Number of requests in the RUNNING, WAITING, and SWAPPED states.
 - `vllm:gpu_cache_usage_perc` - Percentage of used cache blocks by vLLM.
-- `vllm:request_prompt_tokens` - Request prompt length
-- `vllm:request_generation_tokens` - request generation length
-- `vllm:request_success_total` - Number of finished requests by their finish reason: either an EOS token was generated or the max sequence length was reached
-- `vllm:request_queue_time_seconds` - Queue Time
-- `vllm:request_prefill_time_seconds` - Requests Prefill Time
-- `vllm:request_decode_time_seconds` - Requests Decode Time
-- `vllm:request_max_num_generation_tokens` - Max Generation Token in Sequence Group
+- `vllm:request_prompt_tokens` - Request prompt length.
+- `vllm:request_generation_tokens` - Request generation length.
+- `vllm:request_success_total` - Number of finished requests by their finish reason: either an EOS token was generated or the max sequence length was reached.
+- `vllm:request_queue_time_seconds` - Queue time.
+- `vllm:request_prefill_time_seconds` - Requests prefill time.
+- `vllm:request_decode_time_seconds` - Requests decode time.
+- `vllm:request_max_num_generation_tokens` - Max generation tokens in a sequence group.
 
 See [the PR which added this Dashboard](gh-pr:2316) for interesting and useful background on the choices made here.
 
@@ -103,7 +103,7 @@ In v0, metrics are collected in the engine core process and we use multi-process
 
 ### Built in Python/Process Metrics
 
-The following metrics are supported by default by `prometheus_client`, but the are not exposed with multiprocess mode is used:
+The following metrics are supported by default by `prometheus_client`, but they are not exposed when multi-process mode is used:
 
 - `python_gc_objects_collected_total`
 - `python_gc_objects_uncollectable_total`
@@ -158,6 +158,7 @@ In v1, we wish to move computation and overhead out of the engine core
 process to minimize the time between each forward pass.
 
 The overall idea of V1 EngineCore design is:
+
 - EngineCore is the inner loop. Performance is most critical here
 - AsyncLLM is the outer loop. This is overlapped with GPU execution
   (ideally), so this is where any "overheads" should be if
@@ -178,7 +179,7 @@ time" (`time.time()`) to calculate intervals as the former is
 unaffected by system clock changes (e.g. from NTP).
 
 It's also important to note that monotonic clocks differ between
-processes - each process has its own reference. point. So it is
+processes - each process has its own reference point. So it is
 meaningless to compare monotonic timestamps from different processes.
 
 Therefore, in order to calculate an interval, we must compare two
@@ -343,14 +344,15 @@ vllm:time_to_first_token_seconds_bucket{le="0.1",model_name="meta-llama/Llama-3.
 vllm:time_to_first_token_seconds_count{model_name="meta-llama/Llama-3.1-8B-Instruct"} 140.0
 ```
 
-Note - the choice of histogram buckets to be most useful to users
-across a broad set of use cases is not straightforward and will
-require refinement over time.
+!!! note
+    The choice of histogram buckets to be most useful to users
+    across a broad set of use cases is not straightforward and will
+    require refinement over time.
 
 ### Cache Config Info
 
-`prometheus_client` has support for [Info
-metrics](https://prometheus.github.io/client_python/instrumenting/info/)
+`prometheus_client` has support for
+[Info metrics](https://prometheus.github.io/client_python/instrumenting/info/)
 which are equivalent to a `Gauge` whose value is permanently set to 1,
 but exposes interesting key/value pair information via labels. This is
 used for information about an instance that does not change - so it
@@ -363,14 +365,11 @@ We use this concept for the `vllm:cache_config_info` metric:
 # HELP vllm:cache_config_info Information of the LLMEngine CacheConfig
 # TYPE vllm:cache_config_info gauge
 vllm:cache_config_info{block_size="16",cache_dtype="auto",calculate_kv_scales="False",cpu_offload_gb="0",enable_prefix_caching="False",gpu_memory_utilization="0.9",...} 1.0
-
 ```
 
-However, `prometheus_client` has [never supported Info metrics in
-multiprocessing
-mode](https://github.com/prometheus/client_python/pull/300) - for
-[unclear
-reasons](gh-pr:7279#discussion_r1710417152). We
+However, `prometheus_client` has
+[never supported Info metrics in multiprocessing mode](https://github.com/prometheus/client_python/pull/300) -
+for [unclear reasons](gh-pr:7279#discussion_r1710417152). We
 simply use a `Gauge` metric set to 1 and
 `multiprocess_mode="mostrecent"` instead.
 
@@ -395,11 +394,9 @@ distinguish between per-adapter counts. This should be revisited.
 Note that `multiprocess_mode="livemostrecent"` is used - the most
 recent metric is used, but only from currently running processes.
 
-This was added in
-<gh-pr:9477> and there is
-[at least one known
-user](https://github.com/kubernetes-sigs/gateway-api-inference-extension/pull/54). If
-we revisit this design and deprecate the old metric, we should reduce
+This was added in <gh-pr:9477> and there is
+[at least one known user](https://github.com/kubernetes-sigs/gateway-api-inference-extension/pull/54).
+If we revisit this design and deprecate the old metric, we should reduce
 the need for a significant deprecation period by making the change in
 v0 also and asking this project to move to the new metric.
 
@@ -442,23 +439,20 @@ suddenly (from their perspective) when it is removed, even if there is
 an equivalent metric for them to use.
 
 As an example, see how `vllm:avg_prompt_throughput_toks_per_s` was
-[deprecated](gh-pr:2764) (with a
-comment in the code),
-[removed](gh-pr:12383), and then
-[noticed by a
-user](gh-issue:13218).
+[deprecated](gh-pr:2764) (with a comment in the code),
+[removed](gh-pr:12383), and then [noticed by a user](gh-issue:13218).
 
 In general:
 
-1) We should be cautious about deprecating metrics, especially since
+1. We should be cautious about deprecating metrics, especially since
    it can be hard to predict the user impact.
-2) We should include a prominent deprecation notice in the help string
+2. We should include a prominent deprecation notice in the help string
    that is included in the `/metrics' output.
-3) We should list deprecated metrics in user-facing documentation and
+3. We should list deprecated metrics in user-facing documentation and
    release notes.
-4) We should consider hiding deprecated metrics behind a CLI argument
-   in order to give administrators [an escape
-   hatch](https://kubernetes.io/docs/concepts/cluster-administration/system-metrics/#show-hidden-metrics)
+4. We should consider hiding deprecated metrics behind a CLI argument
+   in order to give administrators
+   [an escape hatch](https://kubernetes.io/docs/concepts/cluster-administration/system-metrics/#show-hidden-metrics)
    for some time before deleting them.
 
 See the [deprecation policy](../../contributing/deprecation_policy.md) for
@@ -474,7 +468,7 @@ removed.
 The `vllm:time_in_queue_requests` Histogram metric was added by
 <gh-pr:9659> and its calculation is:
 
-```
+```python
     self.metrics.first_scheduled_time = now
     self.metrics.time_in_queue = now - self.metrics.arrival_time
 ```
@@ -482,7 +476,7 @@ The `vllm:time_in_queue_requests` Histogram metric was added by
 Two weeks later, <gh-pr:4464> added `vllm:request_queue_time_seconds` leaving
 us with:
 
-```
+```python
 if seq_group.is_finished():
     if (seq_group.metrics.first_scheduled_time is not None and
             seq_group.metrics.first_token_time is not None):
@@ -517,8 +511,7 @@ cache to complete other requests), we swap kv cache blocks out to CPU
 memory. This is also known as "KV cache offloading" and is configured
 with `--swap-space` and `--preemption-mode`.
 
-In v0, [vLLM has long supported beam
-search](gh-issue:6226). The
+In v0, [vLLM has long supported beam search](gh-issue:6226). The
 SequenceGroup encapsulated the idea of N Sequences which
 all shared the same prompt kv blocks. This enabled KV cache block
 sharing between requests, and copy-on-write to do branching. CPU
@@ -530,9 +523,8 @@ option than CPU swapping since blocks can be evicted slowly on demand
 and the part of the prompt that was evicted can be recomputed.
 
 SequenceGroup was removed in V1, although a replacement will be
-required for "parallel sampling" (`n>1`). [Beam search was moved out of
-the core (in
-V0)](gh-issue:8306). There was a
+required for "parallel sampling" (`n>1`).
+[Beam search was moved out of the core (in V0)](gh-issue:8306). There was a
 lot of complex code for a very uncommon feature.
 
 In V1, with prefix caching being better (zero over head) and therefore
@@ -547,18 +539,18 @@ Some v0 metrics are only relevant in the context of "parallel
 sampling". This is where the `n` parameter in a request is used to
 request multiple completions from the same prompt.
 
-As part of adding parallel sampling support in <gh-pr:10980> we should
+As part of adding parallel sampling support in <gh-pr:10980>, we should
 also add these metrics.
 
 - `vllm:request_params_n` (Histogram)
 
-Observes the value of the 'n' parameter of every finished request.
+  Observes the value of the 'n' parameter of every finished request.
 
 - `vllm:request_max_num_generation_tokens` (Histogram)
 
-Observes the maximum output length of all sequences in every finished
-sequence group. In the absence of parallel sampling, this is
-equivalent to `vllm:request_generation_tokens`.
+  Observes the maximum output length of all sequences in every finished
+  sequence group. In the absence of parallel sampling, this is
+  equivalent to `vllm:request_generation_tokens`.
 
 ### Speculative Decoding
 
@@ -576,26 +568,23 @@ There is a PR under review (<gh-pr:12193>) to add "prompt lookup (ngram)"
 seculative decoding to v1. Other techniques will follow. We should
 revisit the v0 metrics in this context.
 
-Note - we should probably expose acceptance rate as separate accepted
-and draft counters, like we do for prefix caching hit rate. Efficiency
-likely also needs similar treatment.
+!!! note
+    We should probably expose acceptance rate as separate accepted
+    and draft counters, like we do for prefix caching hit rate. Efficiency
+    likely also needs similar treatment.
 
 ### Autoscaling and Load-balancing
 
 A common use case for our metrics is to support automated scaling of
 vLLM instances.
 
-For related discussion from the [Kubernetes Serving Working
-Group](https://github.com/kubernetes/community/tree/master/wg-serving),
+For related discussion from the
+[Kubernetes Serving Working Group](https://github.com/kubernetes/community/tree/master/wg-serving),
 see:
 
-- [Standardizing Large Model Server Metrics in
-  Kubernetes](https://docs.google.com/document/d/1SpSp1E6moa4HSrJnS4x3NpLuj88sMXr2tbofKlzTZpk)
-- [Benchmarking LLM Workloads for Performance Evaluation and
-  Autoscaling in
-  Kubernetes](https://docs.google.com/document/d/1k4Q4X14hW4vftElIuYGDu5KDe2LtV1XammoG-Xi3bbQ)
-- [Inference
-  Perf](https://github.com/kubernetes-sigs/wg-serving/tree/main/proposals/013-inference-perf)
+- [Standardizing Large Model Server Metrics in Kubernetes](https://docs.google.com/document/d/1SpSp1E6moa4HSrJnS4x3NpLuj88sMXr2tbofKlzTZpk)
+- [Benchmarking LLM Workloads for Performance Evaluation and Autoscaling in Kubernetes](https://docs.google.com/document/d/1k4Q4X14hW4vftElIuYGDu5KDe2LtV1XammoG-Xi3bbQ)
+- [Inference Perf](https://github.com/kubernetes-sigs/wg-serving/tree/main/proposals/013-inference-perf)
 - <gh-issue:5041> and <gh-pr:12726>.
   
 This is a non-trivial topic. Consider this comment from Rob:
@@ -619,19 +608,16 @@ should judge an instance as approaching saturation:
 
 Our approach to naming metrics probably deserves to be revisited:
 
-1. The use of colons in metric names seems contrary to ["colons are
-   reserved for user defined recording
-   rules"](https://prometheus.io/docs/concepts/data_model/#metric-names-and-labels)
+1. The use of colons in metric names seems contrary to
+   ["colons are reserved for user defined recording rules"](https://prometheus.io/docs/concepts/data_model/#metric-names-and-labels).
 2. Most of our metrics follow the convention of ending with units, but
    not all do.
 3. Some of our metric names end with `_total`:
 
-```
-If there is a suffix of `_total` on the metric name, it will be removed. When
-exposing the time series for counter, a `_total` suffix will be added. This is
-for compatibility between OpenMetrics and the Prometheus text format, as OpenMetrics
-requires the `_total` suffix.
-```
+    If there is a suffix of `_total` on the metric name, it will be removed. When
+    exposing the time series for counter, a `_total` suffix will be added. This is
+    for compatibility between OpenMetrics and the Prometheus text format, as OpenMetrics
+    requires the `_total` suffix.
 
 ### Adding More Metrics
 
@@ -642,8 +628,7 @@ There is no shortage of ideas for new metrics:
 - Proposals arising from specific use cases, like the Kubernetes
   auto-scaling topic above
 - Proposals that might arise out of standardisation efforts like
-  [OpenTelemetry Semantic Conventions for Gen
-  AI](https://github.com/open-telemetry/semantic-conventions/tree/main/docs/gen-ai).
+  [OpenTelemetry Semantic Conventions for Gen AI](https://github.com/open-telemetry/semantic-conventions/tree/main/docs/gen-ai).
 
 We should be cautious in our approach to adding new metrics. While
 metrics are often relatively straightforward to add:
@@ -668,19 +653,14 @@ fall under the more general heading of "Observability".
 v0 has support for OpenTelemetry tracing:
 
 - Added by <gh-pr:4687>
-- Configured with `--oltp-traces-endpoint` and
-  `--collect-detailed-traces`
-- [OpenTelemetry blog
-  post](https://opentelemetry.io/blog/2024/llm-observability/)
-- [User-facing
-  docs](https://docs.vllm.ai/en/latest/examples/opentelemetry.html)
-- [Blog
-  post](https://medium.com/@ronen.schaffer/follow-the-trail-supercharging-vllm-with-opentelemetry-distributed-tracing-aa655229b46f)
-- [IBM product
-  docs](https://www.ibm.com/docs/en/instana-observability/current?topic=mgaa-monitoring-large-language-models-llms-vllm-public-preview)
+- Configured with `--oltp-traces-endpoint` and `--collect-detailed-traces`
+- [OpenTelemetry blog post](https://opentelemetry.io/blog/2024/llm-observability/)
+- [User-facing docs](../../examples/online_serving/opentelemetry.md)
+- [Blog post](https://medium.com/@ronen.schaffer/follow-the-trail-supercharging-vllm-with-opentelemetry-distributed-tracing-aa655229b46f)
+- [IBM product docs](https://www.ibm.com/docs/en/instana-observability/current?topic=mgaa-monitoring-large-language-models-llms-vllm-public-preview)
   
-OpenTelemetry has a [Gen AI Working
-Group](https://github.com/open-telemetry/community/blob/main/projects/gen-ai.md).
+OpenTelemetry has a
+[Gen AI Working Group](https://github.com/open-telemetry/community/blob/main/projects/gen-ai.md).
 
 Since metrics is a big enough topic on its own, we are going to tackle
 the topic of tracing in v1 separately.
@@ -699,7 +679,7 @@ These metrics are only enabled when OpenTelemetry tracing is enabled
 and if `--collect-detailed-traces=all/model/worker` is used. The
 documentation for this option states:
 
-> collect detailed traces for the specified "modules. This involves
+> collect detailed traces for the specified modules. This involves
 > use of possibly costly and or blocking operations and hence might
 > have a performance impact.
 

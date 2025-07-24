@@ -3,7 +3,7 @@
 """Attention layer with FlashAttention."""
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 from torch.nn.attention.flex_attention import (BlockMask, _mask_mod_signature,
@@ -342,15 +342,10 @@ class FlexAttentionImpl(AttentionImpl):
         alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
     ) -> None:
-        if blocksparse_params is not None:
-            # TODO we should support this :think
-            raise ValueError(
-                "FlashAttention does not support block-sparse attention.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)

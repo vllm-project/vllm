@@ -11,6 +11,7 @@ from transformers import GraniteMoeHybridConfig
 
 from vllm import envs
 from vllm.attention.layer import Attention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
@@ -104,9 +105,9 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
     ):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.mamba(hidden_states, mamba_cache_params,
-                                   mamba2_metadata)
-        hidden_states = residual + hidden_states * self.residual_multiplier
+        output = torch.empty_like(hidden_states)
+        self.mamba(hidden_states, output, mamba_cache_params, mamba2_metadata)
+        hidden_states = residual + output * self.residual_multiplier
 
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
@@ -307,6 +308,7 @@ ALL_DECODER_LAYER_TYPES = {
 }
 
 
+@support_torch_compile
 class GraniteMoeHybridModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

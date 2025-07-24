@@ -43,7 +43,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from ..layers.pooler import Pooler, PoolingType
+from ..layers.pooler import DispatchPooler, Pooler
 from .interfaces import SupportsPP
 from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -339,12 +339,16 @@ class GPT2ForSequenceClassification(nn.Module):
         self.transformer = GPT2Model(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "gpt2"))
         self.score = nn.Linear(config.n_embd, config.num_labels, bias=False)
+
         pooler_config = vllm_config.model_config.pooler_config
-        self.pooler = Pooler.from_config_with_defaults(
-            pooler_config,
-            pooling_type=PoolingType.LAST,
-            normalize=False,
-            softmax=True)
+        assert pooler_config is not None
+
+        self.pooler = DispatchPooler({
+            "encode":
+            Pooler.for_encode(pooler_config),
+            "classify":
+            Pooler.for_classify(pooler_config, classifier=None),
+        })
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
