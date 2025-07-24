@@ -444,7 +444,7 @@ def test_tp_language_generation(
 
 @pytest.mark.parametrize(
     ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
-     "task", "test_options"),
+     "runner", "test_options"),
     [
         params for model_id, settings in EMBEDDING_MODELS.items()
         for params in settings.iter_params(model_id) if model_id in TEST_MODELS

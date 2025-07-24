@@ -53,7 +53,7 @@ def phi3v_model_config():
 def phi3v_model_config_mm_interleaved():
     return ModelConfig(PHI3V_MODEL_ID,
                        runner="generate",
-                       tokenizer=PHI3V_MODEL_ID,
+                       trust_remote_code=True,
                        interleave_mm_strings=True,
                        limit_mm_per_prompt={
                            "image": 2,

@@ -55,7 +55,6 @@ def test_model_loading_with_params(vllm_runner):
 
         vllm_model.apply_model(check_model)
 
-        # assert output
         assert output
 
 
@@ -95,7 +94,6 @@ def test_roberta_model_loading_with_params(vllm_runner):
 
         vllm_model.apply_model(check_model)
 
-        # assert output
         assert output
 
 

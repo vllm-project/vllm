@@ -124,8 +124,12 @@ SUFFIX_TO_RUNNER_TYPE: list[tuple[str, RunnerType]] = [
     ("ChatModel", "generate"),
     ("LMHeadModel", "generate"),
     ("ForTextEncoding", "pooling"),
-    ("ForSequenceClassification", "pooling"),
     ("EmbeddingModel", "pooling"),
+    ("ForSequenceClassification", "pooling"),
+    ("ForAudioClassification", "pooling"),
+    ("ForImageClassification", "pooling"),
+    ("ForVideoClassification", "pooling"),
+    ("ClassificationModel", "pooling"),
     ("ForRewardModeling", "pooling"),
     ("RewardModel", "pooling"),
 ]
@@ -137,6 +141,7 @@ SUFFIX_TO_CONVERT_TYPE: list[tuple[str, ConvertType]] = [
     ("ForAudioClassification", "classify"),
     ("ForImageClassification", "classify"),
     ("ForVideoClassification", "classify"),
+    ("ClassificationModel", "classify"),
     ("ForRewardModeling", "reward"),
     ("RewardModel", "reward"),
 ]
