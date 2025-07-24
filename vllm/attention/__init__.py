@@ -5,7 +5,7 @@ from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
                                               AttentionState, AttentionType)
-from vllm.attention.layer import Attention
+from vllm.attention.layer import Attention, ChunkedLocalAttention
 from vllm.attention.selector import get_attn_backend
 
 __all__ = [
@@ -16,5 +16,6 @@ __all__ = [
     "AttentionMetadataBuilder",
     "Attention",
     "AttentionState",
+    "ChunkedLocalAttention",
     "get_attn_backend",
 ]

@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, ClassVar, Generic, Optional, TypeVar
 import numpy as np
 import torch
 
-from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.utils import cdiv
 
@@ -22,7 +21,9 @@ import vllm.envs as envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout)
 from vllm.logger import init_logger
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import (AttentionSpec,
+                                        ChunkedLocalAttentionSpec,
+                                        FullAttentionSpec)
 
 logger = init_logger(__name__)
 _KV_CACHE_LAYOUT_OVERRIDE = None
@@ -68,8 +69,12 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     full_cudagraph_supported: ClassVar[bool] = False
 
     @abstractmethod
-    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
-                 device: torch.device):
+    def __init__(
+            self,
+            kv_cache_spec: AttentionSpec,
+            vllm_config: VllmConfig,
+            device: torch.device,
+            build_dispatcher: Optional["AttentionMetadataBuilder"] = None):
         self.kv_cache_spec = kv_cache_spec
 
     @abstractmethod
@@ -129,6 +134,35 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         return False
 
 
+class ChunkedLocalAttentionMetadataBuilder(AttentionMetadataBuilder):
+    """
+    This class is used to build the metadata for chunked local attention.
+    """
+
+    def __init__(self,
+                 kv_cache_spec: AttentionSpec,
+                 vllm_config: VllmConfig,
+                 device: torch.device,
+                 build_dispatcher: Optional[AttentionMetadataBuilder] = None):
+        super().__init__(kv_cache_spec, vllm_config, device, build_dispatcher)
+        assert build_dispatcher is not None
+        self.build_dispatcher = build_dispatcher
+        self.block_size = vllm_config.cache_config.block_size
+        assert isinstance(kv_cache_spec,
+                          (FullAttentionSpec, ChunkedLocalAttentionSpec))
+        assert kv_cache_spec.attention_chunk_size is not None
+        self.attention_chunk_size = kv_cache_spec.attention_chunk_size
+
+    def build(self,
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata,
+              fast_build: bool = False):
+        common_attn_metadata = make_local_attention_virtual_batches(
+            self.attention_chunk_size, common_attn_metadata, self.block_size)
+        return self.build_dispatcher.build(common_prefix_len,
+                                           common_attn_metadata, fast_build)
+
+
 @functools.lru_cache
 def get_kv_cache_layout():
     global _KV_CACHE_LAYOUT_OVERRIDE
@@ -168,7 +202,7 @@ def get_per_layer_parameters(
     Scan all attention layers and determine some hyperparameters
     to use during `plan`.
     """
-
+    from vllm.attention.layer import Attention
     layers = get_layers_from_vllm_config(vllm_config, Attention)
     per_layer_params: dict[str, PerLayerParameters] = {}
 

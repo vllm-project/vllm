@@ -24,7 +24,7 @@ import torch
 from torch import nn
 from transformers import Llama4TextConfig
 
-from vllm.attention import Attention
+from vllm.attention import Attention, ChunkedLocalAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -194,7 +194,8 @@ class Llama4Attention(nn.Module):
             is_neox_style=is_neox_style,
         ) if not self.nope else None
 
-        self.attn = Attention(
+        attn_cls = Attention if self.nope else ChunkedLocalAttention
+        self.attn = attn_cls(
             self.num_heads,
             self.head_dim,
             self.scaling,

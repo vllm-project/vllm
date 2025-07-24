@@ -23,6 +23,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op
+from vllm.v1.attention.backends.utils import (
+    AttentionMetadataBuilder, ChunkedLocalAttentionMetadataBuilder)
 
 logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
@@ -166,18 +168,18 @@ class Attention(nn.Module):
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
-        attn_backend = get_attn_backend(head_size,
-                                        dtype,
-                                        kv_cache_dtype,
-                                        block_size,
-                                        is_attention_free,
-                                        use_mla=use_mla)
-        impl_cls = attn_backend.get_impl_cls()
+        self.attn_backend = get_attn_backend(head_size,
+                                             dtype,
+                                             kv_cache_dtype,
+                                             block_size,
+                                             is_attention_free,
+                                             use_mla=use_mla)
+        impl_cls = self.attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
                              logits_soft_cap, attn_type,
                              kv_sharing_target_layer_name, **extra_impl_args)
-        self.backend = backend_name_to_enum(attn_backend.get_name())
+        self.backend = backend_name_to_enum(self.attn_backend.get_name())
         self.dtype = dtype
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
@@ -187,7 +189,7 @@ class Attention(nn.Module):
         self.use_direct_call = not current_platform.is_cuda_alike(
         ) and not current_platform.is_cpu()
 
-        self.use_output = attn_backend.accept_output_buffer
+        self.use_output = self.attn_backend.accept_output_buffer
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -308,6 +310,21 @@ class Attention(nn.Module):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if hasattr(self.impl, "process_weights_after_loading"):
             self.impl.process_weights_after_loading(act_dtype)
+
+    def get_metadata_builder_cls(self) -> type[AttentionMetadataBuilder]:
+        """
+        Returns metadata bulider class. Note this method is only called in 
+        V1. For V1 attention backends, get_builder_cls() returns 
+        vllm.v1.attention.backends.utils.AttentionMetadataBuilder while in V0,
+        it returns vllm.attention.backends.abstract.AttentionMetadataBuilder.
+        """
+        return self.attn_backend.get_builder_cls()
+
+
+class ChunkedLocalAttention(Attention):
+
+    def get_metadata_builder_cls(self) -> type[AttentionMetadataBuilder]:
+        return ChunkedLocalAttentionMetadataBuilder
 
 
 class MultiHeadAttention(nn.Module):

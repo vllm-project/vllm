@@ -164,7 +164,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # self.model: nn.Module  # Set after load_model
         # Initialize in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
-        self.attn_metadata_builders: list[AttentionMetadataBuilder] = []
+        self.attn_metadata_builders: list[list[AttentionMetadataBuilder]] = []
+        self.attn_metadata_builder_mappings: list[dict[str, int]] = []
         self.attn_backends: list[type[AttentionBackend]] = []
         # self.kv_cache_config: KVCacheConfig
 
@@ -336,8 +337,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if len(self.kv_cache_config.kv_cache_groups) == 0:
             return
 
-        self.attn_metadata_builders[0].reorder_batch(self.input_batch,
-                                                     scheduler_output)
+        for attn_metadata_builder in self.attn_metadata_builders[0]:
+            attn_metadata_builder.reorder_batch(self.input_batch,
+                                                scheduler_output)
 
         # For models with multiple KV cache groups, the groups should agree on
         # the same order of requests. We ensure this by only allowing the first
@@ -347,9 +349,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # re-order the batch (not only the first).
         # TODO(tdoublep): verify this during engine init instead of at runtime
         for i in range(1, len(self.kv_cache_config.kv_cache_groups)):
-            batch_reordered = self.attn_metadata_builders[i].reorder_batch(
-                self.input_batch, scheduler_output)
-            assert not batch_reordered
+            for attn_metadata_builder in self.attn_metadata_builders[i]:
+                batch_reordered = attn_metadata_builder.reorder_batch(
+                    self.input_batch, scheduler_output)
+                assert not batch_reordered
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
@@ -772,27 +775,31 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             # Prepare for cascade attention if enabled & beneficial.
             common_prefix_len = 0
-            builder = self.attn_metadata_builders[kv_cache_group_id]
-            if self.cascade_attn_enabled:
-                common_prefix_len = self._compute_cascade_attn_prefix_len(
-                    num_scheduled_tokens,
-                    scheduler_output.
-                    num_common_prefix_blocks[kv_cache_group_id],
-                    kv_cache_group_spec.kv_cache_spec,
-                    builder,
-                )
+            builders = self.attn_metadata_builders[kv_cache_group_id]
+            kv_cache_group_attn_metadata = []
+            for builder in builders:
+                if self.cascade_attn_enabled:
+                    common_prefix_len = self._compute_cascade_attn_prefix_len(
+                        num_scheduled_tokens,
+                        scheduler_output.
+                        num_common_prefix_blocks[kv_cache_group_id],
+                        kv_cache_group_spec.kv_cache_spec,
+                        builder,
+                    )
 
-            attn_metadata_i = (builder.build(
-                common_prefix_len=common_prefix_len,
-                common_attn_metadata=common_attn_metadata,
-            ))
+                attn_metadata_i = (builder.build(
+                    common_prefix_len=common_prefix_len,
+                    common_attn_metadata=common_attn_metadata,
+                ))
+                kv_cache_group_attn_metadata.append(attn_metadata_i)
 
-            for layer_name in kv_cache_group_spec.layer_names:
-                attn_metadata[layer_name] = attn_metadata_i
+            for layer_name, idx in self.attn_metadata_builder_mappings[
+                    kv_cache_group_id].items():
+                attn_metadata[layer_name] = kv_cache_group_attn_metadata[idx]
 
         attention_cuda_graphs = all(
             b.can_run_in_cudagraph(common_attn_metadata)
-            for b in self.attn_metadata_builders)
+            for bl in self.attn_metadata_builders for b in bl)
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -2077,11 +2084,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     slot_mapping=self.input_batch.
                     block_table[kv_cache_group_id].slot_mapping[:num_tokens])
 
-                attn_metadata_i = self.attn_metadata_builders[
-                    kv_cache_group_id].build_for_cudagraph_capture(
+                kv_cache_group_attn_metadata = []
+                for builder in self.attn_metadata_builders[kv_cache_group_id]:
+                    attn_metadata_i = builder.build_for_cudagraph_capture(
                         common_attn_metadata)
-                for layer_name in kv_cache_group_spec.layer_names:
-                    attn_metadata[layer_name] = attn_metadata_i
+                    kv_cache_group_attn_metadata.append(attn_metadata_i)
+
+                for layer_name, idx in self.attn_metadata_builder_mappings[
+                        kv_cache_group_id].items():
+                    attn_metadata[layer_name] = kv_cache_group_attn_metadata[
+                        idx]
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
@@ -2443,6 +2455,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         Initialize the attention backends and attention metadata builders.
         """
+        layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+
         assert len(self.attn_backends) == 0 and len(
             self.attn_metadata_builders
         ) == 0, "Attention backends are already initialized"
@@ -2475,21 +2489,52 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 raise ValueError(
                     f"Unknown KV cache spec type: {type(kv_cache_spec)}")
 
-            attn_metadata_builder_i = attn_backend_i.get_builder_cls()(
+            default_builder_cls: type[AttentionMetadataBuilder] = \
+                attn_backend_i.get_builder_cls()
+
+            default_attn_metadata_builder = default_builder_cls(
                 kv_cache_spec,
                 self.vllm_config,
                 self.device,
             )
 
-            if (self.full_cuda_graph
-                    and not attn_metadata_builder_i.full_cudagraph_supported):
-                raise ValueError(
-                    f"Full CUDAGraph not supported for "
-                    f"{attn_backend_i.__name__}. Turn off CompilationConfig."
-                    f"full_cuda_graph or use a different attention backend.")
+            metadata_builder_class_to_idx = {}
+            layer_name_to_builder_class_idx = {}
+            metadata_builders_i = []
+
+            for layer_name in kv_cache_group_spec.layer_names:
+                builder_cls = layers[layer_name].get_metadata_builder_cls()
+                if builder_cls not in metadata_builder_class_to_idx:
+                    default_builder = None
+                    if builder_cls != default_builder_cls:
+                        default_builder = default_attn_metadata_builder
+
+                    attn_metadata_builder = builder_cls(
+                        kv_cache_spec,
+                        self.vllm_config,
+                        self.device,
+                        default_builder,
+                    )
+                    if (self.full_cuda_graph and
+                            not attn_metadata_builder.full_cudagraph_supported
+                        ):
+                        raise ValueError(
+                            f"Full CUDAGraph not supported for "
+                            f"{attn_backend_i.__name__}. Turn off "
+                            "CompilationConfig.full_cuda_graph or use a "
+                            "different attention backend.")
+
+                    metadata_builder_class_to_idx[builder_cls] = len(
+                        metadata_builders_i)
+                    metadata_builders_i.append(attn_metadata_builder)
+
+                layer_name_to_builder_class_idx[layer_name] = \
+                    metadata_builder_class_to_idx[builder_cls]
 
             self.attn_backends.append(attn_backend_i)
-            self.attn_metadata_builders.append(attn_metadata_builder_i)
+            self.attn_metadata_builders.append(metadata_builders_i)
+            self.attn_metadata_builder_mappings.append(
+                layer_name_to_builder_class_idx)
 
     def may_reinitialize_input_batch(self,
                                      kv_cache_config: KVCacheConfig) -> None:

@@ -220,8 +220,11 @@ class FlashInferMetadata:
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
-    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
-                 device: torch.device):
+    def __init__(self,
+                 kv_cache_spec: AttentionSpec,
+                 vllm_config: VllmConfig,
+                 device: torch.device,
+                 build_dispatcher: Optional[AttentionMetadataBuilder] = None):
         self.device = device
         self._workspace_buffer = None
         self._prefill_wrapper = None  # Wrapper for prefill/append

@@ -408,6 +408,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                  kv_cache_spec: AttentionSpec,
                  vllm_config: VllmConfig,
                  device: torch.device,
+                 build_dispatcher: Optional[AttentionMetadataBuilder] = None,
                  metadata_cls: Optional[type[M]] = None):
         self.metadata_cls = metadata_cls \
             if metadata_cls is not None else MLACommonMetadata

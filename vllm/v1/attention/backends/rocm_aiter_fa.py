@@ -13,7 +13,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if current_platform.is_rocm():
@@ -163,10 +164,13 @@ if current_platform.is_rocm():
 logger = init_logger(__name__)
 
 
-class AiterFlashAttentionMetadataBuilder:
+class AiterFlashAttentionMetadataBuilder(AttentionMetadataBuilder):
 
-    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
-                 device: torch.device):
+    def __init__(self,
+                 kv_cache_spec: AttentionSpec,
+                 vllm_config: VllmConfig,
+                 device: torch.device,
+                 build_dispatcher: Optional[AttentionMetadataBuilder] = None):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config

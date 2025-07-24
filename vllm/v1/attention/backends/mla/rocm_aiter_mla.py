@@ -10,13 +10,14 @@ import vllm.envs as envs
 from vllm.attention.ops.rocm_aiter_mla import aiter_mla_decode_fwd
 from vllm.config import VllmConfig
 from vllm.utils import cdiv
-# yapf conflicts with isort for this docstring
-# yapf: disable
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonDecodeMetadata,
                                                    MLACommonImpl,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
+# yapf conflicts with isort for this docstring
+# yapf: disable
+from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 # yapf: enable
@@ -66,9 +67,15 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     full_cudagraph_supported: ClassVar[bool] = True  # decode only
 
-    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
-                 device: torch.device):
-        super().__init__(kv_cache_spec, vllm_config, device, AiterMLAMetadata)
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        build_dispatcher: Optional[AttentionMetadataBuilder] = None,
+    ):
+        super().__init__(kv_cache_spec, vllm_config, device, build_dispatcher,
+                         AiterMLAMetadata)
         assert self.kv_cache_spec.block_size == 1, "AITER MLA" \
             "only supports block size 1."
 

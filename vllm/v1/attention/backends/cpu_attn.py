@@ -315,8 +315,13 @@ class TorchSDPAMetadata(AttentionMetadata):
 
 class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
 
-    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
-                 device: torch.device) -> None:
+    def __init__(
+            self,
+            kv_cache_spec: AttentionSpec,
+            vllm_config: VllmConfig,
+            device: torch.device,
+            build_dispatcher: Optional[AttentionMetadataBuilder] = None
+    ) -> None:
         self.kv_cache_spec = kv_cache_spec
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
