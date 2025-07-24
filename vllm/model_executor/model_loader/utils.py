@@ -15,7 +15,7 @@ from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from typing_extensions import assert_never
 
 from vllm.attention import Attention
-from vllm.config import (SUFFIX_TO_CONVERT_TYPE, ModelConfig, ModelImpl,
+from vllm.config import (SUFFIX_TO_DEFAULTS, ModelConfig, ModelImpl,
                          VllmConfig, set_current_vllm_config)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import QKVCrossParallelLinear
@@ -249,8 +249,9 @@ def get_model_architecture(
         for i in range(len(architectures)):
             arch = architectures[i]
 
-            for suffix, convert_type in SUFFIX_TO_CONVERT_TYPE:
-                if (convert_type == model_config.convert_type
+            for suffix, (runner_type, convert_type) in SUFFIX_TO_DEFAULTS:
+                if (runner_type == model_config.runner_type
+                        and convert_type == model_config.convert_type
                         and arch.endswith(suffix)):
                     causal_lm_arch = arch.replace(suffix, "ForCausalLM")
                     if causal_lm_arch in vllm_supported_archs:

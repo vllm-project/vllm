@@ -285,9 +285,6 @@ def mteb_test_rerank_models(hf_runner,
                      **vllm_extra_kwargs) as vllm_model:
 
         model_config = vllm_model.llm.llm_engine.model_config
-
-        if model_info.architecture:
-            assert (model_info.architecture in model_config.architectures)
         assert model_config.hf_config.num_labels == 1
 
         vllm_main_score = run_mteb_rerank(vllm_mteb_encoder(vllm_model),

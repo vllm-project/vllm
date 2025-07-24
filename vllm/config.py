@@ -118,32 +118,20 @@ _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
 }
 
 # https://huggingface.co/docs/transformers/en/model_doc/auto
-SUFFIX_TO_RUNNER_TYPE: list[tuple[str, RunnerType]] = [
-    ("ForCausalLM", "generate"),
-    ("ForConditionalGeneration", "generate"),
-    ("ChatModel", "generate"),
-    ("LMHeadModel", "generate"),
-    ("ForTextEncoding", "pooling"),
-    ("EmbeddingModel", "pooling"),
-    ("ForSequenceClassification", "pooling"),
-    ("ForAudioClassification", "pooling"),
-    ("ForImageClassification", "pooling"),
-    ("ForVideoClassification", "pooling"),
-    ("ClassificationModel", "pooling"),
-    ("ForRewardModeling", "pooling"),
-    ("RewardModel", "pooling"),
-]
-
-SUFFIX_TO_CONVERT_TYPE: list[tuple[str, ConvertType]] = [
-    ("ForTextEncoding", "embed"),
-    ("EmbeddingModel", "embed"),
-    ("ForSequenceClassification", "classify"),
-    ("ForAudioClassification", "classify"),
-    ("ForImageClassification", "classify"),
-    ("ForVideoClassification", "classify"),
-    ("ClassificationModel", "classify"),
-    ("ForRewardModeling", "reward"),
-    ("RewardModel", "reward"),
+SUFFIX_TO_DEFAULTS: list[tuple[str, tuple[RunnerType, ConvertType]]] = [
+    ("ForCausalLM", ("generate", "none")),
+    ("ForConditionalGeneration", ("generate", "none")),
+    ("ChatModel", ("generate", "none")),
+    ("LMHeadModel", ("generate", "none")),
+    ("ForTextEncoding", ("pooling", "embed")),
+    ("EmbeddingModel", ("pooling", "embed")),
+    ("ForSequenceClassification", ("pooling", "classify")),
+    ("ForAudioClassification", ("pooling", "classify")),
+    ("ForImageClassification", ("pooling", "classify")),
+    ("ForVideoClassification", ("pooling", "classify")),
+    ("ClassificationModel", ("pooling", "classify")),
+    ("ForRewardModeling", ("pooling", "reward")),
+    ("RewardModel", ("pooling", "reward")),
 ]
 
 
@@ -942,7 +930,7 @@ class ModelConfig:
         if get_pooling_config(self.model, self.revision):
             return "pooling"
 
-        for suffix, runner_type in SUFFIX_TO_RUNNER_TYPE:
+        for suffix, (runner_type, _) in SUFFIX_TO_DEFAULTS:
             if architecture.endswith(suffix):
                 return runner_type
 
@@ -972,18 +960,16 @@ class ModelConfig:
         registry = self.registry
 
         if architecture in registry.get_supported_archs():
-            if runner_type == "generate" and registry.is_text_generation_model(
-                    architecture):
+            if (runner_type == "generate"
+                    and registry.is_text_generation_model(architecture)):
                 return "none"
-            if runner_type == "pooling" and registry.is_pooling_model(
-                    architecture):
+            if (runner_type == "pooling"
+                    and registry.is_pooling_model(architecture)):
                 return "none"
 
-        if self.registry.is_cross_encoder_model(architecture):
-            return "classify"
-
-        for suffix, convert_type in SUFFIX_TO_CONVERT_TYPE:
-            if architecture.endswith(suffix):
+        for suffix, (default_runner_type, convert_type) in SUFFIX_TO_DEFAULTS:
+            if (default_runner_type == runner_type
+                    and architecture.endswith(suffix)):
                 return convert_type
 
         if runner_type == "pooling":
