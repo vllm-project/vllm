@@ -17,8 +17,8 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.transformers import replace_linear_class
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
+from vllm.model_executor.models.transformers import replace_linear_class
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargs, NestedTensors)
@@ -390,7 +390,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return parent, names[-1]
 
     #patch for timm ViT instance to support tensor parallel
-    def patch_vit_for_tp(self, vit: torch.nn.Module, quant_config: QuantizationConfig):
+    def patch_vit_for_tp(self, vit: torch.nn.Module,
+                         quant_config: QuantizationConfig):
         try:
             import timm
         except ImportError as e:
@@ -399,12 +400,14 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         for name, module in vit.named_modules():
             if isinstance(module, nn.Linear):
                 parent, attr_name = self._get_parent_and_attr(vit, name)
-                if isinstance(parent, timm.layers.Mlp) and attr_name == "fc1":         
-                    new_linear = replace_linear_class(module, "colwise", quant_config)
+                if isinstance(parent, timm.layers.Mlp) and attr_name == "fc1":
+                    new_linear = replace_linear_class(module, "colwise",
+                                                      quant_config)
                     setattr(parent, attr_name, new_linear)
-                elif isinstance(parent, 
-                                timm.layers.Mlp) and attr_name == "fc2": 
-                    new_linear = replace_linear_class(module, "rowwise", quant_config)
+                elif isinstance(parent,
+                                timm.layers.Mlp) and attr_name == "fc2":
+                    new_linear = replace_linear_class(module, "rowwise",
+                                                      quant_config)
                     setattr(parent, attr_name, new_linear)
 
         return vit
@@ -431,7 +434,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             )
         
         if get_tensor_model_parallel_world_size() > 1:
-            model = self.patch_vit_for_tp(model,quant_config)
+            model = self.patch_vit_for_tp(model, quant_config)
 
         model = model.to(dtype=torch.get_default_dtype())
         return model
