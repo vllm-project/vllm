@@ -565,8 +565,8 @@ def test_engine_core_proc_instantiation_cuda_empty(
 
         from vllm.v1.engine.utils import EngineZmqAddresses
 
-        def mock_startup_handshake(self, handshake_socket, on_head_node,
-                                   parallel_config):
+        def mock_startup_handshake(self, handshake_socket, local_client,
+                                   headless, parallel_config):
             return EngineZmqAddresses(inputs=["tcp://127.0.0.1:5555"],
                                       outputs=["tcp://127.0.0.1:5556"],
                                       coordinator_input=None,

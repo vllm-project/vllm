@@ -429,18 +429,23 @@ class MPClient(EngineCoreClient):
             parallel_config = vllm_config.parallel_config
             dp_size = parallel_config.data_parallel_size
             dp_rank = parallel_config.data_parallel_rank
-            external_dp_lb = parallel_config.data_parallel_external_lb
-
+            dp_local_size = parallel_config.data_parallel_size_local
             offline_mode = parallel_config.data_parallel_rank_local is not None
-            self.engine_ranks = ([dp_rank] if
-                                 (offline_mode or external_dp_lb) else list(
-                                     range(dp_size)))
+            # Client manages local+remote EngineCores in pure internal LB case.
+            # Client manages local EngineCores in hybrid and external LB case.
+            local_engines_only = (parallel_config.data_parallel_hybrid_lb
+                                  or parallel_config.data_parallel_external_lb)
+
+            num_ranks = dp_local_size if local_engines_only else dp_size
+            self.engine_ranks_managed = [dp_rank] if offline_mode else list(
+                range(dp_rank, dp_rank + num_ranks))
             assert parallel_config.data_parallel_size_local <= len(
-                self.engine_ranks)
+                self.engine_ranks_managed)
 
             # ZMQ identity of each engine that this client will talk to.
             self.core_engines: list[EngineIdentity] = [
-                index.to_bytes(2, "little") for index in self.engine_ranks
+                rank.to_bytes(2, "little")
+                for rank in self.engine_ranks_managed
             ]
 
             # Wait for ready messages from each engine on the input socket.
@@ -895,6 +900,12 @@ class DPAsyncMPClient(AsyncMPClient):
             return
 
         assert self.stats_update_address is not None
+        assert len(self.engine_ranks_managed) > 0
+        # NOTE: running and waiting counts are all global from
+        # the Coordinator include all global EngineCores. This
+        # slice includes just the cores managed by this client.
+        count_slice = slice(self.engine_ranks_managed[0],
+                            self.engine_ranks_managed[-1] + 1)
 
         async def run_engine_stats_update_task():
             with make_zmq_socket(self.ctx, self.stats_update_address,
@@ -959,7 +970,7 @@ class DPAsyncMPClient(AsyncMPClient):
                     counts, wave, running = msgspec.msgpack.decode(buf)
                     self.current_wave = wave
                     self.engines_running = running
-                    self.lb_engines = counts
+                    self.lb_engines = counts[count_slice]
 
         resources.stats_update_task = asyncio.create_task(
             run_engine_stats_update_task())
