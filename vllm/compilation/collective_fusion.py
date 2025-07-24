@@ -292,8 +292,6 @@ if flashinfer_comm is not None:
             assert (_FI_WORKSPACE_TENSOR is not None
                     ), "Flashinfer must be enabled when using flashinfer"
 
-            # For the sizes that are smaller than the max size,
-            # we only use flashinfer one shot allreduce
             fusion_pattern = (flashinfer_comm.AllReduceFusionPattern.
                               kARResidualRMSNormFP8Quant)
 

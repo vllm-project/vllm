@@ -229,8 +229,7 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
 
     # residual is updated in-place by rms+add, so clone it
     ref = model(hidden_states, residual.clone())
-    res = compiled_model(hidden_states, residual)
-
+    res = compiled_model(hidden_states, residual.clone())
     torch.testing.assert_close(res, ref, atol=1e-2, rtol=1e-2)
 
     backend.check_before_ops(model.ops_in_model_before(), fully_replaced=True)
