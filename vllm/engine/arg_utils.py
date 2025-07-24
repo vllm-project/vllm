@@ -1343,13 +1343,6 @@ class EngineArgs:
                                recommend_to_remove=True)
             return False
 
-        if self.guided_decoding_backend not in get_args(GuidedDecodingBackend):
-            _raise_or_fallback(
-                feature_name=
-                f"--guided-decoding-backend={self.guided_decoding_backend}",
-                recommend_to_remove=False)
-            return False
-
         # Need at least Ampere for now (FA support required).
         # Skip this check if we are running on a non-GPU platform,
         # or if the device capability is not available
