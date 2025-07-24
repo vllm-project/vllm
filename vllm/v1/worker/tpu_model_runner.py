@@ -25,14 +25,17 @@ from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.tpu import TPUModelLoader
+from vllm.model_executor.models.interfaces_base import is_pooling_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
                                     PlaceholderRange)
 from vllm.multimodal.utils import group_mm_inputs_by_modality
+from vllm.pooling_params import PoolingTask
 from vllm.sequence import IntermediateTensors
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, cdiv,
-                        is_pin_memory_available, prev_power_of_2)
-from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
+from vllm.utils import (LayerBlockType, cdiv, is_pin_memory_available,
+                        prev_power_of_2)
+from vllm.v1.attention.backends.pallas import (TPU_STR_DTYPE_TO_TORCH_DTYPE,
+                                               PallasAttentionBackend,
                                                PallasMetadata,
                                                get_page_size_bytes)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
@@ -111,7 +114,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.original_parallel_config = original_parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
         self.device_config = vllm_config.device_config
 
@@ -140,11 +142,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         if cache_config.cache_dtype == "auto":
             model_dtype = self.dtype
             if isinstance(model_dtype, str):
-                self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[model_dtype]
+                self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[model_dtype]
             else:
                 self.kv_cache_dtype = model_dtype
         else:
-            self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
+            self.kv_cache_dtype = TPU_STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
         self._hidden_states_dtype = self.dtype
 
@@ -483,6 +485,13 @@ class TPUModelRunner(LoRAModelRunnerMixin):
     def get_model(self) -> nn.Module:
         return self.model
 
+    def get_supported_pooling_tasks(self) -> list[PoolingTask]:
+        model = self.get_model()
+        if not is_pooling_model(model):
+            return []
+
+        return list(model.pooler.get_supported_tasks())
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
         Generates the KVCacheSpec by parsing the kv cache format from each
@@ -509,6 +518,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 continue
 
             if attn_module.attn_type == AttentionType.DECODER:
+                if attn_module.use_irope:
+                    logger.warning_once(
+                        "Using irope in Pallas is not supported yet, it "
+                        "will fall back to global attention for long context.")
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
@@ -937,11 +950,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
-            if mm_embeds:
-                inputs_embeds = self.model.get_input_embeddings(
-                    input_ids, mm_embeds)
-            else:
-                inputs_embeds = self.model.get_input_embeddings(input_ids)
+            inputs_embeds = self.model.get_input_embeddings(
+                input_ids=input_ids,
+                multimodal_embeddings=mm_embeds,
+            )
             return None, inputs_embeds
         else:
             # For text-only models, we use token ids as input.
@@ -1161,16 +1173,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                         mesh=self.mesh)
                 else:
                     model_loader = get_model_loader(self.load_config)
-                    if not hasattr(self, "model"):
-                        logger.info("Loading model from scratch...")
-                        model = model_loader.load_model(
-                            vllm_config=self.vllm_config,
-                            model_config=self.model_config)
-                    else:
-                        logger.info("Model was already initialized. \
-                                Loading weights inplace...")
-                        model_loader.load_weights(
-                            self.model, model_config=self.model_config)
+                    logger.info("Loading model from scratch...")
+                    model = model_loader.load_model(
+                        vllm_config=self.vllm_config,
+                        model_config=self.model_config)
             except RuntimeError as e:
                 raise RuntimeError(
                     f"Unable to load model, a likely reason is the model is "
@@ -1191,6 +1197,13 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         if not hasattr(self, "model"):
             self.model = model
         self.sampler = TPUSampler()
+
+    def reload_weights(self) -> None:
+        assert getattr(self, "model", None) is not None, \
+            "Cannot reload weights before model is loaded."
+        model_loader = get_model_loader(self.load_config)
+        logger.info("Reloading weights inplace...")
+        model_loader.load_weights(self.model, model_config=self.model_config)
 
     @torch.no_grad()
     def _dummy_run(self, num_tokens: int, num_reqs: int,

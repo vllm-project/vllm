@@ -22,9 +22,7 @@ from vllm.lora.fully_sharded_layers import (
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
-                              FusedMoEWithLoRA,
-                              LinearScalingRotaryEmbeddingWithLoRA,
-                              LogitsProcessorWithLoRA,
+                              FusedMoEWithLoRA, LogitsProcessorWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLoRA,
                               QKVParallelLinearWithLoRA,
@@ -58,7 +56,6 @@ _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     MergedColumnParallelLinearWithShardedLoRA,
     MergedQKVParallelLinearWithShardedLoRA,
     RowParallelLinearWithShardedLoRA,
-    LinearScalingRotaryEmbeddingWithLoRA,
     FusedMoEWithLoRA,
 }
 
@@ -105,8 +102,8 @@ def replace_submodule(model: nn.Module, module_name: str,
 
 
 def parse_fine_tuned_lora_name(
-        name: str,
-        weights_mapper: Optional["WeightsMapper"] = None
+    name: str,
+    weights_mapper: Optional["WeightsMapper"] = None
 ) -> tuple[str, bool, bool]:
     """Parse the name of lora weights.
 
@@ -191,20 +188,23 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
     """
     In vLLM, all linear layers support LoRA.
     """
+
     supported_lora_modules: set[str] = set()
-    # step1: traverse the model to get all the linear subfixes.
     for name, module in model.named_modules():
+        # get the embedding modules if the module's embedding_modules
+        # is not empty.
+        embedding_modules = getattr(module, "embedding_modules", None)
+        if embedding_modules is not None:
+            for name in embedding_modules:
+                supported_lora_modules.add(name)
+
+        # get all the linear subfixes.
         if isinstance(module, (LinearBase,)):
             supported_lora_modules.add(name.split(".")[-1])
 
         if isinstance(module, (FusedMoE,)):
             supported_lora_modules.add(name.split(".")[-1])
 
-    # step 2: get the embedding modules if the model's mbedding_modules
-    # is not empty.
-    if model.embedding_modules:
-        for name in model.embedding_modules:
-            supported_lora_modules.add(name)
     return list(supported_lora_modules)
 
 

@@ -19,6 +19,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
+from vllm.pooling_params import PoolingTask
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.attention.backends.pallas import TPU_HEAD_SIZE_ALIGNMENT
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -61,7 +62,6 @@ class TPUWorker:
         self.scheduler_config = vllm_config.scheduler_config
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
 
         self.parallel_config.rank = rank
@@ -264,6 +264,9 @@ class TPUWorker:
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
 
+    def reload_weights(self) -> None:
+        self.model_runner.reload_weights()
+
     def compile_or_warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
@@ -274,6 +277,9 @@ class TPUWorker:
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
+
+    def get_supported_pooling_tasks(self) -> list[PoolingTask]:
+        return self.model_runner.get_supported_pooling_tasks()
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
