@@ -15,11 +15,6 @@ from .test_completion import zephyr_lora_files  # noqa: F401
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 
-@pytest.fixture(scope="function", autouse=True)
-def use_v1_only(monkeypatch):
-    monkeypatch.setenv('VLLM_USE_V1', '1')
-
-
 @pytest.fixture(scope="module")
 def server(zephyr_lora_added_tokens_files: str):  # noqa: F811
     args = [
