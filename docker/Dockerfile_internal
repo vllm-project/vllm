@@ -1,8 +1,9 @@
-FROM us-central1-docker.pkg.dev/character-ai/vllm/vllm-forked:latest as builder
-
+FROM us-central1-docker.pkg.dev/character-ai/vllm/vllm-forked:d0ab76f as builder
 COPY . /mnt/vllm
-RUN pip uninstall -y vllm
-RUN VLLM_USE_PRECOMPILED=1 pip install /mnt/vllm
+
+# Install without build isolation to preserve existing binaries
+RUN pip install --no-build-isolation --no-deps /mnt/vllm --force-reinstall
+
 RUN rm -rf /mnt/vllm
 RUN python3 -c "import vllm; print('Custom vLLM loaded successfully')"
 RUN python3 -m pip install --no-cache-dir --upgrade \
@@ -12,6 +13,5 @@ RUN python3 -m pip install --no-cache-dir --upgrade \
       opentelemetry-exporter-otlp==1.26.0 \
       opentelemetry-semantic-conventions-ai==0.4.1 \
       google-cloud-trace==1.7.1
-
 
 ENV HF_HOME=/huggingface/cache
