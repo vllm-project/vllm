@@ -519,10 +519,6 @@ class CudaPlatformBase(Platform):
         return supported
 
     @classmethod
-    def empty_cache(cls):
-        torch.cuda.empty_cache()
-
-    @classmethod
     def reset_peak_memory_stats(cls):
         torch.cuda.reset_peak_memory_stats()
 
