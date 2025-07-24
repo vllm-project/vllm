@@ -26,11 +26,14 @@ from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
+from vllm.entrypoints.openai.logits_processors import (
+    get_logits_processors as get_openai_logits_processors)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
 from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
+from vllm.logits_process import get_bad_words_logits_processors
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -730,6 +733,9 @@ class LLMEngine:
                     and sampling_params.prompt_logprobs > max_logprobs):
             raise ValueError(f"Cannot request more than "
                              f"{max_logprobs} logprobs.")
+
+        sampling_params = self._build_logits_processors(
+            sampling_params, lora_request)
 
         # Defensive copy of SamplingParams, which are used by the sampler,
         # this doesn't deep-copy LogitsProcessor objects
@@ -1970,6 +1976,43 @@ class LLMEngine:
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
+
+    def _build_logits_processors(
+            self, sampling_params: SamplingParams,
+            lora_request: Optional[LoRARequest]) -> SamplingParams:
+        """Constructs logits processors based on the logits_bias, and
+        allowed_token_ids fields in sampling_params. Deletes those fields and
+        adds the constructed logits processors to the logits_processors field.
+        Returns the modified sampling params."""
+
+        logits_processors = []
+
+        if (sampling_params.logit_bias or sampling_params.allowed_token_ids):
+            tokenizer = self.get_tokenizer(lora_request=lora_request)
+
+            processors = get_openai_logits_processors(
+                logit_bias=sampling_params.logit_bias,
+                allowed_token_ids=sampling_params.allowed_token_ids,
+                tokenizer=tokenizer)
+            logits_processors.extend(processors)
+
+            # Unset so these don't get passed down to the model
+            sampling_params.logit_bias = None
+            sampling_params.allowed_token_ids = None
+
+        if len(sampling_params.bad_words) > 0:
+            tokenizer = self.get_tokenizer(lora_request)
+            processors = get_bad_words_logits_processors(
+                bad_words=sampling_params.bad_words, tokenizer=tokenizer)
+            logits_processors.extend(processors)
+
+        if logits_processors:
+            if sampling_params.logits_processors is None:
+                sampling_params.logits_processors = logits_processors
+            else:
+                sampling_params.logits_processors.extend(logits_processors)
+
+        return sampling_params
 
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
