@@ -269,7 +269,7 @@ class MistralToolParser(ToolParser):
             delta_text = delta_text.replace(self.bot_token, "", 1)
         if self.streaming_state == StreamingState.PARSING_NAME:
             if self.current_tool_name is None:
-                    self.current_tool_name = ""
+                self.current_tool_name = ""
             # The name stops where the arguments start
             # And the arguments start with the `{` char
             if "{" in delta_text:
@@ -282,11 +282,10 @@ class MistralToolParser(ToolParser):
                 self.current_tool_name += delta_text
                 if tool_id is not None:
                     return [
-                        DeltaToolCall(
-                        index=self.current_tool_id,
-                        type="function",
-                        id=tool_id
-                    )]
+                        DeltaToolCall(index=self.current_tool_id,
+                                      type="function",
+                                      id=tool_id)
+                    ]
                 else:
                     return []
         if self.streaming_state == StreamingState.PARSING_ARGUMENTS:
