@@ -971,6 +971,7 @@ class DPAsyncMPClient(AsyncMPClient):
                     self.current_wave = wave
                     self.engines_running = running
                     self.lb_engines = counts[count_slice]
+                    logger.info(f"{counts=} | {count_slice=}")
 
         resources.stats_update_task = asyncio.create_task(
             run_engine_stats_update_task())
