@@ -47,13 +47,13 @@ __global__ void compute_problem_sizes(const int32_t* __restrict__ topk_ids,
 
 __global__ void compute_expert_offsets(
     const int32_t* __restrict__ problem_sizes1, int32_t* expert_offsets,
-    int32_t* atomic_buffer, const int num_experts, const int topk_length) {
+    int32_t* atomic_buffer, const int num_experts, const int topk_length,
+    const bool swap_ab) {
   int32_t tot_offset = 0;
   expert_offsets[0] = 0;
   for (int i = 0; i < num_experts; ++i) {
     atomic_buffer[i] = tot_offset;
-    tot_offset += topk_length > SWAP_AB_THRESHOLD ? problem_sizes1[i * 3]
-                                                  : problem_sizes1[i * 3 + 1];
+    tot_offset += swap_ab ? problem_sizes1[i * 3 + 1] : problem_sizes1[i * 3];
     expert_offsets[i + 1] = tot_offset;
   }
 }
@@ -61,15 +61,14 @@ __global__ void compute_expert_offsets(
 __global__ void compute_expert_blockscale_offsets(
     const int32_t* __restrict__ problem_sizes1, int32_t* expert_offsets,
     int32_t* blockscale_offsets, int32_t* atomic_buffer, const int num_experts,
-    const int topk_length) {
+    const int topk_length, const bool swap_ab) {
   int32_t tot_offset = 0;
   int32_t tot_offset_round = 0;
   expert_offsets[0] = 0;
   blockscale_offsets[0] = 0;
   for (int i = 0; i < num_experts; ++i) {
-    int32_t cur_offset = topk_length > SWAP_AB_THRESHOLD
-                             ? problem_sizes1[i * 3]
-                             : problem_sizes1[i * 3 + 1];
+    int32_t cur_offset =
+        swap_ab ? problem_sizes1[i * 3 + 1] : problem_sizes1[i * 3];
     atomic_buffer[i] = tot_offset;
     tot_offset += cur_offset;
     expert_offsets[i + 1] = tot_offset;
@@ -111,7 +110,8 @@ void get_cutlass_moe_mm_data_caller(
     torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
     const int64_t num_experts, const int64_t n, const int64_t k,
-    const std::optional<torch::Tensor>& blockscale_offsets) {
+    const std::optional<torch::Tensor>& blockscale_offsets,
+    bool force_no_swap) {
   auto stream = at::cuda::getCurrentCUDAStream(topk_ids.device().index());
   auto options_int32 =
       torch::TensorOptions().dtype(torch::kInt32).device(topk_ids.device());
@@ -119,15 +119,16 @@ void get_cutlass_moe_mm_data_caller(
 
   int num_threads = min(THREADS_PER_EXPERT, topk_ids.numel());
 
-  if (topk_ids.numel() > SWAP_AB_THRESHOLD) {
-    compute_problem_sizes<false><<<num_experts, num_threads, 0, stream>>>(
+  bool swap_ab = !force_no_swap && topk_ids.numel() <= SWAP_AB_THRESHOLD;
+  if (swap_ab) {
+    compute_problem_sizes<true><<<num_experts, num_threads, 0, stream>>>(
         static_cast<const int32_t*>(topk_ids.data_ptr()),
         static_cast<int32_t*>(problem_sizes1.data_ptr()),
         static_cast<int32_t*>(problem_sizes2.data_ptr()),
         static_cast<int32_t*>(atomic_buffer.data_ptr()), topk_ids.numel(), n,
         k);
   } else {
-    compute_problem_sizes<true><<<num_experts, num_threads, 0, stream>>>(
+    compute_problem_sizes<false><<<num_experts, num_threads, 0, stream>>>(
         static_cast<const int32_t*>(topk_ids.data_ptr()),
         static_cast<int32_t*>(problem_sizes1.data_ptr()),
         static_cast<int32_t*>(problem_sizes2.data_ptr()),
@@ -141,13 +142,13 @@ void get_cutlass_moe_mm_data_caller(
         static_cast<int32_t*>(expert_offsets.data_ptr()),
         static_cast<int32_t*>(blockscale_offsets.value().data_ptr()),
         static_cast<int32_t*>(atomic_buffer.data_ptr()), num_experts,
-        topk_ids.numel());
+        topk_ids.numel(), swap_ab);
   } else {
     compute_expert_offsets<<<1, 1, 0, stream>>>(
         static_cast<const int32_t*>(problem_sizes1.data_ptr()),
         static_cast<int32_t*>(expert_offsets.data_ptr()),
         static_cast<int32_t*>(atomic_buffer.data_ptr()), num_experts,
-        topk_ids.numel());
+        topk_ids.numel(), swap_ab);
   }
   compute_arg_sorts<<<num_experts, num_threads, 0, stream>>>(
       static_cast<const int32_t*>(topk_ids.data_ptr()),

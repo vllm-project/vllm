@@ -485,6 +485,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 "Using FlashInfer MoE FP8 kernels for Fp8MoEMethod.")
             self.flashinfer_moe_enabled = True
 
+        self.allow_cutlass_block_scaled_grouped_gemm = False
+
         # Check for DeepGemm support.
         self.allow_deep_gemm = False
         if envs.VLLM_USE_DEEP_GEMM:

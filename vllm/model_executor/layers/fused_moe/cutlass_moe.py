@@ -155,7 +155,8 @@ def run_cutlass_moe_fp8(
 
         ops.get_cutlass_moe_mm_data(local_topk_ids, expert_offsets,
                                     problem_sizes1, problem_sizes2, a_map,
-                                    c_map, global_num_experts, N, K)
+                                    c_map, global_num_experts, N, K, None,
+                                    False)
 
         a1q = ops.shuffle_rows(a1q, a_map)
         a1q_scale = (ops.shuffle_rows(a1q_scale, a_map)
@@ -528,7 +529,7 @@ def run_cutlass_moe_fp4(
     # Note that problem sizes are based on logical number of elements.
     ops.get_cutlass_moe_mm_data(topk_ids, expert_offsets, problem_sizes1,
                                 problem_sizes2, a_map, c_map, e, n, k,
-                                blockscale_offsets)
+                                blockscale_offsets, True)
 
     a = ops.shuffle_rows(a, a_map)
     rep_a_fp4, rep_a_blockscale = ops.scaled_fp4_experts_quant(
@@ -865,7 +866,7 @@ def run_block_scaled_cutlass_moe_fp8(
 
     ops.get_cutlass_moe_mm_data(local_topk_ids, expert_offsets, problem_sizes1,
                                 problem_sizes2, a_map, c_map,
-                                global_num_experts, N, K)
+                                global_num_experts, N, K, None, True)
 
     a1q = ops.shuffle_rows(a1q, a_map)
     a1q_scale = (ops.shuffle_rows(a1q_scale, a_map)
