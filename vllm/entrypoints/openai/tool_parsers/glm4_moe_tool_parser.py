@@ -20,7 +20,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("glm4_moe")
+@ToolParserManager.register_module("glm45")
 class Glm4MoeModelToolParser(ToolParser):
 
     def __init__(self, tokenizer: AnyTokenizer):
