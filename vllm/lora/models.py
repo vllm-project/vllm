@@ -20,7 +20,8 @@ from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (BaseLayerWithLoRA,
-                              LinearScalingRotaryEmbeddingWithLoRA, LoRAMapping)
+                              LinearScalingRotaryEmbeddingWithLoRA,
+                              LoRAMapping)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import get_punica_wrapper
@@ -93,8 +94,9 @@ class LoRAModel(AdapterModel):
         # Scaling factor for long context lora model. None if it is not
         # fine tuned for the long context.
         self.scaling_factor = scaling_factor
-        assert (lora_model_id
-                > 0), f"a valid lora id should be greater than 0, got {self.id}"
+        assert (
+            lora_model_id
+            > 0), f"a valid lora id should be greater than 0, got {self.id}"
         self.rank = rank
         self.loras: dict[str, LoRALayerWeights] = loras
 
@@ -175,7 +177,8 @@ class LoRAModel(AdapterModel):
                 loras[module_name].lora_b = tensor.to(device=device,
                                                       dtype=dtype).t()
                 assert embedding_padding_modules is not None
-                if any(name in module_name for name in embedding_padding_modules
+                if any(name in module_name
+                       for name in embedding_padding_modules
                       ) and target_embedding_padding is not None:
                     lora_b = loras[module_name].lora_b
                     assert target_embedding_padding >= lora_b.shape[1]
@@ -226,8 +229,8 @@ class LoRAModel(AdapterModel):
         """
         lora_tensor_path = os.path.join(lora_dir, "adapter_model.safetensors")
         lora_bin_file_path = os.path.join(lora_dir, "adapter_model.bin")
-        new_embeddings_tensor_path = os.path.join(lora_dir,
-                                                  "new_embeddings.safetensors")
+        new_embeddings_tensor_path = os.path.join(
+            lora_dir, "new_embeddings.safetensors")
         new_embeddings_bin_file_path = os.path.join(lora_dir,
                                                     "new_embeddings.bin")
         tensors: dict[str, torch.Tensor] = {}
@@ -306,7 +309,8 @@ class LoRAModel(AdapterModel):
 
         embeddings = None
         if os.path.isfile(new_embeddings_tensor_path):
-            embeddings = safetensors.torch.load_file(new_embeddings_tensor_path)
+            embeddings = safetensors.torch.load_file(
+                new_embeddings_tensor_path)
         elif os.path.isfile(new_embeddings_bin_file_path):
             embeddings = torch.load(new_embeddings_bin_file_path,
                                     map_location=device,
@@ -438,9 +442,8 @@ class LoRAModelManager(AdapterModelManager):
                         f"Adapter bias cannot be used for {module_name}"
                         " without --enable-lora-bias.")
                 module.set_lora(index, module_lora.lora_a, module_lora.lora_b,
-                                module_lora.embeddings_tensor, module_lora.bias)
-            elif hasattr(module, 'load_weights'):
-                module.load_weights(index, module_name, lora_model)
+                                module_lora.embeddings_tensor,
+                                module_lora.bias)
             else:
                 module.reset_lora(index)
         return True
@@ -531,8 +534,8 @@ class LoRAModelManager(AdapterModelManager):
                     "logits_processor")
                 new_module = replace_submodule(
                     self.model, "logits_processor",
-                    from_layer_logits_processor(logits_processor_module, module,
-                                                self.lora_slots,
+                    from_layer_logits_processor(logits_processor_module,
+                                                module, self.lora_slots,
                                                 self.lora_config,
                                                 self.model.config))
 
@@ -573,15 +576,15 @@ class LoRAModelManager(AdapterModelManager):
                 assert embedding_modules is not None
                 if parts[-1] in embedding_modules:
                     input_dim = (module.base_layer.org_vocab_size +
-                                 self.lora_config.lora_extra_vocab_size
-                                 if hasattr(module.base_layer, "org_vocab_size")
+                                 self.lora_config.lora_extra_vocab_size if
+                                 hasattr(module.base_layer, "org_vocab_size")
                                  else module.base_layer.weight.shape[1])
                     output_dim = module.base_layer.embedding_dim if hasattr(
                         module.base_layer,
                         "embedding_dim") else module.base_layer.weight.shape[0]
-                    embeddings_tensor_dim = (module.base_layer.embedding_dim
-                                             if hasattr(module.base_layer,
-                                                        "embedding_dim") else
+                    embeddings_tensor_dim = (module.base_layer.embedding_dim if
+                                             hasattr(module.base_layer,
+                                                     "embedding_dim") else
                                              module.base_layer.weight.shape[1])
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
@@ -685,8 +688,9 @@ class LoRAModelManager(AdapterModelManager):
             for module in replaced_module:
                 lora_model.loras.pop(module, None)
 
-    def _get_lora_layer_weights(self, lora_model: LoRAModel,
-                                module_name: str) -> Optional[LoRALayerWeights]:
+    def _get_lora_layer_weights(
+            self, lora_model: LoRAModel,
+            module_name: str) -> Optional[LoRALayerWeights]:
         org_module_name = module_name
         if self.is_pooling_model and not lora_model.check_lora_name(
                 module_name):

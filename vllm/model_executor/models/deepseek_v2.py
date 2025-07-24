@@ -170,7 +170,8 @@ class DeepseekV2MoE(nn.Module):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=self.experts.must_reduce_shared_expert_outputs(),
+                reduce_results=self.experts.must_reduce_shared_expert_outputs(
+                ),
                 prefix=f"{prefix}.shared_experts",
             )
 
@@ -332,8 +333,8 @@ class DeepseekV2Attention(nn.Module):
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
                                dim=-1)
         latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
-        kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim],
-                                     dim=-1)
+        kv_a, _ = latent_cache.split(
+            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         latent_cache = latent_cache.unsqueeze(1)
         kv_a = self.kv_a_layernorm(kv_a.contiguous())
         kv = self.kv_b_proj(kv_a)[0]
@@ -349,10 +350,9 @@ class DeepseekV2Attention(nn.Module):
         k[..., :self.qk_nope_head_dim] = k_nope
         k[..., self.qk_nope_head_dim:] = k_pe
         # padding value to qk_head_dim for alignment
-        v = torch.nn.functional.pad(v, [0, self.qk_head_dim - self.v_head_dim],
-                                    value=0).view(
-                                        -1,
-                                        self.num_local_heads * self.qk_head_dim)
+        v = torch.nn.functional.pad(
+            v, [0, self.qk_head_dim - self.v_head_dim],
+            value=0).view(-1, self.num_local_heads * self.qk_head_dim)
         attn_output = self.attn(q, k, v)
         attn_output = attn_output.view(
             -1, self.num_local_heads,
@@ -714,12 +714,38 @@ class DeepseekV2Model(nn.Module):
 
 class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
                             SupportsLoRA):
-    packed_modules_mapping = {
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ]
-    }
+
+    def get_packed_modules_mapping(self) -> dict[str, list[str]]:
+        # This method generates and returns a dictionary mapping packed module
+        # names to lists of their corresponding submodule names. It includes
+        # both static mappings and dynamic mappings for expert layers, where
+        # the expert indices are expanded based on the configured number
+        # of routed experts.
+
+        packed_modules_mapping = {
+            "gate_up_proj": [
+                "gate_proj",
+                "up_proj",
+            ]
+        }
+
+        packed_modules_mapping_replacement = {
+            "experts": [
+                "experts.{}.gate_proj",
+                "experts.{}.up_proj",
+                "experts.{}.down_proj",
+            ]
+        }
+
+        n_routed_experts = getattr(self.config, "n_routed_experts", None)
+        assert n_routed_experts is not None
+        for key, values in packed_modules_mapping_replacement.items():
+            expert_layers = []
+            for expert_id in range(0, n_routed_experts):
+                for layer_name in values:
+                    expert_layers.append(layer_name.format(expert_id))
+            packed_modules_mapping[key] = expert_layers
+        return packed_modules_mapping
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

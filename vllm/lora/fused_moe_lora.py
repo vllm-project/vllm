@@ -85,7 +85,6 @@ def fused_moe_lora(
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
-    # ----------------------------------------------------------
     num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr + lora_idx)
     if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
         return
@@ -138,7 +137,6 @@ def fused_moe_lora(
         accumulator = accumulator * moe_weight[:, None]
 
     accumulator = accumulator.to(tl.bfloat16)
-    # -----------------------------------------------------------
     # Write back the block of the output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = cur_c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[
@@ -147,26 +145,40 @@ def fused_moe_lora(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-def fused_moe_w13_lora(qcurr_hidden_states: torch.Tensor,
-                       w13_lora_a_stacked: list[torch.Tensor],
-                       w13_lora_b_stacked: list[torch.Tensor],
-                       topk_weights: torch.Tensor,
-                       sorted_token_ids: torch.Tensor, expert_ids: torch.Tensor,
-                       num_tokens_post_padded: torch.Tensor, max_lora_rank: int,
-                       top_k_num: int, config,
-                       intermediate_cache1: torch.Tensor):
+def fused_moe_w13_lora(
+        qcurr_hidden_states: torch.Tensor,
+        w13_lora_a_stacked: list[torch.Tensor],
+        w13_lora_b_stacked: list[torch.Tensor], topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor, expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor, max_lora_rank: int,
+        top_k_num: int, config, intermediate_cache1: torch.Tensor):
+    """_summary_
+    
+    Args:
+        qcurr_hidden_states (torch.Tensor): _description_
+        w13_lora_a_stacked (list[torch.Tensor]): _description_
+        w13_lora_b_stacked (list[torch.Tensor]): _description_
+        topk_weights (torch.Tensor): _description_
+        sorted_token_ids (torch.Tensor): _description_
+        expert_ids (torch.Tensor): _description_
+        num_tokens_post_padded (torch.Tensor): _description_
+        max_lora_rank (int): _description_
+        top_k_num (int): _description_
+        config (_type_): _description_
+        intermediate_cache1 (torch.Tensor): _description_
+    """
 
     w1_lora_a_stacked = w13_lora_a_stacked[0]
     w1_lora_b_stacked = w13_lora_b_stacked[0]
     num_experts = w13_lora_a_stacked[0].shape[1]
-    #============begin============
+
     N = max_lora_rank
     M = qcurr_hidden_states.shape[0]
     EM = sorted_token_ids.shape[1]
     K = qcurr_hidden_states.shape[1]
     num_tokens = M * top_k_num
     w1_output_dim_size = w1_lora_b_stacked.shape[2]
-    #====================================
+
     w13_intermediate_cache1 = torch.zeros(
         (2 * M * top_k_num * (max_lora_rank + w1_output_dim_size)),
         dtype=torch.bfloat16,
@@ -191,8 +203,6 @@ def fused_moe_w13_lora(qcurr_hidden_states: torch.Tensor,
                                                        w1_b_inter_size:].view(
                                                            M, top_k_num,
                                                            w1_output_dim_size)
-
-    #====================================
 
     b_ptr = _get_ptr(w13_lora_a_stacked, qcurr_hidden_states.device)
 
@@ -285,6 +295,23 @@ def fused_moe_w2_lora(intermediate_cache2, w2_lora_a_stacked: torch.Tensor,
                       sorted_token_ids: torch.Tensor, expert_ids: torch.Tensor,
                       num_tokens_post_padded: torch.Tensor, max_lora_rank: int,
                       top_k_num: int, config):
+    """_summary_
+
+    Args:
+        intermediate_cache2 (_type_): _description_
+        w2_lora_a_stacked (torch.Tensor): _description_
+        w2_lora_b_stacked (torch.Tensor): _description_
+        topk_weights (torch.Tensor): _description_
+        sorted_token_ids (torch.Tensor): _description_
+        expert_ids (torch.Tensor): _description_
+        num_tokens_post_padded (torch.Tensor): _description_
+        max_lora_rank (int): _description_
+        top_k_num (int): _description_
+        config (_type_): _description_
+
+    Returns:
+        _type_: _description_
+    """
     EM = sorted_token_ids.shape[1]
     M = topk_weights.shape[0]
     num_tokens = topk_weights.numel()
