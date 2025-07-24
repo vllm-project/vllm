@@ -61,11 +61,12 @@ class DPCoordinator:
 
         host = parallel_config.data_parallel_master_ip
         external_lb = parallel_config.data_parallel_external_lb
+        hybrid_lb = parallel_config.data_parallel_hybrid_lb
 
         # Assume coordinator is colocated with front-end procs when not in
-        # external DP LB mode.
+        # either external or hybrid DP LB mode.
         front_publish_address = get_engine_client_zmq_addr(
-            local_only=not external_lb, host=host)
+            local_only=not external_lb and not hybrid_lb, host=host)
 
         local_only_eng = dp_size == parallel_config.data_parallel_size_local
         back_publish_address = get_engine_client_zmq_addr(local_only_eng, host)
