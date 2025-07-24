@@ -58,6 +58,7 @@ class TritonAttentionMetadata:
 class TritonAttentionMetadataBuilder(
         AttentionMetadataBuilder[TritonAttentionMetadata]):
     full_cudagraph_supported: ClassVar[bool] = True
+    reorder_batch_threshold: ClassVar[Optional[int]] = None
 
     def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
                  device: torch.device):

@@ -4,15 +4,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, ClassVar, Optional
 
 import torch
+
+import vllm.envs as envs
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache
-
-import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
 from vllm.config import VllmConfig
@@ -220,6 +220,8 @@ class FlashInferMetadata:
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
+    reorder_batch_threshold: ClassVar[int] = 1
+
     def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
                  device: torch.device):
         self.device = device
@@ -243,9 +245,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def reorder_batch(self, input_batch: InputBatch,
                       scheduler_output: SchedulerOutput) -> bool:
-        return reorder_batch_to_split_decodes_and_prefills(input_batch,
-                                                           scheduler_output,
-                                                           decode_threshold=1)
+        return reorder_batch_to_split_decodes_and_prefills(
+            input_batch,
+            scheduler_output,
+            decode_threshold=self.reorder_batch_threshold)
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:

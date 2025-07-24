@@ -190,7 +190,7 @@ return curr_o @ W_O
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Generic, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, ClassVar, Generic, Optional, TypeVar, Union
 
 import torch
 
@@ -403,6 +403,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+    reorder_batch_threshold: ClassVar[Optional[int]] = 1
 
     def __init__(self,
                  kv_cache_spec: AttentionSpec,

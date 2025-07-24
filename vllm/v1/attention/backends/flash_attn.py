@@ -145,6 +145,7 @@ def _get_sliding_window_configs(
 class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
     full_cudagraph_supported: ClassVar[bool] = get_flash_attn_version() == 3
+    reorder_batch_threshold: ClassVar[Optional[int]] = None
 
     def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
                  device: torch.device):

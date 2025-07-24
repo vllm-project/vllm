@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with AiterFlashAttention."""
 from dataclasses import dataclass
-from typing import Optional
+from typing import ClassVar, Optional
 
 import torch
 
@@ -164,6 +164,8 @@ logger = init_logger(__name__)
 
 
 class AiterFlashAttentionMetadataBuilder:
+
+    reorder_batch_threshold: ClassVar[Optional[int]] = None
 
     def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
                  device: torch.device):

@@ -336,20 +336,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if len(self.kv_cache_config.kv_cache_groups) == 0:
             return
 
-        self.attn_metadata_builders[0].reorder_batch(self.input_batch,
-                                                     scheduler_output)
-
-        # For models with multiple KV cache groups, the groups should agree on
-        # the same order of requests. We ensure this by only allowing the first
-        # group to reorder the batch and asserting that all other groups do not
-        # reorder the batch.
-        # TODO(tdoublep): make this more flexible so that any group can
-        # re-order the batch (not only the first).
-        # TODO(tdoublep): verify this during engine init instead of at runtime
         for i in range(1, len(self.kv_cache_config.kv_cache_groups)):
-            batch_reordered = self.attn_metadata_builders[i].reorder_batch(
+            self.attn_metadata_builders[i].reorder_batch(
                 self.input_batch, scheduler_output)
-            assert not batch_reordered
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
@@ -2446,6 +2435,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert len(self.attn_backends) == 0 and len(
             self.attn_metadata_builders
         ) == 0, "Attention backends are already initialized"
+        reorder_batch_threshold = None
         for i, kv_cache_group_spec in enumerate(
                 kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
@@ -2487,6 +2477,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     f"Full CUDAGraph not supported for "
                     f"{attn_backend_i.__name__}. Turn off CompilationConfig."
                     f"full_cuda_graph or use a different attention backend.")
+
+            # check that if any backends reorder batches; that the reordering
+            # is compatible (e.g., decode threshold is the same)
+            reorder_batch_threshold_i = (
+                attn_metadata_builder_i.reorder_batch_threshold)
+            if reorder_batch_threshold_i is not None:
+                if reorder_batch_threshold is not None:
+                    if reorder_batch_threshold_i != reorder_batch_threshold:
+                        raise ValueError(
+                            f"Attention backend reorders decodes with "
+                            f"threshold {reorder_batch_threshold_i} but other "
+                            f"backend uses threshold {reorder_batch_threshold}"
+                        )
+                else:
+                    reorder_batch_threshold = reorder_batch_threshold_i
 
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)
