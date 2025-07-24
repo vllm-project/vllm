@@ -201,6 +201,7 @@ _MULTIMODAL_MODELS = {
     "GraniteSpeechForConditionalGeneration": ("granite_speech", "GraniteSpeechForConditionalGeneration"),  # noqa: E501
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
+    "InternS1ForConditionalGeneration": ("interns1", "InternS1ForConditionalGeneration"),
     "Idefics3ForConditionalGeneration":("idefics3","Idefics3ForConditionalGeneration"),
     "SmolVLMForConditionalGeneration": ("smolvlm","SmolVLMForConditionalGeneration"),  # noqa: E501
     "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
@@ -683,7 +684,6 @@ def _run() -> None:
     # Setup plugins
     from vllm.plugins import load_general_plugins
     load_general_plugins()
-
     fn, output_file = pickle.loads(sys.stdin.buffer.read())
 
     result = fn()
