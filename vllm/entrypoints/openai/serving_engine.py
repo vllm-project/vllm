@@ -69,7 +69,6 @@ from vllm.multimodal import (  # noqa: F401 - Required to resolve Pydantic error
     MultiModalDataDict)
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob, PromptLogprobs

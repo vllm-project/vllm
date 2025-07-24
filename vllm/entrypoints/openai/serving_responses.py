@@ -64,6 +64,7 @@ class OpenAIServingResponses(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
+        exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: Optional[str] = None,
         tool_server: Optional[ToolServer] = None,
         enable_prompt_tokens_details: bool = False,
@@ -86,6 +87,9 @@ class OpenAIServingResponses(OpenAIServing):
 
         self.tool_parser = self._get_tool_parser(
             tool_parser_name=tool_parser, enable_auto_tools=enable_auto_tools)
+        self.exclude_tools_when_tool_choice_none = (
+            exclude_tools_when_tool_choice_none
+        )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = (
@@ -176,7 +180,9 @@ class OpenAIServingResponses(OpenAIServing):
             lora_request = self._maybe_get_adapters(request)
             model_name = self._get_model_name(request.model, lora_request)
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
-            if request.tools is None:
+            if (request.tools is None or
+                (request.tool_choice == "none"
+                        and self.exclude_tools_when_tool_choice_none)):
                 tool_dicts = None
             else:
                 tool_dicts = [tool.model_dump() for tool in request.tools]
