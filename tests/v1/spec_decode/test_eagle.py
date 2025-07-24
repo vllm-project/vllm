@@ -6,6 +6,7 @@ from unittest import mock
 import pytest
 import torch
 
+from tests.utils import get_attn_backend_list_based_on_platform
 from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_common_attn_metadata,
                                       create_standard_kv_cache_spec,
@@ -20,21 +21,6 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"
 eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
 eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
-
-
-def _get_attn_backend_list_based_on_platform():
-    if current_platform.is_cuda():
-        return ["FLASH_ATTN_VLLM_V1"]
-    elif current_platform.is_rocm():
-        attn_backend_list = ["TRITON_ATTN_VLLM_V1"]
-        try:
-            attn_backend_list.append("FLASH_ATTN_VLLM_V1")
-        except Exception:
-            print("Skip FLASH_ATTN_VLLM_V1 on ROCm as aiter is not installed")
-
-        return attn_backend_list
-    else:
-        raise ValueError("Unsupported platform")
 
 
 def _create_proposer(method: str, k: int) -> EagleProposer:
@@ -142,7 +128,7 @@ def test_prepare_inputs():
 
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])
 @pytest.mark.parametrize("attn_backend",
-                         _get_attn_backend_list_based_on_platform())
+                         get_attn_backend_list_based_on_platform())
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("use_distinct_embed_tokens", [True, False])
 @mock.patch('vllm.v1.spec_decode.eagle.get_pp_group')
@@ -153,6 +139,10 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
                     monkeypatch):
 
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
+
+    if attn_backend == "TRITON_ATTN_VLLM_V1" and current_platform.is_cuda():
+        pytest.skip("TRITON_ATTN_VLLM_V1 does not support "
+                    "multi-token eagle spec decode on CUDA")
 
     if attn_backend == "FLASH_ATTN_VLLM_V1" and current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
@@ -229,7 +219,7 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
 
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])
 @pytest.mark.parametrize("attn_backend",
-                         _get_attn_backend_list_based_on_platform())
+                         get_attn_backend_list_based_on_platform())
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 8])
 def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
 
