@@ -220,7 +220,7 @@ class Qwen2ModelWithKVSharing(Qwen2Model):
 
         hidden_states, residual = self.first_layer_group(
             positions,
-            self.hidden_states[:num_input_tokens],
+            hidden_states,
         )
 
         truncated_prefill_metadata = \
@@ -228,23 +228,17 @@ class Qwen2ModelWithKVSharing(Qwen2Model):
         if truncated_prefill_metadata is not None:
             gen_indices_padded = \
                 truncated_prefill_metadata.generation_indices_padded
-            num_tokens = gen_indices_padded.shape[0]
-            # CUDA graph expects static tensor addresses
-            # Copy output of first layer group to second layer group
-            # TODO(sarckk): Move logic to @support_torch_compile
-            self.residual[:num_tokens].copy_(residual[gen_indices_padded])
-            self.hidden_states[:num_tokens].copy_(
-                hidden_states[gen_indices_padded])
-            positions[:num_tokens].copy_(positions[gen_indices_padded])
         else:
-            num_tokens = num_input_tokens
-            self.residual[:num_tokens].copy_(residual)
-            self.hidden_states[:num_tokens].copy_(hidden_states)
+            gen_indices_padded = torch.arange(
+                positions.size(0),
+                dtype=positions.dtype,
+                device=positions.device,
+            )
 
         second_hidden_states, second_residual = self.second_layer_group(
-            positions[:num_tokens],
-            self.hidden_states[:num_tokens],
-            self.residual[:num_tokens],
+            positions[gen_indices_padded],
+            hidden_states[gen_indices_padded],
+            residual[gen_indices_padded],
         )
 
         if truncated_prefill_metadata is not None:
@@ -353,6 +347,9 @@ def test_kv_sharing_truncated_prefill(
     ModelRegistry.register_model("Qwen2ForCausalLM", TestQwen2ForCausalLM)
     sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
     compilation_config = CompilationConfig(
+        # This allows vLLM compilation backend to handle allocating and 
+        # managing buffers for cudagraph
+        cudagraph_copy_inputs=True,
         level=CompilationLevel.
         PIECEWISE if not enforce_eager else CompilationLevel.NO_COMPILATION)
 
