@@ -1,4 +1,3 @@
-
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
@@ -434,19 +433,24 @@ ARG DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
 ARG DEEPGEMM_GIT_REF="187656694f7f69e3e7975617a68bc3387680a7e1"
 RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
   . /etc/environment
-    git clone --depth 1 --recursive --shallow-submodules \
-        --branch ${DEEPGEMM_GIT_REF} \
-        ${DEEPGEMM_GIT_REPO} deepgemm
-    echo "🏗️  Building DeepGEMM"
-    pushd deepgemm
-        # Build DeepGEMM
-        # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)
-        rm -rf build dist
-        rm -rf *.egg-info
-        python3 setup.py bdist_wheel
-        uv pip install --system dist/*.whl
-    popd
-    rm -rf deepgemm
+    # Check if TORCH_CUDA_ARCH_LIST contains 9.0 or 10.0 (with optional 'a' suffix)
+    if echo "${TORCH_CUDA_ARCH_LIST}" | grep -E "(9\.0a?|10\.0a?)" > /dev/null; then
+        git clone --depth 1 --recursive --shallow-submodules \
+            --branch ${DEEPGEMM_GIT_REF} \
+            ${DEEPGEMM_GIT_REPO} deepgemm
+        echo "🏗️  Building DeepGEMM"
+        pushd deepgemm
+            # Build DeepGEMM
+            # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)
+            rm -rf build dist
+            rm -rf *.egg-info
+            python3 setup.py bdist_wheel
+            uv pip install --system dist/*.whl
+        popd
+        rm -rf deepgemm
+    else
+        echo "Skipping DeepGEMM installation (requires CUDA arch 9.0 or 10.0 but got: ${TORCH_CUDA_ARCH_LIST})"
+    fi
 BASH
 
 #################### vLLM installation IMAGE ####################
