@@ -997,6 +997,7 @@ class EngineArgs:
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
+            has_additional_heads=self.has_additional_heads,
         )
 
     def create_load_config(self) -> LoadConfig:
