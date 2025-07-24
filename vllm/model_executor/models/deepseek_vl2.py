@@ -380,7 +380,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
-    
+
     def _get_parent_and_attr(self, root: torch.nn.Module, dotted_name: str):
         """Return (parent_module, final_attr_name) for a dotted module path."""
         names = dotted_name.split('.')
@@ -396,7 +396,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             import timm
         except ImportError as e:
             raise ImportError("Please install timm") from e
-            
+
         for name, module in vit.named_modules():
             if isinstance(module, nn.Linear):
                 parent, attr_name = self._get_parent_and_attr(vit, name)
@@ -432,7 +432,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 dynamic_img_size=True,
                 dynamic_img_pad=True,
             )
-        
+
         if get_tensor_model_parallel_world_size() > 1:
             model = self.patch_vit_for_tp(model, quant_config)
 
