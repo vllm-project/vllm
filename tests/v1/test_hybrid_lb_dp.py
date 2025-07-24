@@ -147,7 +147,7 @@ def default_server_args():
     ]
 
 
-@pytest.fixture(scope="module", params=[1])  # Only 1 API server for now
+@pytest.fixture(scope="module", params=[1, 4])
 def servers(request, default_server_args):
     api_server_count = request.param
     with HybridLBServerManager(MODEL_NAME, DP_SIZE, api_server_count,
