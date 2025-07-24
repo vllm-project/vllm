@@ -120,8 +120,8 @@ class KVOutputAggregator:
     output corresponding to Rank 0 for scheduler."""
 
     def __init__(self, world_size: int):
-        # Complete transfer tracker. Used by to track finished requests
-        # [req_id -> n_finished_workers]
+        # Complete transfer tracker. Used to track finished requests
+        # [req_id -> n_remaining_workers]
         self._recv_remaining_count = defaultdict[str, int](lambda: world_size)
         self._send_remaining_count = defaultdict[str, int](lambda: world_size)
 
@@ -134,12 +134,10 @@ class KVOutputAggregator:
                                 remaining_count_dict: dict[str, int],
                                 finished_set: set[str]) -> None:
             for req_id in req_ids or ():
-                new_count = remaining_count_dict[req_id] - 1
-                if new_count == 0:
+                remaining_count_dict[req_id] -= 1
+                if remaining_count_dict[req_id] == 0:
                     finished_set.add(req_id)
                     del remaining_count_dict[req_id]
-                else:
-                    remaining_count_dict[req_id] = new_count
 
         finished_sending = set[str]()
         finished_recving = set[str]()
