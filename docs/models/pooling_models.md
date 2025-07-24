@@ -1,6 +1,6 @@
 # Pooling Models
 
-vLLM also supports pooling models, including embedding, reranking and reward models.
+vLLM also supports pooling models, such as embedding, classification and reward models.
 
 In vLLM, pooling models implement the [VllmModelForPooling][vllm.model_executor.models.VllmModelForPooling] interface.
 These models use a [Pooler][vllm.model_executor.layers.pooler.Pooler] to extract the final hidden states of the input
@@ -11,22 +11,46 @@ before returning them.
     As shown in the [Compatibility Matrix](../features/compatibility_matrix.md), most vLLM features are not applicable to
     pooling models as they only work on the generation or decode stage, so performance may not improve as much.
 
-If the model doesn't implement this interface, you can set `--convert` which tells vLLM
-to convert the model into a pooling model.
-vLLM can also automatically detect models to convert based on their architecture name.
+## Configuration
 
-| `--convert` | Automatically converted architectures         | Model type           | Supported pooling tasks       |
-|-------------|-----------------------------------------------|----------------------|-------------------------------|
-| `embed`     | `*ForTextEncoding`, `*EmbeddingModel`         | Embedding model      | `encode`, `embed`             |
-| `classify`  | `*For*Classification`, `*ClassificationModel` | Classification model | `encode`, `classify`, `score` |
-| `reward`    | `*ForRewardModeling`, `*RewardModel`          | Reward model         | `encode`                      |
+### Model Runner (`--runner`)
 
-For model architectures that support both generation and pooling, you should set `--runner pooling`
-to use the model as a pooling model.
+Run a model in pooling mode via the option `--runner pooling`.
 
-## Pooling Tasks
+!! note
+    It is recommended to always set `--runner pooling` because `--runner auto` (the default)
+    automatically resolves to `--runner generate` for models that implement the
+    [VllmModelForTextGeneration][vllm.model_executor.models.VllmModelForTextGeneration] interface,
+    even if they also implement the
+    [VllmModelForPooling][vllm.model_executor.models.VllmModelForPooling] interface.
 
-In vLLM, we define the following pooling tasks and corresponding APIs:
+    Moreover, setting `--runner pooling` will automatically trigger model conversion
+    via `--convert` (see below) if the model in vLLM does not implement
+    the [VllmModelForPooling][vllm.model_executor.models.VllmModelForPooling] interface.
+
+### Model Conversion (`--convert`)
+
+vLLM can adapt models for various pooling tasks via the option `--convert <...>`.
+
+If `--runner pooling` has been set but the model does not implement the
+[VllmModelForPooling][vllm.model_executor.models.VllmModelForPooling] interface,
+vLLM will attempt to automatically convert the model according to the architecture names
+shown in the table below.
+
+| Architecture                                  | `--convert` | Supported pooling tasks       |
+|-----------------------------------------------|-------------|-------------------------------|
+| `*ForTextEncoding`, `*EmbeddingModel`         | `embed`     | `encode`, `embed`             |
+| `*For*Classification`, `*ClassificationModel` | `classify`  | `encode`, `classify`, `score` |
+| `*ForRewardModeling`, `*RewardModel`          | `reward`    | `encode`                      |
+
+!! tip
+    You can explicitly set `--convert <...>` to specify how to convert the model.
+
+### Pooling Tasks
+
+Each pooling model in vLLM supports one or more of these tasks according to
+[Pooler.get_supported_tasks][vllm.model_executor.layers.pooler.Pooler.get_supported_tasks],
+enabling the corresponding APIs:
 
 | Task       | APIs               |
 |------------|--------------------|
@@ -37,9 +61,17 @@ In vLLM, we define the following pooling tasks and corresponding APIs:
 
 \* The `score` API falls back to `embed` task if the model does not support `score` task.
 
-Each pooling model in vLLM supports one or more of these tasks according to [Pooler.get_supported_tasks][vllm.model_executor.layers.pooler.Pooler.get_supported_tasks].
+### Pooler Configuration
 
-By default, the pooler assigned to each task has the following attributes:
+#### Predefined models
+
+If the [Pooler][vllm.model_executor.layers.pooler.Pooler] defined by the model accepts `pooler_config`,
+you can override some of its attributes via the `--override-pooler-config` option.
+
+#### Converted models
+
+If the model has been converted via `--convert` (see above),
+the pooler assigned to each task has the following attributes by default:
 
 | Task       | Pooling Type   | Normalization | Softmax |
 |------------|----------------|---------------|---------|
@@ -47,19 +79,11 @@ By default, the pooler assigned to each task has the following attributes:
 | `embed`    | `LAST`         | ✅︎            | ❌      |
 | `classify` | `LAST`         | ❌            | ✅︎      |
 
-These defaults may be overridden by the model's implementation in vLLM.
-
 When loading [Sentence Transformers](https://huggingface.co/sentence-transformers) models,
-we attempt to override the defaults based on its Sentence Transformers configuration file (`modules.json`),
-which takes priority over the model's defaults.
+its Sentence Transformers configuration file (`modules.json`) takes priority over the model's defaults.
 
 You can further customize this via the `--override-pooler-config` option,
 which takes priority over both the model's and Sentence Transformers's defaults.
-
-!!! note
-
-    The above configuration may be disregarded if the model's implementation in vLLM defines its own pooler
-    that is not based on [PoolerConfig][vllm.config.PoolerConfig].
 
 ## Offline Inference
 
