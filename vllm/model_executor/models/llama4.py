@@ -35,6 +35,7 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 
@@ -367,7 +368,12 @@ class Llama4Model(LlamaModel):
                 if "w13" in full_param_name:
                     shard_idx = 0 if shard_id == "w1" else 1
                     new_loaded_weight = new_loaded_weight[shard_idx]
-                new_loaded_weight = new_loaded_weight.transpose(-1, -2)
+
+                # Only transpose for non-FP4 weights
+                # FP4 weights are already in the correct format and shouldn't be transposed (double check)
+                if new_loaded_weight.dtype != torch.uint8:
+                    new_loaded_weight = new_loaded_weight.transpose(-1, -2)
+
                 layer_idx = extract_layer_index(name)
                 # EP mapping
                 expert_map = self.layers[
@@ -382,6 +388,8 @@ class Llama4Model(LlamaModel):
             else:
                 # TODO: add EP support for non fused weights
                 pass
+            if new_loaded_weight.dtype == torch.uint8:
+                new_loaded_weight = new_loaded_weight.transpose(-1, -2)
             weight_loader(param,
                           new_loaded_weight,
                           full_param_name,
@@ -401,6 +409,11 @@ class Llama4Model(LlamaModel):
             (".qkv_proj", ".v_proj", "v"),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
+        ]
+        expert_scale_params_mapping = [
+            ("w13_", 0, 'w1'),
+            ("w13_", 0, 'w3'),
+            ("w2_",  0, 'w2')
         ]
         fused_experts_params = False
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
@@ -483,19 +496,16 @@ class Llama4Model(LlamaModel):
                                                'supports_moe_loading', False)
 
                         if supports_moe:
-                            # This is a MoE weight loader
-                            if "w13_" in name:
-                                shard_id = "w1"
-                            elif "w2_" in name:
-                                shard_id = "w2"
-                            else:
-                                shard_id = "w1"
-
-                            weight_loader(param,
-                                          loaded_weight,
-                                          name,
-                                          shard_id=shard_id,
-                                          expert_id=0)
+                            if loaded_weight.dtype == torch.uint8 or loaded_weight.dtype == torch.float8_e4m3fn:
+                                loaded_weight = loaded_weight.transpose(-1, -2)
+                                param.data.fill_(0)
+                            for (expert_name, expert_id, shard_id) in expert_scale_params_mapping:
+                                if expert_name in name:
+                                    weight_loader(param,
+                                                loaded_weight,
+                                                name,
+                                                shard_id=shard_id,
+                                                expert_id=expert_id)
                         else:
                             # Regular weight loader (handles both
                             # param.weight_loader and default_weight_loader)
@@ -561,22 +571,26 @@ class Llama4ForCausalLM(LlamaForCausalLM):
     ) -> tuple[str, torch.Tensor]:
 
         def permute(w: torch.Tensor, n_heads: int):
-            attn_in = self.config.head_dim * n_heads
-            attn_out = self.config.hidden_size
-
-            return w.view(n_heads, attn_in // n_heads // 2, 2,
-                          attn_out).transpose(1, 2).reshape(attn_in, attn_out)
+            head_dim = w.shape[0] // n_heads
+            return (
+                w.view(n_heads, head_dim // 2, 2, w.shape[1])
+                .transpose(1, 2)
+                .reshape(w.shape[0], w.shape[1])
+            )
 
         modules = name.split(".")
-
+        is_nvfp4_weights = (
+            (modules[-1] == "weight_scale" and loaded_weight.dtype == torch.float8_e4m3fn) or \
+                (modules[-1] == "weight" and loaded_weight.dtype == torch.uint8)
+        )
         # rotary embeds should be sliced
         if ("wk" in modules or "k_proj" in modules) \
-           and modules[-1] == "weight":
-            loaded_weight = permute(loaded_weight,
+           and (modules[-1] == "weight" or is_nvfp4_weights):
+               loaded_weight = permute(loaded_weight,
                                     self.config.num_key_value_heads)
         elif ("wq" in modules or "q_proj" in modules) \
-                and modules[-1] == "weight":
-            loaded_weight = permute(loaded_weight,
+           and (modules[-1] == "weight" or is_nvfp4_weights):
+               loaded_weight = permute(loaded_weight,
                                     self.config.num_attention_heads)
 
         return name, loaded_weight
