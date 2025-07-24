@@ -13,7 +13,8 @@ from vllm.logger import init_logger
 from vllm.utils import get_mp_context, make_zmq_socket
 from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
 from vllm.v1.serial_utils import MsgpackDecoder
-from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
+from vllm.v1.utils import (bind_process_name, get_engine_client_zmq_addr,
+                           shutdown)
 
 logger = init_logger(__name__)
 
@@ -79,7 +80,7 @@ class DPCoordinator:
 
         context = get_mp_context()
         self.proc: multiprocessing.Process = context.Process(
-            target=CoordinatorProc.run_coordinator,
+            target=DPCoordinatorProc.run_coordinator,
             name="VLLM_DP_Coordinator",
             kwargs={
                 "engine_count": parallel_config.data_parallel_size,
@@ -113,12 +114,12 @@ class EngineState:
         self.request_counts = [0, 0]  # [waiting, running]
 
 
-class CoordinatorProc:
+class DPCoordinatorProc:
 
     def __init__(self,
                  engine_count: int,
                  min_stats_update_interval_ms: int = 100):
-
+        bind_process_name(self.__class__.__name__)
         self.ctx = zmq.Context()
 
         self.engines = [EngineState() for _ in range(engine_count)]
@@ -137,7 +138,7 @@ class CoordinatorProc:
         back_publish_address: str,
         min_stats_update_interval_ms: int = 100,
     ):
-        coordinator = CoordinatorProc(
+        coordinator = DPCoordinatorProc(
             engine_count=engine_count,
             min_stats_update_interval_ms=min_stats_update_interval_ms)
         try:
