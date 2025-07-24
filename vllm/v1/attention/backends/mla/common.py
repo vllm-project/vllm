@@ -403,7 +403,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
-    reorder_batch_threshold: ClassVar[Optional[int]] = 1
+    reorder_batch_threshold: ClassVar[int] = 1
 
     def __init__(self,
                  kv_cache_spec: AttentionSpec,
@@ -560,9 +560,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
-        return reorder_batch_to_split_decodes_and_prefills(input_batch,
-                                                           scheduler_output,
-                                                           decode_threshold=1)
+        return reorder_batch_to_split_decodes_and_prefills(
+            input_batch,
+            scheduler_output,
+            decode_threshold=self.reorder_batch_threshold)
 
     def _build_decode(self, block_table_tensor: torch.Tensor,
                       seq_lens: torch.Tensor):
