@@ -4,13 +4,15 @@
 # See details in README (benchmarks/auto_tune/README.md).
 
 TAG=$(date +"%Y_%m_%d_%H_%M")
-BASE=""
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+BASE="$SCRIPT_DIR/../../.."
 MODEL="meta-llama/Llama-3.1-8B-Instruct"
 SYSTEM="TPU"
 TP=1
 DOWNLOAD_DIR=""
 INPUT_LEN=4000
 OUTPUT_LEN=16
+MAX_MODEL_LEN=4096
 MIN_CACHE_HIT_PCT=0
 MAX_LATENCY_ALLOWED_MS=100000000000
 NUM_SEQS_LIST="128 256"
@@ -36,6 +38,13 @@ current_hash=$(git rev-parse HEAD)
 echo "hash:$current_hash" >> "$RESULT"
 echo "current_hash: $current_hash"
 
+TOTAL_LEN=$((INPUT_LEN + OUTPUT_LEN))
+RED='\033[0;31m'
+if (( TOTAL_LEN > MAX_MODEL_LEN )); then
+    echo -e "${RED}FAILED: INPUT_LEN($INPUT_LEN) + OUTPUT_LEN($OUTPUT_LEN) = $TOTAL_LEN, which is > MAX_MODEL_LEN = $MAX_MODEL_LEN.\033[0m" >&2
+    exit 1
+fi
+
 best_throughput=0
 best_max_num_seqs=0
 best_num_batched_tokens=0
@@ -60,7 +69,7 @@ start_server() {
         --enable-prefix-caching \
         --load-format dummy \
         --download-dir "$DOWNLOAD_DIR" \
-        --max-model-len $(( INPUT_LEN+OUTPUT_LEN )) > "$vllm_log" 2>&1 &
+        --max-model-len $MAX_MODEL_LEN > "$vllm_log" 2>&1 &
 
     # wait for 10 minutes...
     server_started=0
@@ -245,4 +254,3 @@ done
 echo "finish permutations"
 echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput, profile saved in: $PROFILE_PATH"
 echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput, profile saved in: $PROFILE_PATH" >> "$RESULT"
-
