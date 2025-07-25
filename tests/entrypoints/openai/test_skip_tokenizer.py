@@ -33,7 +33,9 @@ def server():
         DTYPE,
         "--enforce-eager",
         "--trust-remote-code",
-        "--skip-tokenizer-init"
+        "--skip-tokenizer-init",
+        "--max-num-seqs",
+        "32"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
