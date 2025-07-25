@@ -463,7 +463,6 @@ class InternS1VisionModel(nn.Module):
         self.embeddings = InternS1VisionEmbeddings(config)
         self.encoder = InternS1VisionEncoder(
             config=config,
-            quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             num_dummy_heads=num_dummy_heads,
             prefix=f"{prefix}.encoder",

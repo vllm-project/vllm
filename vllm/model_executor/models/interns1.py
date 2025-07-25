@@ -897,12 +897,6 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
             "inputs_embeds": inputs_embeds,
         }
 
-        # Only required if the model is mono-architecture
-        if self.visual_token_mask is not None:
-            forward_kwargs.update(
-                {"visual_token_mask": self.visual_token_mask})
-            self.visual_token_mask = None
-
         hidden_states = self.language_model.model(**forward_kwargs)
         return hidden_states
 
