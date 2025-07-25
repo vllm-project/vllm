@@ -4,7 +4,7 @@ This doc serves as a collection of handy tips for optimizing your vLLM on TPU wo
 
 ### Get started
 
-Looking for setup and installation instructions? Find them [here](https://docs.vllm.ai/en/latest/getting_started/installation/google_tpu.html).
+Looking for setup and installation instructions? Find them [here](../getting_started/installation/google_tpu.md).
 
 ### PU workload sizing
 
@@ -46,7 +46,7 @@ This initial compilation time ranges significantly and is impacted by many of th
 
 #### max model len vs. most model len
 
-![most_model_len](../../assets/design/v1/tpu/most_model_len.png)
+![most_model_len](../assets/design/v1/tpu/most_model_len.png)
 
 If most of your requests are shorter than the maximum model length but you still need to accommodate occasional longer requests, setting a high maximum model length can negatively impact performance. In these cases, you can try introducing most model len by specifying the `VLLM_TPU_MOST_MODEL_LEN` environment variable.
 
@@ -82,14 +82,14 @@ Although it’s common to do this with GPUs, don't try to fragment 2 or 8 differ
 
 ### Tune your workloads!
 
-Although we try to have great default configs, we strongly recommend you check out the [vLLM auto-tuner](https://github.com/vllm-project/vllm/tree/main/benchmarks/auto_tune) to optimize your workloads for your use case.
+Although we try to have great default configs, we strongly recommend you check out the [vLLM auto-tuner](../../benchmarks/auto_tune/README.md) to optimize your workloads for your use case.
 
 
 ### Future Topics We'll Cover 
 
 #### Profiling
 
-The auto-tuner provides a profile of optimized configurations as its final step. However, interpreting this profile can be challenging for new users. We plan to expand this section in the future with more detailed guidance. In the meantime, you can learn how to collect a TPU profile using vLLM's native profiling tools [here](https://docs.vllm.ai/en/latest/examples/offline_inference/profiling_tpu.html). This profile can provide valuable insights into your workload's performance.
+The auto-tuner provides a profile of optimized configurations as its final step. However, interpreting this profile can be challenging for new users. We plan to expand this section in the future with more detailed guidance. In the meantime, you can learn how to collect a TPU profile using vLLM's native profiling tools [here](../../examples/offline_inference/profiling_tpu/README.md). This profile can provide valuable insights into your workload's performance.
 
 #### SPMD
 More details to come.
