@@ -63,8 +63,8 @@ class OpenAIServingTranscription(OpenAISpeechToText):
             self, request: TranscriptionRequest,
             result_generator: AsyncGenerator[tuple[PromptType, float]],
             request_id: str, request_metadata: RequestResponseMetadata,
-            sampling_params : SamplingParams,
-            previous_context : list[str]) -> AsyncGenerator[str, None]:
+            sampling_params: SamplingParams,
+            previous_context: list[str]) -> AsyncGenerator[str, None]:
         generator = self._speech_to_text_stream_generator(
             request=request,
             async_result_generator=result_generator,
@@ -120,8 +120,8 @@ class OpenAIServingTranslation(OpenAISpeechToText):
             self, request: TranslationRequest,
             result_generator: AsyncGenerator[tuple[PromptType, float]],
             request_id: str, request_metadata: RequestResponseMetadata,
-            sampling_params : SamplingParams,
-            previous_context : list[str]) -> AsyncGenerator[str, None]:
+            sampling_params: SamplingParams,
+            previous_context: list[str]) -> AsyncGenerator[str, None]:
         generator = self._speech_to_text_stream_generator(
             request=request,
             async_result_generator=result_generator,
