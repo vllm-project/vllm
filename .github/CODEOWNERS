@@ -52,3 +52,8 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 # Docs
 /docs @hmellor
 mkdocs.yaml @hmellor
+
+# CPU & Intel GPU
+/vllm/v1/worker/cpu* @bigPYJ1151
+/vllm/v1/worker/xpu* @jikunshang
+/csrc/cpu @bigPYJ1151
