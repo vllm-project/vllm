@@ -129,7 +129,7 @@ def _load_logitsprocs_by_fqcns(
     return classes
 
 
-def load_custom_logitsprocs(
+def _load_custom_logitsprocs(
     logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]],
 ) -> list[type[LogitsProcessor]]:
     """Load all custom logits processors.
@@ -157,7 +157,8 @@ def load_custom_logitsprocs(
 
 def build_logitsprocs(vllm_config: "VllmConfig", device: torch.device,
                       is_pin_memory: bool) -> LogitsProcessors:
-    custom_logitsprocs_classes = vllm_config.logits_processors or []
+    custom_logitsprocs_classes = _load_custom_logitsprocs(
+        vllm_config.model_config.logits_processors)
     return LogitsProcessors(
         ctor(vllm_config, device, is_pin_memory) for ctor in itertools.chain(
             BUILTIN_LOGITS_PROCESSORS, custom_logitsprocs_classes))
@@ -173,5 +174,4 @@ __all__ = [
     "MoveDirectionality",
     "LogitsProcessors",
     "build_logitsprocs",
-    "load_custom_logitsprocs",
 ]

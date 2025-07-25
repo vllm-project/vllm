@@ -427,6 +427,9 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation."""
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
+    logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]] = None
+    """One or more logits processors' fully-qualified class names or class
+    definitions"""
 
     def compute_hash(self) -> str:
         """
@@ -4372,8 +4375,6 @@ class VllmConfig:
     you are using. Contents must be hashable."""
     instance_id: str = ""
     """The ID of the vLLM instance."""
-    logits_processors: Optional[list[type[LogitsProcessor]]] = None
-    """A list of logitproc types to construct for this vLLM instance"""
 
     def compute_hash(self) -> str:
         """
