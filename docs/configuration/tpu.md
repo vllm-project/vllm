@@ -6,7 +6,7 @@ This doc serves as a collection of handy tips for optimizing your vLLM on TPU wo
 
 Looking for setup and installation instructions? Find them [here](../getting_started/installation/google_tpu.md).
 
-### PU workload sizing
+### TPU workload sizing
 
 When selecting the ideal number of chips for a single serving instance, it's important to account for both the model size and the average request context length. Adequate HBM for the KV cache is essential to ensure a sufficient number of concurrent requests can be processed.
 
