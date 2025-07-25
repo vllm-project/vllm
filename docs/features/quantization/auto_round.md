@@ -100,4 +100,4 @@ if __name__ == '__main__':
 # Acknowledgement
 
 Special thanks to open-source low precision libraries such as AutoGPTQ, AutoAWQ, GPTQModel, Triton, Marlin, and
-ExLLaMAV2 for providing low-precision CUDA kernels, which are leveraged in AutoRound
+ExLLaMAV2 for providing low-precision CUDA kernels, which are leveraged in AutoRound.
