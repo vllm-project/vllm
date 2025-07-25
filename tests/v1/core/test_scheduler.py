@@ -1886,9 +1886,11 @@ def test_priority_scheduling_preemption_victim_iterator_order():
     for request in high_priority_requests:
         scheduler.add_request(request)
 
-    # After scheduling, transfer the two high-priority requests from the waiting queue to the running queue.
+    # After scheduling, transfer the two high-priority requests from
+    # the waiting queue to the running queue.
     # the IDs of the requests in the running queue are: 1, 2, 3, 4, 5.
-    # At this time, 3+2 blocks have been allocated, and 3 available blocks remain.
+    # At this time, 3+2 blocks have been allocated,
+    # and 3 available blocks remain.
     output = scheduler.schedule()
 
     merge_requests = priority_requests + high_priority_requests
@@ -1906,9 +1908,11 @@ def test_priority_scheduling_preemption_victim_iterator_order():
         pooler_output=[],
     )
     scheduler.update_from_output(output, model_output)
-    # When allocating resources to the fourth request, preemption is triggered.
-    # At this time, the request with the lowest priority (request.id = 5) will be preempted, freeing up 2 blocks,
-    # which exactly meets the resource allocation requirements for request.id = 4 and request.id = 5.
+
+    # At this time, the request with the lowest priority 
+    # (request.id = 2) will be preempted, freeing up 2 blocks,
+    # which exactly meets the resource allocation requirements
+    # for request.id = 4 and request.id = 5.
     output = scheduler.schedule()
 
     # Should schedule the new request without preemption
