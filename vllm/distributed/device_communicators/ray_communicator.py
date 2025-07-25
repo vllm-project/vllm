@@ -1,29 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import uuid
 from typing import Any, Optional
 
 import ray
 import torch
 from ray.exceptions import RayChannelError
-from ray.experimental.channel.accelerator_context import AcceleratorContext
-from ray.experimental.channel.communicator import Communicator, TorchTensorAllocator
+from ray.experimental.channel.communicator import (Communicator,
+                                                   TorchTensorAllocator)
 from torch.distributed import ReduceOp
 
-from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
-class RayPPCommunicatorWrapper(Communicator):
+class RayPPCommunicator(Communicator):
     """
-    Communicator for a group of Ray Compiled Graph actors on NVIDIA GPU.
-    This is based on the PyNCCL communicator.
-
-    The Ray Compiled Graph execution uses this communicator to support
-    communication between actors in the group.
+    Communicator to be used for pipeline parallelism in Ray Compiled Graph.
+    This is wraps around the vLLM _PP GroupCoordinator.
 
     This class is not thread-safe.
     """
@@ -38,88 +34,50 @@ class RayPPCommunicatorWrapper(Communicator):
         use_communication_streams: bool = False,
     ):
         """
-        Initialize a RayCudaCommunicator that can be used to communicate with
-        other GPU actors.
-
-        This method blocks until the same call has been made on all other
-        actors in the group, with the same arguments for world_size and
-        comm_id.
-
-        NOTE: A concurrent RayCudaCommunicator can coexist with this one
-        but using the two groups concurrently on different CUDA streams
-        may cause deadlock.
-        See
-        https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/
-        communicators.html#using-multiple-nccl-communicators-concurrently.
-
-        If the user can guarantee that all involved actors execute the same ops
-        in the same order, then the other RayCudaCommunicator should use the
-        given `cuda_stream`, and there will not be a concurrency issue.
-        Otherwise, the other stream needs to synchronize with the given
-        `cuda_stream` before and after it launches NCCL ops, e.g., at the
-        beginning and end of a DAG task.
+        Initialize a RayPPCommunicator that can be used to communicate with
+        other Ray Compiled Graph actors for pipeline parallelism.
 
         Args:
-            world_size: The number of participating actors/devices.
-            comm_id: A unique communicator ID returned by ncclGetUniqueId().
+            world_size: The number of participating actors.
+            comm_id: A unique communicator ID. This is just to conform with
+                the Ray Communicator API and is not used.
             rank: The rank of this actor. If None, then the caller is not a
-                participant of the RayCudaCommunicator group.
-            actor_handles: A list of actor handles, in rank order.
-            cuda_stream: A CUDA stream to dispatch NCCL ops to. If rank is
-                specified, then this must be specified too.
-            use_communication_streams: Whether to use dedicated send and recv
-                streams for communication. If True, communication and
-                computation can be overlapped to improve performance.
+                participant of the RayPPCommunicator group (e.g., the Ray
+                driver).
+            actor_handles: A list of actor handles.
+            cuda_stream: A CUDA stream to dispatch NCCL ops to.
         """
         self._world_size = world_size
         self._rank: Optional[int] = None
         self._actor_handles = actor_handles
-        self._use_communication_streams = use_communication_streams
+        assert not use_communication_streams, (
+            "use_communication_streams is not yet supported")
 
-        device = None
         if rank is not None:
+            # Rank is not None, this is Ray worker
             assert ray.get_gpu_ids(
             ), "RayCudaCommunicator has no GPUs assigned"
             assert cuda_stream is not None, (
                 "RayCudaCommunicator must specify cuda_stream")
-            
-            self._comm = get_pp_group().device_communicator
 
+            self._comm = get_pp_group().device_communicator
+            assert self._comm.pynccl_comm is not None, (
+                "RayPPCommunicator requires a PyNCCL communicator")
+
+            # Since we wrap around the vLLM _PP communicator, we use
+            # the rank from the vLLM communicator, and ignore the rank
+            # passed in from Ray.
+            # TODO(rui): refactor the Ray Communicator API so that
+            # it also supports no rank passed in.
             self._rank = self._comm.rank_in_group
 
             self._build_actor_rank_mapping()
-
-            # expected_rank = self.get_rank(
-            #     ray.get_runtime_context().current_actor)
-            # assert (
-            #     rank == expected_rank), f"RayCudaCommunicator's rank {rank} "
-            # f"does not match expected rank {expected_rank}"
-
-            # pg = RayStatelessProcessGroup(rank, world_size)
-            # device = AcceleratorContext.get().get_accelerator_devices()[0]
-            # self._pynccl: Optional[PyNcclCommunicator] = PyNcclCommunicator(
-            #     pg, device=device, unique_id=comm_id)
         else:
-            # Driver does not have a rank.
+            # rank is None, this is Ray driver
             self._comm = None
 
-        self._cuda_stream: Optional[torch.cuda.Stream] = None
-        self._send_stream: Optional[torch.cuda.Stream] = None
-        self._recv_stream: Optional[torch.cuda.Stream] = None
-        if cuda_stream is not None:
-            assert rank is not None, "Actor has no rank assigned"
-            self._cuda_stream = cuda_stream
-
-            if use_communication_streams:
-                assert device is not None, "Device should have been set"
-                self._send_stream = torch.cuda.Stream(device=device)
-                self._recv_stream = torch.cuda.Stream(device=device)
-            else:
-                self._send_stream = self._cuda_stream
-                self._recv_stream = self._cuda_stream
-
+        self._cuda_stream: Optional[torch.cuda.Stream] = cuda_stream
         self._closed = False
-    
 
     def _build_actor_rank_mapping(self):
         """
@@ -128,23 +86,27 @@ class RayPPCommunicatorWrapper(Communicator):
         """
         if self._comm is None:
             return {}
-        
-        # Get current actor's Ray actor ID
+
         current_actor = ray.get_runtime_context().current_actor
-        current_actor_id = current_actor._ray_actor_id
-        
-        # Convert actor ID to a tensor (we'll use a hash for simplicity)
-        actor_id_hash = hash(current_actor_id) % (2**31)  # Fit in int32
-        actor_id_tensor = torch.tensor([actor_id_hash], dtype=torch.int32, 
-                                    device=self._comm.device)
-        
-        # All-gather actor ID hashes from all processes
+        actor_id_hash = self._hash_actor(current_actor)
+
+        actor_id_tensor = torch.tensor([actor_id_hash],
+                                       dtype=torch.int32,
+                                       device=self._comm.device)
+
+        # All-gather actor ID hashes from all actors
         gathered_ids = self._comm.all_gather(actor_id_tensor, dim=0)
-        
+
         # Build mapping: actor_id_hash -> device_comm_rank
-        self._actor_id_to_rank = {}
+        self._actor_hash_to_rank = {}
         for rank, actor_id_hash in enumerate(gathered_ids.cpu().tolist()):
-            self._actor_id_to_rank[actor_id_hash] = rank
+            self._actor_hash_to_rank[actor_id_hash] = rank
+
+    def _hash_actor(self, actor: ray.actor.ActorHandle) -> int:
+        """
+        Hash an actor handle to a 32-bit integer.
+        """
+        return hash(actor._ray_actor_id) % (2**31)
 
     def initialize(self, rank: int) -> None:
         # No additional initialization is needed.
@@ -157,17 +119,16 @@ class RayPPCommunicatorWrapper(Communicator):
         """
         Return the given actor's rank using device communicator collective ops.
         """
-        if not hasattr(self, '_actor_id_to_rank'):
-            self._build_actor_rank_mapping()
-        
-        # Hash the target actor's ID
-        target_actor_id = actor._ray_actor_id
-        target_hash = hash(target_actor_id) % (2**31)
-        
-        if target_hash in self._actor_id_to_rank:
-            return self._actor_id_to_rank[target_hash]
+        assert hasattr(self, '_actor_hash_to_rank'), (
+            "Actor rank mapping not built. "
+            "This should have been done during initialization.")
+
+        actor_hash = self._hash_actor(actor)
+
+        if actor_hash in self._actor_hash_to_rank:
+            return self._actor_hash_to_rank[actor_hash]  # type: ignore
         else:
-            raise ValueError(f"Actor {target_actor_id} not found in communicator group")
+            raise ValueError(f"Actor {actor} not found in communicator group")
 
     def get_self_rank(self) -> Optional[int]:
         """
@@ -200,17 +161,9 @@ class RayPPCommunicatorWrapper(Communicator):
         if self._closed:
             raise RayChannelError("RayCudaCommunicator has been destroyed.")
 
-        if self._use_communication_streams:
-            assert self._send_stream is not None
-            # We observed that if all recv/compute/send operations run on GPU,
-            # since there is no synchronization, the CPU execution loop may be
-            # far ahead of the GPU operations and lead to runtime failures.
-            # To avoid that, we synchronize on the send stream.
-            # TODO(rui): find a better approach
-            self._send_stream.synchronize()
-
-        # self._pynccl.send(buf, peer_rank, stream=self._send_stream)
-        self._comm.pynccl_comm.send(buf, peer_rank, stream=self._send_stream)
+        # We call _comm.pynccl_comm.send() instead of _comm.send() to be
+        # able to pass in the CUDA stream.
+        self._comm.pynccl_comm.send(buf, peer_rank, stream=self._cuda_stream)
 
     def recv(
         self,
@@ -238,26 +191,16 @@ class RayPPCommunicatorWrapper(Communicator):
             "RayCudaCommunicator requires a tensor allocator")
         buf = allocator(shape, dtype)
 
-        if self._use_communication_streams:
-            assert self._recv_stream is not None
-            # We observed that if all recv/compute/send operations run on GPU,
-            # since there is no synchronization, the CPU execution loop may be
-            # far ahead of the GPU operations and lead to runtime failures.
-            # To avoid that, we synchronize on the recv stream.
-            # TODO(rui): find a better approach
-            self._recv_stream.synchronize()
+        # We call _comm.pynccl_comm.recv() instead of _comm.recv() to be
+        # able to pass in the CUDA stream.
+        self._comm.pynccl_comm.recv(buf, peer_rank, stream=self._cuda_stream)
 
-            self._pynccl.recv(buf, peer_rank, stream=self._recv_stream)
-        else:
-            # self._pynccl.recv(buf, peer_rank, stream=self._recv_stream)
-            self._comm.pynccl_comm.recv(buf, peer_rank, stream=self._recv_stream)
-
-            assert self._cuda_stream is not None
-            # Buffer values are undefined if NCCL ops are aborted. Therefore, we
-            # need to synchronize here and check that the channel is still
-            # open to ensure that the receive buffer is valid.
-            # TODO(swang): Avoid CUDA synchronization.
-            self._cuda_stream.synchronize()
+        assert self._cuda_stream is not None
+        # Buffer values are undefined if NCCL ops are aborted. Therefore, we
+        # need to synchronize here and check that the channel is still
+        # open to ensure that the receive buffer is valid.
+        # TODO(swang): Avoid CUDA synchronization.
+        self._cuda_stream.synchronize()
 
         if self._closed:
             raise RayChannelError("RayCudaCommunicator has been destroyed.")
@@ -268,9 +211,7 @@ class RayPPCommunicatorWrapper(Communicator):
         send_buf: "torch.Tensor",
         recv_buf: "torch.Tensor",
     ):
-        # TODO(rui): in vLLM, Compiled Graph does not use collectives
-        # probably want to just raise NotImplementedError
-        self._pynccl.all_gather(recv_buf, send_buf, stream=self._cuda_stream)
+        raise NotImplementedError("allgather is not supported")
 
     def allreduce(
         self,
@@ -278,11 +219,7 @@ class RayPPCommunicatorWrapper(Communicator):
         recv_buf: "torch.Tensor",
         op: ReduceOp = ReduceOp.SUM,
     ):
-        out_tensor = self._pynccl.all_reduce(send_buf,
-                                             op=op,
-                                             stream=self._cuda_stream)
-        if out_tensor is not None:
-            recv_buf.copy_(out_tensor)
+        raise NotImplementedError("allreduce is not supported")
 
     def reducescatter(
         self,
@@ -290,27 +227,24 @@ class RayPPCommunicatorWrapper(Communicator):
         recv_buf: "torch.Tensor",
         op: ReduceOp = ReduceOp.SUM,
     ):
-        self._pynccl.reduce_scatter(recv_buf,
-                                    send_buf,
-                                    op=op,
-                                    stream=self._cuda_stream)
+        raise NotImplementedError("reducescatter is not supported")
 
     @property
     def recv_stream(self):
-        return torch.cuda.StreamContext(self._recv_stream)
+        return torch.cuda.StreamContext(self._cuda_stream)
 
     @property
     def send_stream(self):
-        return torch.cuda.StreamContext(self._send_stream)
+        return torch.cuda.StreamContext(self._cuda_stream)
 
     def destroy(self) -> None:
-        pass
+        # Just sets a flag, vLLM manages the lifecycle of the underlying
+        # _PP GroupCoordinator.
+        self._closed = True
 
     def get_transport_name(self) -> str:
         return "nccl"
 
     @classmethod
     def generate_communicator_id(cls) -> Any:
-        # return cls._nccl.ncclGetUniqueId()
-        import uuid
         return uuid.uuid4()
