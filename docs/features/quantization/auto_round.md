@@ -1,8 +1,11 @@
 # AutoRound
 
-AutoRound is Intel’s advanced quantization algorithm designed to produce highly efficient **INT2, INT3, INT4, and INT8** quantized large language models—striking an optimal balance between accuracy and deployment performance.
+AutoRound is Intel’s advanced quantization algorithm designed to produce highly efficient **INT2, INT3, INT4, and INT8**
+quantized large language models—striking an optimal balance between accuracy and deployment performance.
 
-AutoRound applies weight-only quantization to transformer-based models, enabling significant memory savings and faster inference while maintaining near-original accuracy. It supports a wide range of hardware platforms, including **CPUs, Intel GPUs, HPUs, and CUDA-enabled devices**.
+AutoRound applies weight-only quantization to transformer-based models, enabling significant memory savings and faster
+inference while maintaining near-original accuracy. It supports a wide range of hardware platforms, including **CPUs,
+Intel GPUs, HPUs, and CUDA-enabled devices**.
 
 Key Features:
 
@@ -71,6 +74,7 @@ autoround.quantize_and_save(output_dir, format="auto_round")
 ```
 
 ## Running a quantized model with vLLM
+
 An example code to run auto-round format in vLLM
 
 ~~~python
@@ -93,3 +97,7 @@ if __name__ == '__main__':
 
 ~~~
 
+# Acknowledgement
+
+Special thanks to open-source low precision libraries such as AutoGPTQ, AutoAWQ, GPTQModel, Triton, Marlin, and
+ExLLaMAV2 for providing low-precision CUDA kernels, which are leveraged in AutoRound
