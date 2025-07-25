@@ -1182,8 +1182,7 @@ class LLM:
             A list of `EmbeddingRequestOutput` objects containing the
             embedding vectors in the same order as the input prompts.
         """
-        model_config = self.llm_engine.model_config
-        if "embed" not in model_config.supported_tasks:
+        if "embed" not in self.supported_tasks:
             raise ValueError("Embedding API is not supported by this model. "
                              "Please set `--task embed`.")
 
@@ -1227,8 +1226,7 @@ class LLM:
             A list of `ClassificationRequestOutput` objects containing the
             embedding vectors in the same order as the input prompts.
         """
-        model_config = self.llm_engine.model_config
-        if "classify" not in model_config.supported_tasks:
+        if "classify" not in self.supported_tasks:
             raise ValueError(
                 "Classification API is not supported by this model. "
                 "Please set `--task classify`.")
@@ -1409,8 +1407,8 @@ class LLM:
 
             raise ValueError(" ".join(messages))
 
-        if all(t not in model_config.supported_tasks
-               for t in ("embed", "classify")):
+        supported_tasks = self.supported_tasks
+        if all(t not in supported_tasks for t in ("embed", "classify")):
             raise ValueError("Score API is not supported by this model. "
                              "Please set `--task embed` or `--task classify`.")
 
