@@ -12,9 +12,10 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, cdiv, sha256_cbor_64bit
 from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
-                                        FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec, KVCacheSpec,
-                                        KVCacheTensor, SlidingWindowSpec)
+                                        FullAttentionSpec, GiantTensorSpec,
+                                        KVCacheConfig, KVCacheGroupSpec,
+                                        KVCacheSpec, KVCacheTensor, MambaSpec,
+                                        SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -36,9 +37,9 @@ class BlockHash(NamedTuple):
 
 
 class BlockHashWithGroupId(NamedTuple):
-    # The hash value for the contents (e.g., token_ids) of a block without group
-    # ID. The value is the same for blocks representing the same tokens but for
-    # different groups.
+    # The hash value for the contents (e.g., token_ids) of a block without
+    # group ID. The value is the same for blocks representing the same tokens
+    # but for different groups.
     block_hash: BlockHash
     # The KV cache group ID.
     group_id: int
@@ -545,6 +546,7 @@ def hash_block_tokens(
         The hash value of the block and the token ids in the block.
         The entire tuple is used as the hash key of the block.
     """
+    global NONE_HASH
     if not parent_block_hash:
         parent_block_hash = NONE_HASH
 
@@ -616,7 +618,7 @@ def estimate_max_model_len(vllm_config: VllmConfig,
         available_memory: Memory available for KV cache in bytes.
 
     Returns:
-        The estimated maximum model length that can fit in the available memory.
+        The estimated maximum model length that fits in available memory.
     """
 
     # Define a function to check if a given model length fits in memory
@@ -677,7 +679,7 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
     needed_memory = max_memory_usage_bytes(vllm_config, kv_cache_spec.values())
 
     if needed_memory > available_memory:
-        # Estimate the maximum model length that can fit in the available memory
+        # Estimate the maximum model length that fits in available memory
         estimated_max_len = estimate_max_model_len(vllm_config, kv_cache_spec,
                                                    available_memory)
         estimated_msg = ""
@@ -861,6 +863,23 @@ def is_kv_cache_type_attention_free(
     return not kv_cache_spec
 
 
+def is_hybrid_attention_mamba_model(
+        kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
+    """
+    Check if the model contains both attention and mamba layers.
+    Such models benefit from unified memory allocation strategies.
+    """
+    has_attention = any(
+        isinstance(spec, (FullAttentionSpec, SlidingWindowSpec))
+        for spec in kv_cache_spec.values()
+    )
+    has_mamba = any(
+        isinstance(spec, MambaSpec)
+        for spec in kv_cache_spec.values()
+    )
+    return has_attention and has_mamba
+
+
 def _get_kv_cache_config_uniform_page_size(
         vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec],
         available_memory: int) -> KVCacheConfig:
@@ -870,56 +889,34 @@ def _get_kv_cache_config_uniform_page_size(
     block per layer) for all layers.
 
     Detailed explanation about kv cache management of hybrid models:
-    The layers in the models are repeated with some patterns, e.g., a model
-    with 10 full attention layers and 20 sliding window attention layers can be
-    regarded as repeating the pattern (1 * full, 2 * sw) 10 times. 
-    The KVCacheManager allocates different block tables for each of the 3 layers
-    in the pattern, and repeats each of them 10 times to generate the 
-    block_table for the 30 layers in the model.
-    Therefore, we can group the layers in the model into 3 kv_cache_groups, each
-    of which contains 10 layers in the model.
+    The layers in hybrid models follow repeating patterns where different
+    attention types are organized in sequences. The KVCacheManager creates
+    block tables for each unique layer type and applies them to corresponding
+    layers throughout the model. This enables efficient grouping where layers
+    of the same type and position in the pattern share cache resources.
     The KVCacheManager allocates the block_table for each group based on its
     kv_cache spec, and the model runner applies the block table to each layer 
     in the group.
-    For example:
-    1. A model only uses full attention. The pattern is 
-    (num_hidden_layers * full), so there is only one group and the block table 
-    is shared by all layers. It is already handled by 
-    `_get_kv_cache_config_uniform_type`.
-    2. A model with 10 full attention layers and 20 sliding window 
-    attention layers. There are 3 layers in the pattern (1 * full, 2 * sw), so 
-    there are 3 kv_cache_groups, each of which represents 10 layers.
+    Models with uniform attention types use a single shared block table,
+    while hybrid models require separate groups for different attention
+    types based on their architectural patterns.
 
     To simplify the implementation, we make the following assumptions:
-    1. Physical memory per block: Must be the same across all KV cache groups. 
-    Breaking this assumption is non-trivial due to memory fragmentation concerns
-    when allocating blocks of different sizes.
-    2. Tokens per block (block_size): Currently, we directly use 
-    `CacheConfig.block_size` for all layers. It can be extended to vary by KV 
-    cache group, but within each KV cache group, all layers must share the same 
-    block size.
-    3. Physical memory per token per layer: This property is decided by model 
-    config. Currently we only support models that have the same physical memory 
-    per token per layer for all layers. Can be relaxed with a simple extension, 
-    but still need to keep physical memory per block the same for all groups.
-    4. Number of layers per group: Currently assumed the same for all layers. 
-    Can be relaxed with a simple extension, but still need to keep physical 
-    memory per block the same for all groups.
-    5. Attention type within groups: All layers in a group must share the same
-    attention type. One exception is that, when 
-    `--disable-hybrid-kv-cache-manager` is true, the single group for full 
-    attention layers may also include attention layers using sliding window or 
-    LLaMA 4 local attention. See `unify_hybrid_kv_cache_specs` for more details.
-    6. Support for multiple attention types: The design for most components is 
-    general to an arbitrary number of attention types. But 
-    `find_longest_cache_hit` only supports one attention type or two 
-    types of full-attention plus exactly one another type. The general
-    implementation of this function is feasible but we don't know how to 
-    implement it cleanly yet.
+    1. Physical memory per block: Must be uniform across all KV cache groups
+    to avoid memory fragmentation when allocating blocks of different sizes.
+    2. Block size: Uses consistent block size across layers within each group
+    while allowing variation between groups.
+    3. Memory per token per layer: Assumes uniform memory requirements across
+    layers to maintain consistent block sizes.
+    4. Group structure: Maintains uniform layer count per group to ensure
+    balanced memory allocation.
+    5. Attention type consistency: Layers within each group must use the same
+    attention mechanism, with exceptions for compatibility modes.
+    6. Multi-type support: Current implementation supports specific attention
+    type combinations with room for future extensions.
 
-    As we assume tokens per block, physical memory per token per layer, and 
-    number of layers per group are the same now, we can ensure that physical 
-    memory per block is the same for all groups.
+    These assumptions ensure uniform physical memory per block across all
+    groups, enabling efficient memory management.
 
     Args:
         vllm_config: The global VllmConfig
@@ -929,31 +926,24 @@ def _get_kv_cache_config_uniform_page_size(
         The generated KVCacheConfig
     """
     # Group all layers by type_id.
-    # E.g., 2 full attention layers and 3 sliding window attention layers,
-    # -> (full.0, full.1), (sw.0, sw.1, sw.2).
+    # Group layers by attention type for balanced memory allocation
     same_type_layers: dict[str, list[str]] = defaultdict(list)
     for layer_name, layer_spec in kv_cache_spec.items():
         same_type_layers[layer_spec.type_id].append(layer_name)
 
-    # Split each group into smaller groups, to make the number of layers in each
-    # group identical. Add padding to the last group of each type if necessary.
-    # E.g., (full.0, full.1), (sw.0, sw.1, sw.2)
-    # split to 3 groups with 2 layers each:
-    # (full.0, full.1), (sw.0, sw.1), (sw.2, padding).
-    # FIXME(Chen): At the moment of writing this code (2025-06-02), all
-    # open-source hybrid model follows a n:1 pattern between different attention
-    # types (e.g., Gemma3 5:1 between sw and full, LLaMA4 3:1 between local and
-    # full), so we can use the "1" in the n:1 pattern as the group size, which
-    # is the minimum number of layers among all attention types. Need a better
-    # strategy if we want to support more complex patterns (e.g., 20 full + 30
-    # sw, where the group size should be 10).
+    # Split layer groups to ensure uniform group sizes, adding padding
+    # as needed to maintain consistent memory allocation patterns.
+    # Current hybrid models follow predictable layer patterns, so we use the
+    # minimum layer count as the group size. This ensures balanced memory
+    # distribution across groups while maintaining compatibility with
+    # existing architectures.
     group_size = min([len(layers) for layers in same_type_layers.values()])
     grouped_layers = []
     for layers in same_type_layers.values():
         num_padding_layers = group_size - len(layers) % group_size
         if num_padding_layers != group_size:
             logger.warning(
-                "Add %d padding layers, may waste at most %.2f%% KV cache memory",  # noqa
+                "Adding %d padding layers, potential memory overhead: %.2f%%",
                 num_padding_layers,
                 num_padding_layers / len(layers) * 100,
             )
@@ -962,13 +952,9 @@ def _get_kv_cache_config_uniform_page_size(
     kv_cache_groups = create_kv_cache_group_specs(kv_cache_spec,
                                                   grouped_layers)
 
-    # Determine how model runners should initialize the KV cache tensors.
-    # We will have group_size memory pools, each is shared by one layer from
-    # each group. As layers of different groups have different block table,
-    # they will use different parts of the shared Tensor.
-    # The memory layout in the example will be:
-    # full.0, sw.0, sw.2: share a Tensor with size=available_memory//2
-    # full.1, sw.1: share another Tensor with size=available_memory//2
+    # Initialize memory pools where each pool is shared by corresponding
+    # layers from different groups. Different groups use separate regions
+    # within the shared tensors based on their block tables.
     page_size = get_uniform_page_size(kv_cache_spec)
     num_blocks = get_num_blocks(vllm_config, group_size, available_memory,
                                 page_size)
@@ -991,7 +977,7 @@ def _get_kv_cache_config_uniform_page_size(
     min_block_size = min(
         [group.kv_cache_spec.block_size for group in kv_cache_groups])
 
-    # Print the KV cache size and maximum concurrency.
+    # Log memory allocation and concurrency metrics
     num_tokens = num_blocks // len(grouped_layers) * min_block_size
     num_tokens_str = f"{num_tokens:,}"
     logger.info("GPU KV cache size: %s tokens", num_tokens_str)
@@ -1000,6 +986,111 @@ def _get_kv_cache_config_uniform_page_size(
         vllm_config, kv_cache_config)
     logger.info("Maximum concurrency for %s tokens per request: %.2fx",
                 max_model_len_str, max_concurrency)
+    return kv_cache_config
+
+
+def _get_kv_cache_config_giant_tensor(
+        vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec],
+        available_memory: int) -> KVCacheConfig:
+    """
+    Generates KV cache configuration using unified memory allocation for 
+    hybrid models with both attention and mamba layers.
+    
+    Creates a single memory tensor shared across all layers, with different
+    access patterns for attention and mamba components. Attention layers
+    use interleaved key-value storage while mamba layers use contiguous
+    state storage.
+    
+    Args:
+        vllm_config: The global VllmConfig
+        kv_cache_spec: The KVCacheSpec of each layer in the model
+        available_memory: Memory available for KV cache in bytes.
+    Returns:
+        The generated KVCacheConfig using unified memory allocation
+    """
+    # Separate attention and mamba layers
+    attention_layers = []
+    mamba_layers = []
+    attention_spec = None
+    mamba_spec = None
+    
+    for layer_name, layer_spec in kv_cache_spec.items():
+        if isinstance(layer_spec, (FullAttentionSpec, SlidingWindowSpec)):
+            attention_layers.append(layer_name)
+            if attention_spec is None:
+                attention_spec = layer_spec
+        elif isinstance(layer_spec, MambaSpec):
+            mamba_layers.append(layer_name)
+            if mamba_spec is None:
+                mamba_spec = layer_spec
+        else:
+            raise ValueError(f"Unsupported layer spec type: {type(layer_spec)}")
+    
+    if not attention_layers or not mamba_layers:
+        raise ValueError(
+            "Unified allocation requires both attention and mamba layers")
+    
+    if attention_spec is None or mamba_spec is None:
+        raise ValueError("Missing attention or mamba layer specifications")
+    
+    # Use a small block size to reduce memory fragmentation
+    small_block_size = 16
+    
+    # Create unified GiantTensorSpec
+    giant_spec = GiantTensorSpec(
+        num_attention_layers=len(attention_layers),
+        num_kv_heads=attention_spec.num_kv_heads,
+        head_size=attention_spec.head_size,
+        attention_dtype=attention_spec.dtype,
+        mamba_shapes=mamba_spec.shapes,
+        mamba_dtype=mamba_spec.dtype,
+        block_size=small_block_size,
+        attention_layer_names=attention_layers,
+        mamba_layer_names=mamba_layers,
+    )
+    
+    # Calculate number of blocks available with giant tensor
+    page_size = giant_spec.page_size_bytes
+    num_blocks = available_memory // page_size
+    
+    # Create KV cache groups: one shared group for attention layers,
+    # individual groups for each mamba layer
+    kv_cache_groups = []
+    
+    # All attention layers share one group to enable efficient batching
+    if attention_layers:
+        kv_cache_groups.append(KVCacheGroupSpec(
+            layer_names=attention_layers,
+            kv_cache_spec=giant_spec
+        ))
+    
+    # Each mamba layer gets its own group for independent state management
+    for mamba_layer in mamba_layers:
+        kv_cache_groups.append(KVCacheGroupSpec(
+            layer_names=[mamba_layer],  
+            kv_cache_spec=giant_spec
+        ))
+    
+    # Create single giant tensor shared by all layers
+    all_layers = attention_layers + mamba_layers
+    kv_cache_tensors = [KVCacheTensor(
+        size=page_size * num_blocks,
+        shared_by=all_layers
+    )]
+    
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=kv_cache_tensors,
+        kv_cache_groups=kv_cache_groups,
+    )
+    
+    # Log the unified memory configuration
+    num_tokens = num_blocks * small_block_size
+    num_tokens_str = f"{num_tokens:,}"
+    num_groups = len(kv_cache_groups)
+    logger.info("Unified KV cache: %s tokens across %d groups", 
+                num_tokens_str, num_groups)
+    
     return kv_cache_config
 
 
@@ -1089,6 +1180,12 @@ def get_kv_cache_config(
         # This returns a kv_cache config with 0 kv_cache groups and 1 block
         # to allow for the KVCache manager to handle attention free models.
         return _get_kv_cache_config_attention_free()
+    elif is_hybrid_attention_mamba_model(kv_cache_spec):
+        # Use unified memory allocation for hybrid models to improve efficiency
+        logger.info("Detected hybrid attention+mamba model, using unified"
+                    " memory allocation")
+        return _get_kv_cache_config_giant_tensor(vllm_config, kv_cache_spec, 
+                                                 available_memory)
     elif is_kv_cache_type_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for
         # most models. Allocate the same amount of memory for

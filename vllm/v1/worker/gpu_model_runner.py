@@ -4,6 +4,7 @@
 import gc
 import time
 from contextlib import contextmanager
+from math import prod
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 import numpy as np
@@ -51,7 +52,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         ChunkedLocalAttentionSpec,
                                         FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MambaSpec,
-                                        SlidingWindowSpec)
+                                        SlidingWindowSpec, GiantTensorSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
@@ -258,7 +259,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # NOTE: `mrope_positions` is implemented with one additional dummy
             # position on purpose to make it non-contiguous so that it can work
             # with torch compile.
-            # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
+            # See PR #12128 for detailed explanation
 
             # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
             # the modality of inputs. For text-only inputs, each dimension has
@@ -415,8 +416,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             sampling_params = new_req_data.sampling_params
             pooling_params = new_req_data.pooling_params
 
-            if sampling_params and \
-                sampling_params.sampling_type == SamplingType.RANDOM_SEED:
+            if (sampling_params and 
+                    sampling_params.sampling_type == SamplingType.RANDOM_SEED):
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
             else:
@@ -760,8 +761,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 slot_mapping=slot_mapping,
             )
 
-            if self.speculative_config and \
-                spec_decode_common_attn_metadata is None:
+            if (self.speculative_config and 
+                    spec_decode_common_attn_metadata is None):
                 spec_decode_common_attn_metadata = common_attn_metadata
 
             if isinstance(kv_cache_group_spec.kv_cache_spec,
@@ -952,7 +953,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 src_end = num_computed_tokens + prompt_part_len
 
                 self.mrope_positions_cpu[:, dst_start:dst_end] = \
-                    req.mrope_positions[:,src_start:src_end]
+                    req.mrope_positions[:, src_start:src_end]
 
                 mrope_pos_ptr += prompt_part_len
 
@@ -1307,10 +1308,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         finished_sending: Optional[set[str]],
         finished_recving: Optional[set[str]],
     ) -> ModelRunnerOutput:
-        assert self.input_batch.num_reqs ==\
+        assert self.input_batch.num_reqs == \
             len(self.input_batch.pooling_params), \
-        "Either all or none of the requests in" \
-        " a batch must be pooling request"
+            "Either all or none of the requests in" \
+            " a batch must be pooling request"
 
         extracted_hidden_states = list(
             torch.split(hidden_states[:num_scheduled_tokens],
@@ -1376,8 +1377,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Pad tokens to multiple of tensor_parallel_size when
             # enabled collective fusion for SP
             tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-            if self.compilation_config.pass_config. \
-                enable_sequence_parallelism and tp_size > 1:
+            if (self.compilation_config.pass_config.
+                    enable_sequence_parallelism and tp_size > 1):
                 num_input_tokens = round_up(num_scheduled_tokens, tp_size)
             else:
                 num_input_tokens = num_scheduled_tokens
@@ -2625,6 +2626,84 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         storage_offset += stride[0]
 
                     kv_caches[layer_name] = state_tensors
+                elif isinstance(kv_cache_spec, GiantTensorSpec):
+                    # Unified memory allocation for hybrid models with different layer types
+                    
+                    raw_tensor = kv_cache_raw_tensors[layer_name]
+                    num_blocks = (raw_tensor.numel() // kv_cache_spec.page_size_bytes)
+                    
+                    # Determine layer type using information stored in GiantTensorSpec
+                    is_attention_layer = layer_name in kv_cache_spec.attention_layer_names
+                    
+                    if is_attention_layer:
+                        has_attn = True
+                        
+                        # Find layer index among attention layers for pointer arithmetic
+                        layer_index = kv_cache_spec.attention_layer_names.index(layer_name)
+                        
+                        # Calculate memory offsets for key and value tensors
+                        k_offset_bytes = kv_cache_spec.get_layer_pointer_offset(
+                            layer_index, is_value=False)
+                        v_offset_bytes = kv_cache_spec.get_layer_pointer_offset(
+                            layer_index, is_value=True)
+                        
+                        dtype = kv_cache_spec.attention_dtype
+                        dtype_size = get_dtype_size(dtype)
+                        
+                        # Convert byte offsets to element offsets
+                        k_offset_elements = k_offset_bytes // dtype_size
+                        v_offset_elements = v_offset_bytes // dtype_size
+                        
+                        # Create tensor views for key and value data with calculated offsets
+                        elements_per_layer_block = (
+                            kv_cache_spec.num_kv_heads * 
+                            kv_cache_spec.head_size * 
+                            kv_cache_spec.block_size
+                        )
+                        
+                        # Key tensor view at calculated memory offset
+                        k_tensor = raw_tensor.view(dtype)[
+                            k_offset_elements:k_offset_elements + 
+                            num_blocks * elements_per_layer_block
+                        ].view(num_blocks, kv_cache_spec.num_kv_heads,
+                               kv_cache_spec.block_size, kv_cache_spec.head_size)
+                        
+                        # Value tensor view at calculated memory offset
+                        v_tensor = raw_tensor.view(dtype)[
+                            v_offset_elements:v_offset_elements +
+                            num_blocks * elements_per_layer_block
+                        ].view(num_blocks, kv_cache_spec.num_kv_heads,
+                               kv_cache_spec.block_size, kv_cache_spec.head_size)
+                        
+                        kv_caches[layer_name] = (k_tensor, v_tensor)
+                        
+                    else:
+                        # Mamba layer: use contiguous state storage within tensor
+                        has_mamba = True
+                        dtype = kv_cache_spec.mamba_dtype
+                        
+                        # Create tensor views for mamba state components
+                        # Each block contains complete state, components laid out contiguously
+                        state_tensors = []
+                        total_elements_per_block = sum(
+                            prod(shape) for shape in kv_cache_spec.mamba_shapes)
+                        
+                        block_offset = 0
+                        for shape in kv_cache_spec.mamba_shapes:
+                            elements_per_component = prod(shape)
+                            
+                            # Create strided view: each block has complete state
+                            tensor = torch.as_strided(
+                                raw_tensor.view(dtype),
+                                size=(num_blocks, *shape),
+                                stride=(total_elements_per_block, *torch.empty(shape).stride()),
+                                storage_offset=block_offset
+                            )
+                            
+                            state_tensors.append(tensor)
+                            block_offset += elements_per_component
+                        
+                        kv_caches[layer_name] = state_tensors
                 else:
                     raise NotImplementedError
 

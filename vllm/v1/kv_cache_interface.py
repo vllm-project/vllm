@@ -261,3 +261,78 @@ class KVCacheConfig:
     see `_get_kv_cache_config_uniform_page_size` for more details.
     """
     kv_cache_groups: list[KVCacheGroupSpec]
+
+
+@dataclass
+class GiantTensorSpec(KVCacheSpec):
+    """
+    Unified KV cache specification for hybrid models with both attention 
+    and mamba layers.
+    
+    This approach allocates a single large tensor where each block can 
+    accommodate either the complete KV cache for all attention layers or 
+    a single mamba state. This eliminates the page size matching constraint 
+    that typically forces large block sizes in hybrid models, enabling 
+    smaller, more memory-efficient blocks.
+    
+    Results in separate KV cache groups: one shared group for all attention 
+    layers, and individual groups for each mamba layer.
+    """
+    # Model specifications
+    num_attention_layers: int
+    num_kv_heads: int  
+    head_size: int
+    attention_dtype: torch.dtype
+    mamba_shapes: tuple[tuple[int, ...], ...]
+    mamba_dtype: torch.dtype
+    block_size: int  # Unified block size for improved memory granularity
+    # Layer type information for tensor reshaping
+    attention_layer_names: list[str]
+    mamba_layer_names: list[str]
+    
+    def __post_init__(self):
+        # Calculate memory needed per block for attention layers (all layers)
+        attention_kv_bytes = (
+            2 * self.num_attention_layers * self.num_kv_heads * 
+            self.head_size * self.block_size * 
+            get_dtype_size(self.attention_dtype)
+        )
+        
+        # Calculate memory needed per block for mamba state (padded)
+        mamba_elements = sum(prod(shape) for shape in self.mamba_shapes)
+        mamba_bytes = mamba_elements * get_dtype_size(self.mamba_dtype)
+        
+        # Giant tensor block = max(attention_bytes, mamba_bytes)
+        self.giant_block_bytes = max(attention_kv_bytes, mamba_bytes)
+        
+        # Calculate stride for attention layer access via pointer arithmetic
+        self.page_size = (self.giant_block_bytes //
+                          (2 * self.num_attention_layers))
+
+    @property
+    def type_id(self) -> str:
+        return f"giant_tensor_{self.num_attention_layers}_{self.block_size}"
+
+    @property  
+    def page_size_bytes(self) -> int:
+        return self.giant_block_bytes
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        max_blocks = cdiv(vllm_config.model_config.max_model_len,
+                          self.block_size)
+        return max_blocks * self.page_size_bytes
+    
+    def get_layer_pointer_offset(self, layer_index: int, is_value: bool) -> int:
+        """
+        Calculate byte offset for accessing individual attention layer tensors
+        within the unified giant tensor block.
+        """
+        multiplier = 2 * layer_index + (1 if is_value else 0)
+        return multiplier * self.page_size
+        
+    def get_block_id(self, block_id_alloc: int) -> int:
+        """
+        Transform allocated block ID to account for the attention layer
+        interleaving pattern in the giant tensor layout.
+        """
+        return block_id_alloc * self.num_attention_layers * 2
