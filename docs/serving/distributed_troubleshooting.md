@@ -25,12 +25,6 @@ To enable GPUDirect RDMA with vLLM, configure the following settings:
 
 - `IPC_LOCK` security context: add the `IPC_LOCK` capability to the container's security context to lock memory pages and prevent swapping to disk.
 - Shared memory with `/dev/shm`: mount `/dev/shm` in the pod spec to provide shared memory for interprocess communication (IPC).
-## Enabling GPUDirect RDMA
-
-To enable GPUDirect RDMA with vLLM, configure the following settings:
-
-- `IPC_LOCK` security context: add the `IPC_LOCK` capability to the container's security context to lock memory pages and prevent swapping to disk.
-- Shared memory with `/dev/shm`: mount `/dev/shm` in the pod spec to provide shared memory for interprocess communication (IPC).
 
 If you use Docker, set up the container as follows:
 
