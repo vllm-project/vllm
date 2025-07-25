@@ -109,7 +109,6 @@ InternVLVideoInputs = Union[InternVLVideoPixelInputs,
 
 
 def resolve_internvl_min_max_num(
-    *,
     min_dynamic_patch: int,
     max_dynamic_patch: int,
     dynamic_image_size: bool,
@@ -191,9 +190,9 @@ class BaseInternS1ProcessingInfo(BaseProcessingInfo):
         if use_thumbnail is None:
             use_thumbnail = True
         min_num, max_num = resolve_min_max_num(min_dynamic_patch,
-                                                    max_dynamic_patch,
-                                                    dynamic_image_size,
-                                                    use_thumbnail=use_thumbnail)
+                                               max_dynamic_patch,
+                                               dynamic_image_size,
+                                               use_thumbnail=use_thumbnail)
 
         return get_internvl_target_ratios(min_num, max_num)
     
@@ -201,12 +200,12 @@ class BaseInternS1ProcessingInfo(BaseProcessingInfo):
         processor = self.get_hf_processor()
 
         hf_config = self.ctx.get_hf_config()
-        base_size = hf_config.vision_config.image_size
+        base_height, base_width = hf_config.vision_config.image_size
         target_ratios = self.resolve_target_ratios()
 
         largest_feature_size, largest_feature_pinpoint = 0, None
         for wr, hr in target_ratios:
-            width, height = base_size * wr, base_size * hr
+            width, height = base_width * wr, base_height * hr
 
             feat_size = self.get_num_image_tokens(
                 image_width=width,
@@ -243,7 +242,7 @@ class BaseInternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
-        return "<image>" * num_images
+        return "<IMG_CONTEXT>" * num_images
 
     def get_dummy_mm_data(
         self,
@@ -370,8 +369,19 @@ class InternS1ProcessingInfo(BaseInternS1ProcessingInfo):
     
     @property
     def supports_video(self) -> bool:
+        return False
+        # TODO
         return self.video_token_id is not None
 
+    @property
+    def num_image_token(self) -> int:
+        hf_config = self.get_hf_config()
+        image_size: int = hf_config.vision_config.image_size[0]
+        patch_size: int = hf_config.vision_config.patch_size[0]
+        num_image_token = int(
+            (image_size // patch_size)**2 * (hf_config.downsample_ratio**2))
+        return num_image_token
+        
     def get_supported_mm_limits(self):
         video_limit = {"video": None} if self.supports_video else {}
         return {**super().get_supported_mm_limits(), **video_limit}
@@ -387,11 +397,9 @@ class InternS1ProcessingInfo(BaseInternS1ProcessingInfo):
         max_images = mm_counts.get("image", 0)
         max_videos = mm_counts.get("video", 0)
 
-        processor = self.get_hf_processor()
-
         max_image_tokens = self.get_max_image_tokens() * max_images
         max_total_frames = (seq_len -
-                            max_image_tokens) // processor.num_image_token
+                            max_image_tokens) // self.num_image_token
         max_frames_per_video = max_total_frames // max(max_videos, 1)
 
         return max(max_frames_per_video, 1)
@@ -436,14 +444,14 @@ class InternS1DummyInputsBuilder(
                                                 mm_counts=mm_counts)
         if self.info.supports_video:
             config = self.info.get_hf_config()
-            image_size: int = config.vision_config.image_size
+            height, width = config.vision_config.image_size
             target_num_frames = \
                 self.info.get_num_frames_with_most_features(seq_len, mm_counts)
             num_videos = mm_counts.get("video", 0)
             dummy_video = {
                 "video":
-                self._get_dummy_videos(width=image_size,
-                                       height=image_size,
+                self._get_dummy_videos(width=width,
+                                       height=height,
                                        num_frames=target_num_frames,
                                        num_videos=num_videos)
             }
@@ -545,7 +553,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
-            return "<image>"
+            return "<IMG_CONTEXT>"
         if modality.startswith("video"):
             return "<video>"
 
