@@ -199,11 +199,7 @@ class XPUPlatform(Platform):
         return torch.xpu.device_count()
 
     @classmethod
-    def reset_peak_memory_stats(cls):
-        torch.xpu.reset_peak_memory_stats()
-
-    @classmethod
-    def mem_get_info(cls):
+    def mem_get_info(cls) -> tuple[int, int]:
         if cls.is_data_center_gpu():
             return torch.xpu.mem_get_info()
         else:
@@ -218,15 +214,3 @@ class XPUPlatform(Platform):
             free_gpu_memory = total_gpu_memory - (used_memory +
                                                   NON_TORCH_ALLOCATIONS_BYTES)
             return free_gpu_memory, total_gpu_memory
-
-    @classmethod
-    def memory_stats(cls):
-        return torch.xpu.memory_stats()
-
-    @classmethod
-    def memory_reserved(cls):
-        return torch.xpu.memory_reserved()
-
-    @classmethod
-    def empty_cache(cls):
-        torch.cuda.empty_cache()

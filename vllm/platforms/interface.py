@@ -310,7 +310,8 @@ class Platform:
         """
         Set the device for the current platform.
         """
-        raise NotImplementedError
+        set_device_method = cls.get_platform_method("set_device")
+        set_device_method(device)
 
     @classmethod
     def pre_register_and_update(cls,
@@ -573,28 +574,50 @@ class Platform:
         return False
 
     @classmethod
-    def empty_cache(cls):
+    def get_platform_method(cls, method_name: str):
+        """
+        Returns the platform-specific method for the given method name.
+        """
+        if not hasattr(cls, "device_type") or not cls.device_type:
+            raise NotImplementedError
+        try:
+            device_module = getattr(torch, cls.device_type)
+            method = getattr(device_module, method_name)
+        except AttributeError:
+            raise NotImplementedError(
+                f"{method_name} not implemented for platform with "
+                f"device_type '{cls.device_type}'") from None
+        return method
+
+    @classmethod
+    def empty_cache(cls) -> None:
         # torch.accelerator.empty_cache() only works after torch 2.8
-        raise NotImplementedError
+        empty_cache_method = cls.get_platform_method("empty_cache")
+        empty_cache_method()
 
     @classmethod
-    def reset_peak_memory_stats(cls):
-        raise NotImplementedError
+    def reset_peak_memory_stats(cls) -> None:
+        reset_peak_memory_stats_method = cls.get_platform_method(
+            "reset_peak_memory_stats")
+        reset_peak_memory_stats_method()
 
     @classmethod
-    def mem_get_info(cls):
-        raise NotImplementedError
+    def mem_get_info(cls) -> tuple[int, int]:
+        mem_get_info_method = cls.get_platform_method("mem_get_info")
+        return mem_get_info_method()
 
     @classmethod
-    def memory_stats(cls):
-        raise NotImplementedError
+    def memory_stats(cls) -> dict[str, Any]:
+        memory_stats_method = cls.get_platform_method("memory_stats")
+        return memory_stats_method()
 
     @classmethod
-    def memory_reserved(cls):
-        raise NotImplementedError
+    def memory_reserved(cls) -> int:
+        memory_reserved_method = cls.get_platform_method("memory_reserved")
+        return memory_reserved_method()
 
     @classmethod
-    def synchronize(cls):
+    def synchronize(cls) -> None:
         torch.accelerator.synchronize()
 
     @classmethod

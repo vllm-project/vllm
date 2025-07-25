@@ -464,26 +464,6 @@ class RocmPlatform(Platform):
         return True
 
     @classmethod
-    def empty_cache(cls):
-        torch.cuda.empty_cache()
-
-    @classmethod
-    def reset_peak_memory_stats(cls):
-        torch.cuda.reset_peak_memory_stats()
-
-    @classmethod
-    def mem_get_info(cls):
-        return torch.cuda.mem_get_info()
-
-    @classmethod
-    def memory_stats(cls):
-        return torch.cuda.memory_stats()
-
-    @classmethod
-    def memory_reserved(cls):
-        return torch.cuda.memory_reserved()
-
-    @classmethod
     def synchronize(cls):
         # leave this in case torch.acceleartor.synchronize() not work.
         torch.cuda.synchronize()
