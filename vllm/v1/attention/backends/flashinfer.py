@@ -8,13 +8,12 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
+import vllm.envs as envs
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
-
-import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
 from vllm.config import VllmConfig
@@ -467,7 +466,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self._get_workspace_buffer()
             assert self._workspace_buffer is not None, \
                 "workspace_buffer is not set"
-
+        query_start_loc = common_attn_metadata.query_start_loc_cpu.to(
+            self.device)
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
             qo_indptr_cpu=common_attn_metadata.query_start_loc_cpu,
@@ -496,7 +496,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             seq_lens=seq_lens,
             block_table_tensor=block_table_tensor,
             workspace_buffer=self._get_workspace_buffer(),
-            actual_seq_lens_q=qo_indptr[1:] - qo_indptr[:-1],
+            actual_seq_lens_q=query_start_loc[1:] - query_start_loc[:-1],
         )
 
         self._plan(num_prefills, num_decodes, attn_metadata)
