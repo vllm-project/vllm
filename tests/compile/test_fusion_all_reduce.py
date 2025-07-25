@@ -17,7 +17,7 @@ from vllm.platforms import current_platform
 from vllm.utils import update_environment_variables
 
 from ..utils import multi_gpu_test
-from .backend import TestBackend
+from .backend import TestBackend, TestPassManager
 
 
 class TestAllReduceRMSNormModel(torch.nn.Module):
@@ -133,9 +133,15 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
                                            seed=42)
 
     all_reduce_fusion_pass = AllReduceFusionPass(vllm_config)
-    backend = TestBackend(all_reduce_fusion_pass)
 
     model = test_model_cls(hidden_size)
+
+    def check(test_pass_manager: TestPassManager):
+        test_pass_manager.check_before_ops(model.ops_in_model_before(),
+                                           fully_replaced=False)
+        test_pass_manager.check_after_ops(model.ops_in_model_after())
+
+    backend = TestBackend(all_reduce_fusion_pass, check_fn=check)
 
     hidden_states = torch.randn((batch_size * seq_len, hidden_size),
                                 requires_grad=False)
@@ -145,6 +151,4 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
     compiled_model = torch.compile(model, backend=backend)
     compiled_model(hidden_states, residual)
 
-    backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
-    backend.check_after_ops(model.ops_in_model_after())
     del all_reduce_fusion_pass

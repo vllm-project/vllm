@@ -22,7 +22,7 @@ from vllm.platforms import current_platform
 from vllm.utils import update_environment_variables
 
 from ..utils import multi_gpu_test
-from .backend import TestBackend
+from .backend import TestBackend, TestPassManager
 
 FP8_DTYPE = current_platform.fp8_dtype()
 prompts = [
@@ -267,12 +267,21 @@ def sequence_parallelism_pass_on_test_model(
         fusion_pass = FusionPass.instance(vllm_config)
         passes_for_backend.append(fusion_pass)
 
-    backend_no_func = TestBackend(*passes_for_backend)
-    backend_func = TestBackend(*passes_for_backend, func_pass)
-
     model = test_model_cls(hidden_size,
                            hidden_size * 2,
                            vllm_config=vllm_config)
+
+    def check(test_pass_manager: TestPassManager):
+        # In pre-nodes, all reduce should be there,
+        # reduce scatter and all gather should not
+        test_pass_manager.check_before_ops(model.ops_in_model_before())
+
+        # In post-nodes, reduce scatter and all gather should be there,
+        # all reduce should not
+        test_pass_manager.check_after_ops(model.ops_in_model_after())
+
+    backend_no_func = TestBackend(*passes_for_backend, check_fn=check)
+    backend_func = TestBackend(*passes_for_backend, func_pass)
 
     hidden_states = torch.randn((batch_size * seq_len, hidden_size),
                                 dtype=dtype)
@@ -282,14 +291,6 @@ def sequence_parallelism_pass_on_test_model(
     compiled_model_no_func(hidden_states, residual)
     compiled_model_func = torch.compile(model, backend=backend_func)
     compiled_model_func(hidden_states, residual)
-
-    # In pre-nodes, all reduce should be there,
-    # reduce scatter and all gather should not
-    backend_no_func.check_before_ops(model.ops_in_model_before())
-
-    # In post-nodes, reduce scatter and all gather should be there,
-    # all reduce should not
-    backend_no_func.check_after_ops(model.ops_in_model_after())
 
     # check if the functionalization pass is applied
     for op in model.ops_in_model():
