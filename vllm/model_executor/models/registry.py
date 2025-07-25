@@ -12,19 +12,18 @@ import sys
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Set
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from typing import Callable, Optional, TypeVar, Union
 
-import cloudpickle
 import torch.nn as nn
 
 from vllm.logger import init_logger
 
 from .interfaces import (has_inner_state, has_noops, is_attention_free,
                          is_hybrid, supports_cross_encoding,
-                         supports_multimodal, supports_pp,
-                         supports_transcription, supports_v0_only)
+                         supports_multimodal, supports_multimodal_raw_input,
+                         supports_pp, supports_transcription, supports_v0_only)
 from .interfaces_base import is_text_generation_model
 
 logger = init_logger(__name__)
@@ -34,13 +33,16 @@ _TEXT_GENERATION_MODELS = {
     # [Decoder-only]
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
+    "ArceeForCausalLM": ("arcee", "ArceeForCausalLM"),
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
+    "MiniMaxForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     "MiniMaxText01ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     "MiniMaxM1ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     # baichuan-7b, upper case 'C' in the class name
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),
     # baichuan-13b, lower case 'c' in the class name
     "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),
+    "BailingMoeForCausalLM": ("bailing_moe", "BailingMoeForCausalLM"),
     "BambaForCausalLM": ("bamba", "BambaForCausalLM"),
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
@@ -56,6 +58,7 @@ _TEXT_GENERATION_MODELS = {
     "Ernie4_5_ForCausalLM": ("ernie45", "Ernie4_5_ForCausalLM"),
     "Ernie4_5_MoeForCausalLM": ("ernie45_moe", "Ernie4_5_MoeForCausalLM"),
     "ExaoneForCausalLM": ("exaone", "ExaoneForCausalLM"),
+    "Exaone4ForCausalLM": ("exaone4", "Exaone4ForCausalLM"),
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "Fairseq2LlamaForCausalLM": ("fairseq2_llama", "Fairseq2LlamaForCausalLM"),
     "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
@@ -65,6 +68,7 @@ _TEXT_GENERATION_MODELS = {
     "Gemma3nForConditionalGeneration": ("gemma3n", "Gemma3nForConditionalGeneration"),    # noqa: E501
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "Glm4ForCausalLM": ("glm4", "Glm4ForCausalLM"),
+    "Glm4MoeForCausalLM": ("glm4_moe", "Glm4MoeForCausalLM"),
     "GPT2LMHeadModel": ("gpt2", "GPT2LMHeadModel"),
     "GPTBigCodeForCausalLM": ("gpt_bigcode", "GPTBigCodeForCausalLM"),
     "GPTJForCausalLM": ("gpt_j", "GPTJForCausalLM"),
@@ -75,7 +79,9 @@ _TEXT_GENERATION_MODELS = {
     "GraniteMoeSharedForCausalLM": ("granitemoeshared", "GraniteMoeSharedForCausalLM"),   # noqa: E501
     "GritLM": ("gritlm", "GritLM"),
     "Grok1ModelForCausalLM": ("grok1", "Grok1ForCausalLM"),
-    "HunYuanMoEV1ForCausalLM": ("hunyuan_v1_moe", "HunYuanMoEV1ForCausalLM"),
+    "HunYuanMoEV1ForCausalLM": ("hunyuan_v1", "HunYuanMoEV1ForCausalLM"),
+    "HunYuanDenseV1ForCausalLM": ("hunyuan_v1", "HunYuanDenseV1ForCausalLM"),
+    "HCXVisionForCausalLM": ("hyperclovax_vision", "HCXVisionForCausalLM"),
     "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
@@ -108,8 +114,8 @@ _TEXT_GENERATION_MODELS = {
     "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
-    "Phi3SmallForCausalLM": ("phi3_small", "Phi3SmallForCausalLM"),
     "PhiMoEForCausalLM": ("phimoe", "PhiMoEForCausalLM"),
+    "Phi4FlashForCausalLM": ("phi4flash", "Phi4FlashForCausalLM"),
     "Plamo2ForCausalLM": ("plamo2", "Plamo2ForCausalLM"),
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
@@ -179,9 +185,7 @@ _CROSS_ENCODER_MODELS = {
     "ModernBertForSequenceClassification": ("modernbert",
                                             "ModernBertForSequenceClassification"),
     # [Auto-converted (see adapters.py)]
-    "GemmaForSequenceClassification": ("gemma", "GemmaForSequenceClassification"), # noqa: E501
-    "Qwen2ForSequenceClassification": ("qwen2", "Qwen2ForSequenceClassification"), # noqa: E501
-    "Qwen3ForSequenceClassification": ("qwen3", "Qwen3ForSequenceClassification"), # noqa: E501
+    "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"), # noqa: E501,
 }
 
 _MULTIMODAL_MODELS = {
@@ -202,6 +206,7 @@ _MULTIMODAL_MODELS = {
     "SmolVLMForConditionalGeneration": ("smolvlm","SmolVLMForConditionalGeneration"),  # noqa: E501
     "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
+    "Llama_Nemotron_Nano_VL": ("nemotron_vl", "LlamaNemotronVLChatModel"),
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "LlavaNextVideoForConditionalGeneration": ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),  # noqa: E501
@@ -227,6 +232,7 @@ _MULTIMODAL_MODELS = {
     "Phi4MMForCausalLM": ("phi4mm", "Phi4MMForCausalLM"),
     "TarsierForConditionalGeneration": ("tarsier", "TarsierForConditionalGeneration"),  # noqa: E501
     "Tarsier2ForConditionalGeneration": ("qwen2_vl", "Tarsier2ForConditionalGeneration"),  # noqa: E501
+    "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
     # [Encoder-decoder]
     "Florence2ForConditionalGeneration": ("florence2", "Florence2ForConditionalGeneration"),  # noqa: E501
     "MllamaForConditionalGeneration": ("mllama", "MllamaForConditionalGeneration"),  # noqa: E501
@@ -237,16 +243,24 @@ _MULTIMODAL_MODELS = {
 
 _SPECULATIVE_DECODING_MODELS = {
     "MiMoMTPModel": ("mimo_mtp", "MiMoMTP"),
-    "EAGLEModel": ("eagle", "EAGLE"),
     "EagleLlamaForCausalLM": ("llama_eagle", "EagleLlamaForCausalLM"),
+    "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
+    "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),
     "MedusaModel": ("medusa", "Medusa"),
-    "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
+    # Temporarily disabled.
+    # # TODO(woosuk): Re-enable this once the MLP Speculator is supported in V1.
+    # "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
 }
 
-_TRANSFORMERS_MODELS = {
+_TRANSFORMERS_SUPPORTED_MODELS = {
+    "Emu3ForConditionalGeneration": ("transformers", "TransformersForMultimodalLM"),  # noqa: E501
+}
+
+_TRANSFORMERS_BACKEND_MODELS = {
+    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"), # noqa: E501
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
 }
 # yapf: enable
@@ -257,7 +271,8 @@ _VLLM_MODELS = {
     **_CROSS_ENCODER_MODELS,
     **_MULTIMODAL_MODELS,
     **_SPECULATIVE_DECODING_MODELS,
-    **_TRANSFORMERS_MODELS,
+    **_TRANSFORMERS_SUPPORTED_MODELS,
+    **_TRANSFORMERS_BACKEND_MODELS,
 }
 
 # This variable is used as the args for subprocess.run(). We
@@ -268,6 +283,8 @@ _SUBPROCESS_COMMAND = [
     sys.executable, "-m", "vllm.model_executor.models.registry"
 ]
 
+_PREVIOUSLY_SUPPORTED_MODELS = {"Phi3SmallForCausalLM": "0.9.2"}
+
 
 @dataclass(frozen=True)
 class _ModelInfo:
@@ -276,12 +293,14 @@ class _ModelInfo:
     is_pooling_model: bool
     supports_cross_encoding: bool
     supports_multimodal: bool
+    supports_multimodal_raw_input: bool
     supports_pp: bool
     has_inner_state: bool
     is_attention_free: bool
     is_hybrid: bool
     has_noops: bool
     supports_transcription: bool
+    supports_transcription_only: bool
     supports_v0_only: bool
 
     @staticmethod
@@ -292,11 +311,14 @@ class _ModelInfo:
             is_pooling_model=True,  # Can convert any model into a pooling model
             supports_cross_encoding=supports_cross_encoding(model),
             supports_multimodal=supports_multimodal(model),
+            supports_multimodal_raw_input=supports_multimodal_raw_input(model),
             supports_pp=supports_pp(model),
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
             supports_transcription=supports_transcription(model),
+            supports_transcription_only=(supports_transcription(model) and
+                                         model.supports_transcription_only),
             supports_v0_only=supports_v0_only(model),
             has_noops=has_noops(model),
         )
@@ -452,10 +474,26 @@ class _ModelRegistry:
         return _try_load_model_cls(model_arch, self.models[model_arch])
 
     def _try_inspect_model_cls(self, model_arch: str) -> Optional[_ModelInfo]:
-        if model_arch not in self.models:
-            return None
+        if model_arch in self.models:
+            return _try_inspect_model_cls(model_arch, self.models[model_arch])
 
-        return _try_inspect_model_cls(model_arch, self.models[model_arch])
+        if model_arch.endswith("ForSequenceClassification"):
+            causal_lm_arch = model_arch.replace("ForSequenceClassification",
+                                                "ForCausalLM")
+            if causal_lm_arch not in self.models:
+                return None
+
+            info = _try_inspect_model_cls(causal_lm_arch,
+                                          self.models[causal_lm_arch])
+
+            info = _ModelInfo(**dict(
+                asdict(info), **{
+                    "architecture": model_arch,
+                    "supports_cross_encoding": True
+                }))
+            return info
+
+        return None
 
     def _normalize_archs(
         self,
@@ -470,9 +508,23 @@ class _ModelRegistry:
         normalized_arch = list(
             filter(lambda model: model in self.models, architectures))
 
-        # make sure Transformers backend is put at the last as a fallback
-        if len(normalized_arch) != len(architectures):
-            normalized_arch.append("TransformersForCausalLM")
+        # try automatic conversion in adapters.py
+        for arch in architectures:
+            if not arch.endswith("ForSequenceClassification"):
+                continue
+            causal_lm_arch = arch.replace("ForSequenceClassification",
+                                          "ForCausalLM")
+            if causal_lm_arch in self.models:
+                normalized_arch.append(arch)
+
+        # NOTE(Isotr0py): Be careful of architectures' order!
+        # Make sure Transformers backend architecture is at the end of the
+        # list, otherwise pooling models automatic conversion will fail!
+        for arch in normalized_arch:
+            if arch.startswith("TransformersFor"):
+                normalized_arch.remove(arch)
+                normalized_arch.append(arch)
+
         return normalized_arch
 
     def inspect_model_cls(
@@ -529,6 +581,13 @@ class _ModelRegistry:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.supports_multimodal
 
+    def supports_multimodal_raw_input(
+        self,
+        architectures: Union[str, list[str]],
+    ) -> bool:
+        model_cls, _ = self.inspect_model_cls(architectures)
+        return model_cls.supports_multimodal_raw_input
+
     def is_pp_supported_model(
         self,
         architectures: Union[str, list[str]],
@@ -571,6 +630,13 @@ class _ModelRegistry:
         model_cls, _ = self.inspect_model_cls(architectures)
         return model_cls.supports_transcription
 
+    def is_transcription_only_model(
+        self,
+        architectures: Union[str, list[str]],
+    ) -> bool:
+        model_cls, _ = self.inspect_model_cls(architectures)
+        return model_cls.supports_transcription_only
+
     def is_v1_compatible(
         self,
         architectures: Union[str, list[str]],
@@ -598,6 +664,7 @@ def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
         output_filepath = os.path.join(tempdir, "registry_output.tmp")
 
         # `cloudpickle` allows pickling lambda functions directly
+        import cloudpickle
         input_bytes = cloudpickle.dumps((fn, output_filepath))
 
         # cannot use `sys.executable __file__` here because the script

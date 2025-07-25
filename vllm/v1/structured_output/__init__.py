@@ -88,6 +88,15 @@ class StructuredOutputManager:
                     tokenizer=self.tokenizer,
                     vocab_size=vocab_size,
                 )
+            elif backend == "outlines":
+                from vllm.v1.structured_output.backend_outlines import (
+                    OutlinesBackend)
+
+                self.backend = OutlinesBackend(
+                    self.vllm_config,
+                    tokenizer=self.tokenizer,
+                    vocab_size=vocab_size,
+                )
             else:
                 raise ValueError(
                     f"Unsupported structured output backend: {backend}")

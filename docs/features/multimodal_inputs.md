@@ -98,7 +98,7 @@ To substitute multiple images inside the same text prompt, you can pass in a lis
 
 Full example: <gh-file:examples/offline_inference/vision_language_multi_image.py>
 
-If using the [LLM.chat](https://docs.vllm.ai/en/stable/models/generative_models.html#llmchat) method, you can pass images directly in the message content using various formats: image URLs, PIL Image objects, or pre-computed embeddings:
+If using the [LLM.chat](../models/generative_models.md#llmchat) method, you can pass images directly in the message content using various formats: image URLs, PIL Image objects, or pre-computed embeddings:
 
 ```python
 from vllm import LLM

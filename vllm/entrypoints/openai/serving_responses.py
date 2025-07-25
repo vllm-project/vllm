@@ -51,7 +51,6 @@ class OpenAIServingResponses(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
-        expand_tools_even_if_tool_choice_none: bool = False,
         tool_parser: Optional[str] = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
@@ -134,10 +133,7 @@ class OpenAIServingResponses(OpenAIServing):
         messages = self._construct_input_messages(request, prev_response)
 
         try:
-            (
-                lora_request,
-                prompt_adapter_request,
-            ) = self._maybe_get_adapters(request)
+            lora_request = self._maybe_get_adapters(request)
             model_name = self._get_model_name(request.model, lora_request)
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
@@ -170,8 +166,7 @@ class OpenAIServingResponses(OpenAIServing):
                 self._log_inputs(request.request_id,
                                  request_prompts[i],
                                  params=sampling_params,
-                                 lora_request=lora_request,
-                                 prompt_adapter_request=prompt_adapter_request)
+                                 lora_request=lora_request)
 
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
@@ -182,7 +177,6 @@ class OpenAIServingResponses(OpenAIServing):
                     request.request_id,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    prompt_adapter_request=prompt_adapter_request,
                     priority=request.priority,
                 )
                 generators.append(generator)
@@ -373,7 +367,7 @@ class OpenAIServingResponses(OpenAIServing):
                         })
 
         # Append the new input.
-        # Reponses API supports simple text inputs without chat format.
+        # Responses API supports simple text inputs without chat format.
         if isinstance(request.input, str):
             messages.append({"role": "user", "content": request.input})
         else:

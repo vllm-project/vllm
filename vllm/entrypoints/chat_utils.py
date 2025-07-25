@@ -28,6 +28,7 @@ from openai.types.chat import (ChatCompletionMessageToolCallParam,
                                ChatCompletionToolMessageParam)
 from openai.types.chat.chat_completion_content_part_input_audio_param import (
     InputAudio)
+from openai.types.responses import ResponseInputImageParam
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 # yapf: enable
@@ -38,7 +39,6 @@ from typing_extensions import Required, TypeAlias, TypedDict
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader import get_model_cls
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
@@ -151,6 +151,27 @@ class CustomChatCompletionContentSimpleVideoParam(TypedDict, total=False):
     video_url: Required[str]
 
 
+class CustomThinkCompletionContentParam(TypedDict, total=False):
+    """A Think Completion Content Param that accepts a plain text and a boolean.
+
+    Example:
+    {
+        "thinking": "I am thinking about the answer",
+        "closed": True,
+        "type": "thinking"
+    }
+    """
+
+    thinking: Required[str]
+    """The thinking content."""
+
+    closed: bool
+    """Whether the thinking is closed."""
+
+    type: Required[Literal["thinking"]]
+    """The thinking type."""
+
+
 ChatCompletionContentPartParam: TypeAlias = Union[
     OpenAIChatCompletionContentPartParam, ChatCompletionContentPartAudioParam,
     ChatCompletionContentPartInputAudioParam,
@@ -159,7 +180,8 @@ ChatCompletionContentPartParam: TypeAlias = Union[
     CustomChatCompletionContentSimpleImageParam,
     ChatCompletionContentPartImageEmbedsParam,
     CustomChatCompletionContentSimpleAudioParam,
-    CustomChatCompletionContentSimpleVideoParam, str]
+    CustomChatCompletionContentSimpleVideoParam, str,
+    CustomThinkCompletionContentParam]
 
 
 class CustomChatCompletionMessageParam(TypedDict, total=False):
@@ -524,6 +546,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
     @cached_property
     def model_cls(self):
+        from vllm.model_executor.model_loader import get_model_cls
         return get_model_cls(self.model_config)
 
     @property
@@ -937,11 +960,14 @@ _ImageEmbedsParser = partial(cast, ChatCompletionContentPartImageEmbedsParam)
 _InputAudioParser = partial(cast, ChatCompletionContentPartInputAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
 _PILImageParser = partial(cast, CustomChatCompletionContentPILImageParam)
+_ThinkParser = partial(cast, CustomThinkCompletionContentParam)
 # Need to validate url objects
 _ImageParser = TypeAdapter(ChatCompletionContentPartImageParam).validate_python
 _AudioParser = TypeAdapter(ChatCompletionContentPartAudioParam).validate_python
 _VideoParser = TypeAdapter(ChatCompletionContentPartVideoParam).validate_python
 
+_ResponsesInputImageParser = TypeAdapter(
+    ResponseInputImageParam).validate_python
 _ContentPart: TypeAlias = Union[str, dict[str, str], InputAudio, PILImage]
 
 # Define a mapping from part types to their corresponding parsing functions.
@@ -951,8 +977,12 @@ MM_PARSER_MAP: dict[
 ] = {
     "text":
     lambda part: _TextParser(part).get("text", None),
+    "thinking":
+    lambda part: _ThinkParser(part).get("thinking", None),
     "input_text":
     lambda part: _TextParser(part).get("text", None),
+    "input_image":
+    lambda part: _ResponsesInputImageParser(part).get("image_url", None),
     "image_url":
     lambda part: _ImageParser(part).get("image_url", {}).get("url", None),
     "image_embeds":
@@ -1085,10 +1115,8 @@ def _parse_chat_message_content_part(
     """
     if isinstance(part, str):  # Handle plain text parts
         return part
-
     # Handle structured dictionary parts
     part_type, content = _parse_chat_message_content_mm_part(part)
-
     # if part_type is text/refusal/image_url/audio_url/video_url/input_audio but
     # content is None, log a warning and skip
     if part_type in VALID_MESSAGE_CONTENT_MM_PART_TYPES and content is None:
@@ -1097,7 +1125,7 @@ def _parse_chat_message_content_part(
             "with empty / unparsable content.", part, part_type)
         return None
 
-    if part_type in ("text", "input_text", "refusal"):
+    if part_type in ("text", "input_text", "refusal", "thinking"):
         str_content = cast(str, content)
         if wrap_dicts:
             return {'type': 'text', 'text': str_content}
@@ -1109,7 +1137,7 @@ def _parse_chat_message_content_part(
         image_content = cast(Image.Image, content)
         mm_parser.parse_image_pil(image_content)
         modality = "image"
-    elif part_type == "image_url":
+    elif part_type in ("image_url", "input_image"):
         str_content = cast(str, content)
         mm_parser.parse_image(str_content)
         modality = "image"
