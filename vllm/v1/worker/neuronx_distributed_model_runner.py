@@ -137,6 +137,7 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
             parallel_config=self.parallel_config,
             scheduler_config=self.scheduler_config,
             lora_serving_config=self.lora_serving_config)
+        assert self.model is not None
         self.model.is_reorder_needed = not self.is_block_kv_layout
 
     @torch.inference_mode()
@@ -158,6 +159,7 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
         model_input = self._prepare_model_input(scheduler_output)
         logger.debug("model_input: %s", model_input)
 
+        assert self.model is not None
         is_mllama = self.model.architecture == "MllamaForConditionalGeneration"
 
         if is_mllama:
@@ -228,6 +230,7 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
+        assert self.model is not None
         return {
             "layer":
             FullAttentionSpec(
@@ -241,6 +244,8 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
             )
         }
 
+    # Note: this implementation is largely the same as GPU / TPU. We could
+    # consider refactoring this to model runner base.
     def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
         """Update the cached states and the persistent batch with the scheduler
         output.
@@ -362,6 +367,7 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
         model_input: ModelInputForNeuron,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Optional[list[SamplerOutput]]:
+        assert self.model is not None
         hidden_states = self.model(
             input_ids=model_input.input_tokens,
             position_ids=model_input.position_ids,
@@ -419,14 +425,15 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         logger.debug("num_scheduled_tokens: %s", num_scheduled_tokens)
 
-        for request_data in scheduler_output.scheduled_new_reqs:
+        for new_request_data in scheduler_output.scheduled_new_reqs:
             self._process_new_request_for_chunked_prefill(
-                request_data, num_scheduled_tokens[request_data.req_id], data)
+                new_request_data,
+                num_scheduled_tokens[new_request_data.req_id], data)
 
-        request_data = scheduler_output.scheduled_cached_reqs
-        for i, req_id in enumerate(request_data.req_ids):
+        cached_request_data = scheduler_output.scheduled_cached_reqs
+        for i, req_id in enumerate(cached_request_data.req_ids):
             self._process_cached_request_for_chunked_prefill(
-                request_data, i, num_scheduled_tokens[req_id], data)
+                cached_request_data, i, num_scheduled_tokens[req_id], data)
 
         return data
 
@@ -548,6 +555,7 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
         # The following logic reorders the model output to match the
         # incoming request order. First obtain the order of requests
         # processed by Neuron hardware
+        assert model_input.request_ids is not None
         request_id_order = {
             request_id: idx
             for idx, request_id in enumerate(model_input.request_ids)
@@ -565,10 +573,13 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
         hidden_states = hidden_states[reorder_indices]
 
         # Sample the next token.
+        assert self.model is not None
         output = self.model.sample(logits=hidden_states, )
         return output
 
     def get_nxd_sampling_params(self, input_ids: torch.Tensor):
+        assert self.model is not None
+        assert self.model.neuron_config is not None
         if self.model.neuron_config.on_device_sampling_config:
             max_topk = (
                 self.model.neuron_config.on_device_sampling_config.global_topk)
@@ -582,15 +593,16 @@ class NeuronxDistributedModelRunner(LoRAModelRunnerMixin):
         temperature = [1.0] * self.scheduler_config.max_num_seqs
 
         for index, request in enumerate(self.requests.values()):
-            top_k[index] = (request.sampling_params.top_k
-                            if request.sampling_params.top_k > 0
-                            and request.sampling_params.top_k < max_topk else
-                            max_topk)
-            top_p[index] = request.sampling_params.top_p
-            temperature[index] = request.sampling_params.temperature
-            if request.sampling_params.temperature == 0.0:
-                top_k[index] = 1
-                temperature[index] = 1.0
+            if request.sampling_params is not None:
+                top_k[index] = (request.sampling_params.top_k
+                                if request.sampling_params.top_k > 0
+                                and request.sampling_params.top_k < max_topk
+                                else max_topk)
+                top_p[index] = request.sampling_params.top_p
+                temperature[index] = request.sampling_params.temperature
+                if request.sampling_params.temperature == 0.0:
+                    top_k[index] = 1
+                    temperature[index] = 1.0
 
         sampling_params = prepare_sampling_params(
             batch_size=self.scheduler_config.max_num_seqs,

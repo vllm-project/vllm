@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This example is used to illustrate the usage when chunked prefill is enabled.
-To run it, you need to set DISABLE_NEURON_CUSTOM_SCHEDULER=1 when with Neuron
-plugin installed.
+To run it, you need to set DISABLE_NEURON_CUSTOM_SCHEDULER=1 if the Neuron
+plugin is installed.
 """
 
 from neuronx_distributed_inference.models.config import OnDeviceSamplingConfig
@@ -68,7 +68,8 @@ llm = LLM(
             "kernel_kv_tile_size": 4096,
         },
         "skip_warmup": True,
-        "save_sharded_checkpoint": True,
+        # chunked prefill currently only supports LNC=1.
+        "logical_nc_config": 1,
     },
 )
 

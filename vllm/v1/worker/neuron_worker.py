@@ -9,7 +9,6 @@ from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -50,12 +49,15 @@ class NeuronWorker(WorkerBase):
         set_random_seed(self.model_config.seed)
 
     def determine_available_memory(self):
-        # TODO: implement this
+        # Note: This is not needed for Neuron, thus setting to 1GB as a
+        # placeholder. This will be implemented in the navtive integration
+        # phase
         return 1024 * 1024 * 1024  # 1GB
 
     def execute_model(
             self, scheduler_output: "SchedulerOutput"
     ) -> Optional[ModelRunnerOutput]:
+        assert self.model_runner is not None
         output = self.model_runner.execute_model(scheduler_output)
         return output if self.is_driver_worker else None
 
@@ -74,6 +76,7 @@ class NeuronWorker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def load_model(self):
+        assert self.model_runner is not None
         self.model_runner.load_model()
 
     def compile_or_warm_up_model(self) -> None:
@@ -84,10 +87,12 @@ class NeuronWorker(WorkerBase):
         raise NotImplementedError
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+        assert self.model_runner is not None
         return self.model_runner.get_kv_cache_spec()
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
+        assert self.model_runner is not None
         self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def check_health(self) -> None:
@@ -110,15 +115,3 @@ class NeuronWorker(WorkerBase):
             1,
             1,
         )
-
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        return self.model_runner.add_lora(lora_request)
-
-    def remove_lora(self, lora_id: int) -> bool:
-        return self.model_runner.remove_lora(lora_id)
-
-    def pin_lora(self, lora_id: int) -> bool:
-        return self.model_runner.pin_lora(lora_id)
-
-    def list_loras(self) -> set[int]:
-        return self.model_runner.list_loras()

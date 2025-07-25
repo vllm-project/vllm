@@ -87,8 +87,7 @@ class NeuronModelBase(nn.Module):
         self.head_size: int
         self.dtype: torch.dtype
 
-    def forward(self, input_ids, positions, input_block_ids, sampling_params,
-                **kwargs):
+    def forward(self, input_ids, input_block_ids, **kwargs):
         raise NotImplementedError
 
     def sample(self, logits: torch.Tensor) -> Optional[SamplerOutput]:
@@ -268,7 +267,7 @@ class NeuronCausalLM(NeuronModelBase):
                                          config, compiled_model_path)
 
 
-def _get_model_configs(config: PretrainedConfig) -> str:
+def _get_model_configs(config: PretrainedConfig) -> tuple[Any, int, int]:
     archs = getattr(config, "architectures", [])
     num_key_value_heads = getattr(config, "num_key_value_heads", None)
     head_dim = getattr(config, "head_dim", None)
