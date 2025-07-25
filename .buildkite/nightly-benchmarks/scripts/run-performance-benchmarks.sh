@@ -33,8 +33,7 @@ check_gpus() {
 
 check_cpus() {
   # check the number of CPUs and NUMA Node and GPU type.
-  last_numa_index=$(cat /sys/devices/system/node/online | cut -d'-' -f2)
-  declare -g numa_count=$((last_numa_index+1))
+  declare -g numa_count=$(lscpu | grep "NUMA node(s):" | awk '{print $3}')
   if [[ $numa_count -gt 0 ]]; then
     echo "NUMA found."
     echo $numa_count
