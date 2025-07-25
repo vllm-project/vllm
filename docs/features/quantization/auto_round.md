@@ -19,7 +19,7 @@ Key Features:
 
 ✅ **Multiple quantization recipes**: best, base, and light
 
-✅ Advanced utilities such as immediate packing and support for 10+ backends
+✅ Advanced utilities such as immediate packing and support for **10+ backends**
 
 ## Installation
 
