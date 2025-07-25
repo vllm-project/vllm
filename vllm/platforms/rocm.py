@@ -39,6 +39,16 @@ try:
 except ImportError as e:
     logger.warning("Failed to import from vllm._rocm_C with %r", e)
 
+# V1 Backends in priority/performance order (when available)
+_BACKEND_NAME_TO_QUALIFIED_NAME_MAPPING: dict[str, str] = {
+    "ROCM_AITER_FLASH_ATTENTION_V1":
+    "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend",
+    "TRITON_SPLIT_PREFILL_DECODE_ATTENTION_V1":
+    "vllm.v1.attention.backends.triton_attn.TritonSplitPrefillDecodeAttentionBackend",
+    "TRITON_UNIFIED_ATTENTION_V1":
+    "vllm.v1.attention.backends.triton_attn.TritonUnifiedAttentionBackend",
+}
+
 # Models not supported by ROCm.
 _ROCM_UNSUPPORTED_MODELS: list[str] = []
 
@@ -222,16 +232,16 @@ class RocmPlatform(Platform):
         if selected_backend is None or selected_backend == _Backend.FLASH_ATTN:
             selected_backend = _Backend.ROCM_FLASH
 
-        if envs.VLLM_USE_V1:
-            if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA \
-                and on_gfx9():
-                logger.info("Using Flash Attention backend on V1 engine.")
-                return ("vllm.v1.attention.backends."
-                        "rocm_aiter_fa.AiterFlashAttentionBackend")
-            else:
-                logger.info("Using Triton Attention backend on V1 engine.")
-                return ("vllm.v1.attention.backends."
-                        "triton_attn.TritonAttentionBackend")
+        if use_v1:
+            from vllm.attention.selector import choose_attention_backend
+
+            backend_name, backend_qualname = choose_attention_backend(
+                _BACKEND_NAME_TO_QUALIFIED_NAME_MAPPING, head_size, dtype,
+                kv_cache_dtype, block_size)
+
+            logger.info_once("Using %s backend on V1 engine.", backend_name)
+            return backend_qualname
+
         if selected_backend == _Backend.ROCM_FLASH:
             if not cls.has_device_capability(90):
                 # not Instinct series GPUs.

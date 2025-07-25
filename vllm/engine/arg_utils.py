@@ -1404,7 +1404,6 @@ class EngineArgs:
             "FLASH_ATTN",
             "PALLAS",
             "PALLAS_VLLM_V1",
-            "TRITON_ATTN_VLLM_V1",
             "TRITON_MLA",
             "CUTLASS_MLA_VLLM_V1",
             "FLASHMLA",
@@ -1413,6 +1412,9 @@ class EngineArgs:
             "ROCM_AITER_MLA",
             "TORCH_SDPA_VLLM_V1",
             "FLEX_ATTENTION",
+            "ROCM_AITER_FLASH_ATTENTION_V1",
+            "TRITON_UNIFIED_ATTENTION_V1",
+            "TRITON_SPLIT_PREFILL_DECODE_ATTENTION_V1",
         ]
         if (envs.is_set("VLLM_ATTENTION_BACKEND")
                 and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS):

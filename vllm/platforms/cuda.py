@@ -239,7 +239,10 @@ class CudaPlatformBase(Platform):
         if use_v1:
             FLASHINFER_V1 = "vllm.v1.attention.backends.flashinfer.FlashInferBackend"  # noqa: E501
             FLEX_ATTENTION_V1 = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"  # noqa: E501
-            TRITON_ATTN_VLLM_V1 = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
+            TRITON_UNIFIED_ATTENTION_V1 = "vllm.v1.attention.backends.triton_attn." \
+            "TritonUnifiedAttentionBackend"  # noqa: E501
+            TRITON_SPLIT_PREFILL_DECODE_ATTENTION_V1 = "vllm.v1.attention.backends.triton_attn." \
+                                            "TritonSplitPrefillDecodeAttentionBackend"                                                                                                                                                                            # noqa: E501
             FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
 
             if selected_backend == _Backend.FLASHINFER:
@@ -252,9 +255,17 @@ class CudaPlatformBase(Platform):
             elif selected_backend == _Backend.FLEX_ATTENTION:
                 logger.info_once("Using FlexAttention backend on V1 engine.")
                 return FLEX_ATTENTION_V1
-            elif selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
-                logger.info_once("Using Triton backend on V1 engine.")
-                return TRITON_ATTN_VLLM_V1
+            elif selected_backend == _Backend.TRITON_UNIFIED_ATTENTION_V1:
+                logger.info_once(
+                    "Using Triton Unified Attention backend on V1 engine.")
+                return TRITON_UNIFIED_ATTENTION_V1
+            elif (selected_backend ==
+                  _Backend.TRITON_SPLIT_PREFILL_DECODE_ATTENTION_V1):
+                logger.info_once(
+                    "Using Triton Split Prefill Decode Attention backend " \
+                    "on V1 engine."
+                )
+                return TRITON_SPLIT_PREFILL_DECODE_ATTENTION_V1
             elif selected_backend == _Backend.FLASH_ATTN:
                 logger.info_once("Using Flash Attention backend on V1 engine.")
                 return FLASH_ATTN_V1
@@ -265,7 +276,8 @@ class CudaPlatformBase(Platform):
             # Prefer FlashInfer for Blackwell GPUs if installed
             if cls.is_device_capability(100):
                 if is_default_backend_supported := is_attn_backend_supported(
-                        FLASHINFER_V1, head_size, dtype):
+                        FLASHINFER_V1, head_size, dtype, kv_cache_dtype,
+                        block_size):
                     from vllm.v1.attention.backends.utils import (
                         set_kv_cache_layout)
 
@@ -285,7 +297,11 @@ class CudaPlatformBase(Platform):
             # FlashAttention is the default for SM 8.0+ GPUs
             if cls.has_device_capability(80):
                 if is_default_backend_supported := is_attn_backend_supported(
-                        FLASH_ATTN_V1, head_size, dtype,
+                        FLASH_ATTN_V1,
+                        head_size,
+                        dtype,
+                        kv_cache_dtype,
+                        block_size,
                         allow_import_error=False):
                     logger.info_once("Using Flash Attention backend on "
                                      "V1 engine.")

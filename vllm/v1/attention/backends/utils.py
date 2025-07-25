@@ -501,3 +501,7 @@ def reorder_batch_to_split_decodes_and_prefills(
         modified_batch = True
 
     return modified_batch
+
+
+def is_power_of_two(n: int) -> bool:
+    return n > 0 and (n & (n - 1)) == 0
