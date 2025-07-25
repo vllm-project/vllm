@@ -411,15 +411,15 @@ def make_local_attention_metadata_builder(
     def build(self,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False) -> M:
+              fast_build: bool = False):
         #print(f"Building local attention metadata builder {type(self)}")
         # TODO(lucas): this requires the attention metadata builder save the
         #  kv_cache_spec, as an attribute; we maybe can do something better here
         common_attn_metadata = make_local_attention_virtual_batches(
             self.kv_cache_spec.attention_chunk_size, common_attn_metadata,
             self.kv_cache_spec.block_size)
-        return super(builder_cls, self).build(common_prefix_len,
-                                              common_attn_metadata, fast_build)
+        return builder_cls.build(self, common_prefix_len, common_attn_metadata,
+                                 fast_build)
 
     Wrapped = type(
         name,
