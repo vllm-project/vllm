@@ -1254,8 +1254,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 x, layer.w13_weight, layer.w2_weight), (
                     "Flashinfer CUTLASS Fused MoE not applicable!")
 
-            a1_gscale = torch.min(layer.w13_input_scale_quant)
-            a2_gscale = torch.min(layer.w2_input_scale_quant)
+            a1_gscale = layer.w13_input_scale_quant
+            a2_gscale = layer.w2_input_scale_quant
             extra_expert_args = {
                 'g1_alphas': layer.g1_alphas,
                 'g2_alphas': layer.g2_alphas,
