@@ -234,6 +234,26 @@ try:
 except ImportError:
     flashinfer_available = False
 
+
+def dynamic_per_batched_tensor_quant(
+    x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn
+):
+    DTYPE_MAX = torch.finfo(dtype).max
+    min_val, max_val = x.aminmax()
+    amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-10)
+    scale = DTYPE_MAX / amax
+    x_scl_sat = (x * scale).clamp(min=-DTYPE_MAX, max=DTYPE_MAX)
+    return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
+
+from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant
+@torch.compiler.disable
+def aiter_triton_fp8_bmm_wrapper(x, w, w_s, y = None, transpose_bm = False):
+    if y is not None:
+        batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant(x, w, w_s, YQ=y, transpose_bm=transpose_bm)
+    else:
+        y = batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant(x, w, w_s, transpose_bm = transpose_bm)
+        return y
+            
 logger = init_logger(__name__)
 
 CUDNN_WORKSPACE_SIZE = 12800
@@ -953,7 +973,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
         # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
-        x = torch.bmm(x, self.W_UV)
+        x = aiter_triton_fp8_bmm_wrapper(x, self.W_V, self.W_V_scale, transpose_bm = False)
+        # x = torch.bmm(x, self.W_UV)
         # Convert from (N, B, V) to (B, N * V)
         return x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
 
@@ -986,6 +1007,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         # `W_UV` and `W_UK_T`, we we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
         kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
+
         assert kv_b_proj_weight.shape == (
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim)), (
@@ -1002,11 +1024,16 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         W_UK, W_UV = kv_b_proj_weight.split(
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        
+        W_K = W_UK.transpose(0, 1) # 16 512 128
+        W_V = W_UV.permute(1, 2, 0) # 16 128 512
+        self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(W_K, dtype=torch.float8_e4m3fnuz)
+        self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(W_V, dtype=torch.float8_e4m3fnuz)
 
-        # Convert from (L, N, V) to (N, L, V)
-        self.W_UV = W_UV.transpose(0, 1)
-        # Convert from (L, N, P) to (N, P, L)
-        self.W_UK_T = W_UK.permute(1, 2, 0)
+        # # Convert from (L, N, V) to (N, L, V)
+        # self.W_UV = W_UV.transpose(0, 1)
+        # # Convert from (L, N, P) to (N, P, L)
+        # self.W_UK_T = W_UK.permute(1, 2, 0)
 
     def _compute_prefill_context(
         self,
