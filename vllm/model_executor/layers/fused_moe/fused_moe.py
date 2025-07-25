@@ -501,10 +501,10 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
 
     if use_fp8_w8a8 or use_int8_w8a8:
         assert B_scale is not None
-        assert (block_shape is None or
-                triton.cdiv(B.size(-2), block_shape[0]) == B_scale.size(-2))
-        assert (block_shape is None or
-                triton.cdiv(B.size(-1), block_shape[1]) == B_scale.size(-1))
+        assert (block_shape is None
+                or triton.cdiv(B.size(-2), block_shape[0]) == B_scale.size(-2))
+        assert (block_shape is None
+                or triton.cdiv(B.size(-1), block_shape[1]) == B_scale.size(-1))
 
     elif use_int8_w8a16 or use_int4_w4a16:
         assert B_scale is not None
@@ -525,7 +525,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         EM = min(sorted_token_ids.size(0),
                  A.size(0) * top_k * config['BLOCK_SIZE_M'])
     grid = lambda META: (triton.cdiv(EM, META['BLOCK_SIZE_M']) * triton.cdiv(
-        B.size(1), META['BLOCK_SIZE_N']),)
+        B.size(1), META['BLOCK_SIZE_N']), )
 
     if (use_int8_w8a16 or use_int4_w4a16) and \
             block_shape is not None and block_shape[1] > 0:
@@ -1078,7 +1078,7 @@ direct_register_custom_op(
     mutates_args=["hidden_states"],
     fake_impl=inplace_fused_experts_fake,
     tags=(() if is_torch_equal_or_newer("2.7.0") else
-          (torch.Tag.needs_fixed_stride_order,)),
+          (torch.Tag.needs_fixed_stride_order, )),
 )
 
 
@@ -1176,7 +1176,7 @@ direct_register_custom_op(
     op_func=flashinfer_fused_moe_blockscale_fp8,
     mutates_args=[],
     fake_impl=flashinfer_fused_moe_blockscale_fp8_fake,
-    tags=(torch.Tag.needs_fixed_stride_order,),
+    tags=(torch.Tag.needs_fixed_stride_order, ),
 )
 
 
@@ -1243,7 +1243,7 @@ direct_register_custom_op(
     mutates_args=[],
     fake_impl=outplace_fused_experts_fake,
     tags=(() if is_torch_equal_or_newer("2.7.0") else
-          (torch.Tag.needs_fixed_stride_order,)),
+          (torch.Tag.needs_fixed_stride_order, )),
 )
 
 
@@ -1306,9 +1306,9 @@ def fused_experts(
     # scale. Fallen back to cutlass or triton for some cases would cause
     # accuracy issue.
     N = w1.size(1)
-    should_use_deep_gemm = ((N > 512 and
-                             _valid_deep_gemm(hidden_states, w1, w2)) or
-                            is_blackwell_deep_gemm_used())
+    should_use_deep_gemm = ((N > 512
+                             and _valid_deep_gemm(hidden_states, w1, w2))
+                            or is_blackwell_deep_gemm_used())
     if (allow_deep_gemm and use_fp8_w8a8 and should_use_deep_gemm):
         assert apply_router_weight_on_input is False
         return deep_gemm_moe_fp8(
@@ -1327,8 +1327,8 @@ def fused_experts(
             a2_scale=a2_scale,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
-    elif (allow_cutlass_block_scaled_grouped_gemm and use_fp8_w8a8 and
-          _valid_cutlass_block_scaled_grouped_gemm(
+    elif (allow_cutlass_block_scaled_grouped_gemm and use_fp8_w8a8
+          and _valid_cutlass_block_scaled_grouped_gemm(
               w1, w2, inplace, activation, apply_router_weight_on_input,
               expert_map)):
         return run_cutlass_block_scaled_fused_experts(
@@ -1546,6 +1546,13 @@ def fused_experts_impl(
                                 block_shape=block_shape)
 
         if token_lora_mapping is not None:  # fusedmoe with lora
+            assert w1_lora_a_stacked is not None
+            assert w1_lora_b_stacked is not None
+            assert w2_lora_a_stacked is not None
+            assert w2_lora_b_stacked is not None
+            assert w3_lora_a_stacked is not None
+            assert w3_lora_b_stacked is not None
+
             (sorted_token_ids_lora, expert_ids_lora,
              num_tokens_post_padded_lora) = (moe_lora_align_block_size(
                  curr_topk_ids, token_lora_mapping, config['BLOCK_SIZE_M'],
