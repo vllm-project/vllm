@@ -3,29 +3,27 @@
 
 # --------------------------------------------------------
 # InternS1
-# Copyright (c) 2023 OpenGVLab
+# Copyright (c) 2025 Shanghai AI Lab
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, Optional, TypedDict, TypeVar, Union, List
+from typing import Literal, Optional, TypedDict, TypeVar, Union
 
-import numpy.typing as npt
 import torch
 import torch.nn as nn
-import torchvision.transforms as T
-from PIL import Image
-from transformers import BatchEncoding, PretrainedConfig, TensorType
-from transformers import AutoProcessor
-from transformers.models.internvl import InternVLProcessor
+from transformers import PretrainedConfig
 from transformers.activations import ACT2FN
+from transformers.models.got_ocr2.image_processing_got_ocr2_fast import (
+    GotOcr2ImageProcessorFast)
+from transformers.models.internvl import InternVLProcessor
+
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.interns1_vit import InternS1VisionModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargs, NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
@@ -40,10 +38,9 @@ from vllm.transformers_utils.processor import (
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
-from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn, init_vllm_registered_model,
-                    maybe_prefix, merge_multimodal_embeddings)
-
-from transformers.models.got_ocr2.image_processing_got_ocr2_fast import GotOcr2ImageProcessorFast
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
+                    init_vllm_registered_model, maybe_prefix,
+                    merge_multimodal_embeddings)
 
 IMG_START = '<img>'
 IMG_END = '</img>'
@@ -52,15 +49,20 @@ IMG_CONTEXT = '<IMG_CONTEXT>'
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
+
 class InternS1MultiModalProjector(nn.Module):
+
     def __init__(self, config):
         super().__init__()
-        self.layer_norm = nn.LayerNorm(config.vision_config.hidden_size * int(1 / config.downsample_ratio) ** 2)
+        self.layer_norm = nn.LayerNorm(config.vision_config.hidden_size *
+                                       int(1 / config.downsample_ratio)**2)
         self.linear_1 = nn.Linear(
-            config.vision_config.hidden_size * int(1 / config.downsample_ratio) ** 2, config.text_config.hidden_size
-        )
+            config.vision_config.hidden_size *
+            int(1 / config.downsample_ratio)**2,
+            config.text_config.hidden_size)
         self.act = ACT2FN[config.projector_hidden_act]
-        self.linear_2 = nn.Linear(config.text_config.hidden_size, config.text_config.hidden_size)
+        self.linear_2 = nn.Linear(config.text_config.hidden_size,
+                                  config.text_config.hidden_size)
 
     def forward(self, image_features):
         hidden_states = self.layer_norm(image_features)
@@ -77,6 +79,7 @@ class InternS1ImagePixelInputs(TypedDict):
     Shape:
     `(batch_size * num_images * (1 + num_patches), num_channels, height, width)`
     """
+
 
 class InternS1ImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
@@ -145,18 +148,20 @@ def get_interns1_target_ratios(
                      for j in range(1, n + 1) if min_num <= i * j <= max_num}
     return sorted(target_ratios, key=lambda x: x[0] * x[1])
 
+
 def resolve_min_max_num(
-        min_dynamic_patch: int,
-        max_dynamic_patch: int,
-        dynamic_image_size: bool,
-        use_thumbnail: bool,
-    ) -> tuple[int, int]:
-        return resolve_interns1_min_max_num(
-            min_dynamic_patch=min_dynamic_patch,
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
-            use_thumbnail=use_thumbnail,
-        )
+    min_dynamic_patch: int,
+    max_dynamic_patch: int,
+    dynamic_image_size: bool,
+    use_thumbnail: bool,
+) -> tuple[int, int]:
+    return resolve_interns1_min_max_num(
+        min_dynamic_patch=min_dynamic_patch,
+        max_dynamic_patch=max_dynamic_patch,
+        dynamic_image_size=dynamic_image_size,
+        use_thumbnail=use_thumbnail,
+    )
+
 
 class BaseInternS1ProcessingInfo(BaseProcessingInfo):
     """Basic image-only ProcessingInfo for InternS1-style models."""
@@ -186,12 +191,12 @@ class BaseInternS1ProcessingInfo(BaseProcessingInfo):
             processor = self.get_hf_processor().image_processor
 
         if not isinstance(processor, GotOcr2ImageProcessorFast):
-            raise ValueError(f'GotOcr2ImageProcessorFast is expected but got {type(processor)}')
+            raise ValueError(f'GotOcr2ImageProcessorFast is expected but got '
+                             f'{type(processor)}')
         num_image_patches = processor.get_number_of_image_tokens(
-            image_height,
-            image_width,
-            images_kwargs=dict())
-        num_image_tokens = self.get_hf_processor().image_seq_length * num_image_patches
+            image_height, image_width, images_kwargs=dict())
+        num_image_tokens = self.get_hf_processor(
+        ).image_seq_length * num_image_patches
         return num_image_tokens
 
     def resolve_target_ratios(self, use_thumbnail: Optional[bool] = None):
@@ -302,8 +307,10 @@ class BaseInternS1MultiModalProcessor(BaseMultiModalProcessor[_I]):
         if images is not None:
             image_inputs = image_processor(images=images)
             image_num_patches = image_inputs.pop("num_patches")
-            if not isinstance(image_num_patches, List):
-                raise ValueError(f'num_patches is supposed to be List, but got {type(image_num_patches)}')
+            if not isinstance(image_num_patches, list):
+                raise ValueError(
+                    f'num_patches is supposed to be list, but got '
+                    f'{type(image_num_patches)}')
             image_num_patches = torch.tensor(image_num_patches)
             processed_outputs['image_num_patches'] = image_num_patches
 
@@ -378,11 +385,11 @@ class InternS1ProcessingInfo(BaseInternS1ProcessingInfo):
 
     @property
     def supports_video(self) -> bool:
-        # return self.video_token_id is not None
-        # InternVLProcessor uses the same media placeholder for both images and videos,
-        # making it challenging to adapt the `_get_mm_fields_config` function
-        # https://github.com/huggingface/transformers/blob/e3760501b0f0ce6be6fe31f0dab15d0e5d2c5260/src/transformers/models/internvl/processing_internvl.py#L92
+        # InternVLProcessor uses the same media placeholder for both images
+        # and videos, making it challenging to adapt `_get_mm_fields_config`
+        # refer to https://github.com/huggingface/transformers/blob/e3760501b0f0ce6be6fe31f0dab15d0e5d2c5260/src/transformers/models/internvl/processing_internvl.py#L92  # noqa: E501
         return False
+        # return self.video_token_id is not None
 
     @property
     def num_image_token(self) -> int:
@@ -400,17 +407,13 @@ class InternS1ProcessingInfo(BaseInternS1ProcessingInfo):
     def get_video_token(self) -> Optional[str]:
         return self.get_hf_processor().video_token
 
-    def get_num_frames_with_most_features(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int]
-    ) -> int:
+    def get_num_frames_with_most_features(self, seq_len: int,
+                                          mm_counts: Mapping[str, int]) -> int:
         max_images = mm_counts.get("image", 0)
         max_videos = mm_counts.get("video", 0)
 
         max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = (seq_len -
-                            max_image_tokens) // self.num_image_token
+        max_total_frames = (seq_len - max_image_tokens) // self.num_image_token
         max_frames_per_video = max_total_frames // max(max_videos, 1)
 
         return max(max_frames_per_video, 1)
@@ -421,11 +424,10 @@ class InternS1ProcessingInfo(BaseInternS1ProcessingInfo):
     ) -> GotOcr2ImageProcessorFast:
         return cached_image_processor_from_config(self.ctx.model_config)
 
-    def get_video_processor(
-        self,
-        **kwargs: object):
+    def get_video_processor(self, **kwargs: object):
         from transformers import AutoVideoProcessor
-        return AutoVideoProcessor.from_pretrained(self.ctx.model_config.model, trust_remote_code=True)
+        return AutoVideoProcessor.from_pretrained(self.ctx.model_config.model,
+                                                  trust_remote_code=True)
 
     def get_hf_processor(
         self,
@@ -436,6 +438,7 @@ class InternS1ProcessingInfo(BaseInternS1ProcessingInfo):
             image_processor=self.get_image_processor(),
             video_processor=self.get_video_processor(),
         )
+
 
 class InternS1DummyInputsBuilder(
         BaseInternS1DummyInputsBuilder[InternS1ProcessingInfo]):
@@ -484,10 +487,8 @@ class InternS1MultiModalProcessor(
     ) -> Mapping[str, NestedTensors]:
         processed_outputs = super()._call_hf_processor(prompt, mm_data,
                                                        mm_kwargs, tok_kwargs)
-
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        if self.info.supports_video and (
-                video_token_id := self.info.video_token_id) is not None:
+        if self.info.supports_video and (video_token_id :=
+                                         self.info.video_token_id) is not None:
             processed_outputs["video_token_id"] = torch.tensor(video_token_id)
         return processed_outputs
 
@@ -499,12 +500,12 @@ class InternS1MultiModalProcessor(
         image_fields = super()._get_mm_fields_config(hf_inputs,
                                                      hf_processor_mm_kwargs)
         if self.info.supports_video:
-            pixel_values = hf_inputs.get("pixel_values", torch.empty(0, 0, 0, 0))
+            pixel_values = hf_inputs.get("pixel_values",
+                                         torch.empty(0, 0, 0, 0))
             video_num_patches = torch.tensor([pixel_values.shape[0]])
             video_fields = dict(
                 pixel_values=MultiModalFieldConfig.flat_from_sizes(
-                    "video", video_num_patches),
-            )
+                    "video", video_num_patches), )
         else:
             video_fields = {}
 
@@ -534,14 +535,16 @@ class InternS1MultiModalProcessor(
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            video_context_token=hf_processor.video_token
+            video_context_token = hf_processor.video_token
             repl_features = video_context_token * hf_processor.num_image_token
             repl_features_with_sep = IMG_START + repl_features + IMG_END
             # num_patches is equal to num_frames
             repl_full = ''.join([
-                f'Frame{i+1}: {repl_features_with_sep}' for i in range(num_patches)
+                f'Frame{i+1}: {repl_features_with_sep}'
+                for i in range(num_patches)
             ])
-            return PromptUpdateDetails.select_text(repl_full, video_context_token)
+            return PromptUpdateDetails.select_text(repl_full,
+                                                   video_context_token)
 
         if self.info.supports_video:
             prompt_repl.append(
@@ -557,7 +560,8 @@ class InternS1MultiModalProcessor(
     InternS1MultiModalProcessor,
     info=InternS1ProcessingInfo,
     dummy_inputs=InternS1DummyInputsBuilder)
-class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                       SupportsPP, SupportsLoRA):
 
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
@@ -717,8 +721,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
 
             return InternS1ImagePixelInputs(
                 type="pixel_values",
-                pixel_values=self._validate_pixel_values(
-                    pixel_values),
+                pixel_values=self._validate_pixel_values(pixel_values),
                 num_patches=image_num_patches,
             )
 

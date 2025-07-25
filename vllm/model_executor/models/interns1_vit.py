@@ -15,13 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
-from transformers.utils import (
-    ModelOutput,
-    auto_docstring,
-    can_return_tuple,
-    is_torchdynamo_compiling,
-    torch_int,
-)
+from transformers.utils import torch_int
 
 from vllm.attention.layer import MultiHeadAttention
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
@@ -41,36 +35,38 @@ NORM2FN = {
     'layer_norm': nn.LayerNorm,
 }
 
+
 class InternS1VisionPatchEmbeddings(nn.Module):
-    """
-    This class turns `pixel_values` of shape `(batch_size, num_channels, height, width)` into the initial
-    `hidden_states` (patch embeddings) of shape `(batch_size, seq_length, hidden_size)` to be consumed by a
-    Transformer.
-    """
 
     def __init__(self, config):
         super().__init__()
         image_size, patch_size = config.image_size, config.patch_size
         num_channels, hidden_size = config.num_channels, config.hidden_size
 
-        num_patches = (image_size[1] // patch_size[1]) * (image_size[0] // patch_size[0])
-        patch_shape = (image_size[0] // patch_size[0], image_size[1] // patch_size[1])
+        num_patches = (image_size[1] // patch_size[1]) * (image_size[0] //
+                                                          patch_size[0])
+        patch_shape = (image_size[0] // patch_size[0],
+                       image_size[1] // patch_size[1])
         self.image_size = image_size
         self.patch_size = patch_size
         self.num_channels = num_channels
         self.num_patches = num_patches
         self.patch_shape = patch_shape
 
-        self.projection = nn.Conv2d(num_channels, hidden_size, kernel_size=patch_size, stride=patch_size)
+        self.projection = nn.Conv2d(num_channels,
+                                    hidden_size,
+                                    kernel_size=patch_size,
+                                    stride=patch_size)
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         batch_size, num_channels, height, width = pixel_values.shape
         if num_channels != self.num_channels:
             raise ValueError(
-                "Make sure that the channel dimension of the pixel values match with the one set in the configuration."
-            )
+                "Make sure that the channel dimension of the pixel values "
+                "match with the one set in the configuration.")
 
-        embeddings = self.projection(pixel_values.to(self.projection.weight.dtype))
+        embeddings = self.projection(
+            pixel_values.to(self.projection.weight.dtype))
         patch_height, patch_width = embeddings.shape[2], embeddings.shape[3]
         embeddings = embeddings.flatten(2).transpose(1, 2)
 
@@ -84,23 +80,24 @@ class InternS1VisionEmbeddings(nn.Module):
         self.config = config
         self.cls_token = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
         if config.use_mask_token:
-            self.mask_token = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
+            self.mask_token = nn.Parameter(
+                torch.zeros(1, 1, config.hidden_size))
         else:
             self.mask_token = None
         self.patch_embeddings = InternS1VisionPatchEmbeddings(config)
         self.patch_size = config.patch_size
-        self.image_size = (
-            config.image_size
-            if isinstance(config.image_size, Iterable)
-            else (config.image_size, config.image_size)
-        )
+        self.image_size = (config.image_size if isinstance(
+            config.image_size, Iterable) else
+                           (config.image_size, config.image_size))
         num_patches = self.patch_embeddings.num_patches
         if config.use_absolute_position_embeddings:
-            self.position_embeddings = nn.Parameter(torch.zeros(1, num_patches + 1, config.hidden_size))
+            self.position_embeddings = nn.Parameter(
+                torch.zeros(1, num_patches + 1, config.hidden_size))
         else:
             self.position_embeddings = None
 
-    def interpolate_pos_encoding(self, embeddings: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    def interpolate_pos_encoding(self, embeddings: torch.Tensor, height: int,
+                                 width: int) -> torch.Tensor:
         """
         This method allows to interpolate the pre-trained position encodings, to be able to use the model on higher resolution
         images. This method is also adapted to support torch.jit tracing.
@@ -108,13 +105,15 @@ class InternS1VisionEmbeddings(nn.Module):
         Adapted from:
         - https://github.com/facebookresearch/dino/blob/de9ee3df6cf39fac952ab558447af1fa1365362a/vision_transformer.py#L174-L194, and
         - https://github.com/facebookresearch/dinov2/blob/e1277af2ba9496fbadf7aec6eba56e8d882d1e35/dinov2/models/vision_transformer.py#L179-L211
-        """
+        """  # noqa: E501
 
         num_patches = embeddings.shape[1] - 1
         num_positions = self.position_embeddings.shape[1] - 1
 
-        # always interpolate when tracing to ensure the exported model works for dynamic input shapes
-        if not torch.jit.is_tracing() and num_patches == num_positions and height == width:
+        # always interpolate when tracing to ensure the exported model
+        # works for dynamic input shapes
+        if not torch.jit.is_tracing(
+        ) and num_patches == num_positions and height == width:
             return self.position_embeddings
 
         class_pos_embed = self.position_embeddings[:, :1]
@@ -126,7 +125,8 @@ class InternS1VisionEmbeddings(nn.Module):
         new_width = width // self.patch_size[1]
 
         sqrt_num_positions = torch_int(num_positions**0.5)
-        patch_pos_embed = patch_pos_embed.reshape(1, sqrt_num_positions, sqrt_num_positions, dim)
+        patch_pos_embed = patch_pos_embed.reshape(1, sqrt_num_positions,
+                                                  sqrt_num_positions, dim)
         patch_pos_embed = patch_pos_embed.permute(0, 3, 1, 2)
 
         patch_pos_embed = nn.functional.interpolate(
@@ -146,7 +146,8 @@ class InternS1VisionEmbeddings(nn.Module):
         bool_masked_pos: Optional[torch.BoolTensor] = None,
     ) -> torch.Tensor:
         _, _, height, width = pixel_values.shape
-        embeddings, (patch_height, patch_width) = self.patch_embeddings(pixel_values)
+        embeddings, (patch_height,
+                     patch_width) = self.patch_embeddings(pixel_values)
         batch_size, seq_len, _ = embeddings.size()
 
         if bool_masked_pos is not None:
@@ -159,7 +160,8 @@ class InternS1VisionEmbeddings(nn.Module):
         embeddings = torch.cat((cls_tokens, embeddings), dim=1)
 
         if self.position_embeddings is not None:
-            embeddings = embeddings + self.interpolate_pos_encoding(embeddings, height, width)
+            embeddings = embeddings + self.interpolate_pos_encoding(
+                embeddings, height, width)
 
         return embeddings, (patch_height, patch_width)
 
@@ -276,9 +278,15 @@ class InternSdpaAttention(nn.Module):
 
         self.scale = self.head_dim**-0.5
 
-        self.q_proj = nn.Linear(self.embed_dim, self.num_heads * self.head_dim, bias=config.attention_bias)
-        self.k_proj = nn.Linear(self.embed_dim, self.num_heads * self.head_dim, bias=config.attention_bias)
-        self.v_proj = nn.Linear(self.embed_dim, self.num_heads * self.head_dim, bias=config.attention_bias)
+        self.q_proj = nn.Linear(self.embed_dim,
+                                self.num_heads * self.head_dim,
+                                bias=config.attention_bias)
+        self.k_proj = nn.Linear(self.embed_dim,
+                                self.num_heads * self.head_dim,
+                                bias=config.attention_bias)
+        self.v_proj = nn.Linear(self.embed_dim,
+                                self.num_heads * self.head_dim,
+                                bias=config.attention_bias)
 
         self.qk_normalization = config.use_qk_norm
         if self.qk_normalization:
@@ -361,19 +369,25 @@ class InternS1VisionLayer(nn.Module):
         super().__init__()
 
         self.attention = self._init_attn(config,
-                                    quant_config,
-                                    num_dummy_heads=num_dummy_heads,
-                                    prefix=f"{prefix}.attention")
+                                         quant_config,
+                                         num_dummy_heads=num_dummy_heads,
+                                         prefix=f"{prefix}.attention")
 
         self.mlp = InternS1VisionMLP(config,
-                             quant_config=quant_config,
-                             prefix=f"{prefix}.mlp")
-        self.layernorm_before = NORM2FN[config.norm_type](config.hidden_size, eps=config.layer_norm_eps)
-        self.layernorm_after = NORM2FN[config.norm_type](config.hidden_size, eps=config.layer_norm_eps)
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.mlp")
+        self.layernorm_before = NORM2FN[config.norm_type](
+            config.hidden_size, eps=config.layer_norm_eps)
+        self.layernorm_after = NORM2FN[config.norm_type](
+            config.hidden_size, eps=config.layer_norm_eps)
 
         init_values = config.layer_scale_init_value
-        self.lambda_1 = nn.Parameter(init_values * torch.ones(config.hidden_size), requires_grad=True)
-        self.lambda_2 = nn.Parameter(init_values * torch.ones(config.hidden_size), requires_grad=True)
+        self.lambda_1 = nn.Parameter(init_values *
+                                     torch.ones(config.hidden_size),
+                                     requires_grad=True)
+        self.lambda_2 = nn.Parameter(init_values *
+                                     torch.ones(config.hidden_size),
+                                     requires_grad=True)
 
     def _init_attn(
         self,
@@ -430,9 +444,9 @@ class InternS1VisionEncoder(nn.Module):
 
         self.layer = nn.ModuleList([
             InternS1VisionLayer(config,
-                                     quant_config,
-                                     num_dummy_heads=num_dummy_heads,
-                                     prefix=f"{prefix}.layer.{layer_idx}")
+                                quant_config,
+                                num_dummy_heads=num_dummy_heads,
+                                prefix=f"{prefix}.layer.{layer_idx}")
             for layer_idx in range(num_hidden_layers)
         ])
 
@@ -467,9 +481,9 @@ class InternS1VisionModel(nn.Module):
             num_dummy_heads=num_dummy_heads,
             prefix=f"{prefix}.encoder",
         )
-        self.layernorm = (
-            nn.Identity() if config.use_mean_pooling else nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        )
+        self.layernorm = (nn.Identity() if config.use_mean_pooling else
+                          nn.LayerNorm(config.hidden_size,
+                                       eps=config.layer_norm_eps))
 
     def get_input_embeddings(self):
         return self.embeddings.patch_embeddings
