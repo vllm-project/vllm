@@ -5,8 +5,8 @@ from typing import Any, Optional
 import ray
 import torch
 from ray.exceptions import RayChannelError
-from ray.experimental.channel import (AcceleratorContext, Communicator,
-                                      TorchTensorAllocator)
+from ray.experimental.channel.accelerator_context import AcceleratorContext
+from ray.experimental.channel.communicator import Communicator, TorchTensorAllocator
 from torch.distributed import ReduceOp
 
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
@@ -17,22 +17,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-class RayStatelessProcessGroup(StatelessProcessGroup):
-    """
-    StatelessProcessGroup for Ray.
-    
-    This only holds information about the group, and does not do any
-    communication.
-    """
-
-    def __init__(self, rank: int, world_size: int):
-        super().__init__(rank, world_size, None, None)
-
-    def get_rank(self) -> int:
-        return self.rank
-
-
-class RayCudaCommunicator(Communicator):
+class RayPPCommunicatorWrapper(Communicator):
     """
     Communicator for a group of Ray Compiled Graph actors on NVIDIA GPU.
     This is based on the PyNCCL communicator.
@@ -42,9 +27,6 @@ class RayCudaCommunicator(Communicator):
 
     This class is not thread-safe.
     """
-
-    _pp = get_pp_group()
-    _vllm_device_comm = _pp.device_communicator
 
     def __init__(
         self,
@@ -100,8 +82,10 @@ class RayCudaCommunicator(Communicator):
             ), "RayCudaCommunicator has no GPUs assigned"
             assert cuda_stream is not None, (
                 "RayCudaCommunicator must specify cuda_stream")
+            
+            self._comm = get_pp_group().device_communicator
 
-            self._rank = self._vllm_device_comm.rank_in_group
+            self._rank = self._comm.rank_in_group
 
             self._build_actor_rank_mapping()
 
@@ -117,8 +101,7 @@ class RayCudaCommunicator(Communicator):
             #     pg, device=device, unique_id=comm_id)
         else:
             # Driver does not have a rank.
-            # self._pynccl: Optional[PyNcclCommunicator] = None
-            self._vllm_device_comm = None
+            self._comm = None
 
         self._cuda_stream: Optional[torch.cuda.Stream] = None
         self._send_stream: Optional[torch.cuda.Stream] = None
@@ -143,7 +126,7 @@ class RayCudaCommunicator(Communicator):
         Use collective communication to build a mapping from actor IDs to ranks.
         This should be called once during initialization.
         """
-        if self._vllm_device_comm is None:
+        if self._comm is None:
             return {}
         
         # Get current actor's Ray actor ID
@@ -153,10 +136,10 @@ class RayCudaCommunicator(Communicator):
         # Convert actor ID to a tensor (we'll use a hash for simplicity)
         actor_id_hash = hash(current_actor_id) % (2**31)  # Fit in int32
         actor_id_tensor = torch.tensor([actor_id_hash], dtype=torch.int32, 
-                                    device=self._vllm_device_comm.device)
+                                    device=self._comm.device)
         
         # All-gather actor ID hashes from all processes
-        gathered_ids = self._vllm_device_comm.all_gather(actor_id_tensor, dim=0)
+        gathered_ids = self._comm.all_gather(actor_id_tensor, dim=0)
         
         # Build mapping: actor_id_hash -> device_comm_rank
         self._actor_id_to_rank = {}
@@ -227,7 +210,7 @@ class RayCudaCommunicator(Communicator):
             self._send_stream.synchronize()
 
         # self._pynccl.send(buf, peer_rank, stream=self._send_stream)
-        self._vllm_device_comm.pynccl_comm.send(buf, peer_rank, stream=self._send_stream)
+        self._comm.pynccl_comm.send(buf, peer_rank, stream=self._send_stream)
 
     def recv(
         self,
@@ -267,7 +250,7 @@ class RayCudaCommunicator(Communicator):
             self._pynccl.recv(buf, peer_rank, stream=self._recv_stream)
         else:
             # self._pynccl.recv(buf, peer_rank, stream=self._recv_stream)
-            self._vllm_device_comm.pynccl_comm.recv(buf, peer_rank, stream=self._recv_stream)
+            self._comm.pynccl_comm.recv(buf, peer_rank, stream=self._recv_stream)
 
             assert self._cuda_stream is not None
             # Buffer values are undefined if NCCL ops are aborted. Therefore, we
@@ -321,21 +304,13 @@ class RayCudaCommunicator(Communicator):
         return torch.cuda.StreamContext(self._send_stream)
 
     def destroy(self) -> None:
-        """
-        Destroy the RayCudaCommunicator.
-        """
-        if self._closed:
-            return
-        self._closed = True
-
-        if self._pynccl is not None:
-            logger.info("Destructing RayCudaCommunicator on actor: %s",
-                        ray.get_runtime_context().current_actor)
-            self._pynccl = None
+        pass
 
     def get_transport_name(self) -> str:
         return "nccl"
 
     @classmethod
     def generate_communicator_id(cls) -> Any:
-        return cls._nccl.ncclGetUniqueId()
+        # return cls._nccl.ncclGetUniqueId()
+        import uuid
+        return uuid.uuid4()

@@ -613,9 +613,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 register_accelerator_context)
 
             from vllm.distributed.device_communicators.ray_communicator import (
-                RayCudaCommunicator)
+                RayPPCommunicatorWrapper)
             register_accelerator_context(torch_module_name="cuda",
-                                         communicator_cls=RayCudaCommunicator)
+                                         communicator_cls=RayPPCommunicatorWrapper)
             logger.info(
                 "Using vLLM PyNCCL for Ray Compiled Graph communication.")
         else:
