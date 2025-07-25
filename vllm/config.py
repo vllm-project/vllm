@@ -2852,10 +2852,10 @@ class SpeculativeConfig:
                             "Chunked prefill and EAGLE are not compatible "
                             "when using V0.")
 
+                    from vllm.transformers_utils.configs import (
+                        SpeculatorsConfig)
                     from vllm.transformers_utils.configs.eagle import (
                         EAGLEConfig)
-                    from vllm.transformers_utils.configs.speculators.base import (  # noqa: E501
-                        SpeculatorsConfig)
 
                     # TODO: use isinstance
                     if type(self.draft_model_config.hf_config) in [
