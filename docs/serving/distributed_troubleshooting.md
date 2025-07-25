@@ -12,11 +12,8 @@ Debugging a distributed system can be challenging due to the large scale and com
 - Ray Metrics (Prometheus & Grafana) – scrapeable metrics that can be integrated with existing monitoring systems.
 - Distributed Profiling – diagnose performance bottlenecks with integrated tools for analyzing CPU, memory, and GPU usage across a cluster.
 
-For more information about Ray observability, visit the [official Ray observability docs](https://docs.ray.io/en/latest/ray-observability/index.html). For more information about debugging Ray applications, visit the [Ray Debugging Guide](https://docs.ray.io/en/latest/ray-observability/user-guides/debug-apps/index.html).
-
-## KubeRay
-
-https://docs.ray.io/en/latest/serve/advanced-guides/multi-node-gpu-troubleshooting.html#serve-multi-node-gpu-troubleshooting
+For more information about Ray observability, visit the [official Ray observability docs](https://docs.ray.io/en/latest/ray-observability/index.html). For more information about debugging Ray applications, visit the [Ray Debugging Guide](https://docs.ray.io/en/latest/ray-observability/user-guides/debug-apps/index.html). For information about troubleshooting Kubernetes clusters, see the
+[official KubeRay troubleshooting guide](https://docs.ray.io/en/latest/serve/advanced-guides/multi-node-gpu-troubleshooting.html).
 
 ## Optimizing network communication for tensor parallelism
 
