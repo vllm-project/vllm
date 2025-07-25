@@ -577,7 +577,8 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         safe_input_ids[safe_input_ids == self.config.audio_token_index] = 0
         inputs_embeds = self.language_model.get_input_embeddings(
             safe_input_ids)
-        if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
+        if multimodal_embeddings is not None and len(
+                multimodal_embeddings) > 0:
 
             # TODO(ywang96): remove this block after v0 is deprecated.
             if not envs.VLLM_USE_V1:
