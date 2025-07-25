@@ -6,7 +6,7 @@ AutoRound applies weight-only quantization to transformer-based models, enabling
 
 Key Features:
 
-✅ **AutoRound, AutoAWQ, AutoGPTQ, and GGUF ** are supported:
+✅ **AutoRound, AutoAWQ, AutoGPTQ, and GGUF** are supported:
 
 ✅ **10+ vision-language models (VLMs)** are supported
 
@@ -71,8 +71,8 @@ autoround.quantize_and_save(output_dir, format="auto_round")
 ```
 
 ## Running a quantized model with vLLM
+An example code to run auto-round format in vLLM
 
-To run an AutoRound quantized model with vLLM, you can
 ~~~python
 if __name__ == '__main__':
     from vllm import LLM, SamplingParams
