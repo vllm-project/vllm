@@ -1,12 +1,12 @@
-# **TPU Optimization Tips**
+# TPU Optimization Tips
 
 This doc serves as a collection of handy tips for optimizing your vLLM on TPU workload.
 
-### **Get started**
+### Get started
 
 Looking for setup and installation instructions? Find them [here](https://docs.vllm.ai/en/latest/getting_started/installation/google_tpu.html).
 
-### **TPU workload sizing**
+### PU workload sizing
 
 When selecting the ideal number of chips for a single serving instance, it's important to account for both the model size and the average request context length. Adequate HBM for the KV cache is essential to ensure a sufficient number of concurrent requests can be processed.
 
@@ -42,9 +42,9 @@ Use `VLLM_XLA_CACHE_PATH` environment variable to write to shareable storage for
 #### Reducing compilation time
 This initial compilation time ranges significantly and is impacted by many of the arguments discussed in this optimization doc. Factors that influence the length of time to compile are things like model size and `--max-num-batch-tokens`. Other arguments you can tune are things like `VLLM_TPU_MOST_MODEL_LEN`. 
 
-### **Optimize based on your data**
+### Optimize based on your data
 
-#### *max model len vs. most model len*
+#### max model len vs. most model len
 
 ![most_model_len](../../assets/design/v1/tpu/most_model_len.png)
 
@@ -54,7 +54,7 @@ For example, 1% requests are 32k length and 99% requests are 2k length. You can 
 
 The requests get subdivided into max-model-len and most-model-len categories, for the latter category, we can gain better performance since the server can process more requests at a time.
 
-#### *Padding*
+#### Padding
 
 For online serving with latency requirements, consider switching to bucket padding by setting the `VLLM_TPU_BUCKET_PADDING_GAP` environment variable. Because of the layout of the TPU, try using increments of 128: 128, 256, etc.
 
@@ -71,27 +71,27 @@ The fewer tokens we pad, the less unnecessary computation TPU does, the better p
 
 However, you need to be careful to choose the padding gap. If the gap is too small, it means the number of buckets is large, leading to increased warmup (precompile) time and higher memory to store the compiled graph. Too many compilaed graphs may lead to HBM OOM. Conversely, an overly large gap yields no performance improvement compared to the default exponential padding.
 
-### **If possible, use the precision that matches the chip’s hardware acceleration**
+**If possible, use the precision that matches the chip’s hardware acceleration**
 
 - v5e has int4/int8 hardware acceleration in the MXU
 - v6e has int4/int8 hardware acceleration in the MXU
 
-### **Don't set TP to be less than the number of chips on a single-host deployment**
+**Don't set TP to be less than the number of chips on a single-host deployment**
 
 Although it’s common to do this with GPUs, don't try to fragment 2 or 8 different workloads across 8 chips on a single host. If you need 1 or 4 chips, just create an instance with 1 or 4 chips (these are partial-host machine types).
 
-### **Tune your workloads!**
+### Tune your workloads!
 
 Although we try to have great default configs, we strongly recommend you check out the [vLLM auto-tuner](https://github.com/vllm-project/vllm/tree/main/benchmarks/auto_tune) to optimize your workloads for your use case.
 
 
 ### Future Topics We'll Cover 
 
-#### **Profiling**
+#### Profiling
 
 The auto-tuner provides a profile of optimized configurations as its final step. However, interpreting this profile can be challenging for new users. We plan to expand this section in the future with more detailed guidance. In the meantime, you can learn how to collect a TPU profile using vLLM's native profiling tools [here](https://docs.vllm.ai/en/latest/examples/offline_inference/profiling_tpu.html). This profile can provide valuable insights into your workload's performance.
 
-#### **SPMD**
+#### SPMD
 More details to come.
 
-#### Want us to cover something that isn't listed here? Open up an issue please and cite this doc. We'd love to hear your questions or tips. 
+**Want us to cover something that isn't listed here? Open up an issue please and cite this doc. We'd love to hear your questions or tips.**
