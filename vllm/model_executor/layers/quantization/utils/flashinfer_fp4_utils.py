@@ -3,7 +3,7 @@
 """Utility helpers for NVFP4 + FlashInfer fused-MoE path"""
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 
@@ -49,24 +49,17 @@ def reorder_w1w3_to_w3w1(weight: torch.Tensor,
                                                        dim=dim).contiguous())
 
 
-def _make_flashinfer_experts_kwargs(
-        moe_parallel_config: FusedMoEParallelConfig) -> dict[str, Any]:
-    """Helper: build common kwargs for ``FlashInferExperts`` ctor"""
-    return {
-        "use_nvfp4_w4a4": True,
-        "use_dp": moe_parallel_config.dp_size > 1,
-        "ep_rank": moe_parallel_config.ep_rank,
-        "ep_size": moe_parallel_config.ep_size,
-        "tp_rank": moe_parallel_config.tp_rank,
-        "tp_size": moe_parallel_config.tp_size,
-    }
-
-
 def build_flashinfer_kernel(
     moe_parallel_config: FusedMoEParallelConfig, ) -> mk.FusedMoEModularKernel:
     """Create *and return* a FlashInfer CUTLASS fused-MoE modular kernel"""
     experts = FlashInferExperts(
-        **_make_flashinfer_experts_kwargs(moe_parallel_config))
+        use_nvfp4_w4a4=True,
+        use_dp=moe_parallel_config.dp_size > 1,
+        ep_rank=moe_parallel_config.ep_rank,
+        ep_size=moe_parallel_config.ep_size,
+        tp_rank=moe_parallel_config.tp_rank,
+        tp_size=moe_parallel_config.tp_size,
+    )
     return mk.FusedMoEModularKernel(
         FlashInferCutlassMoEPrepareAndFinalize(quant_dtype=torch.uint8),
         experts,
