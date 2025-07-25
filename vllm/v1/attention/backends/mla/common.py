@@ -560,11 +560,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
         return reorder_batch_to_split_decodes_and_prefills(input_batch,
-                                                           scheduler_output,
-                                                           decode_threshold=1)
+                                                          scheduler_output,
+                                                          decode_threshold=1)
 
-    def _build_decode(self,
-                      block_table_tensor: torch.Tensor,
+    def _build_decode(self, block_table_tensor: torch.Tensor,
                       seq_lens: torch.Tensor,
                       ubatch_id: Optional[int] = None):
         return MLACommonDecodeMetadata(
@@ -723,7 +722,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             decode_metadata = self._build_decode(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
                 seq_lens=seq_lens[:num_decodes],
-                ubatch_id=ubatch_id)
+                ubatch_id=ubatch_id
+            )
 
         attn_metadata = self.metadata_cls(
             num_reqs=common_attn_metadata.num_reqs,

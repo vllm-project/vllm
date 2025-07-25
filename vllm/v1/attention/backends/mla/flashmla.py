@@ -64,14 +64,15 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         self.num_q_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config)
 
-        self.cg_buf_tile_scheduler_metadata = None
-        self.cg_buf_num_splits = None
+        self.cg_buf_tile_scheduler_metadata = [None, None]
+        self.cg_buf_num_splits = [None, None]
 
-    def _build_decode(
-            self,
-            block_table_tensor: torch.Tensor,
-            seq_lens: torch.Tensor,
-            ubatch_id: Optional[int] = None) -> FlashMLADecodeMetadata:
+    def _build_decode(self, block_table_tensor: torch.Tensor,
+                      seq_lens: torch.Tensor,
+                      ubatch_id: Optional[int] = None) -> FlashMLADecodeMetadata:
+        # print(f"UBATCH ID: {ubatch_id}")
+        ubatch_id = 0 if ubatch_id is None else ubatch_id
+        assert ubatch_id < 2
         tile_scheduler_metadata, num_splits = \
             get_mla_metadata(
             seq_lens,
@@ -80,27 +81,31 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         )
 
         if self.compilation_config.full_cuda_graph:
+        # if False:
+            n = num_splits.size(0)
             # First time around (CUDAGraph capture), allocate the static buffer
-            if self.cg_buf_tile_scheduler_metadata is None:
-                self.cg_buf_tile_scheduler_metadata = tile_scheduler_metadata
-                self.cg_buf_num_splits = num_splits
-            else:
-                assert self.cg_buf_num_splits is not None
+            if self.cg_buf_num_splits[ubatch_id] is None:
+                # logger.info(f"ALLOCATING FLASH MLA DATA FOR SIZE {n}")
+                self.cg_buf_num_splits[ubatch_id] = num_splits
+                self.cg_buf_tile_scheduler_metadata[ubatch_id] = tile_scheduler_metadata
+            elif n <= self.cg_buf_num_splits[ubatch_id].size(0):
+                assert self.cg_buf_tile_scheduler_metadata[ubatch_id] is not None
 
                 # Metadata per-SM, fixed size (#SMs, TileMetadataSize)
-                assert (self.cg_buf_tile_scheduler_metadata.size() ==
+                assert (self.cg_buf_tile_scheduler_metadata[ubatch_id].size() ==
                         tile_scheduler_metadata.size())
-                self.cg_buf_tile_scheduler_metadata.\
+                self.cg_buf_tile_scheduler_metadata[ubatch_id].\
                     copy_(tile_scheduler_metadata)
-                tile_scheduler_metadata = self.cg_buf_tile_scheduler_metadata
+                tile_scheduler_metadata = self.cg_buf_tile_scheduler_metadata[ubatch_id]
 
                 # Num splits is per-batch, varying size (batch_size,)
                 n = num_splits.size(0)
+                # logger.info(f"N: {n} num splits {self.cg_buf_num_splits.size(0)}")
                 # make sure static buffer is large enough
-                assert n <= self.cg_buf_num_splits.size(0)
-                num_splits_view = self.cg_buf_num_splits[:n]
+                assert n <= self.cg_buf_num_splits[ubatch_id].size(0)
+                num_splits_view = self.cg_buf_num_splits[ubatch_id][:n]
                 num_splits_view.copy_(num_splits)
-                self.cg_buf_num_splits[n:].fill_(0)  # fill the rest with 0s
+                self.cg_buf_num_splits[ubatch_id][n:].fill_(0)  # fill the rest with 0s
                 num_splits = num_splits_view
 
         return FlashMLADecodeMetadata(
