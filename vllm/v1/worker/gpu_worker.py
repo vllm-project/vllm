@@ -239,11 +239,9 @@ class Worker(WorkerBase):
         unrequested_memory = self.init_snapshot.free_memory \
             - self.requested_memory
         logger.debug(
-            "Initial free memory: %.2f GiB",
-            GiB(self.init_snapshot.free_memory),
-        )
-        logger.debug(
+            "Initial free memory: %.2f GiB; "
             "Requested memory: %.2f (util), %.2f GiB",
+            GiB(self.init_snapshot.free_memory),
             self.cache_config.gpu_memory_utilization,
             GiB(self.requested_memory),
         )
