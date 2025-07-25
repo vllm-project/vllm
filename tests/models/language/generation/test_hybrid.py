@@ -101,10 +101,9 @@ def test_models(
             if model in HYBRID_MODELS:
                 # required due to reorder_batch behaviour
                 m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
-            with vllm_runner(
-                    model,
-                    max_num_seqs=MAX_NUM_SEQS,
-            ) as vllm_model:
+            with vllm_runner(model,
+                             max_num_seqs=MAX_NUM_SEQS,
+                             enable_prefix_caching=False) as vllm_model:
                 vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
                     example_prompts, max_tokens, num_logprobs)
     else:
@@ -306,10 +305,7 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
     a single step.
     """
     try:
-        with vllm_runner(
-                model,
-                max_num_seqs=MAX_NUM_SEQS,
-        ) as vllm_model:
+        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
             vllm_model.generate_greedy([example_prompts[0]] * 100, 10)
     except ValueError:
         pytest.fail("Hybrid inner state wasn't cleaned up properly between"

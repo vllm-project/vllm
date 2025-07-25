@@ -80,7 +80,7 @@ class ShortConv(CustomOp):
             # The inner tuple is (conv_state,)
             self.kv_cache = [(torch.tensor([]))]
 
-        # For compatibility with StaticCacheSpec utils
+        # For compatibility with MambaSpec utils
         self.chunk_size = 1
         self.prefix = prefix
 
