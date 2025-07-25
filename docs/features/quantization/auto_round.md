@@ -28,6 +28,8 @@ pip install auto-round
 
 for vlms, please change to `auto-round-mllm` in CLI usage and `AutoRoundMLLM` in API usage.
 
+### CLI usage
+
 ```bash
 auto-round \
     --model Qwen/Qwen3-0.6B \
