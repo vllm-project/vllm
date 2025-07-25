@@ -435,6 +435,8 @@ class NixlConnectorWorker:
         self.backend_name = backend.get_name()
         attn_backend = backend_name_to_enum(self.backend_name)
         self._use_flashinfer = attn_backend == _Backend.FLASHINFER_VLLM_V1
+        self._use_flashattn = attn_backend == _Backend.FLASH_ATTN_VLLM_V1
+        self._blocks_first = self._use_flashinfer or self._use_flashattn
         logger.debug("Detected attention backend %s", self.backend_name)
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.world_size}
@@ -539,7 +541,7 @@ class NixlConnectorWorker:
             block_size, kv_latent_dim = block_shape
         else:
             # [2 (k and v), num_blocks, ...]
-            if self._use_flashinfer:
+            if self._blocks_first:
                 # FlashInfer swaps 2<->num_blocks dimensions.
                 self.num_blocks = first_kv_cache.shape[0]
                 block_rank = 4  # [2, block_size, kv_heads, head_dim]
@@ -574,7 +576,7 @@ class NixlConnectorWorker:
         # to better exploit the memory layout (ie num_blocks is the first dim).
         for cache_or_caches in kv_caches.values():
             # Normalize to always be a list of caches
-            cache_list = [cache_or_caches] if use_mla or self._use_flashinfer \
+            cache_list = [cache_or_caches] if use_mla or self._blocks_first \
                 else cache_or_caches
             for cache in cache_list:
                 base_addr = cache.data_ptr()
@@ -612,7 +614,7 @@ class NixlConnectorWorker:
         logger.debug("Done registering descs")
         self._registered_descs.append(descs)
 
-        if self._use_flashinfer:
+        if self._blocks_first:
             # NOTE (NickLucche) When FlashInfer is used, memory is registered
             # with joint KV for each block. This minimizes the overhead in
             # registerMem allowing faster descs queries. In order to be able to
@@ -636,7 +638,7 @@ class NixlConnectorWorker:
                 # (addr, len, device id)
                 blocks_data.append((addr, kv_block_len, self.tp_rank))
 
-            if self._use_flashinfer:
+            if self._blocks_first:
                 # Separate and interleave K/V regions to maintain the same
                 # descs ordering. This is needed for selecting contiguous heads
                 # when split across TP ranks.
@@ -747,7 +749,7 @@ class NixlConnectorWorker:
         else:
             remote_block_size = nixl_agent_meta.block_len // (
                 self.slot_size_bytes * tp_ratio)
-            if self._use_flashinfer:
+            if self._blocks_first:
                 # Account for joint KV in FlashInfer.
                 remote_block_size //= 2
 
@@ -787,7 +789,7 @@ class NixlConnectorWorker:
                 # (addr, len, device id)
                 blocks_data.append((addr, kv_block_len, remote_tp_rank))
 
-            if self._use_flashinfer:
+            if self._blocks_first:
                 # With FlashInfer index V separately to allow head splitting.
                 for block_id in range(nixl_agent_meta.num_blocks):
                     block_offset = block_id * nixl_agent_meta.block_len
@@ -1117,7 +1119,7 @@ class NixlConnectorWorker:
         For FlashInfer, this is half the length of the whole block, as K and V
         share the same region.
         """
-        if self._use_flashinfer:
+        if self._blocks_first:
             # For indexing only half (either just the K or V part).
             block_len = self.block_len // 2
         else:
