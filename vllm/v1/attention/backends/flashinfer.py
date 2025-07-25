@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Optional
+from typing import TYPE_CHECKING, ClassVar, Optional, Union
 
 import torch
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
-from flashinfer.decode import trtllm_batch_decode_with_kv_cache
+from flashinfer.decode import (trtllm_batch_decode_with_kv_cache,
+                               _get_range_buf, get_seq_lens)
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -18,7 +19,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import cdiv
+from vllm.utils import cdiv, is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
@@ -251,7 +252,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Global hyperparameters shared by all attention layers
         self.global_hyperparameters: Optional[PerLayerParameters] = None
 
-        # Preparing persistent buffers
+        # Preparing persistent buffers (device-side)
         self.paged_kv_indptr = torch.zeros(max_num_reqs + 1,
                                            dtype=torch.int32,
                                            device=self.device)
@@ -262,6 +263,20 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.paged_kv_last_page_len = torch.zeros(max_num_reqs,
                                                   dtype=torch.int32,
                                                   device=self.device)
+        # host-side buffer
+        pin_memory = is_pin_memory_available()
+        self.paged_kv_indptr_cpu = torch.zeros(max_num_reqs + 1,
+                                                dtype=torch.int32,
+                                                device="cpu",
+                                                pin_memory=pin_memory)
+        self.paged_kv_indices_cpu = torch.zeros(max_num_pages,
+                                                dtype=torch.int32,
+                                                device="cpu",
+                                                pin_memory=pin_memory)
+        self.paged_kv_last_page_len_cpu = torch.zeros(max_num_reqs,
+                                                     dtype=torch.int32,
+                                                     device="cpu",
+                                                     pin_memory=pin_memory)
 
         self.block_table_arange = torch.arange(max_num_pages_per_req,
                                                dtype=torch.int32,
@@ -418,6 +433,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 if use_cudagraph:
                     num_input_tokens_decode = (
                         self.vllm_config.pad_for_cudagraph(num_decodes))
+                    # Carefully fulfill the padding region with reasonable value
+                    # on cpu.
+                    # Make sure paged_kv_indptr_cpu is not decreasing
+                    self.paged_kv_indptr_cpu[1 + num_decodes:
+                                1 + num_input_tokens_decode].fill_(
+                        attn_metadata.paged_kv_indptr_cpu[-1])
+                    # Fill the remaining paged_kv_last_page_len_cpu with 1. 
+                    # This is because flashinfer treats 0 as a full page 
+                    # instead of empty.
+                    self.paged_kv_last_page_len_cpu[num_decodes:
+                                num_input_tokens_decode].fill_(1)
+                    
                 else:
                     num_input_tokens_decode = num_decodes
 
@@ -428,10 +455,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         self.cache_config.cache_dtype,
                         attn_metadata.num_qo_heads, attn_metadata.num_kv_heads,
                         attn_metadata.head_dim):
-                    decode_fast_plan(attn_metadata.decode_wrapper,
-                        attn_metadata.paged_kv_indptr_cpu[:num_decodes + 1],
+                    # Use the persistent buffer with padding length, 
+                    # instead of the same address but chunked version
+                    # in atten_metadata when using cudagraph.
+                    fast_plan_decode(attn_metadata.decode_wrapper,
+                        self.paged_kv_indptr_cpu[:num_input_tokens_decode + 1],
                         attn_metadata.paged_kv_indices,
-                        attn_metadata.paged_kv_last_page_len_cpu[:num_decodes],
+                        self.paged_kv_last_page_len_cpu[:num_input_tokens_decode],
                         attn_metadata.num_qo_heads,
                         attn_metadata.num_kv_heads,
                         attn_metadata.head_dim,
@@ -496,34 +526,24 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                                        non_blocking=True)
         mask = (self.block_table_arange[:max_num_blocks].unsqueeze(0)
                 < block_table_bounds.unsqueeze(1))
-        paged_kv_indices = block_table_tensor[:, :max_num_blocks][mask]
-#         num_actual_pages = paged_kv_indices.size(0)
-#         self.paged_kv_indices[:num_actual_pages].copy_(paged_kv_indices,
-#                                                        non_blocking=True)
-#         self.paged_kv_indices[num_actual_pages:].fill_(-1)
+        # write self.paged_kv_indices inplace
+        num_actual_pages = torch.sum(mask)
+        paged_kv_indices = self.paged_kv_indices[:num_actual_pages]
+        torch.masked_select(block_table_tensor[:, :max_num_blocks],
+                            mask,
+                            out=paged_kv_indices)
+ 
 
-#         self.paged_kv_indptr[:1 + num_reqs].copy_(paged_kv_indptr,
-#                                                   non_blocking=True)
-#         # make sure self.paged_kv_indptr is not decreasing
-#         self.paged_kv_indptr[1 + num_reqs:].fill_(paged_kv_indptr[-1])
-
-#         self.paged_kv_last_page_len[:num_reqs].copy_(paged_kv_last_page_len,
-#                                                      non_blocking=True)
-#         # Fill the remaining paged_kv_last_page_len with 1. This is because
-#         # flashinfer treats 0 as a full page instead of empty.
-#         self.paged_kv_last_page_len[num_reqs:].fill_(1)
-        
-
-        paged_kv_indptr_cpu = torch.zeros(len(block_table_bounds_cpu) + 1,
-                                          dtype=torch.int32,
-                                          device='cpu')
-        paged_kv_indptr_cpu[1:] = block_table_bounds_cpu.cumsum(
-            dim=0, dtype=torch.int32)
+        # write self.paged_kv_indptr_cpu inplace (0-index is always 0)
+        torch.cumsum(block_table_bounds_cpu, dim=0, dtype=torch.int32,
+                    out=self.paged_kv_indptr_cpu[1: 1+num_reqs])
 
         paged_kv_last_page_len_cpu = seq_lens_cpu % page_size
-        paged_kv_last_page_len_cpu = torch.where(
-            paged_kv_last_page_len_cpu == 0, page_size,
-            paged_kv_last_page_len_cpu)
+        # write self.paged_kv_last_page_len_cpu inplace
+        torch.where(paged_kv_last_page_len_cpu == 0, torch.tensor(page_size),
+            paged_kv_last_page_len_cpu, 
+            out=self.paged_kv_last_page_len_cpu[:num_reqs])
+        
         cache_dtype = self.cache_config.cache_dtype
         if cache_dtype.startswith("fp8"):
             kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
@@ -533,9 +553,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
             qo_indptr_cpu=common_attn_metadata.query_start_loc_cpu,
-            paged_kv_indptr_cpu=paged_kv_indptr_cpu,
+            paged_kv_indptr_cpu=self.paged_kv_indices_cpu[:1+num_reqs],
             paged_kv_indices=paged_kv_indices,
-            paged_kv_last_page_len_cpu=paged_kv_last_page_len_cpu,
+            paged_kv_last_page_len_cpu=self.paged_kv_last_page_len_cpu[:num_reqs],
             num_qo_heads=self.vllm_config.model_config.get_num_attention_heads(
                 self.vllm_config.parallel_config),
             num_kv_heads=self.kv_cache_spec.num_kv_heads,
@@ -794,6 +814,163 @@ class FlashInferImpl(AttentionImpl):
                         ))
         return output_padded
  
-# TODO: 
-def decode_fast_plan():
-  pass
+
+def fast_plan_decode(
+    self,  # decode wrapper
+    indptr_cpu: torch.Tensor,
+    indices: torch.Tensor,
+    last_page_len_cpu: torch.Tensor,
+    num_qo_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    page_size: int,
+    pos_encoding_mode: str = "NONE",
+    window_left: int = -1,
+    logits_soft_cap: Optional[float] = None,
+    q_data_type: Optional[Union[str, torch.dtype]] = "float16",
+    kv_data_type: Optional[Union[str, torch.dtype]] = None,
+    data_type: Optional[Union[str, torch.dtype]] = None,
+    sm_scale: Optional[float] = None,
+    rope_scale: Optional[float] = None,
+    rope_theta: Optional[float] = None,
+    non_blocking: bool = True,
+) -> None:
+    """
+    A faster version of BatchDecodeWithPagedKVCacheWrapper::plan used for 
+    cudagraph capture/replay, while the no cudagraph version turns back 
+    to the original plan.
+    using original plan after passing host-side buffers:
+    - only host-to-device copy of indptr and last_page_len buffers
+    Modifications for cudagraph:
+    - only host-to-device copy of indptr and last_page_len buffers.
+    - avoid device-to-device copy of indices buffer.
+
+    Part of the code get inspiration from the original plan from FlashInfer repo
+    and the implementation of fast_decode_plan for FlashInfer in SGlang repo.
+    """
+    # Warm up with the original plan if it is first call, and always run the
+    # original plan if we run for dynamic shape. For fixed shape (cudagraph),
+    # this warm up is to generate the _cached_module for the decode wrapper.
+    if not self.is_cuda_graph_enabled or \
+        getattr(self, "vllm_first_call", True):
+        self.plan(
+            indptr_cpu,
+            indices,
+            last_page_len_cpu,
+            num_qo_heads,
+            num_kv_heads,
+            head_dim,
+            page_size,
+            pos_encoding_mode,
+            window_left,
+            logits_soft_cap,
+            q_data_type,
+            kv_data_type,
+            data_type,
+            sm_scale,
+            rope_scale,
+            rope_theta,
+            non_blocking,
+        )
+        self.vllm_first_call = False
+        return
+    
+    assert self.is_cuda_graph_enabled, "Should be cudagraph only here"
+
+    batch_size = len(last_page_len_cpu)
+    if logits_soft_cap is None:
+        logits_soft_cap = 0.0
+
+    # Handle data types consistently
+    if data_type is not None:
+        if q_data_type is None:
+            q_data_type = data_type
+        if kv_data_type is None:
+            kv_data_type = data_type
+    elif q_data_type is None:
+        q_data_type = "float16"
+
+    if kv_data_type is None:
+        kv_data_type = q_data_type
+    q_data_type = getattr(torch, q_data_type) if isinstance(q_data_type, 
+                    str) else q_data_type
+    kv_data_type = getattr(torch, kv_data_type) if isinstance(kv_data_type, 
+                    str) else kv_data_type
+
+    if self.use_tensor_cores:
+        qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
+
+    if batch_size != self._fixed_batch_size:
+        raise ValueError(
+            "The batch size should be fixed in cudagraph mode, the runtime "
+            "batch size {} mismatches the batch size set during "
+            "initialization {}".format(batch_size, self._fixed_batch_size))
+    if len(indices) > len(self._paged_kv_indices_buf):
+        raise ValueError(
+            "The size of indices should be less than or equal to the "
+            "allocated buffer"
+        )
+    
+    # host-to-device copy for the indptr buffer
+    self._paged_kv_indptr_buf.copy_(indptr_cpu, non_blocking=True)
+    # host-to-device copy for the last_page_len buffer
+    self._paged_kv_last_page_len_buf.copy_(
+        last_page_len_cpu, non_blocking=True)
+
+    indptr_host = indptr_cpu
+    last_page_len_host = last_page_len_cpu
+
+    if self.use_tensor_cores:
+        kv_lens_arr_host = get_seq_lens(indptr_host, 
+            last_page_len_host, page_size)
+
+        try:
+            # Make sure we pass exactly 15 arguments for tensor core version
+            self._plan_info = self._cached_module.plan(
+                self._float_workspace_buffer,
+                self._int_workspace_buffer,
+                self._pin_memory_int_workspace_buffer,
+                qo_indptr_host,
+                indptr_host,
+                kv_lens_arr_host,
+                batch_size,  # total_num_rows
+                batch_size,
+                num_qo_heads,
+                num_kv_heads,
+                page_size,
+                self.is_cuda_graph_enabled,
+                head_dim,
+                head_dim,
+                False,  # causal
+            )
+        except Exception as e:
+            raise RuntimeError(f"Error in tensor core plan: {e}") from e
+    else:
+        try:
+            # Make sure we pass exactly 15 arguments for standard version
+            self._plan_info = self._cached_module.plan(
+                self._float_workspace_buffer,
+                self._int_workspace_buffer,
+                self._pin_memory_int_workspace_buffer,
+                indptr_host,
+                batch_size,
+                num_qo_heads,
+                num_kv_heads,
+                page_size,
+                self.is_cuda_graph_enabled,
+                window_left,
+                logits_soft_cap,
+                head_dim,
+                head_dim,
+                torch.empty(0, dtype=q_data_type),
+                torch.empty(0, dtype=kv_data_type),
+            )
+        except Exception as e:
+            raise RuntimeError(f"Error in standard plan: {e}") from e
+
+    self._pos_encoding_mode = pos_encoding_mode
+    self._window_left = window_left
+    self._logits_soft_cap = logits_soft_cap
+    self._sm_scale = sm_scale
+    self._rope_scale = rope_scale
+    self._rope_theta = rope_theta
