@@ -1447,6 +1447,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if envs.VLLM_COMPUTE_PADDED_LOGITS_INDICES:
             assert self.logits_indices is not None
             num_logits = logits_indices.shape[0]
+            assert num_logits > 0 
             self.logits_indices[:num_logits].copy_(logits_indices)
             # Ensure we keep duplicates instead of zeros
             self.logits_indices[num_logits:].fill_(logits_indices[-1].item())
