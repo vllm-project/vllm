@@ -6,7 +6,7 @@ import os
 import pytest
 import torch
 import torch.distributed as dist
-from transformers import AutoConfig, AutoModel, SiglipImageProcessor
+from transformers import AutoModel, SiglipImageProcessor
 
 from vllm.assets.image import ImageAsset
 from vllm.distributed import (destroy_model_parallel,
@@ -31,7 +31,7 @@ def test_model_correctness(model_id: str, dtype: str):
         pytest.skip("This correctness test requires a GPU environment.")
 
     os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "29502"  # Use a unique port
+    os.environ["MASTER_PORT"] = "29503"
 
     backend = "nccl" if device == "cuda" else "gloo"
     init_distributed_environment(world_size=1,
@@ -42,17 +42,11 @@ def test_model_correctness(model_id: str, dtype: str):
                               pipeline_model_parallel_size=1)
 
     try:
-        config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
-        model_class = AutoModel._model_mapping[type(config)]
-        model_class._supports_sdpa = True
-
-        # Load Original Hugging Face Model
         hf_model = AutoModel.from_pretrained(
             model_id,
-            config=config,
             trust_remote_code=True,
             torch_dtype=torch_dtype,
-            attn_implementation="sdpa").vision_model.to(device)
+            attn_implementation="eager").vision_model.to(device)
         hf_model.eval()
 
         vllm_model = SiglipSo400mVisionModel(hf_model.config).to(
