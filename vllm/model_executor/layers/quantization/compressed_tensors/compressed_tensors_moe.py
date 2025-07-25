@@ -253,7 +253,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         layer.w2_weight = torch.nn.Parameter(layer.w2_weight_packed.data,
                                              requires_grad=False)
 
-        # Reorder GEMM1 weights and block scales for FlashInfer CUTLASS kernel.
+        # reorder GEMM1 weights and block scales for FlashInfer CUTLASS kernel.
         if self.allow_flashinfer_cutlass:
             w, s = reorder_w1w3_to_w3w1(layer.w13_weight.data,
                                         layer.w13_weight_scale.data,

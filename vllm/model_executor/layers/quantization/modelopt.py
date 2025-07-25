@@ -891,6 +891,16 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                     "FlashInfer kernels unavailable for "
                     "ModelOptNvFp4FusedMoE on current platform.")
 
+        # fallback to Marlin kernel
+        if not self.cutlass_nvfp4_supported:
+            if is_fp4_marlin_supported():
+                self.use_marlin = True
+                logger.info_once("Falling back to Marlin FP4 MoE kernel.")
+            else:
+                raise ValueError(
+                    "Current platform does not support NVFP4 quantization. "
+                    "Please use Blackwell GPUs or enable FlashInfer.")
+
         self.fused_experts = None  # type: ignore
 
     def maybe_swap_experts_impl(
@@ -928,8 +938,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 tp_size=moe.moe_parallel_config.tp_size,
             )
         else:
-            assert moe.dp_size > 1
-            logger.debug_once("Using CutlassExpertsFp4")
             # Currently CutlassExpertsFp4 doesn't support DP
             raise ValueError("CutlassExpertsFp4 doesn't support DP. "
                              "Use flashinfer CUTLASS FusedMoE backend instead "
