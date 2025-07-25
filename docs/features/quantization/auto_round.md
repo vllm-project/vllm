@@ -70,6 +70,7 @@ autoround = AutoRound(model, tokenizer, bits=bits, group_size=group_size, sym=sy
 
 output_dir = "./tmp_autoround"
 # format= 'auto_round'(default), 'auto_gptq', 'auto_awq'
+autoround.quantize_and_save(output_dir, format="auto_round")
 ```
 
 ## Running a quantized model with vLLM
