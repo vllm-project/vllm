@@ -295,8 +295,6 @@ async def test_metrics_exist(server: RemoteOpenAIServer,
 
 
 def test_metrics_exist_run_batch(use_v1: bool):
-    if use_v1:
-        pytest.skip("Skipping test on vllm V1")
     input_batch = """{"custom_id": "request-0", "method": "POST", "url": "/v1/embeddings", "body": {"model": "intfloat/multilingual-e5-small", "input": "You are a helpful assistant."}}"""  # noqa: E501
 
     base_url = "0.0.0.0"
@@ -323,7 +321,8 @@ def test_metrics_exist_run_batch(use_v1: bool):
             base_url,
             "--port",
             port,
-        ], )
+        ],
+                                env={"VLLM_USE_V1": "1" if use_v1 else "0"})
 
         def is_server_up(url):
             try:
