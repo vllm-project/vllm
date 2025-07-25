@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
+
 import vllm
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 
 MODEL_PATH = "microsoft/phi-2"
 
@@ -46,7 +49,9 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     return generated_texts
 
-
+@pytest.mark.skip(current_platform.is_rocm(),
+                  reason="Head size 80 is not supported by FlashAttention on \
+                          ROCm")
 def test_phi2_lora(phi2_lora_files):
     # We enable enforce_eager=True here to reduce VRAM usage for lora-test CI,
     # Otherwise, the lora-test will fail due to CUDA OOM.

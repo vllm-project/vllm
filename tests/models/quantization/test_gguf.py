@@ -14,6 +14,7 @@ from pytest import MarkDecorator
 from transformers import AutoTokenizer
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.platforms import current_platform
 
 from ...conftest import VllmRunner
 from ...utils import multi_gpu_test
@@ -157,6 +158,9 @@ def test_models(
     num_logprobs: int,
     tp_size: int,
 ) -> None:
+    if current_platform.is_rocm(
+    ) and model.original_model == 'stabilityai/stablelm-3b-4e1t':
+        pytest.skip("Head size 80 is not supported by FlashAttention on ROCm")
     check_model_outputs(vllm_runner, example_prompts, model, dtype, max_tokens,
                         num_logprobs, tp_size)
 
@@ -180,3 +184,4 @@ def test_distributed(
 ) -> None:
     check_model_outputs(vllm_runner, example_prompts, model, dtype, max_tokens,
                         num_logprobs, tp_size)
+
