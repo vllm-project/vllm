@@ -10,8 +10,8 @@ import torch
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
-from flashinfer.decode import (trtllm_batch_decode_with_kv_cache,
-                               _get_range_buf, get_seq_lens)
+from flashinfer.decode import (_get_range_buf, get_seq_lens,
+                               trtllm_batch_decode_with_kv_cache)
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -532,8 +532,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         torch.masked_select(block_table_tensor[:, :max_num_blocks],
                             mask,
                             out=paged_kv_indices)
- 
-
+        
         # write self.paged_kv_indptr_cpu inplace (0-index is always 0)
         torch.cumsum(block_table_bounds_cpu, dim=0, dtype=torch.int32,
                     out=self.paged_kv_indptr_cpu[1: 1+num_reqs])
@@ -553,7 +552,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
             qo_indptr_cpu=common_attn_metadata.query_start_loc_cpu,
-            paged_kv_indptr_cpu=self.paged_kv_indices_cpu[:1+num_reqs],
+            paged_kv_indptr_cpu=self.paged_kv_indptr_cpu[:1+num_reqs],
             paged_kv_indices=paged_kv_indices,
             paged_kv_last_page_len_cpu=self.paged_kv_last_page_len_cpu[:num_reqs],
             num_qo_heads=self.vllm_config.model_config.get_num_attention_heads(
