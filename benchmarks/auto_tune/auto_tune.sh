@@ -280,6 +280,6 @@ if (( $(echo "$best_throughput > 0" | bc -l) )); then
 else
     echo "No configuration met the latency requirements. Skipping final profiling run."
 fi
-
+pkill -f vllm
 echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput, profile saved in: $PROFILE_PATH"
 echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput, profile saved in: $PROFILE_PATH" >> "$RESULT"
