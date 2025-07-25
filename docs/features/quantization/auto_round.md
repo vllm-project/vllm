@@ -24,7 +24,7 @@ Key Features:
 ## Installation
 
 ```bash
-pip install auto-round
+uv pip install auto-round
 ```
 
 ## Quantizing a model
