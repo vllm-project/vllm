@@ -16,8 +16,9 @@ from dataclasses import (MISSING, Field, asdict, field, fields, is_dataclass,
                          replace)
 from functools import cached_property
 from importlib.util import find_spec
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Literal, Optional,
-                    Protocol, TypeVar, Union, cast, get_args)
+from re import Pattern
+from typing import (TYPE_CHECKING, Any, Callable, ClassVar, List, Literal,
+                    Optional, Protocol, Set, TypeVar, Union, cast, get_args)
 
 import regex as re
 import torch
@@ -3947,6 +3948,123 @@ class KVEventsConfig:
     """
 
 
+@config
+@dataclass
+class IntermediateLoggingConfig:
+    """Configuration for intermediate tensor logging."""
+
+    output_dir: str = "/tmp/vllm_intermediates"
+    """Directory where to save the intermediate tensors."""
+
+    module_call_match: Optional[List[str]] = None
+    """Match modules by name regex and call index (
+    a module can be called multiple times in a step)
+    List of regex:call_idx, call_idx is -1  for default for all calls """
+
+    log_step_ids: List[int] = field(default_factory=lambda: [0])
+    """List of step IDs to log (empty list means log all steps)."""
+
+    log_post_fwd_inputs: bool = False
+    """Whether logging inputs after forwards for each module"""
+
+    max_tensor_size: Optional[int] = None
+    """Maximum number of elements in tensors to log (None = no limit)."""
+
+    enabled: bool = True
+    """Whether logging is enabled."""
+    device_names: List[str] = field(default_factory=list)
+    """List of device names to log (empty list means log all devices)."""
+
+    _compiled_module_calls: dict[Pattern, int] = field(default_factory=dict,
+                                                       init=False)
+    """Compiled regex patterns for module filtering."""
+
+    _module_call: dict[str, int] = field(default_factory=dict, init=False)
+    _step_id_set: Set[int] = field(default_factory=set, init=False)
+    """Set of step IDs for faster lookup."""
+    _output_run_dir: str = "/tmp/vllm_intermediates"
+    """Unique directory to save single run/serve logging result."""
+
+    def __post_init__(self):
+        """Initialize derived fields after instance creation."""
+        self._compile_regex_patterns()
+        self._output_run_dir = self.output_dir + "/" + str(uuid.uuid4())
+        self._step_id_set = set(self.log_step_ids)
+
+    def _compile_regex_patterns(self):
+        """Compile regex patterns for module name filtering."""
+        from vllm.logger import init_logger
+        logger = init_logger(__name__)
+
+        self._compiled_module_matches = []
+
+        if self.module_call_match is None:
+            logger.info(
+                "No module name regex patterns provided, will log all modules")
+            return
+
+        # Compile all patterns
+        for regex_pattern_call_idx in self.module_call_match:
+            try:
+                splits = regex_pattern_call_idx.split(":", 2)
+                regex_pattern = splits[0]
+                call_idx = -1
+                if len(splits) > 1:
+                    call_idx = int(splits[1])
+                compiled_pattern: Pattern[str] = re.compile(regex_pattern)
+                self._compiled_module_calls[compiled_pattern] = call_idx
+                logger.info(
+                    f"Successfully compiled regex pattern: '{regex_pattern}'")
+            except Exception as e:
+                logger.error(
+                    f"Failed to parse module_call_match '{regex_pattern_call_idx}': {e}"
+                )
+                raise ValueError(
+                    f"Failed to parse module_call_match '{regex_pattern_call_idx}': {e}"
+                ) from e
+
+        logger.info(
+            f"Compiled {len(self._compiled_module_calls)} regex patterns")
+
+    def to_dict(self) -> dict:
+        """Convert the config to a dictionary for serialization."""
+        return {
+            "output_run_dir": self.output_run_dir,
+            "module_call_match": self.module_call_match,
+            "log_step_ids": self.log_step_ids,
+            "max_tensor_size": self.max_tensor_size,
+            "enabled": self.enabled,
+            "device_names": self.device_names
+        }
+
+    @classmethod
+    def from_dict(cls, dict_value: dict) -> "IntermediateLoggingConfig":
+        """Parse the CLI value for the speculative config."""
+        return cls(**dict_value)
+
+    @property
+    def output_run_dir(self) -> str:
+        return self._output_run_dir
+
+    def compute_hash(self) -> str:
+        """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        # Intermediate logging doesn't affect the computation graph
+        factors: list[Any] = []
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()
+        return hash_str
+
+
 class CompilationLevel:
     # constants for the levels of the compilation process
     NO_COMPILATION = 0
@@ -4405,6 +4523,8 @@ class VllmConfig:
     """The configurations for distributed KV cache transfer."""
     kv_events_config: Optional[KVEventsConfig] = None
     """The configurations for event publishing."""
+    intermediate_log_config: Optional[IntermediateLoggingConfig] = None
+    """Configuration for intermediate tensor logging."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
@@ -4491,6 +4611,10 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.kv_transfer_config:
             vllm_factors.append(self.kv_transfer_config.compute_hash())
+        else:
+            vllm_factors.append("None")
+        if self.intermediate_log_config:
+            vllm_factors.append(self.intermediate_log_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.additional_config:
