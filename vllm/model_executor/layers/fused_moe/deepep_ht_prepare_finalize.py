@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Any, Optional
 
 import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceContiguous, TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 
@@ -62,8 +63,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         has_scales = token_scales is not None
 
-        (num_tokens_per_rank, num_tokens_per_rdma_rank, expert_num_tokens,
-         is_token_in_rank, event) = self.buffer.get_dispatch_layout(
+        (num_tokens_per_rank, num_tokens_per_rdma_rank,
+         dispatch_expert_num_tokens, is_token_in_rank,
+         event) = self.buffer.get_dispatch_layout(
              topk_idx=rank_topk_ids,
              num_experts=num_experts,
              previous_event=None,
@@ -83,7 +85,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             num_tokens_per_rank=num_tokens_per_rank,
             num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
             is_token_in_rank=is_token_in_rank,
-            num_tokens_per_expert=expert_num_tokens,
+            num_tokens_per_expert=dispatch_expert_num_tokens,
             topk_idx=rank_topk_ids,
             topk_weights=rank_topk_weights,
             # expert_alignment rounds the number of tokens per expert
@@ -115,22 +117,25 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             num_experts - 1 if self.rank_expert_offset == 0 else 0,
             expert_topk_ids + self.rank_expert_offset)
 
-        return (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,
+        # Makes a GPU-CPU copy.
+        # TODO (varun): Maybe it is better to re-compute the expert_num_tokens
+        # on GPU.
+        expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
+            expert_num_tokens_per_expert_list, device=expert_x.device)
+
+        return (expert_x, expert_x_scale, expert_tokens_meta, expert_topk_ids,
                 expert_topk_weights)
 
     def prepare(
-        self,
-        a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        apply_router_weight_on_input: bool,
+        self, a1: torch.Tensor, a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor], topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor, num_experts: int,
+        expert_map: Optional[torch.Tensor], apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
-               Optional[torch.Tensor], Optional[torch.Tensor]]:
+        extra_prepare_args: Optional[dict[str, Any]]
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
+               Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
+               Optional[torch.Tensor]]:
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
@@ -149,7 +154,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             )
             if a1q_scale is not None and a1q_scale.numel() == 1:
                 a1q_scale = a1q_scale.view(1, 1)
-            (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,
+            (expert_x, expert_x_scale, expert_tokens_meta, expert_topk_ids,
              expert_topk_weights) = self._do_dispatch(
                  tokens=a1q,
                  token_scales=a1q_scale,
@@ -159,7 +164,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         else:
             # DeepEP kernels only support dispatching per-token-quant
             # quantization. dispatch in bfloat16.
-            (expert_x, _, expert_num_tokens, expert_topk_ids,
+            (expert_x, _, expert_tokens_meta, expert_topk_ids,
              expert_topk_weights) = self._do_dispatch(
                  tokens=a1,
                  token_scales=None,
@@ -176,48 +181,29 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                     per_act_token_quant=False,
                     block_shape=quant_config.block_shape)
 
-        return (expert_x, expert_x_scale, expert_num_tokens, expert_topk_ids,
+        return (expert_x, expert_x_scale, expert_tokens_meta, expert_topk_ids,
                 expert_topk_weights)
-
-    def _apply_weights_and_reduce(self, num_tokens: int,
-                                  fused_expert_output: torch.Tensor,
-                                  topk_weights: torch.Tensor,
-                                  apply_router_weight_on_input: bool,
-                                  output_dtype: torch.dtype):
-
-        hidden_dim = fused_expert_output.size(-1)
-        if fused_expert_output.ndim == 2:
-            fused_expert_output = fused_expert_output.view(
-                num_tokens, -1, hidden_dim)
-
-        if not apply_router_weight_on_input:
-            # The DeepEP combine kernels don't do the topk weight
-            # multiplication. We multiply the weights locally.
-            m_x_topk = fused_expert_output.size(0)
-            fused_expert_output.mul_(topk_weights.view(m_x_topk, -1, 1))
-
-        out = torch.empty((num_tokens, hidden_dim),
-                          device=fused_expert_output.device,
-                          dtype=output_dtype)
-        ops.moe_sum(fused_expert_output, out)
-
-        return out
 
     def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
                  topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                 apply_router_weight_on_input: bool) -> None:
+                 apply_router_weight_on_input: bool,
+                 weight_and_reduce_impl: mk.TopKWeightAndReduce,
+                 extra_finalize_args: Optional[dict[str, Any]]) -> None:
 
         assert self.handle is not None
 
         # fused_expert_output can have 0 tokens - This happens when none of the
         # tokens from the all2all reach this EP rank.
         if fused_expert_output.numel() != 0:
-            fused_expert_output = self._apply_weights_and_reduce(
-                num_tokens=topk_ids.size(0),
+            if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
+                weight_and_reduce_impl = TopKWeightAndReduceContiguous()
+            fused_expert_output = weight_and_reduce_impl.apply(
+                output=None,
                 fused_expert_output=fused_expert_output,
                 topk_weights=topk_weights,
+                topk_ids=topk_ids,
                 apply_router_weight_on_input=apply_router_weight_on_input,
-                output_dtype=output.dtype)
+            )
 
         combined_x, _, event = self.buffer.combine(
             x=fused_expert_output,

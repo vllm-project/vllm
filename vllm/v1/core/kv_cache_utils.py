@@ -10,8 +10,9 @@ from typing import Any, Callable, NamedTuple, Optional
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import GiB_bytes, cdiv, sha256
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+from vllm.utils import GiB_bytes, cdiv, sha256_cbor_64bit
+from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
+                                        FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
                                         KVCacheTensor, SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
@@ -46,18 +47,30 @@ class BlockHashWithGroupId(NamedTuple):
         return self.block_hash.hash_value
 
 
-# The hash seed for the first block of the prefix block sequence.
-#
-# Even if the hash function is the builtin hash(), we use sha256 to generate
-# the initial hash to simplify the code. This is not performance critical
-# as it is done one per process.
+# The hash seed for the first block of any prefix block sequence.
 #
 # We use a random value to avoid hash collisions or PYTHONHASHSEED environment
 # variable if set such that processes can share the seed if needed.
 # This aligns with the behavior of Python's hash() function, which also uses
 # a random seed if PYTHONHASHSEED is not set.
-NONE_HASH = int.from_bytes(os.urandom(32), byteorder="big") if os.getenv(
-    "PYTHONHASHSEED") is None else sha256(os.getenv("PYTHONHASHSEED"))
+#
+# The function `init_none_hash` initializes this variable globally.
+NONE_HASH: int
+
+
+def init_none_hash(hash_fn: Callable):
+    global NONE_HASH
+
+    hash_seed = os.getenv("PYTHONHASHSEED")
+    if hash_seed is None and hash_fn is sha256_cbor_64bit:
+        logger.warning(
+            "PYTHONHASHSEED is not set. This will lead to non-reproducible "
+            "block-hashes when using sha256_cbor_64bit as the hash function."
+            "Consider setting PYTHONHASHSEED to a fixed value for "
+            "reproducibility.")
+
+    NONE_HASH = (int.from_bytes(os.urandom(32), byteorder="big")
+                 if hash_seed is None else hash_fn(hash_seed))
 
 
 class PrefixCachingMetrics:
@@ -141,6 +154,8 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
+    # TODO(Jialin): For performance, let callers handle ref_cnt bumps to
+    # avoid function calls.
     def incr_ref(self):
         self.ref_cnt += 1
 
@@ -200,14 +215,32 @@ class FreeKVCacheBlockQueue:
     def __init__(self, blocks: list[KVCacheBlock]) -> None:
         self.num_free_blocks = len(blocks)
 
-        # Initialize the doubly linked list of free blocks.
-        self.free_list_head: Optional[KVCacheBlock] = blocks[0]
-        self.free_list_tail: Optional[KVCacheBlock] = blocks[-1]
+        # Initialize doubly links of consecutive blocks
         for i in range(self.num_free_blocks):
             if i > 0:
                 blocks[i].prev_free_block = blocks[i - 1]
             if i < self.num_free_blocks - 1:
                 blocks[i].next_free_block = blocks[i + 1]
+
+        # Create a fake head and a tail block for the doubly linked list to
+        # reduce branching in the code
+        #
+        # The implementation garenteed that the fake head and tail
+        # are NEVER got popped, so we could safely assume each real blocks
+        # in the queue has prev and next blocks.
+        self.fake_free_list_head = KVCacheBlock(block_id=-1)
+        self.fake_free_list_tail = KVCacheBlock(block_id=-1)
+        if self.num_free_blocks > 0:
+            # Connect fake_head and fake_tail to the first and last block
+            # respectively.
+            self.fake_free_list_head.next_free_block = blocks[0]
+            blocks[0].prev_free_block = self.fake_free_list_head
+            self.fake_free_list_tail.prev_free_block = blocks[-1]
+            blocks[-1].next_free_block = self.fake_free_list_tail
+        else:
+            # For empty list, simply connect the fake head and tail.
+            self.fake_free_list_head.next_free_block = self.fake_free_list_tail
+            self.fake_free_list_tail.prev_free_block = self.fake_free_list_head
 
     def popleft(self) -> KVCacheBlock:
         """Pop the first free block and reduce num_free_blocks by 1.
@@ -215,12 +248,65 @@ class FreeKVCacheBlockQueue:
         Returns:
             The first free block.
         """
-        if not self.free_list_head:
+        if (self.fake_free_list_head.next_free_block
+                is self.fake_free_list_tail
+                or self.fake_free_list_head.next_free_block is None):
+            assert self.num_free_blocks == 0, (
+                f"num_free_blocks ({self.num_free_blocks}) is out of sync "
+                "with the free list.")
             raise ValueError("No free blocks available")
 
-        block = self.free_list_head
-        self.remove(block)
-        return block
+        first_block: KVCacheBlock = self.fake_free_list_head.next_free_block
+
+        if first_block.next_free_block is None:
+            # This should not happen if the block is from the free list.
+            # It indicates a bug in the caller's logic.
+            raise RuntimeError("Invalid block found in popleft() "
+                               "which doesn't have a valid next_free_block")
+
+        # Connect fake_head and the next block of first_block (i.e. second block
+        # or fake tail).
+        self.fake_free_list_head.next_free_block = first_block.next_free_block
+        first_block.next_free_block.prev_free_block = self.fake_free_list_head
+
+        # Remove the block from the linked list.
+        first_block.prev_free_block = first_block.next_free_block = None
+
+        self.num_free_blocks -= 1
+        return first_block
+
+    def popleft_n(self, n: int) -> list[KVCacheBlock]:
+        """Pop the first n free blocks and reduce num_free_blocks by n.
+
+        Args:
+            n: The number of blocks to pop.
+
+        Returns:
+            A list of n free blocks.
+        """
+        if n == 0:
+            return []
+        assert self.num_free_blocks >= n
+        self.num_free_blocks -= n
+
+        curr_block = self.fake_free_list_head.next_free_block
+        # Pop n blocks from the head of the list
+        ret = []
+        for _ in range(n):
+            assert curr_block is not None
+            ret.append(curr_block)
+            last_block = curr_block
+            curr_block = curr_block.next_free_block
+            # Reset prev_free_block and next_free_block of all popped blocks
+            last_block.prev_free_block = None
+            last_block.next_free_block = None
+
+        if curr_block is not None:
+            # The queue is not empty, connect the fake head to
+            # the new first block.
+            self.fake_free_list_head.next_free_block = curr_block
+            curr_block.prev_free_block = self.fake_free_list_head
+        return ret
 
     def remove(self, block: KVCacheBlock) -> None:
         """Remove a block in the free list and reduce num_free_blocks by 1.
@@ -228,19 +314,15 @@ class FreeKVCacheBlockQueue:
         Args:
             block: The block to remove.
         """
-        if block.prev_free_block is not None:
-            # Link the previous block to the next block.
-            block.prev_free_block.next_free_block = block.next_free_block
-        if block.next_free_block is not None:
-            # Link the next block to the previous block.
-            block.next_free_block.prev_free_block = block.prev_free_block
+        if block.prev_free_block is None or block.next_free_block is None:
+            # This should not happen if the block is from the free list.
+            # It indicates a bug in the caller's logic.
+            raise RuntimeError(f"remove() called on an invalid block: {block}")
 
-        if block == self.free_list_head:
-            # Update the head if the block is the head.
-            self.free_list_head = block.next_free_block
-        if block == self.free_list_tail:
-            # Update the tail if the block is the tail.
-            self.free_list_tail = block.prev_free_block
+        # Link the previous block to the next block.
+        block.prev_free_block.next_free_block = block.next_free_block
+        # Link the next block to the previous block.
+        block.next_free_block.prev_free_block = block.prev_free_block
 
         # Remove the block from the linked list.
         block.prev_free_block = block.next_free_block = None
@@ -253,18 +335,43 @@ class FreeKVCacheBlockQueue:
         Args:
             block: The block to append.
         """
-        if self.free_list_tail is not None:
-            # Link the last block to the new block.
-            self.free_list_tail.next_free_block = block
-            block.prev_free_block = self.free_list_tail
-            self.free_list_tail = block
-        else:
-            # The free list is empty.
-            assert self.free_list_head is None
-            self.free_list_head = self.free_list_tail = block
+        if self.fake_free_list_tail.prev_free_block is None:
+            raise RuntimeError(
+                "prev_free_block of fake_free_list_tail should always exist")
+        last_block: KVCacheBlock = self.fake_free_list_tail.prev_free_block
 
-        block.next_free_block = None
+        # Connect the new block after the last block.
+        last_block.next_free_block = block
+        block.prev_free_block = last_block
+
+        # Connect the fake tail after the new block.
+        block.next_free_block = self.fake_free_list_tail
+        self.fake_free_list_tail.prev_free_block = block
+
         self.num_free_blocks += 1
+
+    def append_n(self, blocks: list[KVCacheBlock]) -> None:
+        """Put a list of blocks back into the free list
+
+        Args:
+            blocks: The blocks to append.
+        """
+        if len(blocks) == 0:
+            return
+        self.num_free_blocks += len(blocks)
+
+        last_block = self.fake_free_list_tail.prev_free_block
+        assert last_block is not None, (
+            "prev_free_block of fake_free_list_tail should always exist")
+        # Add inter-connections between consecutive blocks
+        for block in blocks:
+            block.prev_free_block = last_block
+            last_block.next_free_block = block
+            last_block = block
+
+        # Connect the last block of <blocks> to the fake tail
+        last_block.next_free_block = self.fake_free_list_tail
+        self.fake_free_list_tail.prev_free_block = last_block
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
@@ -273,8 +380,14 @@ class FreeKVCacheBlockQueue:
             A list of free blocks.
         """
         ret = []
-        curr_block = self.free_list_head
-        while curr_block is not None:
+        if self.fake_free_list_head.next_free_block is None:
+            raise RuntimeError(
+                "next_free_block of fake_free_list_head should always exist")
+        # Start from the first block
+        curr_block: KVCacheBlock = self.fake_free_list_head.next_free_block
+        # As long as next_free_block is available, we haven't reached to
+        # the fake tail yet.
+        while curr_block.next_free_block is not None:
             ret.append(curr_block)
             curr_block = curr_block.next_free_block
         return ret
@@ -293,9 +406,9 @@ def need_extra_keys(request: Request) -> bool:
     # Multimodal requests need to include the MM hash.
     # LoRA requests need to include the LoRA ID.
     # Request with provided cache salt need to include the salt.
-    return bool(request.mm_positions) or (request.lora_request
-                                          is not None) or (request.cache_salt
-                                                           is not None)
+    return bool(request.mm_hashes) or (request.lora_request
+                                       is not None) or (request.cache_salt
+                                                        is not None)
 
 
 def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
@@ -551,6 +664,10 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
         ValueError: If there is not enough memory available for the KV cache.
     """
 
+    # No need to check for available memory if the kv_cache_spec is empty
+    if not kv_cache_spec:
+        return
+
     if available_memory <= 0:
         raise ValueError("No available memory for the cache blocks. "
                          "Try increasing `gpu_memory_utilization` when "
@@ -737,6 +854,13 @@ def is_kv_cache_page_size_uniform(
     return len(page_sizes) == 1
 
 
+def is_kv_cache_type_attention_free(
+        kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
+
+    # kv_cache_spec is an empty dict for attention free models
+    return not kv_cache_spec
+
+
 def _get_kv_cache_config_uniform_page_size(
         vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec],
         available_memory: int) -> KVCacheConfig:
@@ -879,6 +1003,10 @@ def _get_kv_cache_config_uniform_page_size(
     return kv_cache_config
 
 
+def _get_kv_cache_config_attention_free() -> KVCacheConfig:
+    return KVCacheConfig(num_blocks=1, kv_cache_tensors=[], kv_cache_groups=[])
+
+
 def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
     """
     This function tries to convert the KV cache specs to one type if the model
@@ -907,7 +1035,11 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
         isinstance(spec, FullAttentionSpec) for spec in kv_cache_spec.values())
     has_sliding_window = any(
         isinstance(spec, SlidingWindowSpec) for spec in kv_cache_spec.values())
-    if has_full_attention and has_sliding_window:
+    has_chunked_local_attention = any(
+        isinstance(spec, ChunkedLocalAttentionSpec)
+        for spec in kv_cache_spec.values())
+    if has_full_attention and (has_sliding_window
+                               or has_chunked_local_attention):
         for layer_name, spec in kv_cache_spec.items():
             if isinstance(spec, SlidingWindowSpec):
                 kv_cache_spec[layer_name] = FullAttentionSpec(
@@ -917,6 +1049,15 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     dtype=spec.dtype,
                     use_mla=spec.use_mla,
                     sliding_window=spec.sliding_window,
+                )
+            elif isinstance(spec, ChunkedLocalAttentionSpec):
+                kv_cache_spec[layer_name] = FullAttentionSpec(
+                    block_size=spec.block_size,
+                    num_kv_heads=spec.num_kv_heads,
+                    head_size=spec.head_size,
+                    dtype=spec.dtype,
+                    use_mla=spec.use_mla,
+                    attention_chunk_size=spec.attention_chunk_size,
                 )
 
     if is_hybrid(kv_cache_spec):
@@ -941,11 +1082,14 @@ def get_kv_cache_config(
         The generated KVCacheConfigs
     """
     check_enough_kv_cache_memory(vllm_config, kv_cache_spec, available_memory)
-
     if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
         unify_hybrid_kv_cache_specs(kv_cache_spec)
 
-    if is_kv_cache_type_uniform(kv_cache_spec):
+    if is_kv_cache_type_attention_free(kv_cache_spec):
+        # This returns a kv_cache config with 0 kv_cache groups and 1 block
+        # to allow for the KVCache manager to handle attention free models.
+        return _get_kv_cache_config_attention_free()
+    elif is_kv_cache_type_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for
         # most models. Allocate the same amount of memory for
         # each layer.

@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input, normalize_batched_scales_shape)
-from vllm.v1.worker.ubatching import (
-    get_current_ubatch_context, yield_and_switch_from_comm_to_compute,
-    yield_and_switch_from_compute_to_comm)
+from vllm.v1.worker.ubatching import (get_current_ubatch_context,
+                                      yield_and_switch_from_comm_to_compute,
+                                      yield_and_switch_from_compute_to_comm)
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
@@ -112,25 +114,19 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         return x, x_scales
 
     def prepare(
-        self,
-        a1: torch.Tensor,
-        a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        apply_router_weight_on_input: bool,
+        self, a1: torch.Tensor, a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor], topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor, num_experts: int,
+        expert_map: Optional[torch.Tensor], apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
-               Optional[torch.Tensor], Optional[torch.Tensor]]:
+        extra_prepare_args: Optional[dict[str, Any]]
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
+               Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
+               Optional[torch.Tensor]]:
 
         hidden_size = a1.size(1)
         ubatch_ctx = get_current_ubatch_context()
         a2a_idx = ubatch_ctx.id if ubatch_ctx is not None else 0
-        # assert hidden_size in self.SUPPORTED_HIDDEN_SIZES, \
-        #     (f"Hidden Size {hidden_size} not in supported list of hidden sizes"
-        #     f"{self.SUPPORTED_HIDDEN_SIZES}")
 
         if self.use_fp8_dispatch:
             assert hidden_size % 128 == 0, \
@@ -166,12 +162,19 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_x, a1_scale, a2_scale, a1.dtype, quant_config.quant_dtype,
             quant_config.per_act_token_quant, quant_config.block_shape)
 
-        return (expert_x, expert_x_scale, expert_num_tokens, None, None)
+        expert_tokens_meta = mk.ExpertTokensMetadata(
+            expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None)
+
+        return (expert_x, expert_x_scale, expert_tokens_meta, None, None)
 
     def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
                  topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                 apply_router_weight_on_input: bool) -> None:
-
+                 apply_router_weight_on_input: bool,
+                 weight_and_reduce_impl: mk.TopKWeightAndReduce,
+                 extra_finalize_args: Optional[dict[str, Any]]) -> None:
+        assert isinstance(
+            weight_and_reduce_impl, TopKWeightAndReduceDelegate
+        ), ("Weight application and reduction happens in the combine kernel.")
         ubatch_ctx = get_current_ubatch_context()
         a2a_idx = ubatch_ctx.id if ubatch_ctx is not None else 0
         handle = self.handles[a2a_idx]
@@ -184,14 +187,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # TODO (varun) : Enable zero copy mode
         yield_and_switch_from_compute_to_comm(schedule="default")
-        _ = self.buffers[a2a_idx].low_latency_combine(
-            fused_expert_output,
-            topk_ids,
-            combine_topk_weights,
-            handle,
-            async_finish=False,
-            zero_copy=False,
-            return_recv_hook=False,
-            out=output)
+        _ = self.buffers[a2a_idx].low_latency_combine(fused_expert_output,
+                                                      topk_ids,
+                                                      combine_topk_weights,
+                                                      handle,
+                                                      async_finish=False,
+                                                      zero_copy=False,
+                                                      return_recv_hook=False,
+                                                      out=output)
         yield_and_switch_from_comm_to_compute(schedule="default")
-

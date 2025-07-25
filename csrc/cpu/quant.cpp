@@ -36,7 +36,7 @@ struct KernelVecType<c10::Half> {
   using cvt_vec_type = vec_op::FP32Vec16;
 };
 
-#ifdef __AVX512F__
+#if defined(__AVX512F__) || defined(__aarch64__)
 template <bool AZP, typename scalar_t>
 void static_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
                                    const float* scale, const int32_t* azp,
@@ -598,8 +598,9 @@ void static_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
                                    const float* scale, const int32_t* azp,
                                    const int num_tokens,
                                    const int hidden_size) {
-  TORCH_CHECK(
-      false, "static_scaled_int8_quant_impl requires AVX512/powerpc64 support.")
+  TORCH_CHECK(false,
+              "static_scaled_int8_quant_impl requires AVX512/powerpc64/AArch64 "
+              "support.")
 }
 
 template <typename scalar_t>
@@ -607,9 +608,9 @@ void dynamic_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
                                     float* scale, int32_t* azp,
                                     const int num_tokens,
                                     const int hidden_size) {
-  TORCH_CHECK(
-      false,
-      "dynamic_scaled_int8_quant_impl requires AVX512/powerpc64 support.")
+  TORCH_CHECK(false,
+              "dynamic_scaled_int8_quant_impl requires "
+              "AVX512/powerpc64/AArch64 support.")
 }
 
 template <bool PerChannel, typename scalar_t>
@@ -617,7 +618,8 @@ void static_quant_epilogue(const float* input, scalar_t* output,
                            const float a_scale, const float* b_scale,
                            const int32_t* azp_with_adj, const int num_tokens,
                            const int hidden_size) {
-  TORCH_CHECK(false, "static_quant_epilogue requires AVX512/powerpc64 support.")
+  TORCH_CHECK(
+      false, "static_quant_epilogue requires AVX512/powerpc64/AArch64 support.")
 }
 
 template <typename scalar_t>
@@ -626,8 +628,9 @@ void dynamic_quant_epilogue(const float* input, scalar_t* output,
                             const int32_t* azp, const int32_t* azp_with_adj,
                             const scalar_t* bias, const int num_tokens,
                             const int hidden_size) {
-  TORCH_CHECK(false,
-              "dynamic_quant_epilogue requires AVX512/powerpc64 support.")
+  TORCH_CHECK(
+      false,
+      "dynamic_quant_epilogue requires AVX512/powerpc64/AArch64 support.")
 }
 #endif
 }  // namespace
