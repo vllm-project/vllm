@@ -163,15 +163,10 @@ def test_auto_runner(model_id, expected_runner_type, expected_convert_type):
         ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
         ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none"),
         ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none"),
-        ("openai/whisper-small", "pooling", None),
+        ("openai/whisper-small", "pooling", "embed"),
     ],
 )
 def test_pooling_runner(model_id, expected_runner_type, expected_convert_type):
-    if expected_convert_type is None:
-        with pytest.raises(ValueError):
-            config = ModelConfig(model_id, runner="pooling")
-        return
-
     config = ModelConfig(model_id, runner="pooling")
 
     assert config.runner_type == expected_runner_type

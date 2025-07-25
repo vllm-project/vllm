@@ -974,8 +974,10 @@ class ModelConfig:
                         and arch.endswith(suffix)):
                     return convert_type
 
-        # Some Sentence Transformers models use *ForCausalLM archs
-        if get_pooling_config(self.model, self.revision):
+        # This is to handle Sentence Transformers models that use *ForCausalLM
+        # and also multi-modal pooling models which are not defined as
+        # Sentence Transformers models
+        if runner_type == "pooling":
             return "embed"
 
         return "none"
