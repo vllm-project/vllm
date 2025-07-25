@@ -1,22 +1,18 @@
 ## Introduction
-ModularKernel is implemented here
+FusedMoEModularKernel is implemented [here](https://github.com/vllm-project/vllm/blob/5ac3168ee342f4cae17b0b67375e647bd5dd9151/vllm/model_executor/layers/fused_moe/modular_kernel.py)
 
 The FusedMoE operation is generally made of multiple operations as described in the diagrams below
 
-> <figure markdown="span">
->   ![](../assets/design/fused_moe_modular_kernel/fused_moe_non_batched.png){ align="center" alt="query" width="100%" }
-> </figure>
+![](../assets/design/fused_moe_modular_kernel/fused_moe_non_batched.png "FusedMoE Non-Batched")
 
-> <figure markdown="span">
->   ![](../assets/design/fused_moe_modular_kernel/fused_moe_batched.png){ align="center" alt="query" width="100%" }
-> </figure>
+![](../assets/design/fused_moe_modular_kernel/fused_moe_batched.png "FusedMoE Batched")
 
 Note that the main difference, in terms of operations, between the Batched and Non-Batched cases is the Permute / Unpermute operations. All other operations remain.
 
-The ModularKernel framework groups these operations into logical components so the implementations of the FusedMoE operation is streamlined. The rest of the document focuses on the Contiguous / Non-Batched case. Extrapolating to the Batched case should be straight-forward.
+The FusedMoEModularKernel framework groups these operations into logical components so the implementations of the FusedMoE operation is streamlined. The rest of the document focuses on the Contiguous / Non-Batched case. Extrapolating to the Batched case should be straight-forward.
 
 ## ModularKernel Components:
-ModularKernel splits the FusedMoE operation into 3 parts,
+FusedMoEModularKernel splits the FusedMoE operation into 3 parts,
     1. TopKWeightAndReduce
     2. FusedMoEPrepareAndFinalize
     3. FusedMoEPermuteExpertsUnpermute
@@ -33,15 +29,13 @@ The `FusedMoEModularKernel` acts as a bridge between the `FusedMoEPermuteExperts
 `FusedMoEPermuteAndUnpermute` returns `TopKWeightAndReduceContiguous` / `TopKWeightAndReduceNaiveBatched` / `TopKWeightAndReduceDelegate` if the `FusedMoEPermuteAndUnpermute` implementation needs the `FusedMoEPrepareAndFinalize::finalize()` to do the weight application and reduction.
 
 ### FusedMoEPrepareAndFinalize
-The FusedMoEPrepareAndFinalize abstract class exposes  prepare and finalize functions.
-The prepare function is responsible for input activation Quantization and All2All Dispatch. The finalize function is responsible for invoking the All2All Combine. Additionally the finalize function may or may not do the TopK weight application and reduction (Please refer to the TopKWeightAndReduce section)
+The `FusedMoEPrepareAndFinalize` abstract class exposes `prepare` and `finalize` functions.
+The `prepare` function is responsible for input activation Quantization and All2All Dispatch. The `finalize` function is responsible for invoking the All2All Combine. Additionally the finalize function may or may not do the TopK weight application and reduction (Please refer to the TopKWeightAndReduce section)
 
-> <figure markdown="span">
->   ![](../assets/design/fused_moe_modular_kernel/prepare_and_finalize_blocks.png){ align="center" alt="query" width="100%" }
-> </figure>
+![](../assets/design/fused_moe_modular_kernel/prepare_and_finalize_blocks.png "FusedMoEPrepareAndFinalize Blocks")
 
 ### FusedMoEPermuteExpertsUnpermute
-The FusedMoEPermuteExpertsUnpermute class is where most of the operations happen. The FusedMoEPermuteExpertsUnpermute abstract class exposes a few important functions,
+The `FusedMoEPermuteExpertsUnpermute` class is where most of the operations happen. The `FusedMoEPermuteExpertsUnpermute` abstract class exposes a few important functions,
     - workspace_shapes()
     - finalize_weight_and_reduce_impl()
     - apply()
@@ -57,26 +51,24 @@ The `apply` method is where the implementations should perform
     - Maybe TopK Weight Application + Reduction
 
 #### workspace_shapes()
-The core FusedMoE implementation performs a series of operations. It would be inefficient to create output memory for each of these operations separately. To that effect, the implementations are required to provide 2 workspace shapes that could be used as intermediate buffers between operations. The `workspace_shapes()` function declares these workspace shapes that are allocated in ModularKernel::forward() and passed to the FusedMoEPermuteExpertsUnpermute::apply() function.
+The core FusedMoE implementation performs a series of operations. It would be inefficient to create output memory for each of these operations separately. To that effect, the implementations are required to provide 2 workspace shapes that could be used as intermediate buffers between operations. The `workspace_shapes()` function declares these workspace shapes that are allocated in `FusedMoEModularKernel::forward()` and passed to the `FusedMoEPermuteExpertsUnpermute::apply()` function.
 
 #### finalize_weight_and_reduce_impl()
-It is sometimes efficient to perform TopK weight application and Reduction inside the FusedMoEPermuteExpertsUnpermute::apply() . An example is here . We have a `TopKWeightAndReduce` abstract class to facilitate such implementations. Please refer to the TopKWeightAndReduce section.
+It is sometimes efficient to perform TopK weight application and Reduction inside the `FusedMoEPermuteExpertsUnpermute::apply()`. An example is [here](https://github.com/vllm-project/vllm/pull/20228). We have a `TopKWeightAndReduce` abstract class to facilitate such implementations. Please refer to the TopKWeightAndReduce section.
 `FusedMoEPermuteExpertsUnpermute::finalize_weight_and_reduce_impl()` returns the `TopKWeightAndReduce` object that the implementation wants the `FusedMoEPrepareAndFinalize::finalize()` to use.
 
-> <figure markdown="span">
->   ![](../assets/design/fused_moe_modular_kernel/fused_experts_blocks.png){ align="center" alt="query" width="100%" }
-> </figure>
+![](../assets/design/fused_moe_modular_kernel/fused_experts_blocks.png "FusedMoEPermuteExpertsUnpermute Blocks")
 
 ### FusedMoEModularKernel
-ModularKernel is composed of the `FusedMoEPrepareAndFinalize` and `FusedMoEPermuteExpertsUnpermute` objects.
-FusedMoEModularKernel pseudocode/sketch,
+`FusedMoEModularKernel` is composed of the `FusedMoEPrepareAndFinalize` and `FusedMoEPermuteExpertsUnpermute` objects.
+`FusedMoEModularKernel` pseudocode/sketch,
 
 ```
 FusedMoEModularKernel::__init__(self,
-prepare_finalize: FusedMoEPrepareAndFinalize,
-fused_experts: FusedMoEPermuteExpertsUnpermute):
-self.prepare_finalize = prepare_finalize
-self.fused_experts = fused_experts
+            prepare_finalize: FusedMoEPrepareAndFinalize,
+            fused_experts: FusedMoEPermuteExpertsUnpermute):
+    self.prepare_finalize = prepare_finalize
+    self.fused_experts = fused_experts
 
 FusedMoEModularKernel::forward(self, DP_A):
     Aq, A_scale, _, _, _ = self.prepare_finalize.prepare(DP_A)
@@ -97,64 +89,35 @@ FusedMoEModularKernel::forward(self, DP_A):
 ```
 
 ### FusedMoEPrepareAndFinalize Implementations
-The following table lists the FusedMoEPrepareAndFinalize implementations at the time of writing,
+The following table lists the `FusedMoEPrepareAndFinalize` implementations at the time of writing,
 
-Implementation
-Type
-Comments
-DeepEPHTPrepareAndFinalize
-Contiguous / Non-Batched
-Uses the DeepEP High-Throughput all2all kernels.
-DeepEPLLPrepareAndFinalize
-Batched
-Uses the DeepEP Low-Latency all2all kernels.
-PplxPrepareAndFinalize
-Batched
-Uses the Perplexity all2all kernels.
-FlashInferCutlassMoEPrepareAndFinalize
-Contiguous
+<div dir="ltr" style="margin-left:0pt;" align="left" id="docs-internal-guid-6887d651-7fff-ff80-077c-87b79c465193">
+Implementation | Type | Comments
+-- | -- | --
+DeepEPHTPrepareAndFinalize | Contiguous / Non-Batched | Uses the DeepEP High-Throughput all2all kernels.
+DeepEPLLPrepareAndFinalize | Batched | Uses the DeepEP Low-Latency all2all kernels.
+PplxPrepareAndFinalize | Batched | Uses the Perplexity all2all kernels.
+FlashInferCutlassMoEPrepareAndFinalize | Contiguous |  
+MoEPrepareAndFinalizeNoEP | Contiguous | This implementation is used when there is no EP. i.e. no all2all kernels are invoked.
+BatchedPrepareAndFinalize | Batched | A reference prepare/finalize class that reorganizes the tokens into expert batched format, i.e. E x max_num_tokens x K.(Doesn’t use any all2all kernels. This is primarily used in unit testing)
 
-MoEPrepareAndFinalizeNoEP
-Contiguous
-This implementation is used when there is no EP. i.e. no all2all kernels are invoked.
-BatchedPrepareAndFinalize
-Batched
-A reference prepare/finalize class that reorganizes the tokens into expert batched format, i.e. E x max_num_tokens x K.
-(Doesn’t use any all2all kernels. This is primarily used in unit testing)
+</div>
 
 ### FusedMoEPermuteExpertsUnpermute
-The following table lists the FusedMoEPermuteExpertsUnpermute implementations at the time of writing,
+The following table lists the `FusedMoEPermuteExpertsUnpermute` implementations at the time of writing,
 
-Implementation
-Type
-Comment
-BatchedDeepGemmExperts
-Batched
-Uses the DeepGemm’s Masked Grouped Gemm kernels for the fused_moe operation.
-BatchedTritonExperts
-Batched
-Uses a Triton Kernel for the Batched matmuls.
-BatchedTritonOrDeepGemmExperts
-Batched
-Chooses either the BatchedDeepGemmExperts or BatchedTritonExperts based on environment settings.
-DeepGemmExperts
-Contiguous / Non-Batched
-Uses DeepGemm’s Grouped Gemm kernels for fused_moe operation.
-TritonExperts
-Contiguous / Non-Batched
-Uses a Triton Kernel for fused_moe matmuls.
-TritonOrDeepGemmExperts
-Contiguous / Non-Batched
-Chooses either the DeepGemmExperts or TritonExperts based on fused_moe inputs.
-CutlassExpertsFP8
-Supports both Batched and Contiguous formats
-Uses Cutlass Grouped Gemm implementations for the fp8 matmuls..
-CutlassExpertsFP4
-Supports both Batched and Contiguous formats
-Uses Cutlass Grouped Gemm implementations for the fp4 matmuls.
-FlashInferExperts
-Contiguous
-Uses fused_moe operation from FlashInfer
-NaiveBatchedExperts
-Batched
-Reference Batched Experts implementation. Primarily used in unit tests.
+<div dir="ltr" style="margin-left:0pt;" align="left" id="docs-internal-guid-f00b1b00-7fff-3308-d37f-6576b34e1bae">
+Implementation | Type | Comment
+-- | -- | --
+BatchedDeepGemmExperts | Batched | Uses the DeepGemm’s Masked Grouped Gemm kernels for the fused_moe operation.
+BatchedTritonExperts | Batched | Uses a Triton Kernel for the Batched matmuls.
+BatchedTritonOrDeepGemmExperts | Batched | Chooses either the BatchedDeepGemmExperts or BatchedTritonExperts based on environment settings.
+DeepGemmExperts | Contiguous / Non-Batched | Uses DeepGemm’s Grouped Gemm kernels for fused_moe operation.
+TritonExperts | Contiguous / Non-Batched | Uses a Triton Kernel for fused_moe matmuls.
+TritonOrDeepGemmExperts | Contiguous / Non-Batched | Chooses either the DeepGemmExperts or TritonExperts based on fused_moe inputs.
+CutlassExpertsFP8 | Supports both Batched and Contiguous formats | Uses Cutlass Grouped Gemm implementations for the fp8 matmuls..
+CutlassExpertsFP4 | Supports both Batched and Contiguous formats | Uses Cutlass Grouped Gemm implementations for the fp4 matmuls.
+FlashInferExperts | Contiguous | Uses fused_moe operation from FlashInfer
+NaiveBatchedExperts | Batched | Reference Batched Experts implementation. Primarily used in unit tests.
+
+</div>
