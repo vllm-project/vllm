@@ -289,6 +289,53 @@ def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_hyperclovax_seed_vision(
+    question: str, image_urls: list[str]
+) -> ModelRequestData:
+    model_name = "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B"
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=16384,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    message = {"role": "user", "content": list()}
+    for _image_url in image_urls:
+        message["content"].append(
+            {
+                "type": "image",
+                "image": _image_url,
+                "ocr": "",
+                "lens_keywords": "",
+                "lens_local_keywords": "",
+            }
+        )
+    message["content"].append(
+        {
+            "type": "text",
+            "text": question,
+        }
+    )
+
+    prompt = tokenizer.apply_chat_template(
+        [
+            message,
+        ],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        stop_token_ids=None,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_llava(question: str, image_urls: list[str]) -> ModelRequestData:
     # NOTE: CAUTION! Original Llava models wasn't really trained on multi-image inputs,
     # it will generate poor response for multi-image inputs!
@@ -900,6 +947,7 @@ model_example_map = {
     "h2ovl_chat": load_h2ovl,
     "idefics3": load_idefics3,
     "internvl_chat": load_internvl,
+    "hyperclovax_seed_vision": load_hyperclovax_seed_vision,
     "keye_vl": load_keye_vl,
     "kimi_vl": load_kimi_vl,
     "llava": load_llava,
