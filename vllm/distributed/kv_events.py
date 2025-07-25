@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import queue
 import threading
 import time
+import uuid
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import asdict
@@ -11,11 +13,13 @@ from itertools import count
 from queue import Queue
 from typing import Any, Callable, Optional, Union
 
+import aiohttp
 import msgspec
 import zmq
 
 from vllm.config import KVEventsConfig
 from vllm.logger import init_logger
+from vllm.utils import get_ip
 
 logger = init_logger(__name__)
 
@@ -323,10 +327,169 @@ class ZmqEventPublisher(EventPublisher):
         raise ValueError("Invalid endpoint: must contain 'inproc' or 'tcp'")
 
 
+class HttpEventPublisher(EventPublisher):
+    SHUTDOWN_TIMEOUT: float = 1.0
+    MAX_RETRIES: int = 3
+    RETRY_DELAY: float = 1.0
+
+    def __init__(
+        self,
+        data_parallel_rank: int,
+        endpoint: str = "",
+        max_queue_size: int = 100_000,
+        port: int = 8080,
+        **kwargs,
+    ) -> None:
+        # Storage
+        super().__init__(data_parallel_rank)
+        self._event_queue: asyncio.Queue[Optional[EventBatch]] = asyncio.Queue(
+            maxsize=max_queue_size)
+        self._publisher_task: Optional[asyncio.Task] = None
+        self._init_task: Optional[asyncio.Task] = None
+
+        # HTTP endpoint metadata
+        self._endpoint = endpoint
+        self.port = port
+        self.ip = get_ip()
+
+        self.create_stamp = str(int(time.time()))
+        self.unique_id = uuid.uuid4().hex
+        self.instance_id = self.ip + ":" + str(
+            self.port) + ":" + self.create_stamp + self.unique_id
+
+        # Thread
+        self._running = True
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run_async_tasks,
+                                        daemon=True)
+        self._thread.start()
+
+    def _run_async_tasks(self):
+        asyncio.set_event_loop(self._loop)
+        self._init_task = self._loop.create_task(self._heartbeat_loop())
+        self._publisher_task = self._loop.create_task(self._publisher_loop())
+        self._loop.run_forever()
+
+    def publish(self, events: EventBatch) -> None:
+        if not self._running:
+            raise RuntimeError("Publisher is closed")
+
+        try:
+            self._loop.call_soon_threadsafe(
+                lambda: self._event_queue.put_nowait(events))
+        except asyncio.QueueFull:
+            logger.warning("Event queue full, dropping events")
+
+    async def _heartbeat_loop(self):
+        """Periodically register this instance to signal liveness."""
+        async with aiohttp.ClientSession() as session:
+            init_dict = {
+                "ip": self.ip,
+                "port": self.port,
+                "instance_id": self.instance_id,
+            }
+            payload = msgspec.json.encode(init_dict)
+            while self._running:
+                try:
+                    async with session.post(
+                            self._endpoint + "/v1/kv/init",
+                            data=payload,
+                            headers={"Content-Type": "application/json"},
+                            timeout=5.0,
+                    ) as response:
+                        response.raise_for_status()
+                except Exception as e:
+                    logger.exception("Error in init loop: %s", e)
+                await asyncio.sleep(5)
+
+    async def _post_event(self, session, event, endpoint):
+        """Publish a single event to the endpoint with retry handling."""
+        event_dict = {f: getattr(event, f) for f in event.__struct_fields__}
+        event_dict["instance_id"] = self.instance_id
+        payload = msgspec.json.encode(event_dict)
+
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            try:
+                async with session.post(
+                        endpoint,
+                        data=payload,
+                        headers={"Content-Type": "application/json"},
+                        timeout=10,
+                ) as response:
+                    if 200 <= response.status < 300:
+                        return
+                    elif 500 <= response.status < 600:
+                        raise aiohttp.ClientResponseError(
+                            response.request_info,
+                            response.history,
+                            status=response.status)
+                    else:
+                        logger.warning(
+                            "Client error, not retrying (status=%d, body=%s)",
+                            response.status,
+                            await response.text(),
+                        )
+                        return
+
+            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                if attempt == self.MAX_RETRIES:
+                    logger.exception("Publish retries exhausted: %s", e)
+                    return
+                await asyncio.sleep(self.RETRY_DELAY)
+            except Exception as e:
+                logger.exception("Unexpected error while publishing event: %s",
+                                 e)
+                return
+
+    async def _publisher_loop(self):
+        """Background thread that processes the event queue."""
+        async with aiohttp.ClientSession() as session:
+            while self._running or not self._event_queue.empty():
+                try:
+                    events = await asyncio.wait_for(self._event_queue.get(),
+                                                    timeout=0.1)
+                    if events is None:
+                        break
+                    for event in events.events:
+                        event_type = event.__class__.__name__
+
+                        if event_type == "BlockStored":
+                            endpoint = self._endpoint + "/v1/kv/create"
+                        elif event_type == "BlockRemoved":
+                            endpoint = self._endpoint + "/v1/kv/delete"
+
+                        asyncio.create_task(
+                            self._post_event(session, event, endpoint))
+
+                except asyncio.TimeoutError:
+                    continue
+                except Exception as e:
+                    logger.exception("Error in publisher loop: %s", e)
+                    await asyncio.sleep(0.1)
+
+    def shutdown(self) -> None:
+        """Stop the publisher thread and clean up resources."""
+        if not self._running:
+            return
+
+        self._running = False
+        self._loop.call_soon_threadsafe(self._loop.stop)
+
+        if self._thread.is_alive():
+            self._thread.join(timeout=self.SHUTDOWN_TIMEOUT)
+
+        remaining = self._event_queue.qsize()
+
+        if remaining > 0:
+            logger.warning("Dropping %s unprocessed events during shutdown",
+                           remaining)
+
+
 class EventPublisherFactory:
     _registry: dict[str, Callable[..., EventPublisher]] = {
         "null": NullEventPublisher,
         "zmq": ZmqEventPublisher,
+        "http": HttpEventPublisher,
     }
 
     @classmethod
