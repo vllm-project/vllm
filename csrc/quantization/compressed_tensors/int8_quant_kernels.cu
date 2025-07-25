@@ -113,7 +113,13 @@ __global__ void static_scaled_int8_quant_kernel(
   const int stride = blockDim.x;
   const int64_t token_idx = blockIdx.x;
   const float scale = *scale_ptr;
-  const float inv_s = 1.0f / scale;
+#ifndef USE_ROCM
+  // Fast reciprocal + one Newton–Raphson step
+  float inv_s = __frcp_rn(scale);
+  inv_s *= (2.f - scale * inv_s);
+#else
+  float inv_s = 1.0f / scale;
+#endif
 
   // Must be performed using 64-bit math to avoid integer overflow.
   const scalar_t* row_in = input + token_idx * hidden_size;
