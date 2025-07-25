@@ -39,6 +39,7 @@ from vllm.plugins import load_general_plugins
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
+from vllm.transformers_utils.config import maybe_override_with_speculators_configs
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
 
@@ -983,8 +984,18 @@ class EngineArgs:
         provided as a JSON string input via CLI arguments or directly as a
         dictionary from the engine.
         """
+
+        from vllm.transformers_utils.config import maybe_fetch_verifier_config
+
         if self.speculative_config is None:
-            return None
+            # TODO: we need a condition here
+            hf_config = maybe_fetch_verifier_config(self.hf_config_path or self.model, runner="draft")
+            # We create one since we dont create one
+            self.speculative_config = {}
+            self.speculative_config["num_speculative_tokens"] = hf_config.num_lookahead_tokens
+            self.speculative_config["model"] = self.model
+            self.speculative_config["method"] = hf_config.method
+            # return None
 
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine

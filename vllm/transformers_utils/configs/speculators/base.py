@@ -17,6 +17,7 @@ __all__ = ["SpeculatorsConfig"]
 
 
 class SpeculatorsConfig(PretrainedConfig):
+    model_type = "speculators"
 
     def __init__(self, config=None, **kwargs):
         super().__init__(**kwargs)
@@ -66,6 +67,8 @@ class SpeculatorsConfig(PretrainedConfig):
 
         # Update method specific defaults
         spec_class_instance.update_defaults(vllm_config=vllm_config)
+        spec_class_instance.ensure_transformer_architectures(
+            vllm_config=vllm_config)
         # Ensure all required field are present
         spec_class_instance.preserve_additional_fields(vllm_config=vllm_config)
         # Create using proper vllm_config
@@ -153,13 +156,14 @@ class SpeculatorsConfig(PretrainedConfig):
         """
         speculators_model_type = self.config["speculators_model_type"]
         transformer_config = self.config["transformer_layer_config"]
-
+        speculators_cfg = self.config.get("speculators_config", {})
         # Build base vLLM config
         vllm_config = {
             "model": transformer_config,
             "method":
             speculators_model_type,  # Use speculators_model_type as method
             "num_lookahead_tokens": num_lookahead_tokens,
+            "target_model": speculators_cfg["verifier"]["name_or_path"]
         }
         return vllm_config
 

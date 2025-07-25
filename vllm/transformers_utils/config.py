@@ -40,6 +40,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              NemotronConfig, NVLM_D_Config,
                                              OvisConfig, RWConfig,
                                              SkyworkR1VChatConfig, SolarConfig,
+                                             SpeculatorsConfig,
                                              Telechat2Config, UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
@@ -87,6 +88,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "mlp_speculator": MLPSpeculatorConfig,
     "medusa": MedusaConfig,
     "eagle": EAGLEConfig,
+    "speculators": SpeculatorsConfig,
     "exaone": ExaoneConfig,
     "exaone4": Exaone4Config,
     "minimax_text_01": MiniMaxText01Config,
@@ -299,6 +301,33 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
     return config
 
 
+def maybe_override_with_speculators_configs(model, tokenizer):
+    config_dict, _ = PretrainedConfig.get_config_dict(
+        model,
+        token=_get_hf_token(),
+    )
+    spec_config = config_dict["speculators_config"]
+    # Return the target model
+    if spec_config is not None:
+        model = tokenizer = spec_config["verifier"]["name_or_path"]
+    return model, tokenizer
+
+
+def maybe_fetch_verifier_config(config, runner):
+    if isinstance(config, str):
+        config = SpeculatorsConfig.from_pretrained(
+            config,
+            token=_get_hf_token(),
+        )
+
+    if runner != "draft":
+        config = AutoConfig.from_pretrained(
+            config.target_model,
+            token=_get_hf_token(),
+        )
+    return config
+
+
 def get_config(
     model: Union[str, Path],
     trust_remote_code: bool,
@@ -308,6 +337,7 @@ def get_config(
     hf_overrides_kw: Optional[dict[str, Any]] = None,
     hf_overrides_fn: Optional[Callable[[PretrainedConfig],
                                        PretrainedConfig]] = None,
+    runner: Optional[str] = None,
     **kwargs,
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
@@ -357,9 +387,9 @@ def get_config(
             token=_get_hf_token(),
             **kwargs,
         )
-
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
+        model_type = "speculators"
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
             config = config_class.from_pretrained(
@@ -369,6 +399,9 @@ def get_config(
                 token=_get_hf_token(),
                 **kwargs,
             )
+            if model_type == "speculators":
+                config = maybe_fetch_verifier_config(config, runner)
+            return config
         else:
             try:
                 config = AutoConfig.from_pretrained(
