@@ -16,7 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, Optional, TypedDict, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 import regex as re
 import torch
@@ -117,13 +117,19 @@ class Phi3VImagePixelInputs(TensorSchema):
     image_sizes: Annotated[Optional[torch.Tensor], TensorShape("bn", 2)]
 
 
-class Phi3VImageEmbeddingInputs(TypedDict):
-    type: Literal["image_embeds"]
-    data: Union[torch.Tensor, list[torch.Tensor]]
-    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
-
-    `hidden_size` must match the hidden size of language model backbone.
+class Phi3VImageEmbeddingInputs(TensorSchema):
     """
+    Dimensions:
+        - b: Batch size
+        - n: Number of images
+        - f: Image feature size (e.g., number of tokens per image)
+        - h: Hidden size (must match language model backbone)
+    """
+    type: Literal["image_embeds"] = "image_embeds"
+    data: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bn", "f", "h"),
+    ]
 
 
 Phi3VImageInputs = Union[Phi3VImagePixelInputs, Phi3VImageEmbeddingInputs]
