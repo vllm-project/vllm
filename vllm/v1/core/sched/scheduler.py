@@ -8,6 +8,7 @@ import time
 from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any, Optional, Union
+from enum import Enum
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
@@ -37,6 +38,10 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
 
+class ScheduleStatus(Enum):
+    SUCCESS = 0
+    CONTINUE = 1
+    EXIT = 2
 
 class Scheduler(SchedulerInterface):
 
@@ -268,7 +273,10 @@ class Scheduler(SchedulerInterface):
                             no_schedule_running_reqs,
                             key=lambda r: (r.priority, r.arrival_time),
                         )
-                        self.running.remove(preempted_req)
+                        preempted_index = self.running.index(preempted_req)
+                        if preempted_index <= req_index:
+                            req_index -= 1
+                        self.running.pop(preempted_index)
                     else:
                         preempted_req = self.running.pop()
 
@@ -281,13 +289,13 @@ class Scheduler(SchedulerInterface):
                                 self.running.append(request)
                             # The request is the last one with the lowest priority.
                             # Exit the scheduling loop.
-                            can_schedule = 0
+                            schedule_status = ScheduleStatus.EXIT
                             break
                         # Preempt the request and proceed to iteratively schedule subsequent higher-priority requests.
                         self._preempt_request(request)
                         preempted_reqs.append(request)
                         # Continue to schedule the subsequent requests with higher priority
-                        can_schedule = 1
+                        schedule_status = ScheduleStatus.CONTINUE
                         break
                     else:
                         self._preempt_request(preempted_req)
@@ -295,12 +303,12 @@ class Scheduler(SchedulerInterface):
   
                 else:
                     # The request can be scheduled.
-                    can_schedule = 2
+                    schedule_status = ScheduleStatus.SUCCESS
                     break
 
-            if can_schedule == 0:
+            if schedule_status == ScheduleStatus.EXIT:
                 break
-            elif can_schedule == 1:
+            elif schedule_status == ScheduleStatus.CONTINUE:
                 req_index += 1
                 continue
             assert new_blocks is not None

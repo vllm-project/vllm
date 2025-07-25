@@ -1886,7 +1886,6 @@ def test_priority_scheduling_preemption_victim_no_scheduled():
     for request in high_priority_requests:
         scheduler.add_request(request)
 
-    # After scheduling, transfer the two high-priority requests from the waiting queue to the running queue.
     # the IDs of the requests in the running queue are: 1, 2, 3, 4, 5.
     # At this time, 3+2 blocks have been allocated, and 3 available blocks remain.
     output = scheduler.schedule()
@@ -1906,8 +1905,9 @@ def test_priority_scheduling_preemption_victim_no_scheduled():
         pooler_output=[],
     )
     scheduler.update_from_output(output, model_output)
-    # When allocating resources to the fourth request, preemption is triggered.
-    # At this time, the request with the lowest priority (request.id = 5) will be preempted, freeing up 1 blocks,
+
+    # At this time, the request with the lowest priority (request.id = 5) 
+    # will be preempted, freeing up 1 blocks.
     # which exactly meets the resource allocation requirements for request.id = 4
     output = scheduler.schedule()
 
@@ -1925,8 +1925,9 @@ def test_priority_scheduling_preemption_victim_no_scheduled():
 
 
 def test_priority_scheduling_preemption_victim_subsequent_high():
-    """Test that when the current request has the lowest priority and is not the last request,
-    it is preempted to allow scheduling of subsequent higher-priority requests."""
+    """Test that when the current request has the lowest priority
+    and is not the last request,it is preempted to allow scheduling
+    of subsequent higher-priority requests."""
     scheduler = create_scheduler_with_priority(
         max_num_batched_tokens=200,
         num_blocks=7,
@@ -1971,7 +1972,6 @@ def test_priority_scheduling_preemption_victim_subsequent_high():
     for request in high_priority_requests:
         scheduler.add_request(request)
 
-    # After scheduling, transfer the high-priority request from the waiting queue to the running queue.
     # the IDs of the requests in the running queue are: 1, 2, 3, 4.
     # At this time, 3+1 blocks have been allocated, and 2 available blocks remain.
     output = scheduler.schedule()
@@ -1991,8 +1991,9 @@ def test_priority_scheduling_preemption_victim_subsequent_high():
         pooler_output=[],
     )
     scheduler.update_from_output(output, model_output)
-    # When allocating resources to the fourth request, preemption is triggered.
-    # At this time, the request with the lowest priority (request.id = 3) will be preempted, freeing up 1 blocks,
+
+    # At this time, the request with the lowest priority (request.id = 3) 
+    # will be preempted, freeing up 1 blocks.
     # which exactly meets the resource allocation requirements for request.id = 4.
     output = scheduler.schedule()
 
