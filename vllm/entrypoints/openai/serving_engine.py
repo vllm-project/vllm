@@ -880,7 +880,10 @@ class OpenAIServing:
         _chat_template_kwargs.update(chat_template_kwargs or {})
 
         request_prompt: Union[str, list[int]]
-        if isinstance(tokenizer, MistralTokenizer):
+
+        if tokenizer is None:
+            request_prompt = "placeholder"
+        elif isinstance(tokenizer, MistralTokenizer):
             request_prompt = apply_mistral_chat_template(
                 tokenizer,
                 messages=messages,
@@ -911,7 +914,7 @@ class OpenAIServing:
                 request=request)
 
         if tokenizer is None:
-            prompt_inputs = TextTokensPrompt(prompt="placeholder",
+            prompt_inputs = TextTokensPrompt(prompt=request_prompt,
                                              prompt_token_ids=[1])
 
         elif isinstance(request_prompt, str):
