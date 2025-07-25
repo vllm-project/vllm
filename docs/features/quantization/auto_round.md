@@ -96,7 +96,6 @@ if __name__ == '__main__':
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-
 # Acknowledgement
 
 Special thanks to open-source low precision libraries such as AutoGPTQ, AutoAWQ, GPTQModel, Triton, Marlin, and
