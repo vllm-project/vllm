@@ -914,9 +914,12 @@ class OpenAIServing:
                 request=request)
 
         if tokenizer is None:
+            assert isinstance(request_prompt, str), (
+                "Prompt has to be a string", \
+                "when the tokenizer is not initialised"
+            )
             prompt_inputs = TextTokensPrompt(prompt=request_prompt,
                                              prompt_token_ids=[1])
-
         elif isinstance(request_prompt, str):
             prompt_inputs = await self._tokenize_prompt_input_async(
                 request,
