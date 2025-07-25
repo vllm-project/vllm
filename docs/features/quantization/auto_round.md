@@ -75,7 +75,7 @@ autoround.quantize_and_save(output_dir, format="auto_round")
 
 ## Running a quantized model with vLLM
 
-An example code to run auto-round format in vLLM
+Here is some example code to run auto-round format in vLLM:
 
 ```python
 if __name__ == '__main__':
