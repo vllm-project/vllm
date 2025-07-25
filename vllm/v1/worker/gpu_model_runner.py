@@ -318,6 +318,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
 
+        self.logits_indices = None
+        if envs.VLLM_COMPUTE_PADDED_LOGITS_INDICES:
+            self.logits_indices = torch.zeros(self.max_num_tokens,
+                                              dtype=torch.int32,
+                                              device=self.device)
+
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
         Update the order of requests in the batch based on the attention
@@ -1364,6 +1370,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
          spec_decode_metadata, num_scheduled_tokens_np,
          spec_decode_common_attn_metadata) = (
              self._prepare_inputs(scheduler_output))
+
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -1436,6 +1443,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # compiled with full CUDA graphs, we have to skip them entirely.
         skip_cuda_graphs = self.full_cuda_graph and not attention_cuda_graphs
 
+        logits_indices_padded = None
+        if envs.VLLM_COMPUTE_PADDED_LOGITS_INDICES:
+            assert self.logits_indices is not None
+            num_logits = logits_indices.shape[0]
+            self.logits_indices[:num_logits].copy_(logits_indices)
+            # Ensure we keep duplicates instead of zeros
+            self.logits_indices[num_logits:].fill_(logits_indices[-1].item())
+            if (self.use_cuda_graph
+                    and num_logits <= self.cudagraph_batch_sizes[-1]):
+                # Use piecewise CUDA graphs.
+                # Add padding to the batch size.
+                num_logits_padded = self.vllm_config.pad_for_cudagraph(
+                    num_logits)
+            else:
+                num_logits_padded = num_logits
+            logits_indices_padded = self.logits_indices[:num_logits_padded]
+
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(
@@ -1444,6 +1468,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
                 skip_cuda_graphs=skip_cuda_graphs,
+                logits_indices_padded=logits_indices_padded,
         ):
             self.maybe_setup_kv_connector(scheduler_output)
 
