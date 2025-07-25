@@ -44,6 +44,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.outputs import (PoolingRequestOutput, RequestOutput,
                           RequestOutputFactory)
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -1814,7 +1815,21 @@ class LLMEngine:
                     # TPOTs.
                     latency = seq_group.get_last_token_latency()
                     # last_token_time is set only for the last step so take avg
-                    num_outputs = scheduler_outputs.num_lookahead_slots + 1
+                    if current_platform.is_tt():
+                        # for the current tt model runner, the number of steps
+                        # executed is not always the same as the number of
+                        # lookahead slots but rather the number of balance
+                        # tokens left to be generated.
+                        assert len(
+                            seq_group.seqs
+                        ) == 1, "Only one seq per group is allowed for TT"
+                        total_tokens = seq_group.seqs[0].get_output_len() - 1
+                        max_steps = scheduler_outputs.num_lookahead_slots + 1
+                        num_outputs = (total_tokens %
+                                       max_steps if total_tokens %
+                                       max_steps != 0 else max_steps)
+                    else:
+                        num_outputs = scheduler_outputs.num_lookahead_slots + 1
                     latency /= num_outputs
                     time_per_output_tokens_iter.append(latency)
                     if seq_group.state.current_step == 0:
