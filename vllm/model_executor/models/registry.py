@@ -549,11 +549,16 @@ class _ModelRegistry:
         *,
         model_config: Optional[ModelConfig],
     ) -> str:
+        # model_config is required for further normalization
         if model_config is None:
             return architecture
 
-        # Force transformers impl
-        if model_config.model_impl == ModelImpl.TRANSFORMERS:
+        # Use Transformers backend architecture if the config specifies it
+        # or if the architecture is not in the registry and the config allows
+        # for Transformers backend fallback behaviour
+        if (model_config.model_impl == ModelImpl.TRANSFORMERS
+                or model_config.model_impl == ModelImpl.AUTO
+                and architecture not in self.models):
             return self._resolve_transformers(architecture, model_config)
 
         if architecture in self.models:
@@ -565,12 +570,6 @@ class _ModelRegistry:
                     and model_config.convert_type == default_convert_type
                     and architecture.endswith(suffix)):
                 return architecture.replace(suffix, "ForCausalLM")
-
-        # Fallback to transformers impl
-        if architecture not in self.models:
-            return self._resolve_transformers(architecture, model_config)
-
-        return architecture
 
     def _normalize_archs(
         self,
