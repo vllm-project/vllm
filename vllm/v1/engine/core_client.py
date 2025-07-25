@@ -970,7 +970,12 @@ class DPAsyncMPClient(AsyncMPClient):
                     counts, wave, running = msgspec.msgpack.decode(buf)
                     self.current_wave = wave
                     self.engines_running = running
-                    self.lb_engines = counts[count_slice]
+                    if counts is not None:
+                        sliced_counts = counts[count_slice]
+                        self.lb_engines = sliced_counts
+                        #TODO TBD whether to keep this debug log
+                        logger.debug("Received counts: %s (%s)",
+                                     sliced_counts, count_slice)
 
         resources.stats_update_task = asyncio.create_task(
             run_engine_stats_update_task())
@@ -1019,27 +1024,26 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     def get_core_engine_for_request(
             self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
+        current_counts = self.lb_engines
         if (eng_index := request.data_parallel_rank) is None:
-            if not self.lb_engines:
+            if not current_counts:
                 return self.core_engine
             # TODO use P2C alg for larger DP sizes
-            num_engines = len(self.lb_engines)
-            min_counts = [sys.maxsize, sys.maxsize]
+            num_engines = len(current_counts)
+            min_score = sys.maxsize
             eng_index = 0
             for i in range(num_engines):
                 # Start from client_index to help with balancing when engines
                 # are empty.
                 idx = (self.client_index + i) % num_engines
-                counts = self.lb_engines[idx]
-                if counts < min_counts:
-                    min_counts = counts
+                waiting, running = current_counts[idx]
+                score = waiting * 4 + running
+                if score < min_score:
+                    min_score = score
                     eng_index = idx
-            # Adjust local counts for better balancing between stats updates
-            # from the coordinator (which happen every 100ms).
-            if min_counts[0]:
-                min_counts[0] += 1
-            else:
-                min_counts[1] += 1
+            # Increment local waiting count for better balancing between stats
+            # updates from the coordinator (which happen every 100ms).
+            current_counts[eng_index][0] += 1
 
         chosen_engine = self.core_engines[eng_index]
         # Record which engine is chosen for this request, to handle aborts.
