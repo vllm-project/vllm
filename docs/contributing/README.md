@@ -98,7 +98,7 @@ For additional features and advanced configurations, refer to the official [MkDo
 ??? console "Commands"
 
     ```bash
-    pip install -r requirements/dev.txt
+    pip install -r requirements/common.txt -r requirements/dev.txt
 
     # Linting, formatting and static type checking
     pre-commit install --hook-type pre-commit --hook-type commit-msg
