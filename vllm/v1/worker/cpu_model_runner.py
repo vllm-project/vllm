@@ -8,7 +8,6 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.models.interfaces import has_step_pooler
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
@@ -46,16 +45,14 @@ class CPUModelRunner(GPUModelRunner):
             if k.endswith("_cpu_tensor") and isinstance(v, torch.Tensor):
                 replace_tensor(self.input_batch, k, k[:-11])
 
-        for k, v in vars(self.input_batch.block_table).items():
-            if k.endswith("_cpu") and isinstance(v, torch.Tensor):
-                replace_tensor(self.input_batch.block_table, k, k[:-4])
+        for block_table in self.input_batch.block_table.block_tables:
+            for k, v in vars(block_table).items():
+                if k.endswith("_cpu") and isinstance(v, torch.Tensor):
+                    replace_tensor(block_table, k, k[:-4])
 
-    def load_model(self) -> None:
+    def load_model(self, eep_scale_up: bool = False) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
         self.model = get_model(vllm_config=self.vllm_config)
-
-        if has_step_pooler(self.model):
-            self.input_batch.logits_processing_needs_token_ids = True
 
         if self.lora_config:
             self.model = self.load_lora_model(self.model, self.model_config,
