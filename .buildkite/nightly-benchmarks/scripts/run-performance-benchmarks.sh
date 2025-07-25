@@ -329,6 +329,9 @@ run_serving_tests() {
     qps_list=$(echo "$params" | jq -r '.qps_list')
     qps_list=$(echo "$qps_list" | jq -r '.[] | @sh')
     echo "Running over qps list $qps_list"
+    max_concurrency_list=$(echo "$params" | jq -r '.max_concurrency_list')
+    max_concurrency_list=$(echo "$max_concurrency_list" | jq -r '.[] | @sh')
+    echo "Final Running over max concurrency list $max_concurrency_list"
 
     # check if there is enough resources to run the test
     tp=$(echo "$server_params" | jq -r '.tensor_parallel_size')
@@ -390,35 +393,39 @@ run_serving_tests() {
         echo "now qps is $qps"
       fi
 
-      new_test_name=$test_name"_qps_"$qps
+      # iterate over different max_concurrency
+      for max_concurrency in $max_concurrency_list; do
+        new_test_name=$test_name"_qps_"$qps"_users_"$max_concurrency
+        echo " new test name $new_test_name"
+        # pass the tensor parallel size to the client so that it can be displayed
+        # on the benchmark dashboard
+        client_command="vllm bench serve \
+          --save-result \
+          --result-dir $RESULTS_FOLDER \
+          --result-filename ${new_test_name}.json \
+          --request-rate $qps \
+          --max-concurrency $max_concurrency \
+          --metadata "tensor_parallel_size=$tp" \
+          $client_args $client_remote_args "
 
-      # pass the tensor parallel size to the client so that it can be displayed
-      # on the benchmark dashboard
-      client_command="vllm bench serve \
-        --save-result \
-        --result-dir $RESULTS_FOLDER \
-        --result-filename ${new_test_name}.json \
-        --request-rate $qps \
-        --metadata "tensor_parallel_size=$tp" \
-        $client_args $client_remote_args "
+        echo "Running test case $test_name with qps $qps"
+        echo "Client command: $client_command"
 
-      echo "Running test case $test_name with qps $qps"
-      echo "Client command: $client_command"
+        bash -c "$client_command"
 
-      bash -c "$client_command"
+        # record the benchmarking commands
+        jq_output=$(jq -n \
+          --arg server "$server_command" \
+          --arg client "$client_command" \
+          --arg gpu "$gpu_type" \
+          '{
+            server_command: $server,
+            client_command: $client,
+            gpu_type: $gpu
+          }')
+        echo "$jq_output" >"$RESULTS_FOLDER/${new_test_name}.commands"
 
-      # record the benchmarking commands
-      jq_output=$(jq -n \
-        --arg server "$server_command" \
-        --arg client "$client_command" \
-        --arg gpu "$gpu_type" \
-        '{
-          server_command: $server,
-          client_command: $client,
-          gpu_type: $gpu
-        }')
-      echo "$jq_output" >"$RESULTS_FOLDER/${new_test_name}.commands"
-
+      done
     done
 
     # clean up
