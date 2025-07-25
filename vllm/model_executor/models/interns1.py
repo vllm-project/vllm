@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# adapted from https://huggingface.co/OpenGVLab/InternVL2-4B/blob/main/modeling_internvl_chat.py
 # --------------------------------------------------------
-# InternVL
+# InternS1
 # Copyright (c) 2023 OpenGVLab
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
@@ -54,7 +53,7 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
-class InternVLImagePixelInputs(TypedDict):
+class InternS1ImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     pixel_values_flat: torch.Tensor
     """
@@ -66,7 +65,7 @@ class InternVLImagePixelInputs(TypedDict):
     """Shape: `(batch_size * num_images)`"""
 
 
-class InternVLImageEmbeddingInputs(TypedDict):
+class InternS1ImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: Union[torch.Tensor, list[torch.Tensor]]
     """ 
@@ -77,11 +76,11 @@ class InternVLImageEmbeddingInputs(TypedDict):
     """
 
 
-InternVLImageInputs = Union[InternVLImagePixelInputs,
-                            InternVLImageEmbeddingInputs]
+InternS1ImageInputs = Union[InternS1ImagePixelInputs,
+                            InternS1ImageEmbeddingInputs]
 
 
-class InternVLVideoPixelInputs(TypedDict):
+class InternS1VideoPixelInputs(TypedDict):
     type: Literal["pixel_values_videos"]
     pixel_values_flat: torch.Tensor
     """
@@ -93,7 +92,7 @@ class InternVLVideoPixelInputs(TypedDict):
     """Shape: `(batch_size * num_images)`"""
 
 
-class InternVLVideoEmbeddingInputs(TypedDict):
+class InternS1VideoEmbeddingInputs(TypedDict):
     type: Literal["video_embeds"]
     data: Union[torch.Tensor, list[torch.Tensor]]
     """ 
@@ -104,11 +103,11 @@ class InternVLVideoEmbeddingInputs(TypedDict):
     """
 
 
-InternVLVideoInputs = Union[InternVLVideoPixelInputs,
-                            InternVLVideoEmbeddingInputs]
+InternS1VideoInputs = Union[InternS1VideoPixelInputs,
+                            InternS1VideoEmbeddingInputs]
 
 
-def resolve_internvl_min_max_num(
+def resolve_interns1_min_max_num(
     min_dynamic_patch: int,
     max_dynamic_patch: int,
     dynamic_image_size: bool,
@@ -123,7 +122,7 @@ def resolve_internvl_min_max_num(
     return min_dynamic_patch, max_dynamic_patch
 
 
-def get_internvl_target_ratios(
+def get_interns1_target_ratios(
     min_num: int,
     max_num: int,
 ) -> list[tuple[int, int]]:
@@ -139,7 +138,7 @@ def resolve_min_max_num(
         dynamic_image_size: bool,
         use_thumbnail: bool,
     ) -> tuple[int, int]:
-        return resolve_internvl_min_max_num(
+        return resolve_interns1_min_max_num(
             min_dynamic_patch=min_dynamic_patch,
             max_dynamic_patch=max_dynamic_patch,
             dynamic_image_size=dynamic_image_size,
@@ -194,7 +193,7 @@ class BaseInternS1ProcessingInfo(BaseProcessingInfo):
                                                dynamic_image_size,
                                                use_thumbnail=use_thumbnail)
 
-        return get_internvl_target_ratios(min_num, max_num)
+        return get_interns1_target_ratios(min_num, max_num)
     
     def get_image_size_with_most_features(self) -> ImageSize:
         processor = self.get_hf_processor()
@@ -236,8 +235,8 @@ class BaseInternS1ProcessingInfo(BaseProcessingInfo):
 _I = TypeVar("_I", bound=BaseInternS1ProcessingInfo)
 
 
-class BaseInternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
-    """Basic image-only DummyInputsBuilder for InternVL-style models."""
+class BaseInternS1DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
+    """Basic image-only DummyInputsBuilder for InternS1-style models."""
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
@@ -261,8 +260,8 @@ class BaseInternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         }
 
 
-class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
-    """ Basic image-only MultiModalProcessor for InternVL-style models."""
+class BaseInternS1MultiModalProcessor(BaseMultiModalProcessor[_I]):
+    """ Basic image-only MultiModalProcessor for InternS1-style models."""
 
     def _call_hf_processor(
         self,
@@ -323,7 +322,7 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         else:
             image_num_patches = []
 
-        def get_replacement_internvl(item_idx: int):
+        def get_replacement(item_idx: int):
             images = mm_items.get_items(
                 "image", (ImageEmbeddingItems, ImageProcessorItems))
 
@@ -346,14 +345,14 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         return [
             PromptReplacement(
                 modality="image",
-                target="<image>",
-                replacement=get_replacement_internvl,
+                target="<IMG_CONTEXT>",
+                replacement=get_replacement,
             )
         ]
 
 
 class InternS1ProcessingInfo(BaseInternS1ProcessingInfo):
-    """InternVL ProcessingInfo extended for video processing"""
+    """InternS1 ProcessingInfo extended for video processing"""
 
     @property
     def image_token_id(self) -> int:
@@ -369,8 +368,6 @@ class InternS1ProcessingInfo(BaseInternS1ProcessingInfo):
     
     @property
     def supports_video(self) -> bool:
-        return False
-        # TODO
         return self.video_token_id is not None
 
     @property
@@ -427,8 +424,8 @@ class InternS1ProcessingInfo(BaseInternS1ProcessingInfo):
         )
 
 class InternS1DummyInputsBuilder(
-        BaseInternVLDummyInputsBuilder[InternS1ProcessingInfo]):
-    """InternVL DummyInputsBuilder extended for video support"""
+        BaseInternS1DummyInputsBuilder[InternS1ProcessingInfo]):
+    """InternS1 DummyInputsBuilder extended for video support"""
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_videos = mm_counts.get("video", 0)
@@ -461,8 +458,8 @@ class InternS1DummyInputsBuilder(
 
 
 class InternS1MultiModalProcessor(
-        BaseInternVLMultiModalProcessor[InternS1ProcessingInfo]):
-    """InternVL MultiModalProcessor extended for video support"""
+        BaseInternS1MultiModalProcessor[InternS1ProcessingInfo]):
+    """InternS1 MultiModalProcessor extended for video support"""
 
     def _call_hf_processor(
         self,
@@ -522,7 +519,7 @@ class InternS1MultiModalProcessor(
             video_num_patches = []
 
         # !! TODO
-        # def get_video_replacement_internvl(item_idx: int):
+        # def get_video_replacement(item_idx: int):
         #     # TODO: find `hf_processor.num_image_token`
         #     feature_size = hf_processor.num_image_token
         #     num_patches = video_num_patches[item_idx]
@@ -539,7 +536,7 @@ class InternS1MultiModalProcessor(
         #         PromptReplacement(
         #             modality="video",
         #             target="<video>",
-        #             replacement=get_video_replacement_internvl,
+        #             replacement=get_video_replacement,
         #         ))
         return prompt_repl
 
@@ -670,7 +667,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
         return data
 
     def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[InternVLImageInputs]:
+            self, **kwargs: object) -> Optional[InternS1ImageInputs]:
         pixel_values_flat = kwargs.pop("pixel_values_flat", None)
         image_num_patches = kwargs.pop("image_num_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -683,7 +680,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
 
-            return InternVLImageEmbeddingInputs(
+            return InternS1ImageEmbeddingInputs(
                 type="image_embeds",
                 data=flatten_bn(image_embeds),
             )
@@ -704,7 +701,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
             pixel_values_flat = flatten_bn(pixel_values_flat, concat=True)
             image_num_patches = flatten_bn(image_num_patches, concat=True)
 
-            return InternVLImagePixelInputs(
+            return InternS1ImagePixelInputs(
                 type="pixel_values",
                 pixel_values_flat=self._validate_pixel_values(
                     pixel_values_flat),
@@ -714,7 +711,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
         raise AssertionError("This line should be unreachable.")
 
     def _parse_and_validate_video_input(
-            self, **kwargs: object) -> Optional[InternVLVideoPixelInputs]:
+            self, **kwargs: object) -> Optional[InternS1VideoPixelInputs]:
         pixel_values_flat_video = kwargs.pop("pixel_values_flat_video", None)
         video_num_patches = kwargs.pop("video_num_patches", None)
         video_embeds = kwargs.pop("image_embeds", None)
@@ -727,7 +724,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
                 raise ValueError("Incorrect type of video embeddings. "
                                  f"Got type: {type(video_embeds)}")
 
-            return InternVLImageEmbeddingInputs(
+            return InternS1ImageEmbeddingInputs(
                 type="video_embeds",
                 data=flatten_bn(video_embeds),
             )
@@ -749,7 +746,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
                                                  concat=True)
             video_num_patches = flatten_bn(video_num_patches, concat=True)
 
-            return InternVLVideoPixelInputs(
+            return InternS1VideoPixelInputs(
                 type="pixel_values_videos",
                 pixel_values_flat=self._validate_pixel_values(
                     pixel_values_flat_video),
@@ -760,7 +757,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
 
     def _process_image_input(
         self,
-        image_input: Union[InternVLImageInputs, InternVLVideoPixelInputs],
+        image_input: Union[InternS1ImageInputs, InternS1VideoPixelInputs],
     ) -> tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
