@@ -32,6 +32,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 import torch
@@ -72,6 +73,30 @@ class KVConnectorMetadata(ABC):  # noqa: B024
 
 
 class KVConnectorBase_V1(ABC):
+
+    class KVConnectorFinishOutput(tuple[set[str], set[str]]):
+        """Output of get_finished() method.
+
+        Contains two sets:
+            - finished_sending: request ids that have finished sending KV
+            - finished_recving: request ids that have finished receiving KV
+        Also contains optional metrics for sending and receiving KV
+        caches, which can be used for performance analysis.
+        """
+        __slots__ = ('sending_latencies', 'receiving_latencies')
+
+        def __new__(
+            cls,
+            *,
+            finished_sending: set[str],
+            finished_recving: set[str],
+            sending_latencies: Sequence[float] = [],
+            receiving_latencies: Sequence[float] = []
+        ) -> "KVConnectorBase_V1.KVConnectorFinishOutput":
+            output = super().__new__(cls, (finished_sending, finished_recving))
+            output.sending_latencies = sending_latencies
+            output.receiving_latencies = receiving_latencies
+            return output
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         logger.warning(
@@ -201,9 +226,8 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
-    def get_finished(
-        self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    def get_finished(self,
+                     finished_req_ids: set[str]) -> KVConnectorFinishOutput:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens on the worker.
@@ -217,7 +241,8 @@ class KVConnectorBase_V1(ABC):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
-        return None, None
+        return KVConnectorFinishOutput(finished_sending=(),
+                                       finished_recving=())
 
     # ==============================
     # Scheduler-side methods

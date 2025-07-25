@@ -6,6 +6,8 @@ from typing import NamedTuple, Optional
 
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
+
 
 class LogprobsLists(NamedTuple):
 
@@ -104,9 +106,8 @@ class ModelRunnerOutput:
     # [num_reqs, hidden_size]
     pooler_output: list[Optional[torch.Tensor]]
 
-    # [req_ids]
-    finished_sending: Optional[set[str]] = None
-    finished_recving: Optional[set[str]] = None
+    kv_connector_finish_output: Optional[
+        KVConnectorBase_V1.KVConnectorFinishOutput] = None
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
@@ -119,6 +120,5 @@ EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               logprobs=None,
                                               prompt_logprobs_dict={},
                                               pooler_output=[],
-                                              finished_sending=None,
-                                              finished_recving=None,
+                                              kv_connector_finish_output=None,
                                               num_nans_in_logits=None)

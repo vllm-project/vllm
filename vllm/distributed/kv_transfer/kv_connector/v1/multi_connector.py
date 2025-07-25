@@ -107,7 +107,7 @@ class MultiConnector(KVConnectorBase_V1):
 
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> KVConnectorBase_V1.KVConnectorFinishOutput:
         finished_sending: set[str] = set()
         finished_recving: set[str] = set()
         for c in self._connectors:
@@ -130,7 +130,17 @@ class MultiConnector(KVConnectorBase_V1):
                 else:
                     self._extra_async_saves[req_id] = extra_pending - 1
 
-        return finished_sending or None, finished_recving or None
+        # TODO: Add KV transfer metrics to the output.
+        # It's unclear what metrics to add when we have multiple connectors.
+        # Some options:
+        # - Aggregate the metrics from all connectors.
+        # - Update the metrics in KVConnectorFinishOutput to be dict instead of
+        #   list, and report the aggregated metrics (e.g. max()) here.
+        # - Add labels for the metrics to indicate which connector they
+        #   belong to. Then we can include per-connector metrics here.
+        return KVConnectorBase_V1.KVConnectorFinishOutput(
+            finished_sending=finished_sending,
+            finished_recving=finished_recving)
 
     # ==============================
     # Scheduler-side methods

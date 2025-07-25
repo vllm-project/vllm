@@ -22,6 +22,7 @@ from vllm.config import (CompilationLevel, VllmConfig,
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture, is_global_first_rank,
     prepare_communication_buffer_for_model)
@@ -1304,8 +1305,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         hidden_states: torch.Tensor,
         num_scheduled_tokens: int,
         num_scheduled_tokens_np: np.ndarray,
-        finished_sending: Optional[set[str]],
-        finished_recving: Optional[set[str]],
+        kv_connector_finish_output: Optional[
+            KVConnectorBase_V1.KVConnectorFinishOutput],
     ) -> ModelRunnerOutput:
         assert self.input_batch.num_reqs ==\
             len(self.input_batch.pooling_params), \
@@ -1340,8 +1341,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
-            finished_sending=finished_sending,
-            finished_recving=finished_recving,
+            kv_connector_finish_output=kv_connector_finish_output,
         )
 
     @torch.inference_mode()
@@ -1459,7 +1459,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
             self.maybe_wait_for_kv_save()
-            finished_sending, finished_recving = (
+            kv_connector_finish_output = (
                 self.get_finished_kv_transfers(scheduler_output))
 
         if self.use_aux_hidden_state_outputs:
@@ -1478,9 +1478,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
             if not broadcast_pp_output:
-                if finished_sending or finished_recving:
-                    hidden_states.finished_sending = finished_sending
-                    hidden_states.finished_recving = finished_recving
+                if kv_connector_finish_output is not None:
+                    hidden_states.kv_connector_finish_output = kv_connector_finish_output
                 return hidden_states
             assert isinstance(hidden_states, IntermediateTensors)
             get_pp_group().send_tensor_dict(hidden_states.tensors,
@@ -1489,8 +1488,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             if self.input_batch.pooling_params:
                 return self._pool(hidden_states, num_scheduled_tokens,
-                                  num_scheduled_tokens_np, finished_sending,
-                                  finished_recving)
+                                  num_scheduled_tokens_np,
+                                  kv_connector_finish_output)
 
             sample_hidden_states = hidden_states[logits_indices]
             logits = self.model.compute_logits(sample_hidden_states, None)
@@ -1640,8 +1639,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
-            finished_sending=finished_sending,
-            finished_recving=finished_recving,
+            kv_connector_finish_output=kv_connector_finish_output,
             num_nans_in_logits=num_nans_in_logits,
         )
 

@@ -1165,8 +1165,8 @@ class IntermediateTensors:
 
     tensors: dict[str, torch.Tensor]
     # [req_ids]
-    finished_sending: Optional[set[str]] = None
-    finished_recving: Optional[set[str]] = None
+    kv_connector_finish_output: Optional[
+        "KVConnectorBase_V1.KVConnectorFinishOutput"] = None
 
     def __init__(self, tensors):
         # manually define this function, so that

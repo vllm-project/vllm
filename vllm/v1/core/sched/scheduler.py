@@ -1139,9 +1139,13 @@ class Scheduler(SchedulerInterface):
             scheduler the request during the next step.
         """
         # KV Connector:: update recv and send status from last step.
-        for req_id in (model_runner_output.finished_recving or ()):
+        finished_recving = model_runner_output.kv_connector_finish_output.finished_recving if model_runner_output.kv_connector_finish_output else (
+        )
+        finished_sending = model_runner_output.kv_connector_finish_output.finished_sending if model_runner_output.kv_connector_finish_output else (
+        )
+        for req_id in finished_recving:
             logger.debug("Finished recving KV transfer for request %s", req_id)
             self.finished_recving_kv_req_ids.add(req_id)
-        for req_id in (model_runner_output.finished_sending or ()):
+        for req_id in finished_sending:
             logger.debug("Finished sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])

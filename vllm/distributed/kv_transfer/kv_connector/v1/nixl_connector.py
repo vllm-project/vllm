@@ -177,8 +177,9 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.set_host_xfer_buffer_ops(copy_operation)
 
-    def get_finished(self,
-                     finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
+    def get_finished(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorBase_V1.KVConnectorFinishOutput:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
@@ -998,7 +999,7 @@ class NixlConnectorWorker:
             self.copy_blocks(self.device_kv_caches, self.host_xfer_buffers,
                              meta.local_block_ids, meta.local_block_ids, "d2h")
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
+    def get_finished(self) -> KVConnectorBase_V1.KVConnectorFinishOutput:
         """
         Get requests that are done sending or recving on this specific worker.
         The scheduler process (via the MultiprocExecutor) will use this output
@@ -1028,7 +1029,8 @@ class NixlConnectorWorker:
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
 
-        return done_sending, done_recving
+        return KVConnectorBase_V1.KVConnectorFinishOutput(
+            finished_sending=done_sending, finished_recving=done_recving)
 
     def _get_new_notifs(self) -> set[str]:
         """

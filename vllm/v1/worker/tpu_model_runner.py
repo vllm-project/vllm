@@ -1051,7 +1051,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # should be called right after each single forward pass,
         # instead of the forwards of the entire input batch.
         self.maybe_wait_for_kv_save()
-        finished_sending, finished_recving = (
+        kv_connector_finish_output = (
             self.get_finished_kv_transfers(scheduler_output))
 
         selected_token_ids = torch.cat(combined_selected_tokens, dim=0)
@@ -1148,8 +1148,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
-            finished_sending=finished_sending,
-            finished_recving=finished_recving,
+            kv_connector_finish_output=kv_connector_finish_output,
         )
 
         # Check there are no new graphs compiled - all the graphs should be

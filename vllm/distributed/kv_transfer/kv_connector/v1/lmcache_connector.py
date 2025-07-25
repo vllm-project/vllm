@@ -89,7 +89,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
 
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> KVConnectorBase_V1.KVConnectorFinishOutput:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens.
@@ -101,7 +101,11 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
-        return self._lmcache_engine.get_finished(finished_req_ids)
+        finished_sending, finished_recving = self._lmcache_engine.get_finished(
+            finished_req_ids)
+        return KVConnectorBase_V1.KVConnectorFinishOutput(
+            finished_sending=finished_sending,
+            finished_recving=finished_recving)
 
     # ==============================
     # Scheduler-side methods

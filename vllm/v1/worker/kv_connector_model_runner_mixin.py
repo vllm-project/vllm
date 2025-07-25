@@ -47,24 +47,23 @@ class KVConnectorModelRunnerMixin:
     @staticmethod
     def get_finished_kv_transfers(
         scheduler_output: "SchedulerOutput",
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> Optional[KVConnectorBase_V1.KVConnectorFinishOutput]:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_finished(
                 scheduler_output.finished_req_ids)
-        return None, None
+        return None
 
     def kv_connector_no_forward(self, scheduler_output: "SchedulerOutput",
                                 vllm_config: VllmConfig) -> ModelRunnerOutput:
         # KV send/recv even if no work to do.
         with set_forward_context(None, vllm_config):
             self.maybe_setup_kv_connector(scheduler_output)
-            finished_sending, finished_recving = (
+            kv_connector_finish_output = (
                 self.get_finished_kv_transfers(scheduler_output))
 
-        if not finished_sending and not finished_recving:
+        if not kv_connector_finish_output:
             return EMPTY_MODEL_RUNNER_OUTPUT
 
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.finished_sending = finished_sending
-        output.finished_recving = finished_recving
+        output.kv_connector_finish_output = kv_connector_finish_output
         return output
