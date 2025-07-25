@@ -2537,6 +2537,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         f" different attention backend.")
                 if attn_metadata_builder_i.attn_cudagraph_support == \
                     AttentionCGSupport.PURE_DECODE_ONLY:
+                    # Limit the max cudagraph size to the max number of
+                    # sequences for pure decode only cudagraph backend,
+                    # whose max_query_len is 1.
                     self.cudagraph_batch_sizes = [
                         size for size in self.cudagraph_batch_sizes
                         if size <= self.scheduler_config.max_num_seqs
