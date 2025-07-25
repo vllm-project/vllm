@@ -54,8 +54,6 @@ class SpeculatorsConfig(PretrainedConfig):
 
         # Update method specific defaults
         spec_class_instance.update_defaults(vllm_config=vllm_config)
-        spec_class_instance.ensure_transformer_architectures(
-            vllm_config=vllm_config)
         # Ensure all required field are present
         spec_class_instance.preserve_additional_fields(vllm_config=vllm_config)
         # Create using proper vllm_config
@@ -146,27 +144,13 @@ class SpeculatorsConfig(PretrainedConfig):
         speculators_cfg = self.config.get("speculators_config", {})
         # Build base vLLM config
         vllm_config = {
-            "model": transformer_config,
             "method":
             speculators_model_type,  # Use speculators_model_type as method
             "num_lookahead_tokens": num_lookahead_tokens,
             "target_model": speculators_cfg["verifier"]["name_or_path"]
         }
+        vllm_config.update(transformer_config)
         return vllm_config
-
-    # TODO: update / fix for Qwen - this is wrong
-    def ensure_transformer_architectures(self, vllm_config: dict[str,
-                                                                 Any]) -> None:
-        """Ensure transformer config has required architecture field."""
-        transformer_config = vllm_config["model"]
-        if "architectures" not in transformer_config:
-            default_arch = "LlamaDecoderLayer"
-            arch = self.config.get("transformer_layer_architecture",
-                                   default_arch)
-            if arch == "LlamaDecoderLayer":
-                transformer_config["architectures"] = ["LlamaForCausalLM"]
-            else:
-                transformer_config["architectures"] = [arch]
 
     def preserve_additional_fields(self, vllm_config: dict[str, Any]) -> None:
         """Preserve additional fields for forward compatibility."""

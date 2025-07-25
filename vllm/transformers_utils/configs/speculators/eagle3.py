@@ -24,21 +24,13 @@ class Eagle3SpeculatorsConfig(SpeculatorsConfig):
         if draft_vocab_size is not None:
             vllm_config["draft_vocab_size"] = draft_vocab_size
 
-        # Target vocab size
-        vllm_config["vocab_size"] = vllm_config["model"]["vocab_size"]
-
         # Handle target_hidden_size - if different than the draft hidden size
         if self.config.get("target_hidden_size") is not None:
             vllm_config["target_hidden_size"] = self.config[
                 "target_hidden_size"]
-        else:
-            # Default to the draft model's hidden size
-            # In practice, this should match the target model's hidden size
-            vllm_config["hidden_size"] = vllm_config["model"].get(
-                "hidden_size")
 
         # Norm before residual
-        vllm_config["model"]["norm_before_residual"] = self.config.get(
+        vllm_config["norm_before_residual"] = self.config.get(
             "norm_before_residual", True)
 
         # Eagle-3 uses a different architecture

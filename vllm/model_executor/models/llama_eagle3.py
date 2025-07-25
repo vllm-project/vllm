@@ -118,8 +118,7 @@ class LlamaModel(nn.Module):
 
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
-                # ToDo: condition
-                config=LlamaConfig.from_dict(self.config.model),
+                config=self.config,
                 prefix=maybe_prefix(prefix, f"layers.{start_layer_id}"),
             )
         ])
@@ -133,7 +132,7 @@ class LlamaModel(nn.Module):
                                       bias=False)
         self.norm = RMSNorm(
             self.config.hidden_size,
-            eps=self.config.model.get("rms_norm_eps"),
+            eps=self.config.rms_norm_eps,
         )
 
     def forward(
