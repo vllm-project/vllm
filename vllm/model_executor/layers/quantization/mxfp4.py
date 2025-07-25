@@ -27,8 +27,9 @@ def swizzle_mxfp4(quant_tensor, scale):
     num_warps = 8
     value_layout, value_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
         mx_axis=1)
-    scale_layout, scale_layout_opts = layout.make_default_matmul_mxfp4_w_scale_layout(
-        mx_axis=1, num_warps=num_warps)
+    scale_layout, scale_layout_opts = (
+        layout.make_default_matmul_mxfp4_w_scale_layout(mx_axis=1,
+                                                        num_warps=num_warps))
     if current_platform.is_cuda() and \
         torch.cuda.get_device_capability()[0] == 10:
         constraints = {
@@ -48,8 +49,9 @@ def swizzle_mxfp4(quant_tensor, scale):
 
 class Mxfp4Config(QuantizationConfig):
 
-    def __init__(self):
+    def __init__(self, ignored_layers: Optional[list[str]] = None):
         super().__init__()
+        self.ignored_layers = ignored_layers
 
     @classmethod
     def from_config(cls, config):
@@ -84,7 +86,7 @@ class Mxfp4Config(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             return Mxfp4MoEMethod()
         elif isinstance(layer, Attention):
-            return NotImplementedError(
+            raise NotImplementedError(
                 "Mxfp4 attention layer is not implemented")
         return None
 
@@ -99,7 +101,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         scale_dtype = torch.uint8
 
         # FIXME (zyongye): ship after torch and safetensors support mxfp4
-        # is_torch_mxfp4_available = hasattr(torch, "float4_e2m1fn_x2") and hasattr(torch, "float8_e8m0fnu")
+        # is_torch_mxfp4_available = (
+        #     hasattr(torch, "float4_e2m1fn_x2") and
+        #     hasattr(torch, "float8_e8m0fnu"))
         # if is_torch_mxfp4_available:
         #     weight_dtype = torch.float4_e2m1fn_x2
         #     scale_dtype = torch.float8_e8m0fnu

@@ -194,8 +194,9 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
 
         w_layout, w_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
             mx_axis=1)
-        w_scale_layout, w_scale_layout_opts = layout.make_default_matmul_mxfp4_w_scale_layout(
-            mx_axis=1, num_warps=8)
+        w_scale_layout, w_scale_layout_opts = (
+            layout.make_default_matmul_mxfp4_w_scale_layout(mx_axis=1,
+                                                            num_warps=8))
 
         w1_tri, w1_scale_tri = downcast_to_mxfp(w1_tri, torch.uint8, axis=1)
         w1 = upcast_from_mxfp(w1_tri, w1_scale_tri, torch.bfloat16, axis=1)

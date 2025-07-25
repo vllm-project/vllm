@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+
 from vllm import LLM, SamplingParams
 
 # Sample prompts.
@@ -16,10 +17,9 @@ prompts = [
 sampling_params = SamplingParams(temperature=0, max_tokens=100)
 
 MODEL_PATH = os.environ.get(
-    "MODEL_PATH",
-    "/data/xmo/yongye/models/real-weight-120b-mxfp4/pytorch-rc-120b")
-TOKENIZER_PATH = os.environ.get("TOKENIZER_PATH",
-                                "../../../../models/hf-converted")
+    "MODEL_PATH", "/data/xmo/yongye/models/real-weight-120b-mxfp4/pytorch-rc-120b"
+)
+TOKENIZER_PATH = os.environ.get("TOKENIZER_PATH", "../../../../models/hf-converted")
 
 
 def main():

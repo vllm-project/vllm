@@ -996,9 +996,13 @@ class FusedMoE(torch.nn.Module):
             return expert_id
         return self.expert_map[expert_id].item()
 
-    def weight_loader(self, param: torch.nn.Parameter,
-                      loaded_weight: torch.Tensor, weight_name: str,
-                      shard_id: str, expert_id: int) -> None:
+    def weight_loader(self,
+                      param: torch.nn.Parameter,
+                      loaded_weight: torch.Tensor,
+                      weight_name: str,
+                      shard_id: str,
+                      expert_id: int,
+                      return_success: bool = False) -> Optional[bool]:
         # if expert_id is None, then
         # all the experts are loaded at the same time
         if not expert_id and self.use_triton_kernels:
