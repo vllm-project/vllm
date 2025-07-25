@@ -82,6 +82,7 @@ Supported quantized formats and features in vLLM on TPU [Jul '25]
 - FP8 KV cache
 - [WIP] FP8 W8A8
 - [WIP] AWQ
+- [WIP] FP4 W4A8
 
 **Don't set TP to be less than the number of chips on a single-host deployment**
 
