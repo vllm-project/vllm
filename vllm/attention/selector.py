@@ -293,7 +293,27 @@ def choose_attention_backend(
     kv_cache_dtype: str,
     block_size: int,
 ) -> tuple[str, str]:
+    """  
+    Selects and returns a suitable attention backend for the given configuration.
 
+    The function will first attempt to select a backend based on the environment
+    variable `VLLM_ATTENTION_BACKEND`, if it is set. If the forced backend is either
+    invalid or not supported for the given configuration, it falls back to automatically
+    selecting the first available supported backend from `backend_to_qualname`.
+
+    Parameters:
+        backend_to_qualname (dict[str, str]): Mapping from backend names to their qualified names.
+        head_size (int): Size of the attention head.
+        dtype (torch.dtype): Data type for computation.
+        kv_cache_dtype (str): Data type of the key-value cache ("auto" or specific type).
+        block_size (int): Block size to use for the backend.
+
+    Returns:
+        tuple[str, str]: (backend name, backend qualified name) of the selected backend.
+
+    Raises:
+        ValueError: If no supported backend is found for the given configuration.
+    """
     maybe_forced_backend = envs.VLLM_ATTENTION_BACKEND
     if maybe_forced_backend:
         if maybe_forced_backend not in backend_to_qualname:
