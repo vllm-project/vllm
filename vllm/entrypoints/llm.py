@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar, deprecated
 
+import vllm.envs as envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence,
                               create_sort_beams_key_function)
@@ -44,9 +45,10 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.outputs import (ClassificationRequestOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput, RequestOutput,
                           ScoringRequestOutput)
-from vllm.pooling_params import PoolingParams, PoolingTask
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
+from vllm.tasks import PoolingTask
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.usage.usage_lib import UsageContext
@@ -276,6 +278,16 @@ class LLM:
 
         self.request_counter = Counter()
         self.default_sampling_params: Union[dict[str, Any], None] = None
+
+        if envs.VLLM_USE_V1:
+            supported_tasks = self.llm_engine \
+                .get_supported_tasks()  # type: ignore
+        else:
+            supported_tasks = self.llm_engine.model_config.supported_tasks
+
+        logger.info("Supported_tasks: %s", supported_tasks)
+
+        self.supported_tasks = supported_tasks
 
     def get_tokenizer(
         self,
@@ -1170,8 +1182,7 @@ class LLM:
             A list of `EmbeddingRequestOutput` objects containing the
             embedding vectors in the same order as the input prompts.
         """
-        model_config = self.llm_engine.model_config
-        if "embed" not in model_config.supported_tasks:
+        if "embed" not in self.supported_tasks:
             raise ValueError("Embedding API is not supported by this model. "
                              "Please set `--task embed`.")
 
@@ -1215,8 +1226,7 @@ class LLM:
             A list of `ClassificationRequestOutput` objects containing the
             embedding vectors in the same order as the input prompts.
         """
-        model_config = self.llm_engine.model_config
-        if "classify" not in model_config.supported_tasks:
+        if "classify" not in self.supported_tasks:
             raise ValueError(
                 "Classification API is not supported by this model. "
                 "Please set `--task classify`.")
@@ -1397,8 +1407,8 @@ class LLM:
 
             raise ValueError(" ".join(messages))
 
-        if all(t not in model_config.supported_tasks
-               for t in ("embed", "classify")):
+        supported_tasks = self.supported_tasks
+        if all(t not in supported_tasks for t in ("embed", "classify")):
             raise ValueError("Score API is not supported by this model. "
                              "Please set `--task embed` or `--task classify`.")
 
