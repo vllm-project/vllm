@@ -280,10 +280,12 @@ class LLM:
         self.default_sampling_params: Union[dict[str, Any], None] = None
 
         if envs.VLLM_USE_V1:
-            supported_tasks = self.llm_engine.get_supported_tasks(  # type: ignore
-            )
+            supported_tasks = self.llm_engine \
+                .get_supported_tasks()  # type: ignore
         else:
             supported_tasks = self.llm_engine.model_config.supported_tasks
+
+        logger.info("Supported_tasks: %s", supported_tasks)
 
         self.supported_tasks = supported_tasks
 
