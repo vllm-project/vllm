@@ -612,14 +612,20 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP):
         self.num_expert_groups = config.n_group
 
         self.moe_layers: list[FusedMoE] = []
+        example_moe = None
         for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+
             assert isinstance(layer, Glm4MoeDecoderLayer)
             if isinstance(layer.mlp, Glm4MoE):
+                # Pick last one layer since the first ones may be dense layers.
+                example_moe = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
 
-        # Pick last one layer since the first ones may be dense layers.
-        example_moe = typing.cast(
-            Glm4MoE, self.model.layers[config.num_hidden_layers - 1].mlp)
+        if example_moe is None:
+            raise RuntimeError("No Glm4MoE layer found in model.layers.")
+
         self.num_logical_experts = example_moe.n_logical_experts
         self.num_physical_experts = example_moe.n_physical_experts
         self.num_local_physical_experts = example_moe.n_local_physical_experts
