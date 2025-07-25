@@ -585,18 +585,15 @@ class Llama4ForCausalLM(LlamaForCausalLM):
         # Helper function to permute the weight's channels
         def permute(w: torch.Tensor, n_heads: int):
             head_dim = w.shape[0] // n_heads
-            return (
-                w.view(n_heads, head_dim // 2, 2, w.shape[1])
-                .transpose(1, 2)
-                .reshape(w.shape[0], w.shape[1])
-            )
+            return (w.view(n_heads, head_dim // 2, 2, w.shape[1]).transpose(
+                1, 2).reshape(w.shape[0], w.shape[1]))
 
         modules = name.split(".")
 
         # Permute Q/K weights and weight block scales for rotary embedding
         is_weight = modules[-1] == "weight"
-        is_nvfp4_weight_scale = (modules[-1] == "weight_scale"
-            and loaded_weight.dtype == torch.float8_e4m3fn)
+        is_nvfp4_weight_scale = (modules[-1] == "weight_scale" and
+                                 loaded_weight.dtype == torch.float8_e4m3fn)
 
         if is_weight or is_nvfp4_weight_scale:
             if ("wk" in modules or "k_proj" in modules):
