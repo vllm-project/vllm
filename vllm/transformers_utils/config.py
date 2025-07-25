@@ -301,31 +301,19 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
     return config
 
 
-def maybe_override_with_speculators_configs(model, tokenizer):
+def maybe_override_with_speculators_target_model(model: str, tokenizer: str):
+    """
+    If running a speculators config, override running model with target model
+    """
     config_dict, _ = PretrainedConfig.get_config_dict(
         model,
         token=_get_hf_token(),
     )
-    spec_config = config_dict["speculators_config"]
+    spec_config = config_dict.get("speculators_config")
     # Return the target model
     if spec_config is not None:
         model = tokenizer = spec_config["verifier"]["name_or_path"]
     return model, tokenizer
-
-
-def maybe_fetch_verifier_config(config, runner):
-    if runner == "draft":
-        if isinstance(config, str):
-            config = SpeculatorsConfig.from_pretrained(
-                config,
-                token=_get_hf_token(),
-            )
-    else:
-        config = AutoConfig.from_pretrained(
-            config.target_model,
-            token=_get_hf_token(),
-        )
-    return config
 
 
 def get_config(
@@ -337,7 +325,6 @@ def get_config(
     hf_overrides_kw: Optional[dict[str, Any]] = None,
     hf_overrides_fn: Optional[Callable[[PretrainedConfig],
                                        PretrainedConfig]] = None,
-    runner: Optional[str] = None,
     **kwargs,
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
@@ -403,8 +390,6 @@ def get_config(
                 token=_get_hf_token(),
                 **kwargs,
             )
-            if model_type == "speculators":
-                config = maybe_fetch_verifier_config(config, runner)
         else:
             try:
                 config = AutoConfig.from_pretrained(

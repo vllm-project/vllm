@@ -38,7 +38,7 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
-    maybe_override_with_speculators_configs, try_get_generation_config,
+    maybe_override_with_speculators_target_model, try_get_generation_config,
     try_get_safetensors_metadata, try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
@@ -468,13 +468,10 @@ class ModelConfig:
                     "affect the random state of the Python process that "
                     "launched vLLM.", self.seed)
 
-        draft_model = None
         if self.runner != "draft":
-            # If we're not runnign the draft model,
-            # assume we're running the target / config model
-            # override self.model with the target model stub
-            draft_model = self.model
-            self.model, self.tokenizer = maybe_override_with_speculators_configs(  # noqa: E501
+            # If we're not running the draft model, check for speculators config
+            # If speculators config, set model / tokenizer to be target model
+            self.model, self.tokenizer = maybe_override_with_speculators_target_model(  # noqa: E501
                 model=self.model, tokenizer=self.tokenizer)
 
         # Keep set served_model_name before maybe_model_redirect(self.model)
@@ -541,24 +538,14 @@ class ModelConfig:
         if isinstance(self.config_format, str):
             self.config_format = ConfigFormat(self.config_format)
 
-        # Check if we're running the draft model or target model
+        hf_config = get_config(self.hf_config_path or self.model,
+                               self.trust_remote_code,
+                               self.revision,
+                               self.code_revision,
+                               self.config_format,
+                               hf_overrides_kw=hf_overrides_kw,
+                               hf_overrides_fn=hf_overrides_fn)
 
-        if draft_model is not None:
-            hf_config = get_config(draft_model,
-                                   self.revision,
-                                   self.code_revision,
-                                   self.config_format,
-                                   hf_overrides_kw=hf_overrides_kw,
-                                   hf_overrides_fn=hf_overrides_fn,
-                                   runner=self.runner)
-        else:
-            hf_config = get_config(self.hf_config_path or self.model,
-                                   self.revision,
-                                   self.code_revision,
-                                   self.config_format,
-                                   hf_overrides_kw=hf_overrides_kw,
-                                   hf_overrides_fn=hf_overrides_fn,
-                                   runner=self.runner)
         self.hf_config = hf_config
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.attention_chunk_size = getattr(self.hf_text_config,

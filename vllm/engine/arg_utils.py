@@ -984,17 +984,18 @@ class EngineArgs:
         dictionary from the engine.
         """
 
-        from vllm.transformers_utils.config import maybe_fetch_verifier_config
+        from vllm.transformers_utils.config import get_config
         from vllm.transformers_utils.configs.speculators.base import (
             SpeculatorsConfig)
 
         if self.speculative_config is None:
-            hf_config = maybe_fetch_verifier_config(self.hf_config_path
-                                                    or self.model,
-                                                    runner="draft")
+            hf_config = get_config(self.hf_config_path or self.model,
+                                   self.trust_remote_code, self.revision,
+                                   self.code_revision, self.config_format)
 
             # if loading a SpeculatorsConfig, load the specualtive_config
-            # details from the config directly - no user input required
+            # details from the config directly
+            # no user input required / expected
             if isinstance(hf_config, SpeculatorsConfig):
                 # We create one since we dont create one
                 self.speculative_config = {}
