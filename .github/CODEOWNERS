@@ -53,7 +53,14 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /docs @hmellor
 mkdocs.yaml @hmellor
 
-# CPU & Intel GPU
-/vllm/v1/worker/cpu* @bigPYJ1151
-/vllm/v1/worker/xpu* @jikunshang
+# CPU
+/vllm/v1/worker/^cpu @bigPYJ1151
 /csrc/cpu @bigPYJ1151
+/vllm/platforms/cpu.py @bigPYJ1151
+/cmake/cpu_extension.cmake @bigPYJ1151
+/docker/Dockerfile.cpu @bigPYJ1151
+
+# Intel GPU
+/vllm/v1/worker/^xpu @jikunshang
+/vllm/platforms/xpu.py @jikunshang
+/docker/Dockerfile.xpu @jikunshang
