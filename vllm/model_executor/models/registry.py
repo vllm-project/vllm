@@ -122,6 +122,7 @@ _TEXT_GENERATION_MODELS = {
     "Qwen3ForCausalLM": ("qwen3", "Qwen3ForCausalLM"),
     "Qwen3MoeForCausalLM": ("qwen3_moe", "Qwen3MoeForCausalLM"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
+    "SmallThinkerForCausalLM": ("smallthinker", "SmallThinkerForCausalLM"),
     "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),

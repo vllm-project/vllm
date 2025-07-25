@@ -1508,6 +1508,10 @@ def fused_experts_impl(
         elif activation == "gelu":
             torch.ops._C.gelu_and_mul(intermediate_cache2,
                                       intermediate_cache1.view(-1, N))
+        elif activation == "relu":
+            # SmallThinker model uses relu activation
+            torch.ops._C.fatrelu_and_mul(intermediate_cache2,
+                                         intermediate_cache1.view(-1, N), 0.0)
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
