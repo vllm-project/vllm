@@ -17,23 +17,15 @@ from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 
-# Separate backends which support grammars vs ones
-# which only support regex based constraints in tests.
-GRAMMAR_DECODING_BACKENDS = [
-    # (backend, disable_any_whitespace),
-    ("lm-format-enforcer", False),
-    ("xgrammar", True),
-    ("guidance", True),
-]
-
-ALL_DECODING_BACKENDS = ([("outlines", False)] + GRAMMAR_DECODING_BACKENDS)
-
 
 @pytest.fixture(scope="module")
-def llm():
+def llm_xgrammar():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
-    llm = LLM(model=MODEL_NAME, max_model_len=1024, seed=0)
+    llm = LLM(model=MODEL_NAME,
+              max_model_len=1024,
+              seed=0,
+              guided_decoding_backend="xgrammar")
 
     with llm.deprecate_legacy_api():
         yield weakref.proxy(llm)
@@ -41,18 +33,78 @@ def llm():
     cleanup_dist_env_and_memory()
 
 
+@pytest.fixture(scope="module")
+def llm_guidance():
+    # pytest caches the fixture so we use weakref.proxy to
+    # enable garbage collection
+    llm = LLM(model=MODEL_NAME,
+              max_model_len=1024,
+              seed=0,
+              guided_decoding_backend="guidance")
+
+    with llm.deprecate_legacy_api():
+        yield weakref.proxy(llm)
+        del llm
+    cleanup_dist_env_and_memory()
+
+
+@pytest.fixture(scope="module")
+def llm_outlines():
+    # pytest caches the fixture so we use weakref.proxy to
+    # enable garbage collection
+    llm = LLM(model=MODEL_NAME,
+              max_model_len=1024,
+              seed=0,
+              guided_decoding_backend="outlines")
+
+    with llm.deprecate_legacy_api():
+        yield weakref.proxy(llm)
+        del llm
+    cleanup_dist_env_and_memory()
+
+
+@pytest.fixture(scope="module")
+def llm(request):
+    """Unified fixture that returns the appropriate LLM backend based on
+    parameter."""
+    backend_name = request.param
+    if backend_name == "llm_outlines":
+        return request.getfixturevalue("llm_outlines")
+    elif backend_name == "llm_xgrammar":
+        return request.getfixturevalue("llm_xgrammar")
+    elif backend_name == "llm_guidance":
+        return request.getfixturevalue("llm_guidance")
+    else:
+        raise ValueError(f"Unknown backend: {backend_name}")
+
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v1_only(monkeypatch):
+    # Guided Decoding is only supported on V1
+    monkeypatch.setenv('VLLM_USE_V1', '1')
+
+
+# Separate backends which support grammars vs ones
+# which only support regex based constraints in tests.
+GRAMMAR_DECODING_BACKENDS = [
+    # (backend, disable_any_whitespace),
+    ("llm_xgrammar", True),
+    ("llm_guidance", True),
+]
+
+ALL_DECODING_BACKENDS = [("llm_outlines", False)] + GRAMMAR_DECODING_BACKENDS
+
+
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         ALL_DECODING_BACKENDS)
-def test_guided_regex(sample_regex, llm, guided_decoding_backend: str,
-                      disable_any_whitespace: bool):
+@pytest.mark.parametrize("llm,disable_any_whitespace",
+                         ALL_DECODING_BACKENDS,
+                         indirect=["llm"])
+def test_guided_regex(sample_regex, llm, disable_any_whitespace: bool):
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
         guided_decoding=GuidedDecodingParams(
-            regex=sample_regex,
-            backend=guided_decoding_backend,
-            disable_any_whitespace=disable_any_whitespace))
+            regex=sample_regex, disable_any_whitespace=disable_any_whitespace))
 
     outputs = llm.generate(prompts=[
         f"Give an example IPv4 address with this regex: {sample_regex}"
@@ -73,17 +125,16 @@ def test_guided_regex(sample_regex, llm, guided_decoding_backend: str,
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         ALL_DECODING_BACKENDS)
+@pytest.mark.parametrize("llm,disable_any_whitespace",
+                         ALL_DECODING_BACKENDS,
+                         indirect=["llm"])
 def test_guided_json_completion(sample_json_schema, llm,
-                                guided_decoding_backend: str,
                                 disable_any_whitespace: bool):
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(
             json=sample_json_schema,
-            backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
     outputs = llm.generate(prompts=[
         f"Give an example JSON for an employee profile "
@@ -107,17 +158,16 @@ def test_guided_json_completion(sample_json_schema, llm,
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         ALL_DECODING_BACKENDS)
+@pytest.mark.parametrize("llm,disable_any_whitespace",
+                         ALL_DECODING_BACKENDS,
+                         indirect=["llm"])
 def test_guided_complex_json_completion(sample_complex_json_schema, llm,
-                                        guided_decoding_backend: str,
                                         disable_any_whitespace: bool):
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(
             json=sample_complex_json_schema,
-            backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
     outputs = llm.generate(prompts=[
         f"Give an example JSON for an assignment grade "
@@ -142,17 +192,16 @@ def test_guided_complex_json_completion(sample_complex_json_schema, llm,
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         ALL_DECODING_BACKENDS)
+@pytest.mark.parametrize("llm,disable_any_whitespace",
+                         ALL_DECODING_BACKENDS,
+                         indirect=["llm"])
 def test_guided_definition_json_completion(sample_definition_json_schema, llm,
-                                           guided_decoding_backend: str,
                                            disable_any_whitespace: bool):
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(
             json=sample_definition_json_schema,
-            backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
     outputs = llm.generate(prompts=[
         f"Give an example JSON for solving 8x + 7 = -23 "
@@ -177,17 +226,16 @@ def test_guided_definition_json_completion(sample_definition_json_schema, llm,
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         ALL_DECODING_BACKENDS)
+@pytest.mark.parametrize("llm,disable_any_whitespace",
+                         ALL_DECODING_BACKENDS,
+                         indirect=["llm"])
 def test_guided_enum_json_completion(sample_enum_json_schema, llm,
-                                     guided_decoding_backend: str,
                                      disable_any_whitespace: bool):
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(
             json=sample_enum_json_schema,
-            backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
     outputs = llm.generate(prompts=[
         "Create a bug report JSON that fits this schema: "
@@ -222,17 +270,16 @@ def test_guided_enum_json_completion(sample_enum_json_schema, llm,
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         ALL_DECODING_BACKENDS)
+@pytest.mark.parametrize("llm,disable_any_whitespace",
+                         ALL_DECODING_BACKENDS,
+                         indirect=["llm"])
 def test_guided_choice_completion(sample_guided_choice, llm,
-                                  guided_decoding_backend: str,
                                   disable_any_whitespace: bool):
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
         guided_decoding=GuidedDecodingParams(
             choice=sample_guided_choice,
-            backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
     outputs = llm.generate(
         prompts="The best language for type-safe systems programming is ",
@@ -252,10 +299,10 @@ def test_guided_choice_completion(sample_guided_choice, llm,
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         GRAMMAR_DECODING_BACKENDS)
+@pytest.mark.parametrize("llm,disable_any_whitespace",
+                         GRAMMAR_DECODING_BACKENDS,
+                         indirect=["llm"])
 def test_guided_grammar(sample_sql_statements, llm,
-                        guided_decoding_backend: str,
                         disable_any_whitespace: bool):
     sampling_params = SamplingParams(
         temperature=0.8,
@@ -263,7 +310,6 @@ def test_guided_grammar(sample_sql_statements, llm,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(
             grammar=sample_sql_statements,
-            backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace))
     outputs = llm.generate(
         prompts=("Generate a sql state that select col_1 from "
@@ -348,18 +394,16 @@ def test_disable_guided_decoding_fallback(sample_regex, llm):
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         GRAMMAR_DECODING_BACKENDS)
-def test_guided_json_object(llm, guided_decoding_backend: str,
-                            disable_any_whitespace: bool):
+@pytest.mark.parametrize("llm,disable_any_whitespace",
+                         GRAMMAR_DECODING_BACKENDS,
+                         indirect=["llm"])
+def test_guided_json_object(llm, disable_any_whitespace: bool):
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=100,
         n=2,
         guided_decoding=GuidedDecodingParams(
-            json_object=True,
-            backend=guided_decoding_backend,
-            disable_any_whitespace=disable_any_whitespace))
+            json_object=True, disable_any_whitespace=disable_any_whitespace))
 
     outputs = llm.generate(
         prompts=("Generate a JSON object with curly braces for a person with "
@@ -401,18 +445,16 @@ class CarDescription(BaseModel):
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         ALL_DECODING_BACKENDS)
-def test_guided_json_completion_with_enum(llm, guided_decoding_backend: str,
-                                          disable_any_whitespace: bool):
+@pytest.mark.parametrize("llm,disable_any_whitespace",
+                         ALL_DECODING_BACKENDS,
+                         indirect=["llm"])
+def test_guided_json_completion_with_enum(llm, disable_any_whitespace: bool):
     json_schema = CarDescription.model_json_schema()
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(
-            json=json_schema,
-            backend=guided_decoding_backend,
-            disable_any_whitespace=disable_any_whitespace))
+            json=json_schema, disable_any_whitespace=disable_any_whitespace))
     outputs = llm.generate(
         prompts="Generate a JSON with the brand, model and car_type of"
         "the most iconic car from the 90's",
@@ -433,9 +475,10 @@ def test_guided_json_completion_with_enum(llm, guided_decoding_backend: str,
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("guided_decoding_backend,disable_any_whitespace",
-                         ALL_DECODING_BACKENDS)
-def test_guided_number_range_json_completion(llm, guided_decoding_backend: str,
+@pytest.mark.parametrize("llm,disable_any_whitespace",
+                         ALL_DECODING_BACKENDS,
+                         indirect=["llm"])
+def test_guided_number_range_json_completion(llm,
                                              disable_any_whitespace: bool):
     sample_output_schema = {
         "type": "object",
@@ -462,7 +505,6 @@ def test_guided_number_range_json_completion(llm, guided_decoding_backend: str,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(
             json=sample_output_schema,
-            backend=guided_decoding_backend,
             disable_any_whitespace=disable_any_whitespace),
     )
     outputs = llm.generate(

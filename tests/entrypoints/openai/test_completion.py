@@ -28,7 +28,7 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 # but we're not testing generation quality here
 LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
-GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
+GUIDED_DECODING_BACKENDS = ["outlines", "xgrammar", "guidance"]
 
 
 @pytest.fixture(scope="module")
@@ -93,6 +93,14 @@ def server(default_server_args, request):
             os.environ.pop('VLLM_USE_V1', None)
         else:
             os.environ['VLLM_USE_V1'] = original_value
+
+
+@pytest.fixture
+def is_v1_server(server):
+    import os
+
+    # For completion tests, we assume v0 since there's no explicit v1 setup
+    return os.environ.get('VLLM_USE_V1', '0') == '1'
 
 
 @pytest_asyncio.fixture
@@ -631,7 +639,10 @@ async def test_allowed_token_ids(client: openai.AsyncOpenAI):
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_json_completion(client: openai.AsyncOpenAI,
                                       guided_decoding_backend: str,
-                                      sample_json_schema):
+                                      sample_json_schema, is_v1_server: bool):
+    if not is_v1_server:
+        pytest.skip("Guided decoding is only supported in v1 engine")
+
     completion = await client.completions.create(
         model=MODEL_NAME,
         prompt=f"Give an example JSON for an employee profile "
@@ -653,7 +664,10 @@ async def test_guided_json_completion(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_regex_completion(client: openai.AsyncOpenAI,
                                        guided_decoding_backend: str,
-                                       sample_regex):
+                                       sample_regex, is_v1_server: bool):
+    if not is_v1_server:
+        pytest.skip("Guided decoding is only supported in v1 engine")
+
     completion = await client.completions.create(
         model=MODEL_NAME,
         prompt=f"Give an example IPv4 address with this regex: {sample_regex}",
@@ -674,7 +688,11 @@ async def test_guided_regex_completion(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_choice_completion(client: openai.AsyncOpenAI,
                                         guided_decoding_backend: str,
-                                        sample_guided_choice):
+                                        sample_guided_choice,
+                                        is_v1_server: bool):
+    if not is_v1_server:
+        pytest.skip("Guided decoding is only supported in v1 engine")
+
     completion = await client.completions.create(
         model=MODEL_NAME,
         prompt="The best language for type-safe systems programming is ",
@@ -692,7 +710,9 @@ async def test_guided_choice_completion(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 async def test_guided_grammar(client: openai.AsyncOpenAI,
-                              sample_sql_statements):
+                              sample_sql_statements, is_v1_server: bool):
+    if not is_v1_server:
+        pytest.skip("Guided grammar is only supported in v1 engine")
 
     completion = await client.completions.create(
         model=MODEL_NAME,
@@ -754,7 +774,11 @@ async def test_echo_logprob_completion(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
 async def test_guided_decoding_type_error(client: openai.AsyncOpenAI,
                                           guided_decoding_backend: str,
-                                          sample_json_schema, sample_regex):
+                                          sample_json_schema, sample_regex,
+                                          is_v1_server: bool):
+    if not is_v1_server:
+        pytest.skip("Guided decoding is only supported in v1 engine")
+
     with pytest.raises(openai.BadRequestError):
         _ = await client.completions.create(
             model=MODEL_NAME,
