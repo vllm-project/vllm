@@ -974,6 +974,10 @@ class ModelConfig:
                         and arch.endswith(suffix)):
                     return convert_type
 
+        # Some Sentence Transformers models use *ForCausalLM archs
+        if get_pooling_config(self.model, self.revision):
+            return "embed"
+
         return "none"
 
     def _get_convert_type(
