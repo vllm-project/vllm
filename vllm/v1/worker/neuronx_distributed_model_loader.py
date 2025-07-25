@@ -30,7 +30,7 @@ from typing import Any, Optional
 import regex as re
 import torch
 import torch.nn as nn
-from neuronx_distributed_inference.models.config import (
+from neuronx_distributed_inference.models.config import (  # yapf: disable
     ChunkedPrefillConfig, NeuronConfig, OnDeviceSamplingConfig)
 from neuronx_distributed_inference.modules.lora_serving import (
     LoraServingConfig)
