@@ -577,9 +577,9 @@ class DeepseekV2DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
 
-        if (config.n_routed_experts is not None and
-                layer_idx >= config.first_k_dense_replace and
-                layer_idx % config.moe_layer_freq == 0):
+        if (config.n_routed_experts is not None
+                and layer_idx >= config.first_k_dense_replace
+                and layer_idx % config.moe_layer_freq == 0):
             self.mlp = DeepseekV2MoE(
                 config=config,
                 quant_config=quant_config,
@@ -923,8 +923,8 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
                 # QKV fusion is optional, fall back to normal
                 # weight loading if it's not enabled
                 # if go with fusion option, then update name
-                if ((param_name == "fused_qkv_a_proj") and
-                        name_mapped not in params_dict):
+                if ((param_name == "fused_qkv_a_proj")
+                        and name_mapped not in params_dict):
                     continue
                 else:
                     name = name_mapped
@@ -1006,8 +1006,8 @@ class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
 
 def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
                                         weight_name: str) -> Optional[int]:
-    if (hasattr(config, "num_nextn_predict_layers") and
-            config.num_nextn_predict_layers > 0):
+    if (hasattr(config, "num_nextn_predict_layers")
+            and config.num_nextn_predict_layers > 0):
         layer_idx = config.num_hidden_layers
         for i in range(config.num_nextn_predict_layers):
             if weight_name.startswith(f"model.layers.{layer_idx+i}."):
