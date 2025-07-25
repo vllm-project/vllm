@@ -11,7 +11,7 @@
         },
         "server_parameters": {
             "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-            "pipeline_parallel_size": 6,
+            "pipeline_parallel_size": 1,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
 	    "block_size": 128,
@@ -66,7 +66,7 @@
         }
     },
     {
-        "test_name": "serving_llama8B_pp6_sharegpt",
+        "test_name": "serving_llama8B_tp2pp6_sharegpt",
         "qps_list": [1, 4, 16, "inf"],
         "server_environment_variables": {
             "VLLM_RPC_TIMEOUT": 100000,
@@ -77,7 +77,8 @@
         },
         "server_parameters": {
             "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-            "pipeline_parallel_size": 6,
+            "tensor_parallel_size": 2,
+            "pipeline_parallel_size": 3,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
 	    "block_size": 128,
@@ -171,7 +172,7 @@
         }
     },
     {
-        "test_name": "serving_llama8B_pp6_random_128_128",
+        "test_name": "serving_llama8B_tp2pp3_random_128_128",
         "qps_list": [1, 4, 16, "inf"],
         "server_environment_variables": {
             "VLLM_RPC_TIMEOUT": 100000,
@@ -182,7 +183,8 @@
         },
         "server_parameters": {
             "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-            "pipeline_parallel_size": 6,
+            "tensor_parallel_size": 2,
+            "pipeline_parallel_size": 3,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
 	    "block_size": 128,

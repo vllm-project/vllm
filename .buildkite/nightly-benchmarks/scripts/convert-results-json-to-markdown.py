@@ -56,9 +56,9 @@ serving_column_mapping = {
     "mean_tpot_ms": "Mean TPOT (ms)",
     "median_tpot_ms": "Median",
     "p99_tpot_ms": "P99",
-    # "mean_itl_ms": "Mean ITL (ms)",
-    # "median_itl_ms": "Median ITL (ms)",
-    # "p99_itl_ms": "P99 ITL (ms)",
+    "mean_itl_ms": "Mean ITL (ms)",
+    "median_itl_ms": "Median ITL (ms)",
+    "p99_itl_ms": "P99 ITL (ms)",
 }
 
 
