@@ -39,6 +39,7 @@ You must set the following variables at the top of the script before execution.
 | `DOWNLOAD_DIR` | **Required.** Directory to download and load model weights from. | `""` (default download path) |
 | `INPUT_LEN` | **Required.** Request input length. | `4000` |
 | `OUTPUT_LEN` | **Required.** Request output length. | `16` |
+| `MAX_MODEL_LEN` | **Required.** Max model length. | `4096` |
 | `MIN_CACHE_HIT_PCT` | Prefix cache hit rate in percentage (0-100). Set to `0` to disable. | `60` |
 | `MAX_LATENCY_ALLOWED_MS` | The maximum allowed P99 end-to-end latency in milliseconds. Set to a very large number (e.g., `100000000000`) to effectively ignore the latency constraint. | `500` |
 | `NUM_SEQS_LIST` | A space-separated string of `max-num-seqs` values to test. | `"128 256"` |
@@ -69,6 +70,7 @@ Here are a few examples of how to configure the script for different goals:
 ```bash
 INPUT_LEN=1800
 OUTPUT_LEN=20
+MAX_MODEL_LEN=2048
 MIN_CACHE_HIT_PCT=0
 MAX_LATENCY_ALLOWED_MS=100000000000 # A very large number
 ```
@@ -80,6 +82,7 @@ MAX_LATENCY_ALLOWED_MS=100000000000 # A very large number
 ```bash
 INPUT_LEN=1800
 OUTPUT_LEN=20
+MAX_MODEL_LEN=2048
 MIN_CACHE_HIT_PCT=0
 MAX_LATENCY_ALLOWED_MS=500
 ```
@@ -91,6 +94,7 @@ MAX_LATENCY_ALLOWED_MS=500
 ```bash
 INPUT_LEN=1800
 OUTPUT_LEN=20
+MAX_MODEL_LEN=2048
 MIN_CACHE_HIT_PCT=60
 MAX_LATENCY_ALLOWED_MS=500
 ```
