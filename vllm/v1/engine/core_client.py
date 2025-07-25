@@ -21,6 +21,7 @@ import zmq.asyncio
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.tasks import SupportedTask
 from vllm.utils import get_open_port, get_open_zmq_inproc_path, make_zmq_socket
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType,
@@ -104,6 +105,9 @@ class EngineCoreClient(ABC):
     def get_output(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
+    def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        raise NotImplementedError
+
     def add_request(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
@@ -168,6 +172,9 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def get_output_async(self) -> EngineCoreOutputs:
+        raise NotImplementedError
+
+    async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
         raise NotImplementedError
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
@@ -237,6 +244,9 @@ class InprocClient(EngineCoreClient):
     def get_output(self) -> EngineCoreOutputs:
         outputs, _ = self.engine_core.step()
         return outputs.get(0) or EngineCoreOutputs()
+
+    def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return self.engine_core.get_supported_tasks()
 
     def add_request(self, request: EngineCoreRequest) -> None:
         self.engine_core.add_request(request)
@@ -608,6 +618,9 @@ class SyncMPClient(MPClient):
 
         return future.result()
 
+    def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return self.call_utility("get_supported_tasks")
+
     def add_request(self, request: EngineCoreRequest) -> None:
         if self.is_dp:
             self.engines_running = True
@@ -801,6 +814,9 @@ class AsyncMPClient(MPClient):
         await self._send_input_message(message, engine, args)
         self._ensure_output_queue_task()
         return await future
+
+    async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
+        return await self.call_utility_async("get_supported_tasks")
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         request.client_index = self.client_index
