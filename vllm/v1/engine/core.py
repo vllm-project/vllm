@@ -714,7 +714,7 @@ class EngineCoreProc(EngineCore):
             self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=output)))
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
-            raise RuntimeError("Executor failed.")
+            raise RuntimeError(f"Executor failed with {request}")
         else:
             logger.error("Unrecognized input request type encountered: %s",
                          request_type)
@@ -798,7 +798,12 @@ class EngineCoreProc(EngineCore):
                     # Deserialize the request data.
                     if request_type == EngineCoreRequestType.ADD:
                         request = add_request_decoder.decode(data_frames)
-                        request = self.preprocess_add_request(request)
+                        try:
+                            request = self.preprocess_add_request(request)
+                        except Exception as err:
+                            self.input_queue.put_nowait(
+                                (EngineCoreRequestType.EXECUTOR_FAILED, err))
+                            continue
                     else:
                         request = generic_decoder.decode(data_frames)
 
