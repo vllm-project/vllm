@@ -376,7 +376,6 @@ def get_config(
         )
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
-        # TODO: why isn't model_type loading correctly
         if model_type is None:
             model_type = "speculators" if config_dict.get(
                 "speculators_config") is not None else model_type

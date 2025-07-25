@@ -36,7 +36,7 @@ class SpeculatorsConfig(PretrainedConfig):
         # Convert from speculators config -> format that can be ingested by vLLM
         vllm_config = cls.convert_speculators_to_vllm(config_dict=config_dict)
         # Apply anything specific to the supported algorithm
-        algo_updater = SUPPORTED_SPECULATORS_TYPES.get(speculators_model_type)
+        algo_updater = SUPPORTED_SPECULATORS_TYPES[speculators_model_type]
         algo_updater(config_dict=config_dict, vllm_config=vllm_config)
         return cls(**vllm_config)
 
