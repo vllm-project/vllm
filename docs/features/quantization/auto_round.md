@@ -77,7 +77,7 @@ autoround.quantize_and_save(output_dir, format="auto_round")
 
 An example code to run auto-round format in vLLM
 
-~~~python
+```python
 if __name__ == '__main__':
     from vllm import LLM, SamplingParams
 
