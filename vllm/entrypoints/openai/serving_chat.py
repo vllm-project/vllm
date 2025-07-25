@@ -623,7 +623,9 @@ class OpenAIServingChat(OpenAIServing):
 
                     # handle streaming deltas for tools with named tool_choice
                     if tool_choice_function_name:
-                        if (self.reasoning_parser
+                        assert reasoning_end_arr is not None
+                        if (not reasoning_end_arr[i] 
+                                and self.reasoning_parser
                                 and not reasoning_parser.is_reasoning_end(
                                     previous_token_ids)):
                             assert reasoning_parser is not None
@@ -641,7 +643,12 @@ class OpenAIServingChat(OpenAIServing):
                             # process the `content`. Only keep 'content',
                             # remove 'reasoning_content'
                             if reasoning_parser.is_reasoning_end(
-                                    list(output.token_ids)):
+                                    list(output.token_ids)) or \
+                                    (res.prompt_token_ids and
+                                        reasoning_parser.is_reasoning_end(
+                                            list(res.prompt_token_ids)
+                                        )):
+                                reasoning_end_arr[i] = True
                                 if delta_message and delta_message.content:
                                     # This need to be added to next `delta_text`
                                     current_text = delta_message.content
