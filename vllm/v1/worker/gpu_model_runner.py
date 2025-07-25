@@ -1383,6 +1383,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
             hidden_states=return_hidden_states,
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
         )
 
     @torch.inference_mode()

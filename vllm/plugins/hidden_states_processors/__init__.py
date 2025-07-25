@@ -57,8 +57,13 @@ def get_hidden_states_processor(
     assert num_available_plugins > 0
 
     if num_available_plugins > 1 and envs.VLLM_USE_HIDDEN_STATES_PROCESSOR:
-        activated_plugin_cls = loadable_plugins[
-            envs.VLLM_USE_HIDDEN_STATES_PROCESSOR]
+        plugin_name = envs.VLLM_USE_HIDDEN_STATES_PROCESSOR
+        if plugin_name not in loadable_plugins:
+            raise ValueError(
+                f"Hidden states processor plugin '{plugin_name}' not found. "
+                f"Available plugins: {list(loadable_plugins.keys())}")
+
+        activated_plugin_cls = loadable_plugins[plugin_name]
         activated_plugin_name = envs.VLLM_USE_HIDDEN_STATES_PROCESSOR
     else:
         activated_plugin_name = list(loadable_plugins.keys())[0]
