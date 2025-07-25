@@ -12,5 +12,5 @@ vLLM supports the following hardware platforms:
     - [Apple silicon](cpu.md#apple-silicon)
     - [IBM Z (S390X)](cpu.md#ibm-z-s390x)
 - [Google TPU](google_tpu.md)
-- [Intel Gaudi](intel_gaudi.md)
 - [AWS Neuron](aws_neuron.md)
+- [Intel Gaudi](intel_gaudi.md)
