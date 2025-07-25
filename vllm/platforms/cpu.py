@@ -347,17 +347,20 @@ class CpuPlatform(Platform):
     @classmethod
     def mem_get_info(cls):
         # FIXME: impl
-        return None
+        # Returning (0, 0) as a placeholder for (free, total) memory.
+        return (0, 0)
 
     @classmethod
     def memory_stats(cls):
         # FIXME: impl
-        return None
+        # Returning an empty dict as a placeholder for memory stats.
+        return {}
 
     @classmethod
     def memory_reserved(cls):
         # FIXME: impl
-        return None
+        # Returning 0 as a placeholder for reserved memory.
+        return 0
 
     @classmethod
     def synchronize(cls):

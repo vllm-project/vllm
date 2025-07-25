@@ -214,9 +214,9 @@ class XPUPlatform(Platform):
             # FIXME: memory_allocated() doesn't count non-torch allocations,
             # and we don't have any API to get it. so we mark it as 128MB.
             used_memory = torch.xpu.memory_allocated()
-            non_torch_allocations = 128 * 1024 * 1024
+            NON_TORCH_ALLOCATIONS_BYTES = 128 * 1024 * 1024
             free_gpu_memory = total_gpu_memory - (used_memory +
-                                                  non_torch_allocations)
+                                                  NON_TORCH_ALLOCATIONS_BYTES)
             return free_gpu_memory, total_gpu_memory
 
     @classmethod
