@@ -571,11 +571,13 @@ class _ModelRegistry:
                     and architecture.endswith(suffix)):
                 return architecture.replace(suffix, "ForCausalLM")
 
+        return architecture
+
     def _normalize_archs(
         self,
         architectures: list[str],
         *,
-        model_config: Optional[ModelConfig] = None,
+        model_config: Optional[ModelConfig],
     ) -> list[str]:
         if not architectures:
             logger.warning("No model architectures are specified")
@@ -584,6 +586,20 @@ class _ModelRegistry:
             self._normalize_arch(arch, model_config=model_config)
             for arch in architectures
         ]
+
+    def _get_inspected_arch(
+        self,
+        orig_architecture: str,
+        normalized_architecture: str,
+        *,
+        model_config: Optional[ModelConfig],
+    ) -> str:
+        if (model_config is not None and normalized_architecture
+                == model_config._get_transformers_backend_cls()):
+            return normalized_architecture
+
+        # Avoid breaking `verify_and_update_config`
+        return orig_architecture
 
     def inspect_model_cls(
         self,
@@ -597,10 +613,13 @@ class _ModelRegistry:
         normalized_archs = self._normalize_archs(architectures,
                                                  model_config=model_config)
 
-        for normalized_arch in normalized_archs:
+        for arch, normalized_arch in zip(architectures, normalized_archs):
             model_info = self._try_inspect_model_cls(normalized_arch)
             if model_info is not None:
-                return (model_info, normalized_arch)
+                out_arch = self._get_inspected_arch(arch,
+                                                    normalized_arch,
+                                                    model_config=model_config)
+                return (model_info, out_arch)
 
         return self._raise_for_unsupported(architectures)
 
@@ -619,7 +638,10 @@ class _ModelRegistry:
         for arch, normalized_arch in zip(architectures, normalized_archs):
             model_cls = self._try_load_model_cls(normalized_arch)
             if model_cls is not None:
-                return (model_cls, arch)
+                out_arch = self._get_inspected_arch(arch,
+                                                    normalized_arch,
+                                                    model_config=model_config)
+                return (model_cls, out_arch)
 
         return self._raise_for_unsupported(architectures)
 
