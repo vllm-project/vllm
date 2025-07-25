@@ -143,9 +143,11 @@ class Pooler(nn.Module, ABC):
         if classifier is None:
             return base_pooler
 
-        return ClassifierPooler(pooling=base_pooler.pooling,
-                                classifier=classifier,
-                                act_fn=base_pooler.head.activation)
+        return ClassifierPooler(
+            pooling=base_pooler.pooling,
+            classifier=classifier,
+            act_fn=base_pooler.head.activation,
+        )
 
     @abstractmethod
     def get_supported_tasks(self) -> Set[PoolingTask]:
