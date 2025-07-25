@@ -245,7 +245,12 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                 dtype=torch.int,
                 device=device,
             )
-        assert max_query_len > 0, "query_lens: {}".format(query_lens)
+        # NOTE: TILT does not always have a decoder input. If the
+        # input document is longer than what is possible to process in a single
+        # step and there is no other work for the decoder, the decoder input
+        # will be empty.
+        # For that reason the assertion below is commented out.
+        # assert max_query_len > 0, "query_lens: {}".format(query_lens)
 
         assert device is not None
         context_lens_tensor = async_tensor_h2d(self.context_lens, torch.int,

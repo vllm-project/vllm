@@ -16,7 +16,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 
 from .data import (DecoderOnlyInputs, EncoderDecoderInputs, ProcessorInputs,
-                   PromptType, SingletonInputs, SingletonPrompt, token_inputs)
+                   PromptType, SingletonInputs, SingletonPrompt, TiltInputs,
+                   token_inputs)
 from .parse import is_explicit_encoder_decoder_prompt, parse_singleton_prompt
 
 logger = init_logger(__name__)
@@ -462,6 +463,67 @@ class InputPreprocessor:
 
         assert_never(parsed)
 
+    def _process_tilt_prompt(self, prompt: PromptType) -> TiltInputs:
+        encoder_inputs: SingletonInputs
+        decoder_inputs: Optional[SingletonInputs]
+
+        if ("encoder_prompt" in prompt and "encoder_prefix_prompt" in prompt
+                and "decoder_prompt" in prompt):
+            encoder_inputs = self._prompt_to_llm_inputs(
+                prompt["encoder_prompt"])
+
+            encoder_prefix_inputs = self._prompt_to_llm_inputs(
+                prompt["encoder_prefix_prompt"])
+
+            decoder_inputs = self._prompt_to_llm_inputs(
+                prompt["decoder_prompt"])
+        else:
+            raise RuntimeError(
+                "TILT models require an explicit 3-part prompt: "
+                "encoder, encoder prefix and decoder")
+
+        return TiltInputs(
+            encoder=encoder_inputs,
+            encoder_prefix=encoder_prefix_inputs,
+            decoder=decoder_inputs,
+        )
+
+    async def _process_tilt_prompt_async(
+        self,
+        prompt: PromptType,
+    ) -> EncoderDecoderInputs:
+        """Async version of :meth:`_process_encoder_decoder_prompt`."""
+        encoder_inputs: SingletonInputs
+        decoder_inputs: Optional[SingletonInputs]
+
+        if ("encoder_prompt" in prompt and "encoder_prefix_prompt" in prompt
+                and "decoder_prompt" in prompt):
+            encoder_task = self._prompt_to_llm_inputs_async(
+                prompt["encoder_prompt"],
+            )
+
+            encoder_prefix_task = self._prompt_to_llm_inputs_async(
+                prompt["encoder_prefix_prompt"],
+            )
+
+            decoder_task = self._prompt_to_llm_inputs_async(
+                prompt["decoder_prompt"],
+            )
+
+            encoder_inputs, encoder_prefix_inputs, decoder_inputs = (
+                await asyncio.gather(encoder_task, encoder_prefix_task,
+                                     decoder_task))
+        else:
+            raise RuntimeError(
+                "TILT models require an explicit 3-part prompt: "
+                "encoder, encoder prefix and decoder")
+
+        return TiltInputs(
+            encoder=encoder_inputs,
+            encoder_prefix=encoder_prefix_inputs,
+            decoder=decoder_inputs,
+        )
+
     def _build_enc_dec_llm_inputs(
         self,
         encoder_inputs: SingletonInputs,
@@ -734,6 +796,10 @@ class InputPreprocessor:
         return_mm_hashes: bool = False,
     ) -> ProcessorInputs:
         """Preprocess the input prompt."""
+        if self.model_config.task == "tilt_generate":
+            # TILT models require special processing of the input prompt
+            return self._process_tilt_prompt(prompt)
+
         if self.model_config.is_encoder_decoder:
             assert not return_mm_hashes, (
                 "Multimodal hashes for encoder-decoder models should not be ",
@@ -762,6 +828,10 @@ class InputPreprocessor:
         return_mm_hashes: bool = False,
     ) -> ProcessorInputs:
         """Async version of :meth:`preprocess`."""
+        if self.model_config.task == "tilt_generate":
+            # TILT models require special processing of the input prompt
+            return await self._process_tilt_prompt_async(prompt)
+
         if self.model_config.is_encoder_decoder:
             assert not return_mm_hashes, (
                 "Multimodal hashes for encoder-decoder models should not be ",

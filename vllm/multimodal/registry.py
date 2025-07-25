@@ -19,6 +19,7 @@ from .audio import AudioPlugin
 from .base import MultiModalInputMapper, MultiModalPlugin, MultiModalTokensCalc
 from .image import ImagePlugin
 from .inputs import MultiModalDataDict, MultiModalKwargs, NestedTensors
+from .ocr_document import OcrDocumentPlugin
 from .processing import (BaseMultiModalProcessor, BaseProcessingInfo,
                          ProcessingCache)
 from .profiling import (BaseDummyInputsBuilder, DummyDecoderData,
@@ -104,7 +105,7 @@ class MultiModalRegistry:
     A registry that dispatches data processing according to the model.
     """
 
-    DEFAULT_PLUGINS = (ImagePlugin(), AudioPlugin(), VideoPlugin())
+    DEFAULT_PLUGINS = (ImagePlugin(), AudioPlugin(), VideoPlugin(), OcrDocumentPlugin())
 
     def __init__(
             self,

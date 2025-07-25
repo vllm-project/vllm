@@ -1257,6 +1257,12 @@ class EngineArgs:
             long_prefill_token_threshold=self.long_prefill_token_threshold,
         )
 
+        if model_config.task == "tilt_generate":
+            from vllm.tilt.scheduler import TiltSchedulerConfig
+
+            scheduler_config = TiltSchedulerConfig.extend_scheduler_config(
+                scheduler_config, model_config, self.additional_config)
+
         lora_config = LoRAConfig(
             bias_enabled=self.enable_lora_bias,
             max_lora_rank=self.max_lora_rank,

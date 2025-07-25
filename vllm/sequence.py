@@ -662,6 +662,7 @@ class SequenceGroup:
                  pooling_params: Optional[PoolingParams] = None,
                  pooled_data: Optional[torch.Tensor] = None,
                  encoder_seq: Optional[Sequence] = None,
+                 encoder_prefix_seq: Optional[Sequence] = None,  # TILT only
                  trace_headers: Optional[Mapping[str, str]] = None,
                  prompt_adapter_request: Optional[PromptAdapterRequest] = None,
                  priority: int = 0,
@@ -689,6 +690,7 @@ class SequenceGroup:
         self.pooled_data = pooled_data
         self.prompt_adapter_request = prompt_adapter_request
         self.encoder_seq = encoder_seq
+        self.encoder_prefix_seq = encoder_prefix_seq
         self.trace_headers = trace_headers
         self.priority = priority
 
@@ -976,9 +978,12 @@ class SequenceGroupMetadata(
     multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
     mm_processor_kwargs: Optional[dict[str, Any]] = None
     encoder_seq_data: Optional[SequenceData] = None
+    encoder_prefix_seq_data: Optional[SequenceData] = None  # TILT only
+    encoder_prefix_multi_modal_data: Optional[Any] = None  # TILT only
     cross_block_table: Optional[list[int]] = None
     prompt_adapter_request: Optional[PromptAdapterRequest] = None
     token_chunk_size: Optional[int] = None
+    encoder_token_chunk_size: Optional[int] = None  # TILT only
 
     ### Stateful fields that are lazily defined. ###
     # The number of speculative tokens adopted in this request.

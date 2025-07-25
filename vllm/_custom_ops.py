@@ -52,6 +52,8 @@ def paged_attention_v1(
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
+    t5_bias_lookup_table: Optional[torch.Tensor] = None,
+    t5_bias_max_distance: int = 0,
     tp_rank: int = 0,
     blocksparse_local_blocks: int = 0,
     blocksparse_vert_stride: int = 0,
@@ -61,9 +63,9 @@ def paged_attention_v1(
     torch.ops._C.paged_attention_v1(
         out, query, key_cache, value_cache, num_kv_heads, scale, block_tables,
         seq_lens, block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
-        k_scale, v_scale, tp_rank, blocksparse_local_blocks,
-        blocksparse_vert_stride, blocksparse_block_size,
-        blocksparse_head_sliding_step)
+        k_scale, v_scale, t5_bias_lookup_table, t5_bias_max_distance, tp_rank,
+        blocksparse_local_blocks, blocksparse_vert_stride,
+        blocksparse_block_size, blocksparse_head_sliding_step)
 
 
 def paged_attention_v2(
@@ -84,6 +86,8 @@ def paged_attention_v2(
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
+    t5_bias_lookup_table: Optional[torch.Tensor] = None,
+    t5_bias_max_distance: int = 0,
     tp_rank: int = 0,
     blocksparse_local_blocks: int = 0,
     blocksparse_vert_stride: int = 0,
@@ -93,9 +97,10 @@ def paged_attention_v2(
     torch.ops._C.paged_attention_v2(
         out, exp_sum, max_logits, tmp_out, query, key_cache, value_cache,
         num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len,
-        alibi_slopes, kv_cache_dtype, k_scale, v_scale, tp_rank,
-        blocksparse_local_blocks, blocksparse_vert_stride,
-        blocksparse_block_size, blocksparse_head_sliding_step)
+        alibi_slopes, kv_cache_dtype, k_scale, v_scale, t5_bias_lookup_table,
+        t5_bias_max_distance, tp_rank, blocksparse_local_blocks,
+        blocksparse_vert_stride, blocksparse_block_size,
+        blocksparse_head_sliding_step)
 
 
 def paged_attention_rocm(

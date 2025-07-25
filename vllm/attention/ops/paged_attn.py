@@ -99,6 +99,8 @@ class PagedAttention:
         alibi_slopes: Optional[torch.Tensor],
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
+        t5_bias_lookup_table: Optional[torch.Tensor] = None,
+        t5_bias_max_distance: int = 0,
         tp_rank: int = 0,
         blocksparse_local_blocks: int = 0,
         blocksparse_vert_stride: int = 0,
@@ -145,6 +147,8 @@ class PagedAttention:
                 kv_cache_dtype,
                 k_scale,
                 v_scale,
+                t5_bias_lookup_table,
+                t5_bias_max_distance,
                 tp_rank,
                 blocksparse_local_blocks,
                 blocksparse_vert_stride,
@@ -183,6 +187,8 @@ class PagedAttention:
                 kv_cache_dtype,
                 k_scale,
                 v_scale,
+                t5_bias_lookup_table,
+                t5_bias_max_distance,
                 tp_rank,
                 blocksparse_local_blocks,
                 blocksparse_vert_stride,
@@ -207,6 +213,9 @@ class PagedAttention:
         sliding_window: Optional[int],
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
+        sm_scale: Optional[float] = None,
+        t5_bias_lookup_table: Optional[torch.Tensor] = None,
+        t5_bias_max_distance: int = 0,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
         max_seq_len = None
@@ -228,6 +237,9 @@ class PagedAttention:
             v_scale,
             alibi_slopes,
             sliding_window,
+            sm_scale=sm_scale,
+            t5_bias_lookup_table=t5_bias_lookup_table,
+            t5_bias_max_distance=t5_bias_max_distance,
         )
         return output
 

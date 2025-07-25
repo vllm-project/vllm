@@ -105,7 +105,10 @@ __device__ void paged_attention_kernel(
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
-    const float* k_scale, const float* v_scale, const int tp_rank,
+    const float* k_scale, const float* v_scale,
+    const float* __restrict__ t5_bias_lookup_table,  // [t5_bias_max_distance,
+                                                     // num_heads]
+    const int t5_bias_max_distance, const int tp_rank,
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
     const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
   const int seq_idx = blockIdx.y;
@@ -139,7 +142,7 @@ __device__ void paged_attention_kernel(
   constexpr int NUM_THREAD_GROUPS =
       NUM_THREADS / THREAD_GROUP_SIZE;  // Note: This assumes THREAD_GROUP_SIZE
                                         // divides NUM_THREADS
-  assert(NUM_THREADS % THREAD_GROUP_SIZE == 0);
+  static_assert(NUM_THREADS % THREAD_GROUP_SIZE == 0);
   constexpr int NUM_TOKENS_PER_THREAD_GROUP =
       DIVIDE_ROUND_UP(BLOCK_SIZE, WARP_SIZE);
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
@@ -295,6 +298,11 @@ __device__ void paged_attention_kernel(
                              q_vecs[thread_group_offset], k_vecs);
       // Add the ALiBi bias if slopes are given.
       qk += (alibi_slope != 0) ? alibi_slope * (token_idx - seq_len + 1) : 0;
+      if (t5_bias_max_distance != 0) {
+        const int t5_bias_idx =
+            max(min(seq_len - token_idx - 1, t5_bias_max_distance), 0);
+        qk += t5_bias_lookup_table[head_idx + t5_bias_idx * num_heads];
+      }
 
       if (thread_group_offset == 0) {
         // Store the partial reductions to shared memory.
@@ -513,7 +521,10 @@ __global__ void paged_attention_v1_kernel(
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
-    const float* k_scale, const float* v_scale, const int tp_rank,
+    const float* k_scale, const float* v_scale,
+    const float* __restrict__ t5_bias_lookup_table,  // [t5_bias_max_distance,
+                                                     // num_heads]
+    const int t5_bias_max_distance, const int tp_rank,
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
     const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS,
@@ -521,7 +532,8 @@ __global__ void paged_attention_v1_kernel(
       /* exp_sums */ nullptr, /* max_logits */ nullptr, out, q, k_cache,
       v_cache, num_kv_heads, scale, block_tables, seq_lens,
       max_num_blocks_per_seq, alibi_slopes, q_stride, kv_block_stride,
-      kv_head_stride, k_scale, v_scale, tp_rank, blocksparse_local_blocks,
+      kv_head_stride, k_scale, v_scale, t5_bias_lookup_table,
+      t5_bias_max_distance, tp_rank, blocksparse_local_blocks,
       blocksparse_vert_stride, blocksparse_block_size,
       blocksparse_head_sliding_step);
 }
@@ -549,15 +561,19 @@ __global__ void paged_attention_v2_kernel(
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
-    const float* k_scale, const float* v_scale, const int tp_rank,
+    const float* k_scale, const float* v_scale,
+    const float* __restrict__ t5_bias_lookup_table,  // [t5_bias_max_distance,
+                                                     // num_heads]
+    const int t5_bias_max_distance, const int tp_rank,
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
     const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS,
                          KV_DTYPE, IS_BLOCK_SPARSE, PARTITION_SIZE>(
       exp_sums, max_logits, tmp_out, q, k_cache, v_cache, num_kv_heads, scale,
       block_tables, seq_lens, max_num_blocks_per_seq, alibi_slopes, q_stride,
-      kv_block_stride, kv_head_stride, k_scale, v_scale, tp_rank,
-      blocksparse_local_blocks, blocksparse_vert_stride, blocksparse_block_size,
+      kv_block_stride, kv_head_stride, k_scale, v_scale, t5_bias_lookup_table,
+      t5_bias_max_distance, tp_rank, blocksparse_local_blocks,
+      blocksparse_vert_stride, blocksparse_block_size,
       blocksparse_head_sliding_step);
 }
 

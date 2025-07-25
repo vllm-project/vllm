@@ -37,7 +37,8 @@
           exp_sums_ptr, max_logits_ptr, tmp_out_ptr, query_ptr, key_cache_ptr, \
           value_cache_ptr, num_kv_heads, scale, block_tables_ptr,              \
           seq_lens_ptr, max_num_blocks_per_seq, alibi_slopes_ptr, q_stride,    \
-          kv_block_stride, kv_head_stride, k_scale_ptr, v_scale_ptr, tp_rank,  \
+          kv_block_stride, kv_head_stride, k_scale_ptr, v_scale_ptr,           \
+          t5_bias_lookup_table_ptr, t5_bias_max_distance, tp_rank,             \
           blocksparse_local_blocks, blocksparse_vert_stride,                   \
           blocksparse_block_size, blocksparse_head_sliding_step);              \
   vllm::paged_attention_v2_reduce_kernel<T, HEAD_SIZE, NUM_THREADS,            \
@@ -55,7 +56,9 @@ void paged_attention_v2_launcher(
     torch::Tensor& value_cache, int num_kv_heads, float scale,
     torch::Tensor& block_tables, torch::Tensor& seq_lens, int max_seq_len,
     const std::optional<torch::Tensor>& alibi_slopes, torch::Tensor& k_scale,
-    torch::Tensor& v_scale, const int tp_rank,
+    torch::Tensor& v_scale,
+    const c10::optional<torch::Tensor>& t5_bias_lookup_table,
+    const int t5_bias_max_distance, const int tp_rank,
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
     const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
   int num_seqs = query.size(0);
@@ -74,6 +77,11 @@ void paged_attention_v2_launcher(
       alibi_slopes
           ? reinterpret_cast<const float*>(alibi_slopes.value().data_ptr())
           : nullptr;
+
+  const float* t5_bias_lookup_table_ptr =
+      t5_bias_lookup_table ? reinterpret_cast<const float*>(
+                                 t5_bias_lookup_table.value().data_ptr())
+                           : nullptr;
 
   T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
   float* exp_sums_ptr = reinterpret_cast<float*>(exp_sums.data_ptr());
@@ -144,9 +152,9 @@ void paged_attention_v2_launcher(
                               IS_BLOCK_SPARSE>(                               \
       out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,      \
       num_kv_heads, scale, block_tables, seq_lens, max_seq_len, alibi_slopes, \
-      k_scale, v_scale, tp_rank, blocksparse_local_blocks,                    \
-      blocksparse_vert_stride, blocksparse_block_size,                        \
-      blocksparse_head_sliding_step);
+      k_scale, v_scale, t5_bias_lookup_table, t5_bias_max_distance, tp_rank,  \
+      blocksparse_local_blocks, blocksparse_vert_stride,                      \
+      blocksparse_block_size, blocksparse_head_sliding_step);
 
 #define CALL_V2_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE) \
   if (is_block_sparse) {                                                   \
@@ -191,7 +199,9 @@ void paged_attention_v2(
     int64_t block_size, int64_t max_seq_len,
     const std::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
-    torch::Tensor& v_scale, const int64_t tp_rank,
+    torch::Tensor& v_scale,
+    const c10::optional<torch::Tensor>& t5_bias_lookup_table,
+    const int64_t t5_bias_max_distance, const int64_t tp_rank,
     const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step) {

@@ -156,6 +156,11 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     cross_slot_mapping: Optional[torch.Tensor] = None
     cross_block_tables: Optional[torch.Tensor] = None
 
+    # T5 bias
+    # Lookup table: [t5_bias_max_distance, num_heads]
+    t5_bias_lookup_table: Optional[torch.Tensor] = None
+    t5_bias_max_distance: int = 0
+
     def __post_init__(self):
         # Set during the execution of the first attention op.
         # It is a list because it is needed to set per prompt
@@ -585,11 +590,17 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     self.sliding_window,
                     layer._k_scale,
                     layer._v_scale,
+                    sm_scale=self.scale,
+                    t5_bias_lookup_table=prefill_meta.t5_bias_lookup_table
+                    if attn_type == AttentionType.DECODER else None,
+                    t5_bias_max_distance=prefill_meta.t5_bias_max_distance
+                    if attn_type == AttentionType.DECODER else 0,
                 )
                 assert output[:num_prefill_query_tokens].shape == out.shape
                 output[:num_prefill_query_tokens] = out
 
-        if decode_meta := attn_metadata.decode_metadata:
+        if (decode_meta := attn_metadata.decode_metadata
+            ) and attn_type != AttentionType.ENCODER:
             assert attn_type != AttentionType.ENCODER_ONLY, (
                 "Encoder-only models should not have decode metadata.")
 
@@ -612,6 +623,10 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 self.alibi_slopes,
                 layer._k_scale,
                 layer._v_scale,
+                t5_bias_lookup_table=decode_meta.t5_bias_lookup_table
+                if attn_type == AttentionType.DECODER else None,
+                t5_bias_max_distance=decode_meta.t5_bias_max_distance
+                if attn_type == AttentionType.DECODER else 0,
             )
 
         # Reshape the output tensor.

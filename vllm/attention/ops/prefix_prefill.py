@@ -8,6 +8,7 @@ import triton
 import triton.language as tl
 
 from vllm.platforms import current_platform
+from ._prefix_prefill_t5 import _fwd_kernel_t5
 
 # Static kernels parameters
 BASE_BLOCK = 128 if current_platform.has_device_capability(80) else 64
@@ -732,7 +733,10 @@ if triton.__version__ >= "2.1.0":
                               alibi_slopes=None,
                               sliding_window=None,
                               sm_scale=None,
-                              skip_decode=False):
+                              skip_decode=False,
+                              t5_bias_lookup_table=None,
+                              t5_bias_max_distance=0,
+                              ):
 
         q_dtype_is_f32 = q.dtype is torch.float32
         # need to reduce num. blocks when using fp32
@@ -784,6 +788,62 @@ if triton.__version__ >= "2.1.0":
         # 0 means "disable"
         if sliding_window is None or sliding_window <= 0:
             sliding_window = 0
+
+        if t5_bias_lookup_table is not None and t5_bias_max_distance > 0:
+            _fwd_kernel_t5[grid](
+                q,
+                k,
+                v,
+                k_cache,
+                v_cache,
+                b_loc,
+                sm_scale,
+                k_scale,
+                v_scale,
+                b_start_loc,
+                b_seq_len,
+                t5_bias_lookup_table,
+                t5_bias_max_distance,
+                v_cache.shape[3],
+                k_cache.shape[4],
+                o,
+                b_loc.stride(0),
+                b_loc.stride(1),
+                q.stride(0),
+                q.stride(1),
+                q.stride(2),
+                k.stride(0),
+                k.stride(1),
+                k.stride(2),
+                v.stride(0),
+                v.stride(1),
+                v.stride(2),
+                o.stride(0),
+                o.stride(1),
+                o.stride(2),
+                k_cache.stride(0),
+                k_cache.stride(1),
+                k_cache.stride(2),
+                k_cache.stride(3),
+                k_cache.stride(
+                    4
+                ),  #[num_blocks, num_kv_heads, head_size/x, block_size, x]
+                v_cache.stride(0),
+                v_cache.stride(1),
+                v_cache.stride(2),
+                v_cache.stride(
+                    3),  #[num_blocks, num_kv_heads, head_size, block_size]
+                num_queries_per_kv=num_queries_per_kv,
+                IN_PRECISION=IN_PRECISION,
+                BLOCK_M=BLOCK,
+                BLOCK_DMODEL=Lk,
+                BLOCK_DMODEL_PADDED=Lk_padded,
+                BLOCK_N=BLOCK,
+                SKIP_DECODE=skip_decode,
+                num_warps=NUM_WARPS,
+                num_stages=1,
+            )
+            return
 
         if alibi_slopes is not None:
             _fwd_kernel_alibi[grid](

@@ -88,6 +88,10 @@ _T2_co = TypeVar("_T2_co",
                  bound=SingletonPrompt,
                  default=SingletonPrompt,
                  covariant=True)
+_T3_co = TypeVar("_T3_co",
+                 bound=SingletonPrompt,
+                 default=SingletonPrompt,
+                 covariant=True)
 
 
 # TODO: Make fields ReadOnly once mypy supports it
@@ -118,7 +122,12 @@ class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
     mm_processor_kwargs: NotRequired[dict[str, Any]]
 
 
-PromptType = Union[SingletonPrompt, ExplicitEncoderDecoderPrompt]
+class TiltPrompt(ExplicitEncoderDecoderPrompt[_T1_co, _T2_co],
+                 Generic[_T1_co, _T2_co, _T3_co]):
+    encoder_prefix_prompt: _T3_co
+
+
+PromptType = Union[SingletonPrompt, ExplicitEncoderDecoderPrompt, TiltPrompt]
 """
 Set of possible schemas for an LLM input, including
 both decoder-only and encoder/decoder input types:
@@ -228,6 +237,23 @@ class EncoderDecoderInputs(TypedDict):
     """The inputs for the encoder portion."""
 
     decoder: Union[TokenInputs, "MultiModalInputs"]
+    """The inputs for the decoder portion."""
+
+
+class TiltInputs(TypedDict):
+    """
+    The inputs in :class:`~vllm.LLMEngine` before they are
+    passed to the model executor.
+
+    This specifies the required data for TILT model.
+    """
+    encoder: Union[TokenInputs, "MultiModalInputs"]
+    """The inputs for the encoder portion."""
+
+    encoder_prefix: Union[TokenInputs, "MultiModalInputs"]
+    """The inputs for the encoder prefix portion."""
+
+    decoder: TokenInputs
     """The inputs for the decoder portion."""
 
 

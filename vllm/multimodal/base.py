@@ -167,7 +167,7 @@ class MultiModalPlugin(ABC):
         raise NotImplementedError
 
     def _validate_max_multimodal_tokens(self, max_mm_tokens: int):
-        if max_mm_tokens < 1:
+        if max_mm_tokens < 0:
             raise ValueError("You should set the number of tokens to a "
                              f"positive integer. Found: {max_mm_tokens}")
 

@@ -64,18 +64,19 @@ _POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
 TaskOption = Literal["auto", "generate", "embedding", "embed", "classify",
-                     "score", "reward", "transcription"]
+                     "score", "reward", "transcription", "tilt_generate"]
 
 _ResolvedTask = Literal["generate", "embed", "classify", "score", "reward",
-                        "draft", "transcription"]
+                        "draft", "transcription", "tilt_generate"]
 
-RunnerType = Literal["generate", "pooling", "draft", "transcription"]
+RunnerType = Literal["generate", "pooling", "draft", "transcription", "tilt"]
 
 _RUNNER_TASKS: dict[RunnerType, list[_ResolvedTask]] = {
     "generate": ["generate"],
     "pooling": ["embed", "classify", "score", "reward"],
     "draft": ["draft"],
     "transcription": ["transcription"],
+    "tilt": ["tilt_generate"],
 }
 
 _TASK_RUNNER: dict[_ResolvedTask, RunnerType] = {
@@ -575,6 +576,9 @@ class ModelConfig:
             "transcription": registry.is_transcription_model(architectures),
             "generate": registry.is_text_generation_model(architectures),
             "pooling": registry.is_pooling_model(architectures),
+            "tilt": (
+                registry.inspect_model_cls(architectures)[1] == "TiltModel"
+            ),
         }
         supported_runner_types_lst: list[RunnerType] = [
             runner_type

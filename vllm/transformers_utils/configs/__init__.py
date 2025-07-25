@@ -23,6 +23,7 @@ from vllm.transformers_utils.configs.olmo2 import Olmo2Config
 from vllm.transformers_utils.configs.skyworkr1v import SkyworkR1VChatConfig
 from vllm.transformers_utils.configs.solar import SolarConfig
 from vllm.transformers_utils.configs.telechat2 import Telechat2Config
+from vllm.transformers_utils.configs.tilt import TiltConfig
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
 __all__ = [
@@ -46,5 +47,6 @@ __all__ = [
     "SkyworkR1VChatConfig",
     "SolarConfig",
     "Telechat2Config",
+    "TiltConfig",
     "UltravoxConfig",
 ]

@@ -619,6 +619,17 @@ class LLMEngine:
             seq_id, encoder_inputs, block_size, eos_token_id, lora_request,
             prompt_adapter_request))
 
+        if self.is_tilt_enabled():
+            encoder_prefix_inputs = processed_inputs.get(
+                "encoder_prefix", None)
+            # encoder_prefix_seq is used in TILT only
+            encoder_prefix_seq = (
+                None if encoder_prefix_inputs is None else Sequence(
+                    seq_id, encoder_prefix_inputs, block_size, eos_token_id,
+                    lora_request, prompt_adapter_request))
+        else:
+            encoder_prefix_seq = None
+
         # Create a SequenceGroup based on SamplingParams or PoolingParams
         if isinstance(params, SamplingParams):
             seq_group = self._create_sequence_group_with_sampling(
@@ -630,6 +641,7 @@ class LLMEngine:
                 trace_headers=trace_headers,
                 prompt_adapter_request=prompt_adapter_request,
                 encoder_seq=encoder_seq,
+                encoder_prefix_seq=encoder_prefix_seq,
                 priority=priority)
         elif isinstance(params, PoolingParams):
             seq_group = self._create_sequence_group_with_pooling(
@@ -826,6 +838,7 @@ class LLMEngine:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         encoder_seq: Optional[Sequence] = None,
+        encoder_prefix_seq: Optional[Sequence] = None,
         priority: int = 0,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
@@ -861,6 +874,7 @@ class LLMEngine:
             trace_headers=trace_headers,
             prompt_adapter_request=prompt_adapter_request,
             encoder_seq=encoder_seq,
+            encoder_prefix_seq=encoder_prefix_seq,
             priority=priority,
             draft_size=draft_size)
 
@@ -932,6 +946,10 @@ class LLMEngine:
     def get_lora_config(self) -> LoRAConfig:
         """Gets the LoRA configuration."""
         return self.lora_config
+
+    def is_tilt_enabled(self) -> bool:
+        """Returns True if engine is configured to use TILT."""
+        return self.model_config.runner_type == "tilt"
 
     def get_num_unfinished_requests(self) -> int:
         """Gets the number of unfinished requests."""
@@ -1104,6 +1122,10 @@ class LLMEngine:
             output: List[SequenceGroupOutput]
             if has_multiple_outputs:
                 output = outputs_by_sequence_group[i]
+            elif (self.is_tilt_enabled()
+                  and outputs_by_sequence_group[0].outputs is None):
+                # TILT only. TILT does not always produce a token in every step
+                output = []
             else:
                 output = [outputs_by_sequence_group[0][i]]
 
@@ -1115,6 +1137,29 @@ class LLMEngine:
                 else:
                     seq_group.update_num_computed_tokens(
                         seq_group_meta.token_chunk_size or 0)
+                    if (self.is_tilt_enabled()
+                            and seq_group.encoder_prefix_seq is not None and
+                        (new_prompt_tokens := seq_group.encoder_prefix_seq.
+                         data.get_num_uncomputed_tokens()) > 0):
+                        # TILT only: set encoder prefix as computed after the
+                        # first chunk has been processed
+                        seq_group.encoder_prefix_seq.data.update_num_computed_tokens(
+                            new_prompt_tokens)
+                    if (self.is_tilt_enabled()
+                            and seq_group.encoder_seq is not None):
+                        # Update computation status of the encoder sequence.
+                        #
+                        # TILT processes encoder input in chunks, so we need to
+                        # track how many tokens have been computed.
+                        #
+                        # For other encoder-decoder models, we fallback to not
+                        # tracking computed tokens. V0 engine assumes all
+                        # encoder tokens are computed in the prefill step.
+                        num_new_encoder_tokens = getattr(
+                            seq_group_meta, "encoder_token_chunk_size", 0)
+                        if num_new_encoder_tokens > 0:
+                            seq_group.encoder_seq.data.update_num_computed_tokens(
+                                num_new_encoder_tokens)
 
             if outputs:
                 for o in outputs:
@@ -1135,6 +1180,9 @@ class LLMEngine:
 
             if self.model_config.runner_type == "pooling":
                 self._process_sequence_group_outputs(seq_group, output)
+            elif self.is_tilt_enabled() and len(output) == 0:
+                # TILT only. TILT does not always produce a token.
+                pass
             else:
                 self.output_processor.process_prompt_logprob(seq_group, output)
                 if seq_group_meta.do_sample:
