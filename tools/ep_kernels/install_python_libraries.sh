@@ -55,7 +55,9 @@ export CMAKE_PREFIX_PATH=$WORKSPACE/nvshmem_install:$CMAKE_PREFIX_PATH
 
 # build and install pplx, require pytorch installed
 pushd $WORKSPACE
-git clone https://github.com/ppl-ai/pplx-kernels
+if [ ! -d "pplx-kernels" ]; then
+    git clone https://github.com/ppl-ai/pplx-kernels
+fi
 cd pplx-kernels
 # see https://github.com/pypa/pip/issues/9955#issuecomment-838065925
 # PIP_NO_BUILD_ISOLATION=0 disables build isolation
@@ -64,7 +66,9 @@ popd
 
 # build and install deepep, require pytorch installed
 pushd $WORKSPACE
-git clone https://github.com/deepseek-ai/DeepEP
+if [ ! -d "DeepEP" ]; then
+    git clone https://github.com/deepseek-ai/DeepEP
+fi
 cd DeepEP
 export NVSHMEM_DIR=$WORKSPACE/nvshmem_install
 PIP_NO_BUILD_ISOLATION=0 pip install -vvv -e  .
