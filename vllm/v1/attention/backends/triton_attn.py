@@ -180,6 +180,8 @@ class TritonAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
+        if envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION:
+            return (2, num_blocks, block_size, num_kv_heads, head_size)
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod
