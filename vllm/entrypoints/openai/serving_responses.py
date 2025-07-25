@@ -61,7 +61,6 @@ class OpenAIServingResponses(OpenAIServing):
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
-            enable_force_include_usage=enable_force_include_usage,
         )
 
         self.chat_template = chat_template

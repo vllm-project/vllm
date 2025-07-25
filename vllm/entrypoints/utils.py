@@ -295,3 +295,8 @@ def get_max_tokens(max_model_len: int, request: Union[ChatCompletionRequest,
                for val in (default_max_tokens, max_tokens, max_output_tokens,
                            default_sampling_params.get("max_tokens"))
                if val is not None)
+
+
+def should_include_usage(stream_options_include_usage: Optional[bool],
+                         enable_force_include_usage: bool) -> bool:
+    return stream_options_include_usage or enable_force_include_usage
