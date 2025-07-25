@@ -35,7 +35,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.processor import (
     cached_image_processor_from_config)
 
@@ -308,7 +307,7 @@ class BaseInternS1MultiModalProcessor(BaseMultiModalProcessor[_I]):
     ) -> Mapping[str, MultiModalFieldConfig]:
 
         pixel_values = hf_inputs.get("pixel_values", torch.empty(0, 0, 0, 0))
-        image_num_patches = torch.tensor([pixel_values.shape[1]])
+        image_num_patches = torch.tensor([pixel_values.shape[0]])
         return dict(
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_num_patches),
@@ -367,8 +366,10 @@ class InternS1ProcessingInfo(BaseInternS1ProcessingInfo):
 
     @property
     def supports_video(self) -> bool:
-        # TODO:
         # return self.video_token_id is not None
+        # InternVLProcessor uses the same media placeholder for both images and videos, 
+        # making it challenging to adapt the `_get_mm_fields_config` function
+        # https://github.com/huggingface/transformers/blob/e3760501b0f0ce6be6fe31f0dab15d0e5d2c5260/src/transformers/models/internvl/processing_internvl.py#L92
         return False
 
     @property
@@ -486,15 +487,11 @@ class InternS1MultiModalProcessor(
         image_fields = super()._get_mm_fields_config(hf_inputs,
                                                      hf_processor_mm_kwargs)
         if self.info.supports_video:
-            video_num_patches = hf_inputs.get("video_num_patches",
-                                              torch.empty(0))
-            num_videos = len(video_num_patches)
+            pixel_values = hf_inputs.get("pixel_values", torch.empty(0, 0, 0, 0))
+            video_num_patches = torch.tensor([pixel_values.shape[0]])
             video_fields = dict(
-                pixel_values_flat_video=MultiModalFieldConfig.flat_from_sizes(
+                pixel_values=MultiModalFieldConfig.flat_from_sizes(
                     "video", video_num_patches),
-                video_num_patches=MultiModalFieldConfig.batched("video"),
-                video_token_id=MultiModalFieldConfig.shared(
-                    "video", num_videos),
             )
         else:
             video_fields = {}
@@ -511,7 +508,7 @@ class InternS1MultiModalProcessor(
             mm_items, hf_processor_mm_kwargs, out_mm_kwargs)
 
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-
+        print(f'>>>>>>>>>>>>_get_prompt_updates out_mm_kwargs {out_mm_kwargs}')
         if "video_num_patches" in out_mm_kwargs:
             video_num_patches = out_mm_kwargs["video_num_patches"]
             assert isinstance(video_num_patches, torch.Tensor)
@@ -519,25 +516,28 @@ class InternS1MultiModalProcessor(
         else:
             video_num_patches = []
 
-        # !! TODO
-        # def get_video_replacement(item_idx: int):
-        #     feature_size = hf_processor.num_image_token
-        #     num_patches = video_num_patches[item_idx]
-        #     if num_patches is not None:
-        #         assert isinstance(num_patches, int)
-        #     # TODO: find `hf_processor.get_video_repl`
-        #     return hf_processor.get_video_repl(
-        #         feature_size,
-        #         num_patches,
-        #         video_context_token=hf_processor.video_token)
+        def get_video_replacement(item_idx: int):
+            # feature_size = hf_processor.num_image_token
+            num_patches = video_num_patches[item_idx]
+            if num_patches is not None:
+                assert isinstance(num_patches, int)
 
-        # if self.info.supports_video:
-        #     prompt_repl.append(
-        #         PromptReplacement(
-        #             modality="video",
-        #             target="<video>",
-        #             replacement=get_video_replacement,
-        #         ))
+            video_context_token=hf_processor.video_token
+            repl_features = video_context_token * hf_processor.num_image_token
+            repl_features_with_sep = IMG_START + repl_features + IMG_END
+            # num_patches is equal to num_frames
+            repl_full = ''.join([
+                f'Frame{i+1}: {repl_features_with_sep}' for i in range(num_patches)
+            ])
+            return PromptUpdateDetails.select_text(repl_full, video_context_token)
+
+        if self.info.supports_video:
+            prompt_repl.append(
+                PromptReplacement(
+                    modality="video",
+                    target="<video>",
+                    replacement=get_video_replacement,
+                ))
         return prompt_repl
 
 
