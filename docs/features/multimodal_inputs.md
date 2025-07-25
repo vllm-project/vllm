@@ -176,7 +176,7 @@ Multi-image input can be extended to perform video captioning. We show this with
 
 You can pass a list of NumPy arrays directly to the `'video'` field of the multi-modal dictionary
 instead of using multi-image input.
-Or you can use torch.Tensor, the following is an example of Qwen2.5-VL.
+Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown in this example using Qwen2.5-VL:
 
 ??? code
 
@@ -185,7 +185,7 @@ Or you can use torch.Tensor, the following is an example of Qwen2.5-VL.
     from vllm import LLM, SamplingParams
     from qwen_vl_utils import process_vision_info
 
-    model_path = "Qwen/Qwen25-VL-3B-Instruct/"
+    model_path = "Qwen/Qwen2.5-VL-3B-Instruct/"
     video_path ="https://content.pexels.com/videos/free-videos.mp4"
 
     llm = LLM(
@@ -235,8 +235,10 @@ Or you can use torch.Tensor, the following is an example of Qwen2.5-VL.
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
-
     ```
+
+!!! note
+    that `'process_vision_info'` is only applicable to Qwen2.5-VL and similar models
 
 Full example: <gh-file:examples/offline_inference/vision_language.py>
 
