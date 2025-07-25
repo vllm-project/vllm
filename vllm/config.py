@@ -3229,7 +3229,7 @@ class PoolerConfig:
     """
 
     ## for classification models
-    activation: Optional[bool] = True
+    activation: Optional[bool] = None
     """
     Whether to apply activation function to the classification outputs. 
     """

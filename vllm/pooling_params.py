@@ -8,7 +8,7 @@ import msgspec
 from vllm.sampling_params import RequestOutputKind
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+    from vllm.config import ModelConfig, PoolerConfig
 
 PoolingTask = Literal["encode", "embed", "classify", "score"]
 
@@ -44,6 +44,10 @@ class PoolingParams(
     requires_token_ids: bool = False
     """Internal use only."""
 
+    @property
+    def all_parameters(self) -> list[str]:
+        return ["dimensions", "normalize", "activation", "softmax"]
+
     def clone(self) -> "PoolingParams":
         """Returns a deep copy of the PoolingParams instance."""
         return PoolingParams(
@@ -68,8 +72,6 @@ class PoolingParams(
         # which is not available in model config. So, it's not included
         # in this method
 
-        all_parameters = ["dimensions", "normalize", "activation", "softmax"]
-
         if self.task == "embed":
             legal_parameters = ["dimensions", "normalize"]
 
@@ -91,15 +93,24 @@ class PoolingParams(
                             f'lead to poor results.')
                 elif self.dimensions < 1:
                     raise ValueError("Dimensions must be greater than 0")
+
+            if self.normalize is None:
+                self.normalize = True
+
         elif self.task in ["classify", "score"]:
             legal_parameters = ["activation"]
+            if self.activation is None:
+                self.activation = True
+
         elif self.task == "encode":
             legal_parameters = ["softmax"]
+            if self.softmax is None:
+                self.softmax = True
         else:
             assert_never(self.task)
 
         invalid_parameters = []
-        for k in all_parameters:
+        for k in self.all_parameters:
             if k in legal_parameters:
                 continue
 
@@ -110,6 +121,11 @@ class PoolingParams(
             raise ValueError(
                 f"{self.task} only supports {legal_parameters} parameters, "
                 f"does not support {invalid_parameters} parameters")
+
+    def merge_default_parameters(self, pooler_config: "PoolerConfig") -> None:
+        for k in self.all_parameters:
+            if getattr(self, k, None) is None:
+                setattr(self, k, getattr(pooler_config, k))
 
     def __repr__(self) -> str:
         return (f"PoolingParams("

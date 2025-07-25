@@ -320,16 +320,14 @@ class ModernBertForSequenceClassification(nn.Module, SupportsV0Only,
                 pooling=ModernBertPooler(config),
                 classifier=self.classifier,
                 act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                    vllm_config.model_config),
-                activation=pooler_config.activation,
+                    vllm_config.model_config)
             ),
             "score":
             ClassifierPooler(
                 pooling=ModernBertPooler(config),
                 classifier=self.classifier,
                 act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                    vllm_config.model_config),
-                activation=pooler_config.activation,
+                    vllm_config.model_config)
             ),
         })
 

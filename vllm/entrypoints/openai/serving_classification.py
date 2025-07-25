@@ -177,6 +177,7 @@ class ServingClassification(ClassificationMixin):
             return pooling_params
 
         try:
+            pooling_params.merge_default_parameters(self.model_config.pooler_config)
             pooling_params.verify("classify", self.model_config)
         except ValueError as e:
             return self.create_error_response(str(e))
