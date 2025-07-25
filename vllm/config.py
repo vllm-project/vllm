@@ -134,6 +134,7 @@ SUFFIX_TO_DEFAULTS: list[tuple[str, tuple[RunnerType, ConvertType]]] = [
     ("ClassificationModel", ("pooling", "classify")),
     ("ForRewardModeling", ("pooling", "reward")),
     ("RewardModel", ("pooling", "reward")),
+    ("Model", ("pooling", "embed")),
 ]
 
 
@@ -970,11 +971,6 @@ class ModelConfig:
                 if (default_runner_type == runner_type
                         and arch.endswith(suffix)):
                     return convert_type
-
-        if runner_type == "pooling":
-            # Some models simply end with *Model which we assume
-            # to be embedding model if the runner type is known
-            return "embed"
 
         return "none"
 
