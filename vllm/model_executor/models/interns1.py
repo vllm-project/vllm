@@ -191,7 +191,7 @@ class BaseInternS1ProcessingInfo(BaseProcessingInfo):
             image_height,
             image_width,
             images_kwargs=dict())
-        num_image_tokens = 2 + self.get_hf_processor().image_seq_length * num_image_patches
+        num_image_tokens = self.get_hf_processor().image_seq_length * num_image_patches
         return num_image_tokens
 
     def resolve_target_ratios(self, use_thumbnail: Optional[bool] = None):
@@ -570,6 +570,8 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        # transformers InternVLProcessor uses <IMG_CONTEXT> as the seperator
+        # refer to https://github.com/huggingface/transformers/blob/f90de364c2484c7c325bbe05befdcf487bd75b63/src/transformers/models/internvl/processing_internvl.py#L116
         if modality.startswith("image"):
             return "<IMG_CONTEXT>"
         if modality.startswith("video"):
@@ -813,12 +815,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
         return modalities
 
     def _set_visual_token_mask(self, input_ids: torch.Tensor) -> None:
-        if self.is_mono:
-            assert self.img_context_token_id is not None
-            self.visual_token_mask = (
-                input_ids == self.img_context_token_id).reshape(-1, 1)
-        else:
-            self.visual_token_mask = None
+        self.visual_token_mask = None
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
