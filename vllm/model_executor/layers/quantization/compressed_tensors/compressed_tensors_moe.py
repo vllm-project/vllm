@@ -335,8 +335,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             return experts
 
         # Native CUTLASS experts currently don't support DP
-        assert moe.dp_size > 1
-        logger.debug_once("Using CutlassExpertsFp4 (unsupported for DP)")
+        # TP case won't call this function
         raise ValueError(
             "CutlassExpertsFp4 doesn't support DP. Use flashinfer CUTLASS "
             "Fused MoE backend instead (set VLLM_USE_FLASHINFER_MOE_FP4=1)")
