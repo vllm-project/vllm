@@ -375,7 +375,8 @@ class Llama4Model(LlamaModel):
                     new_loaded_weight = new_loaded_weight[shard_idx]
 
                 # Only transpose for non-FP4 weights
-                # FP4 weights are already in the correct format and shouldn't be transposed here.
+                # FP4 weights are already in the correct format and
+                # shouldn't be transposed here.
                 if not is_fp4_weight(new_loaded_weight):
                     new_loaded_weight = new_loaded_weight.transpose(-1, -2)
 
