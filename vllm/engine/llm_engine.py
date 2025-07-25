@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import os
 import time
 from collections import Counter as collectionsCounter
 from collections import deque
@@ -11,7 +12,7 @@ from functools import partial
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
                     Iterable, List, Literal, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
-from typing import Set, Type, Union, cast
+from typing import Set, Tuple, Type, Union, cast
 
 import torch
 from typing_extensions import TypeVar
@@ -223,6 +224,11 @@ class LLMEngine:
         self.decoding_config = vllm_config.decoding_config or DecodingConfig(  # noqa
         )
         self.observability_config = vllm_config.observability_config or ObservabilityConfig(  # noqa
+        )
+
+        self._profile_current_step = 0
+        self.profiler_start_iters, self.profiler_stop_iters = (
+            self._get_profiler_iteration_index_env_var("VLLM_PROFILE_START_STOP")
         )
 
         logger.info(
@@ -1248,6 +1254,14 @@ class LLMEngine:
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
 
+        self._profile_current_step = self._profile_current_step + 1
+        if self._profile_current_step in self.profiler_start_iters:
+            torch.cuda.cudart().cudaProfilerStart()
+
+        if self._profile_current_step in self.profiler_stop_iters:
+            torch.cuda.cudart().cudaProfilerStop()
+
+
         # For llm_engine, there is no pipeline parallel support, so the engine
         # used is always 0.
         virtual_engine = 0
@@ -2046,6 +2060,32 @@ class LLMEngine:
                 sampling_params.logits_processors.extend(logits_processors)
 
         return sampling_params
+
+    def _get_profiler_iteration_index_env_var(
+        self, name: str
+        ) -> Tuple[frozenset[int], frozenset[int]]:
+        spans = os.environ.get(name, None)
+        starts, stops = [], []
+
+        if spans:
+            spans = spans.split(",")
+
+            for span in spans:
+                try:
+                    if "-" in span:
+                        start, stop = span.strip().split("-")
+                        starts.append(int(start))
+                        stops.append(int(stop))
+                    else:
+                        it = int(span.strip())
+                        starts.append(it)
+                        stops.append(it)
+                except ValueError as e:
+                    raise ValueError(
+                        f"Cannot parse span in environment variable `{name}`: {e}"
+                    ) from None
+
+        return frozenset(starts), frozenset(stops)
 
     def collective_rpc(self,
                        method: Union[str, Callable[..., _R]],
