@@ -1620,7 +1620,6 @@ async def init_app_state(
         model_config=model_config,
         base_model_paths=base_model_paths,
         lora_modules=lora_modules,
-        prompt_adapters=args.prompt_adapters,
     )
     await state.openai_serving_models.init_static_loras()
     state.openai_serving_responses = OpenAIServingResponses(
@@ -1668,7 +1667,7 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if "pooling" in model_config.supported_tasks else None
+    ) if "encode" in model_config.supported_tasks else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,

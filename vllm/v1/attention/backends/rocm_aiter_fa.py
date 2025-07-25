@@ -360,7 +360,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[int] = None,
-        use_irope: bool = False,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -390,7 +389,10 @@ class AiterFlashAttentionImpl(AttentionImpl):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "FlashAttentionImpl")
-        self.use_irope = use_irope
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            raise NotImplementedError(
+                "AiterFlashAttention does not support fp8 kv-cache on this "
+                "device.")
 
     def forward(
         self,
