@@ -29,7 +29,7 @@ pip install auto-round
 
 ## Quantizing a model
 
-for vlms, please change to `auto-round-mllm` in CLI usage and `AutoRoundMLLM` in API usage.
+For VLMs, please change to `auto-round-mllm` in CLI usage and `AutoRoundMLLM` in API usage.
 
 ### CLI usage
 
