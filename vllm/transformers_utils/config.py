@@ -31,11 +31,13 @@ from vllm.logger import init_logger
 # yapf: disable
 from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              DbrxConfig, DeepseekVLV2Config,
-                                             EAGLEConfig, ExaoneConfig,
-                                             JAISConfig, KimiVLConfig,
-                                             MedusaConfig, MiniMaxText01Config,
+                                             EAGLEConfig, Exaone4Config,
+                                             ExaoneConfig, JAISConfig,
+                                             KimiVLConfig, MedusaConfig,
+                                             MiniMaxText01Config,
                                              MiniMaxVL01Config, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
+                                             Nemotron_Nano_VL_Config,
                                              NemotronConfig, NVLM_D_Config,
                                              OvisConfig, RWConfig,
                                              SkyworkR1VChatConfig, SolarConfig,
@@ -79,6 +81,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "dbrx": DbrxConfig,
     "deepseek_vl_v2": DeepseekVLV2Config,
     "kimi_vl": KimiVLConfig,
+    "Llama_Nemotron_Nano_VL": Nemotron_Nano_VL_Config,
     "mpt": MPTConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
@@ -87,6 +90,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "medusa": MedusaConfig,
     "eagle": EAGLEConfig,
     "exaone": ExaoneConfig,
+    "exaone4": Exaone4Config,
     "minimax_text_01": MiniMaxText01Config,
     "minimax_vl_01": MiniMaxVL01Config,
     "nemotron": NemotronConfig,
