@@ -10,7 +10,7 @@ from ray.experimental.channel import (AcceleratorContext, Communicator,
 from torch.distributed import ReduceOp
 
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 
@@ -43,7 +43,8 @@ class RayCudaCommunicator(Communicator):
     This class is not thread-safe.
     """
 
-    _nccl = NCCLLibrary()
+    _pp = get_pp_group()
+    _vllm_device_comm = _pp.device_communicator
 
     def __init__(
         self,
@@ -89,7 +90,7 @@ class RayCudaCommunicator(Communicator):
                 computation can be overlapped to improve performance.
         """
         self._world_size = world_size
-        self._rank: Optional[int] = rank
+        self._rank: Optional[int] = None
         self._actor_handles = actor_handles
         self._use_communication_streams = use_communication_streams
 
@@ -100,19 +101,24 @@ class RayCudaCommunicator(Communicator):
             assert cuda_stream is not None, (
                 "RayCudaCommunicator must specify cuda_stream")
 
-            expected_rank = self.get_rank(
-                ray.get_runtime_context().current_actor)
-            assert (
-                rank == expected_rank), f"RayCudaCommunicator's rank {rank} "
-            f"does not match expected rank {expected_rank}"
+            self._rank = self._vllm_device_comm.rank_in_group
 
-            pg = RayStatelessProcessGroup(rank, world_size)
-            device = AcceleratorContext.get().get_accelerator_devices()[0]
-            self._pynccl: Optional[PyNcclCommunicator] = PyNcclCommunicator(
-                pg, device=device, unique_id=comm_id)
+            self._build_actor_rank_mapping()
+
+            # expected_rank = self.get_rank(
+            #     ray.get_runtime_context().current_actor)
+            # assert (
+            #     rank == expected_rank), f"RayCudaCommunicator's rank {rank} "
+            # f"does not match expected rank {expected_rank}"
+
+            # pg = RayStatelessProcessGroup(rank, world_size)
+            # device = AcceleratorContext.get().get_accelerator_devices()[0]
+            # self._pynccl: Optional[PyNcclCommunicator] = PyNcclCommunicator(
+            #     pg, device=device, unique_id=comm_id)
         else:
             # Driver does not have a rank.
-            self._pynccl: Optional[PyNcclCommunicator] = None
+            # self._pynccl: Optional[PyNcclCommunicator] = None
+            self._vllm_device_comm = None
 
         self._cuda_stream: Optional[torch.cuda.Stream] = None
         self._send_stream: Optional[torch.cuda.Stream] = None
@@ -130,6 +136,32 @@ class RayCudaCommunicator(Communicator):
                 self._recv_stream = self._cuda_stream
 
         self._closed = False
+    
+
+    def _build_actor_rank_mapping(self):
+        """
+        Use collective communication to build a mapping from actor IDs to ranks.
+        This should be called once during initialization.
+        """
+        if self._vllm_device_comm is None:
+            return {}
+        
+        # Get current actor's Ray actor ID
+        current_actor = ray.get_runtime_context().current_actor
+        current_actor_id = current_actor._ray_actor_id
+        
+        # Convert actor ID to a tensor (we'll use a hash for simplicity)
+        actor_id_hash = hash(current_actor_id) % (2**31)  # Fit in int32
+        actor_id_tensor = torch.tensor([actor_id_hash], dtype=torch.int32, 
+                                    device=self._vllm_device_comm.device)
+        
+        # All-gather actor ID hashes from all processes
+        gathered_ids = self._vllm_device_comm.all_gather(actor_id_tensor, dim=0)
+        
+        # Build mapping: actor_id_hash -> device_comm_rank
+        self._actor_id_to_rank = {}
+        for rank, actor_id_hash in enumerate(gathered_ids.cpu().tolist()):
+            self._actor_id_to_rank[actor_id_hash] = rank
 
     def initialize(self, rank: int) -> None:
         # No additional initialization is needed.
@@ -140,18 +172,19 @@ class RayCudaCommunicator(Communicator):
 
     def get_rank(self, actor: ray.actor.ActorHandle) -> int:
         """
-        Return the given actor's rank in the communicator.
-
-        Args:
-            actor: The actor handle to look up.
+        Return the given actor's rank using device communicator collective ops.
         """
-        actor_ids = [a._ray_actor_id for a in self._actor_handles]
-        try:
-            rank = actor_ids.index(actor._ray_actor_id)
-        except ValueError as e:
-            raise ValueError(
-                "Actor is not in the RayCudaCommunicator group.") from e
-        return rank
+        if not hasattr(self, '_actor_id_to_rank'):
+            self._build_actor_rank_mapping()
+        
+        # Hash the target actor's ID
+        target_actor_id = actor._ray_actor_id
+        target_hash = hash(target_actor_id) % (2**31)
+        
+        if target_hash in self._actor_id_to_rank:
+            return self._actor_id_to_rank[target_hash]
+        else:
+            raise ValueError(f"Actor {target_actor_id} not found in communicator group")
 
     def get_self_rank(self) -> Optional[int]:
         """
@@ -193,7 +226,8 @@ class RayCudaCommunicator(Communicator):
             # TODO(rui): find a better approach
             self._send_stream.synchronize()
 
-        self._pynccl.send(buf, peer_rank, stream=self._send_stream)
+        # self._pynccl.send(buf, peer_rank, stream=self._send_stream)
+        self._vllm_device_comm.pynccl_comm.send(buf, peer_rank, stream=self._send_stream)
 
     def recv(
         self,
@@ -232,7 +266,8 @@ class RayCudaCommunicator(Communicator):
 
             self._pynccl.recv(buf, peer_rank, stream=self._recv_stream)
         else:
-            self._pynccl.recv(buf, peer_rank, stream=self._recv_stream)
+            # self._pynccl.recv(buf, peer_rank, stream=self._recv_stream)
+            self._vllm_device_comm.pynccl_comm.recv(buf, peer_rank, stream=self._recv_stream)
 
             assert self._cuda_stream is not None
             # Buffer values are undefined if NCCL ops are aborted. Therefore, we
