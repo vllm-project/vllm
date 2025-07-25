@@ -58,7 +58,7 @@ start_server() {
     local vllm_log=$4
     local profile_dir=$5
 
-    pkill -f vllm
+    pkill -if vllm
 
     local serve_cmd
     local common_args="
@@ -111,7 +111,7 @@ run_benchmark() {
     echo "vllm_log: $vllm_log"
     echo
     rm -f $vllm_log
-    pkill -f vllm
+    pkill -if vllm
 
     echo "starting server..."
     # Call start_server without a profile_dir to avoid profiling overhead
@@ -204,7 +204,7 @@ run_benchmark() {
 
     echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput"
 
-    pkill vllm
+    pkill -if vllm
     sleep 10
     printf '=%.0s' $(seq 1 20)
     return 0
@@ -280,6 +280,6 @@ if (( $(echo "$best_throughput > 0" | bc -l) )); then
 else
     echo "No configuration met the latency requirements. Skipping final profiling run."
 fi
-pkill -f vllm
+pkill -if vllm
 echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput, profile saved in: $PROFILE_PATH"
 echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput, profile saved in: $PROFILE_PATH" >> "$RESULT"
