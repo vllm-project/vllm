@@ -118,6 +118,7 @@ _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
     "draft": [],
 }
 
+# Some model suffixes are based on auto classes from Transformers:
 # https://huggingface.co/docs/transformers/en/model_doc/auto
 SUFFIX_TO_DEFAULTS: list[tuple[str, tuple[RunnerType, ConvertType]]] = [
     ("ForCausalLM", ("generate", "none")),
@@ -971,6 +972,8 @@ class ModelConfig:
                     return convert_type
 
         if runner_type == "pooling":
+            # Some models simply end with *Model which we assume
+            # to be embedding model if the runner type is known
             return "embed"
 
         return "none"
