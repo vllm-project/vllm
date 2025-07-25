@@ -40,7 +40,7 @@ from vllm.transformers_utils.processor import (
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
-from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
 from transformers.models.got_ocr2.image_processing_got_ocr2_fast import GotOcr2ImageProcessorFast 
@@ -529,6 +529,13 @@ class InternS1MultiModalProcessor(
     dummy_inputs=InternS1DummyInputsBuilder)
 class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
+    # To ensure correct weight loading and mapping.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.language_model.": "language_model.",
+            "model.vision_tower.": "vision_tower.",
+        })
+    
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
