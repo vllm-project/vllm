@@ -2746,7 +2746,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             sampling_params = None
         else:
             sampling_params = SamplingParams(temperature=temperature)
-            num_blocks = math.ceil(seq_len / self.block_size)
+        num_blocks = math.ceil(seq_len / self.block_size)
         seq_len = max(seq_len, 1)
         computed_block_nums = None
         if is_prompt:

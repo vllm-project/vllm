@@ -1064,22 +1064,19 @@ class MllamaTextCrossAttention(CustomOp):
         # Skip writing kv-cache for the initial profiling run.
         if kv_cache is not None and isinstance(kv_cache, tuple):
             assert self.attn.backend == _Backend.HPU_ATTN
-            # During cross-attention decode, key & value will be None,
-            # we don't need to cache them.
-            if (k is not None) and (v is not None):
-                from vllm.attention.ops.hpu_paged_attn import HPUPagedAttention
-                key_cache, value_cache = HPUPagedAttention.split_kv_cache(
-                    kv_cache, self.num_local_key_value_heads, self.head_dim)
-                cached_k = torch.cat([k[s:e] for s, e in kv_range_for_decode])
-                cached_v = torch.cat([v[s:e] for s, e in kv_range_for_decode])
-                slot_mapping = torch.cat([
-                    attn_metadata.cross_slot_mapping[s:e]
-                    for s, e in kv_range_for_decode
-                ])
-                key_cache = self.attn.impl.k_cache(cached_k, key_cache,
-                                                   slot_mapping)
-                value_cache = self.attn.impl.v_cache(cached_v, value_cache,
-                                                     slot_mapping)
+            from vllm.attention.ops.hpu_paged_attn import HPUPagedAttention
+            key_cache, value_cache = HPUPagedAttention.split_kv_cache(
+                kv_cache, self.num_local_key_value_heads, self.head_dim)
+            cached_k = torch.cat([k[s:e] for s, e in kv_range_for_decode])
+            cached_v = torch.cat([v[s:e] for s, e in kv_range_for_decode])
+            slot_mapping = torch.cat([
+                attn_metadata.cross_slot_mapping[s:e]
+                for s, e in kv_range_for_decode
+            ])
+            key_cache = self.attn.impl.k_cache(cached_k, key_cache,
+                                               slot_mapping)
+            value_cache = self.attn.impl.v_cache(cached_v, value_cache,
+                                                 slot_mapping)
 
         q_len = q.shape[0]
         kv_len = k.shape[0]

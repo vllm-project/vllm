@@ -156,6 +156,7 @@ def set_forward_context(attn_metadata: Any,
             dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
         cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_tensor, dim=0)
 
+        assert current_platform is not None, "current_platform is None"  # noqa
         if current_platform.is_hpu():  # noqa
             num_experts_per_tok = 0
             num_experts_per_tok = getattr(
