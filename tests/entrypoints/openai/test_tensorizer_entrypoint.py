@@ -44,7 +44,7 @@ def model_uri(tmp_dir):
 def tensorize_model_and_lora(tmp_dir, model_uri):
     tensorizer_config = TensorizerConfig(tensorizer_uri=model_uri,
                                          lora_dir=tmp_dir)
-    args = EngineArgs(model=MODEL_NAME, device="cuda")
+    args = EngineArgs(model=MODEL_NAME)
 
     tensorize_lora_adapter(LORA_PATH, tensorizer_config)
     tensorize_vllm_model(args, tensorizer_config)
