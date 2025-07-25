@@ -12,7 +12,7 @@ from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from inspect import isclass, signature
 from logging import DEBUG
-from typing import Any, Callable, Optional, TypeVar, Union
+from typing import Any, Callable, Optional, TypeVar, Union, get_args
 
 import msgspec
 import zmq
@@ -23,6 +23,7 @@ from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
+from vllm.tasks import PoolingTask, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import (bind_process_name, make_zmq_socket,
@@ -195,11 +196,18 @@ class EngineCore:
                      "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
+    def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return self.model_executor.supported_tasks
+
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
         if pooling_params := request.pooling_params:
-            supported_pooling_tasks = (
-                self.model_executor.supported_pooling_tasks)
+            pooling_tasks = get_args(PoolingTask)
+            supported_pooling_tasks = [
+                task for task in self.get_supported_tasks()
+                if task in pooling_tasks
+            ]
+
             if pooling_params.task not in supported_pooling_tasks:
                 raise ValueError(f"Unsupported task: {pooling_params.task!r} "
                                  f"Supported tasks: {supported_pooling_tasks}")

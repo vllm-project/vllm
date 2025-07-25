@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar, deprecated
 
+import vllm.envs as envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence,
                               create_sort_beams_key_function)
@@ -44,9 +45,10 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.outputs import (ClassificationRequestOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput, RequestOutput,
                           ScoringRequestOutput)
-from vllm.pooling_params import PoolingParams, PoolingTask
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
+from vllm.tasks import PoolingTask
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.usage.usage_lib import UsageContext
@@ -276,6 +278,14 @@ class LLM:
 
         self.request_counter = Counter()
         self.default_sampling_params: Union[dict[str, Any], None] = None
+
+        if envs.VLLM_USE_V1:
+            supported_tasks = self.llm_engine.get_supported_tasks(  # type: ignore
+            )
+        else:
+            supported_tasks = self.llm_engine.model_config.supported_tasks
+
+        self.supported_tasks = supported_tasks
 
     def get_tokenizer(
         self,
