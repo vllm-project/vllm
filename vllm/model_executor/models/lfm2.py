@@ -452,7 +452,7 @@ class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
     embedding_padding_modules = ["lm_head"]
 
     @classmethod
-    def get_static_cache_shape_from_config(
+    def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
         use_v1: bool = True,

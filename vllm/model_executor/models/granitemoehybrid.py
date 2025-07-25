@@ -527,7 +527,7 @@ class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
     embedding_padding_modules = ["lm_head"]
 
     @classmethod
-    def get_static_cache_shape_from_config(
+    def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
         use_v1: bool = True,
@@ -622,7 +622,7 @@ class GraniteMoeHybridForCausalLM(nn.Module, HasInnerState, SupportsLoRA,
                         self.vllm_config.parallel_config,
                         LayerBlockType.mamba))
                 mamba_state_shape = \
-                    self.get_static_cache_shape_from_config(
+                    self.get_mamba_state_shape_from_config(
                         self.vllm_config, use_v1=False)
                 self.mamba_cache = MambaCacheManager(self.vllm_config,
                                                      self.model_config.dtype,

@@ -848,7 +848,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
     })
 
     @classmethod
-    def get_static_cache_shape_from_config(
+    def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
         use_v1: bool = True,
@@ -963,7 +963,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
             if self.mamba_cache is None:
                 num_mamba_layers = self.config.num_hidden_layers
                 mamba_state_shape = \
-                    self.get_static_cache_shape_from_config(
+                    self.get_mamba_state_shape_from_config(
                         self.vllm_config, use_v1=False)
                 self.mamba_cache = MambaCacheManager(self.vllm_config,
                                                      self.lm_head.weight.dtype,

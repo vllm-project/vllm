@@ -196,7 +196,7 @@ class SlidingWindowSpec(AttentionSpec):
 
 
 @dataclass
-class StaticCacheSpec(KVCacheSpec):
+class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtype: torch.dtype
     page_size_padded: Optional[int] = None
@@ -206,8 +206,7 @@ class StaticCacheSpec(KVCacheSpec):
 
     @property
     def type_id(self) -> str:
-        raise NotImplementedError(
-            "Please instantiate a subclass of StaticCacheSpec")
+        return f"mamba_{self.shapes}_{self.dtype}"
 
     @property
     def page_size_bytes(self) -> int:
@@ -225,15 +224,7 @@ class StaticCacheSpec(KVCacheSpec):
 
 
 @dataclass
-class MambaSpec(StaticCacheSpec):
-
-    @property
-    def type_id(self) -> str:
-        return f"mamba_{self.shapes}_{self.dtype}"
-
-
-@dataclass
-class ShortConvSpec(StaticCacheSpec):
+class ShortConvSpec(MambaSpec):
 
     @property
     def type_id(self) -> str:
