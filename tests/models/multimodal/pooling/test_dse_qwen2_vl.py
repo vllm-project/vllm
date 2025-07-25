@@ -96,7 +96,7 @@ def _run_test(
                      dtype=dtype,
                      enforce_eager=True,
                      max_model_len=8192) as vllm_model:
-        tokenizer = vllm_model.model.get_tokenizer()
+        tokenizer = vllm_model.llm.get_tokenizer()
         texts = [
             # this is necessary because vllm_model.embed will not apply any
             # templating to the prompt, and therefore lacks an image_pad
