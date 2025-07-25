@@ -158,9 +158,9 @@ class EagleProposer:
         assert self.runner is not None
 
         # FIXME: need to consider multiple kv_cache_groups
-        attn_metadata = self.runner.attn_metadata_builders[
-            0].build_for_drafting(common_attn_metadata=common_attn_metadata,
-                                  draft_index=0)
+        attn_metadata = self.runner.attn_groups[0][0].metadata_builder\
+            .build_for_drafting(common_attn_metadata=common_attn_metadata,
+                                draft_index=0)
 
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
