@@ -59,7 +59,7 @@ class CommonAttentionMetadata:
     block_table_tensor: torch.Tensor
     slot_mapping: torch.Tensor
 
-    causal: bool
+    causal: bool = True
 
 
 M = TypeVar("M")
