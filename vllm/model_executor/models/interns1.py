@@ -333,14 +333,16 @@ class BaseInternS1MultiModalProcessor(BaseMultiModalProcessor[_I]):
                 feature_size = self.info.get_num_image_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
-                    processor=hf_processor,
+                    processor=hf_processor.image_processor,
                 )
 
             num_patches = image_num_patches[item_idx]
             if num_patches is not None:
                 assert isinstance(num_patches, int)
 
-            return hf_processor.get_image_repl(feature_size, num_patches)
+            repl_features = IMG_CONTEXT * feature_size
+            repl_full = IMG_START + repl_features + IMG_END
+            return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)            
 
         return [
             PromptReplacement(
