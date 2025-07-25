@@ -38,8 +38,7 @@ void cutlass_scaled_fp4_mm(torch::Tensor& D, torch::Tensor const& A,
                            torch::Tensor const& alpha) {
 #if defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100
   return cutlass_scaled_fp4_mm_sm100a(D, A, B, A_sf, B_sf, alpha);
-#endif
-#if defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120
+#elif defined ENABLE_NVFP4_SM120 && ENABLE_NVFP4_SM120
   return cutlass_scaled_fp4_mm_sm120a(D, A, B, A_sf, B_sf, alpha);
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(false,
