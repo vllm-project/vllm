@@ -253,7 +253,8 @@ class OpenAIMoeForCausalLM(nn.Module):
             intermediate_size_block //
             world_size) + 1 if intermediate_size_block % world_size != 0 else (
                 intermediate_size_block // world_size)
-        per_rank_intermediate_size = per_rank_intermediate_size_block * mxfp4_block
+        per_rank_intermediate_size = (per_rank_intermediate_size_block *
+                                      mxfp4_block)
 
         # Calculate common slicing bounds for current rank
         rank_start = my_rank * per_rank_intermediate_size
@@ -295,8 +296,8 @@ class OpenAIMoeForCausalLM(nn.Module):
                 # Handle MLP down projection weights
                 new_name = name.replace("mlp2_weight.blocks",
                                         "experts.w2_weight")
-                # same flatten here, but since 2 mx4 value are packed in 1 uint8,
-                # divide by 2
+                # same flatten here, but since 2 mx4 value are packed in 1
+                # uint8, divide by 2
                 weight = weight.view(num_experts, -1,
                                      intermediate_size // 2).contiguous()
                 narrow_weight = weight[..., rank_start // 2:rank_end // 2]

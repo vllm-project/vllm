@@ -91,8 +91,8 @@ def triton_kernel_fused_experts(
     assert hidden_states.dtype == torch.bfloat16
     # assert w1.dtype in (torch.bfloat16, torch.uint8)
     # assert w2.dtype in (torch.bfloat16, torch.uint8)
-    assert w1_bias.dtype == torch.float32
-    assert w2_bias.dtype == torch.float32
+    assert w1_bias is not None and w1_bias.dtype == torch.float32
+    assert w2_bias is not None and w2_bias.dtype == torch.float32
 
     # Shape check, only check non-mxfp4
     # if w1.dtype != torch.uint8:
