@@ -9,7 +9,7 @@ Intel GPUs, HPUs, and CUDA-enabled devices**.
 
 Key Features:
 
-✅ **AutoRound, AutoAWQ, AutoGPTQ, and GGUF** are supported:
+✅ **AutoRound, AutoAWQ, AutoGPTQ, and GGUF** are supported
 
 ✅ **10+ vision-language models (VLMs)** are supported
 
