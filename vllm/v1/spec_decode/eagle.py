@@ -49,7 +49,14 @@ class EagleProposer:
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
-        self.hidden_size = self.draft_model_config.get_hidden_size()
+        from vllm.transformers_utils.configs.speculators.base import (
+            SpeculatorsConfig)
+
+        if isinstance(self.draft_model_config.hf_config, SpeculatorsConfig):
+            self.hidden_size = self.draft_model_config.hf_config.model.get(
+                "hidden_size")
+        else:
+            self.hidden_size = self.draft_model_config.get_hidden_size()
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and

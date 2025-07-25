@@ -16,25 +16,30 @@ class Eagle3SpeculatorsConfig(SpeculatorsConfig):
         - target_hidden_size: Hidden size of the target model
         - norm_before_residual: Whether to apply norm before residual connection
         """
+        # The way we store hidden size and vocab size is confusing in out config
+        # we store taarget_hidden_size and hidden_size
+
         # Copy Eagle-3 specific fields
-        if self.config.get("draft_vocab_size") is not None:
-            draft_vocab_size = self.config["draft_vocab_size"]
+        draft_vocab_size = self.config.get("draft_vocab_size", None)
+        if draft_vocab_size is not None:
             vllm_config["draft_vocab_size"] = draft_vocab_size
 
-        # Handle target_hidden_size
+        # Target vocab size
+        vllm_config["vocab_size"] = vllm_config["model"]["vocab_size"]
+
+        # Handle target_hidden_size - if different than the draft hidden size
         if self.config.get("target_hidden_size") is not None:
-            target_hidden_size = self.config["target_hidden_size"]
-            vllm_config["target_hidden_size"] = target_hidden_size
+            vllm_config["target_hidden_size"] = self.config[
+                "target_hidden_size"]
         else:
             # Default to the draft model's hidden size
             # In practice, this should match the target model's hidden size
-            vllm_config["target_hidden_size"] = vllm_config["model"].get(
+            vllm_config["hidden_size"] = vllm_config["model"].get(
                 "hidden_size")
 
-        if "norm_before_residual" in self.config:
-            # Add to transformer config which becomes the model config
-            vllm_config["model"]["norm_before_residual"] = self.config[
-                "norm_before_residual"]
+        # Norm before residual
+        vllm_config["model"]["norm_before_residual"] = self.config.get(
+            "norm_before_residual", True)
 
         # Eagle-3 uses a different architecture
         vllm_config["architectures"] = ["Eagle3LlamaForCausalLM"]

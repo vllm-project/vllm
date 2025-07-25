@@ -39,7 +39,6 @@ from vllm.plugins import load_general_plugins
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.transformers_utils.config import maybe_override_with_speculators_configs
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
 
@@ -986,16 +985,25 @@ class EngineArgs:
         """
 
         from vllm.transformers_utils.config import maybe_fetch_verifier_config
+        from vllm.transformers_utils.configs.speculators.base import (
+            SpeculatorsConfig)
 
         if self.speculative_config is None:
-            # TODO: we need a condition here
-            hf_config = maybe_fetch_verifier_config(self.hf_config_path or self.model, runner="draft")
-            # We create one since we dont create one
-            self.speculative_config = {}
-            self.speculative_config["num_speculative_tokens"] = hf_config.num_lookahead_tokens
-            self.speculative_config["model"] = self.model
-            self.speculative_config["method"] = hf_config.method
-            # return None
+            hf_config = maybe_fetch_verifier_config(self.hf_config_path
+                                                    or self.model,
+                                                    runner="draft")
+
+            # if loading a SpeculatorsConfig, load the specualtive_config
+            # details from the config directly - no user input required
+            if isinstance(hf_config, SpeculatorsConfig):
+                # We create one since we dont create one
+                self.speculative_config = {}
+                self.speculative_config[
+                    "num_speculative_tokens"] = hf_config.num_lookahead_tokens
+                self.speculative_config["model"] = self.model
+                self.speculative_config["method"] = hf_config.method
+            else:
+                return None
 
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine

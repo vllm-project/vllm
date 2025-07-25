@@ -51,6 +51,21 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
 
         self.hidden_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+        if getattr(config, "norm_before_residual", False):
+            self._residual_norm = self._norm_before_residual
+        else:
+            self._residual_norm = self._norm_after_residual
+
+    def _norm_before_residual(self, hidden_states: torch.Tensor):
+        hidden_states = self.hidden_norm(hidden_states)
+        residual = hidden_states
+        return hidden_states, residual
+
+    def _norm_after_residual(self, hidden_states: torch.Tensor):
+        residual = hidden_states
+        hidden_states = self.hidden_norm(hidden_states)
+        return hidden_states, residual
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -59,9 +74,10 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         residual: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
-        residual = hidden_states
         embeds = self.input_layernorm(embeds)
-        hidden_states = self.hidden_norm(hidden_states)
+
+        hidden_states, residual = self._residual_norm(
+            hidden_states=hidden_states)
 
         hidden_states = torch.cat([embeds, hidden_states], dim=-1)
         # Self Attention
@@ -102,7 +118,8 @@ class LlamaModel(nn.Module):
 
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
-                self.config,
+                # ToDo: condition
+                config=LlamaConfig.from_dict(self.config.model),
                 prefix=maybe_prefix(prefix, f"layers.{start_layer_id}"),
             )
         ])
@@ -116,7 +133,7 @@ class LlamaModel(nn.Module):
                                       bias=False)
         self.norm = RMSNorm(
             self.config.hidden_size,
-            eps=self.config.rms_norm_eps,
+            eps=self.config.model.get("rms_norm_eps"),
         )
 
     def forward(

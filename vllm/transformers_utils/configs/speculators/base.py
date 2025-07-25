@@ -5,14 +5,6 @@ from typing import Any, Union
 
 from transformers import PretrainedConfig
 
-DEFAULT_NUM_LOOKAHEAD_TOKENS = 5
-SPECULATORS_WEIGHT_MAP = {
-    "fusion_fc.weight": "fc.weight",
-    "fusion_fc.bias": "fc.bias",
-    "embedding_layernorm.weight": "embedding_layernorm.weight",
-    "pre_lm_head_layernorm.weight": "hidden_states_layernorm.weight",
-}
-
 __all__ = ["SpeculatorsConfig"]
 
 
@@ -35,15 +27,10 @@ class SpeculatorsConfig(PretrainedConfig):
 
         speculators_type = config_dict.get("speculators_model_type")
 
-        from vllm.transformers_utils.configs.speculators.eagle import (
-            EagleSpeculatorsConfig)
         from vllm.transformers_utils.configs.speculators.eagle3 import (
             Eagle3SpeculatorsConfig)
 
-        SUPPORTED_SPECULATORS_TYPES = {
-            "eagle": EagleSpeculatorsConfig,
-            "eagle3": Eagle3SpeculatorsConfig
-        }
+        SUPPORTED_SPECULATORS_TYPES = {"eagle3": Eagle3SpeculatorsConfig}
 
         if speculators_type not in SUPPORTED_SPECULATORS_TYPES:
             return super().from_pretrained(pretrained_model_name_or_path,

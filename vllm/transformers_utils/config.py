@@ -314,13 +314,13 @@ def maybe_override_with_speculators_configs(model, tokenizer):
 
 
 def maybe_fetch_verifier_config(config, runner):
-    if isinstance(config, str):
-        config = SpeculatorsConfig.from_pretrained(
-            config,
-            token=_get_hf_token(),
-        )
-
-    if runner != "draft":
+    if runner == "draft":
+        if isinstance(config, str):
+            config = SpeculatorsConfig.from_pretrained(
+                config,
+                token=_get_hf_token(),
+            )
+    else:
         config = AutoConfig.from_pretrained(
             config.target_model,
             token=_get_hf_token(),
@@ -389,7 +389,11 @@ def get_config(
         )
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
-        model_type = "speculators"
+        # TODO: why isn't model_type loading correctly
+        if model_type is None:
+            model_type = "speculators" if config_dict.get(
+                "speculators_config") is not None else model_type
+
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
             config = config_class.from_pretrained(
@@ -401,7 +405,6 @@ def get_config(
             )
             if model_type == "speculators":
                 config = maybe_fetch_verifier_config(config, runner)
-            return config
         else:
             try:
                 config = AutoConfig.from_pretrained(
