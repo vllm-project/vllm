@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 import psutil
 from tabulate import tabulate
+import argparse
 
 results_folder = Path("results/")
 
@@ -95,8 +96,21 @@ def get_size_with_unit(bytes, suffix="B"):
 
 
 if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-f", "--filter", action="append", type=str, help="input filter string for json file names"
+    )
+    args = parser.parse_args()
+    filters = args.filter
+    print("filter out json file names with : " + ", ".join(filters))
     # collect results
     for test_file in results_folder.glob("*.json"):
+        if filters:
+            if not any(f in test_file for f in filters):
+                # the test_file is not in the existed filters
+                continue
+
         with open(test_file) as f:
             raw_result = json.loads(f.read())
 
