@@ -316,6 +316,85 @@ def run_h2ovl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B
+def run_hyperclovax_seed_vision(
+    questions: list[str], modality: str
+) -> ModelRequestData:
+    model_name = "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B"
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192 if modality == "image" else 16384,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    messages = list()
+    for question in questions:
+        if modality == "image":
+            """
+            ocr: List the words in the image in raster order. 
+                Even if the word order feels unnatural for reading, 
+                the model will handle it as long as it follows raster order.
+                e.g. "Naver, CLOVA, bigshane"
+            lens_keywords: List the entity names in the image.
+                e.g. "iPhone"
+            lens_local_keywords: List the entity names with quads in the image.
+                e.g. "[0.07, 0.21, 0.92, 0.90] iPhone"
+            """
+            messages.append(
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "ocr": "",
+                                "lens_keywords": "",
+                                "lens_local_keywords": "",
+                            },
+                            {
+                                "type": "text",
+                                "text": question,
+                            },
+                        ],
+                    }
+                ]
+            )
+        elif modality == "video":
+            messages.append(
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "video",
+                            },
+                            {
+                                "type": "text",
+                                "text": question,
+                            },
+                        ],
+                    }
+                ]
+            )
+        else:
+            raise ValueError(f"Unsupported modality: {modality}")
+
+    prompts = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        stop_token_ids=None,
+    )
+
+
 # Idefics3-8B-Llama3
 def run_idefics3(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1222,6 +1301,7 @@ model_example_map = {
     "glm4v": run_glm4v,
     "glm4_1v": run_glm4_1v,
     "h2ovl_chat": run_h2ovl,
+    "hyperclovax_seed_vision": run_hyperclovax_seed_vision,
     "idefics3": run_idefics3,
     "internvl_chat": run_internvl,
     "nemotron_vl": run_nemotron_vl,
