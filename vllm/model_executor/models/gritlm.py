@@ -16,8 +16,8 @@ from vllm.model_executor.layers.pooler import (DispatchPooler, Pooler,
                                                get_prompt_token_ids)
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.pooling_params import PoolingTask
 from vllm.sequence import PoolerOutput
+from vllm.tasks import PoolingTask
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from .interfaces import SupportsV0Only
