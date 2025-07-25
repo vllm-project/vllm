@@ -108,12 +108,16 @@ def test_auto_task(model_id, expected_runner_type, expected_convert_type,
         ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "classify",
          "classify"),
         ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "embed", "embed"),
-        ("openai/whisper-small", "pooling", "embed", "embed"),
+        ("openai/whisper-small", "pooling", None, "embed"),
     ],
 )
 def test_score_task(model_id, expected_runner_type, expected_convert_type,
                     expected_task):
-    config = ModelConfig(model_id, task="score")
+    if expected_runner_type is None:
+        with pytest.raises(ValueError):
+            config = ModelConfig(model_id, task="score")
+    else:
+        config = ModelConfig(model_id, task="score")
 
     assert config.runner_type == expected_runner_type
     assert config.convert_type == expected_convert_type

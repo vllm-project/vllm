@@ -120,6 +120,7 @@ _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
 
 # Some model suffixes are based on auto classes from Transformers:
 # https://huggingface.co/docs/transformers/en/model_doc/auto
+# NOTE: Items higher on this list priority over lower ones
 SUFFIX_TO_DEFAULTS: list[tuple[str, tuple[RunnerType, ConvertType]]] = [
     ("ForCausalLM", ("generate", "none")),
     ("ForConditionalGeneration", ("generate", "none")),
@@ -134,6 +135,7 @@ SUFFIX_TO_DEFAULTS: list[tuple[str, tuple[RunnerType, ConvertType]]] = [
     ("ClassificationModel", ("pooling", "classify")),
     ("ForRewardModeling", ("pooling", "reward")),
     ("RewardModel", ("pooling", "reward")),
+    # Let other `*Model`s take priority
     ("Model", ("pooling", "embed")),
 ]
 
