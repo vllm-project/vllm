@@ -565,25 +565,8 @@ class FlashAttentionImpl(AttentionImpl):
         """
         # For encoder attention, process FP8 quantization if needed
         if self.kv_cache_dtype.startswith("fp8"):
-            num_tokens, num_heads, head_size = query.shape
-            query, _ = ops.scaled_fp8_quant(
-                query.reshape(
-                    (num_tokens, num_heads * head_size)).contiguous(),
-                layer._q_scale)
-            query = query.reshape((num_tokens, num_heads, head_size))
-
-            num_kv_tokens, num_kv_heads, head_size = key.shape
-            key, _ = ops.scaled_fp8_quant(
-                key.reshape(
-                    (num_kv_tokens, num_kv_heads * head_size)).contiguous(),
-                layer._k_scale)
-            key = key.reshape((num_kv_tokens, num_kv_heads, head_size))
-
-            value, _ = ops.scaled_fp8_quant(
-                value.reshape(
-                    (num_kv_tokens, num_kv_heads * head_size)).contiguous(),
-                layer._v_scale)
-            value = value.reshape((num_kv_tokens, num_kv_heads, head_size))
+            raise NotImplementedError(
+                "quantization is not supported for encoder attention")
 
         # Use encoder-specific metadata for sequence information
         cu_seqlens_q = attn_metadata.query_start_loc
