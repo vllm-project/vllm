@@ -1,11 +1,13 @@
 # AutoRound
 
-AutoRound is Intel’s advanced quantization algorithm designed to produce highly efficient **INT2, INT3, INT4, and INT8**
+[AutoRound](https://github.com/intel/auto-round) is Intel’s advanced quantization algorithm designed to produce highly efficient **INT2, INT3, INT4, and INT8**
 quantized large language models—striking an optimal balance between accuracy and deployment performance.
 
 AutoRound applies weight-only quantization to transformer-based models, enabling significant memory savings and faster
 inference while maintaining near-original accuracy. It supports a wide range of hardware platforms, including **CPUs,
 Intel GPUs, HPUs, and CUDA-enabled devices**.
+
+Please refer to the [AutoRound readme](https://github.com/intel/auto-round/blob/main/docs/step_by_step.md) for more details.
 
 Key Features:
 
@@ -78,22 +80,21 @@ autoround.quantize_and_save(output_dir, format="auto_round")
 Here is some example code to run auto-round format in vLLM:
 
 ```python
-if __name__ == '__main__':
-    from vllm import LLM, SamplingParams
+from vllm import LLM, SamplingParams
 
-    prompts = [
-        "Hello, my name is",
-    ]
-    sampling_params = SamplingParams(temperature=0.6, top_p=0.95)
-    model_name = "Intel/DeepSeek-R1-0528-Qwen3-8B-int4-AutoRound"
-    llm = LLM(model=model_name)
+prompts = [
+    "Hello, my name is",
+]
+sampling_params = SamplingParams(temperature=0.6, top_p=0.95)
+model_name = "Intel/DeepSeek-R1-0528-Qwen3-8B-int4-AutoRound"
+llm = LLM(model=model_name)
 
-    outputs = llm.generate(prompts, sampling_params)
+outputs = llm.generate(prompts, sampling_params)
 
-    for output in outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+for output in outputs:
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
 # Acknowledgement
