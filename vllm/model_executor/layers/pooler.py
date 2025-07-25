@@ -167,6 +167,84 @@ class Pooler(nn.Module, ABC):
         raise NotImplementedError
 
 
+def get_prompt_lens(
+    hidden_states: Union[torch.Tensor, list[torch.Tensor]],
+    pooling_metadata: PoolingMetadata,
+) -> torch.Tensor:
+    if isinstance(pooling_metadata, V1PoolingMetadata):
+        return pooling_metadata.prompt_lens
+
+    return PoolingTensors.from_pooling_metadata(
+        pooling_metadata, hidden_states[0].device).prompt_lens
+
+
+def get_prompt_token_ids(
+        pooling_metadata: PoolingMetadata) -> list[torch.Tensor]:
+    if isinstance(pooling_metadata, V1PoolingMetadata):
+        assert pooling_metadata.prompt_token_ids is not None, (
+            "Please set `requires_token_ids=True` in `get_pooling_updates`")
+
+        return [
+            pooling_metadata.prompt_token_ids[i, :num]
+            for i, num in enumerate(pooling_metadata.prompt_lens)
+        ]
+
+    return [
+        torch.tensor(seq_data_i.prompt_token_ids)
+        for seq_data_i in pooling_metadata.seq_data.values()
+    ]
+
+
+def get_pooling_params(
+        pooling_metadata: PoolingMetadata) -> list[PoolingParams]:
+    if isinstance(pooling_metadata, V0PoolingMetadata):
+        pooling_params = [p for _, p in pooling_metadata.seq_groups]
+    else:
+        pooling_params = pooling_metadata.pooling_params
+    return pooling_params
+
+
+def get_tasks(pooling_metadata: PoolingMetadata) -> list[PoolingTask]:
+    pooling_params = get_pooling_params(pooling_metadata)
+
+    tasks: list[PoolingTask] = [
+        task for pooling_param in pooling_params
+        if (task := pooling_param.task) is not None
+    ]
+    assert len(pooling_params) == len(tasks)
+
+    return tasks
+
+
+def get_classification_activation_function(config: PretrainedConfig):
+    return PoolerClassify()
+
+
+def get_cross_encoder_activation_function(config: PretrainedConfig):
+    function_name: Optional[str] = None
+    if (hasattr(config, "sentence_transformers")
+            and "activation_fn" in config.sentence_transformers):
+        function_name = config.sentence_transformers["activation_fn"]
+    elif (hasattr(config, "sbert_ce_default_activation_function")
+          and config.sbert_ce_default_activation_function is not None):
+        function_name = config.sbert_ce_default_activation_function
+
+    if function_name is not None:
+        assert function_name.startswith("torch.nn.modules."), (
+            "Loading of activation functions is restricted to "
+            "torch.nn.modules for security reasons")
+        fn = resolve_obj_by_qualname(function_name)()
+        return PoolerActivation.wraps(fn)
+
+    return PoolerScore()
+
+
+def build_output(
+    all_data: Union[torch.Tensor, list[torch.Tensor]], ) -> PoolerOutput:
+    all_outputs = [PoolingSequenceGroupOutput(data) for data in all_data]
+    return PoolerOutput(outputs=all_outputs)
+
+
 class PoolingMethod(nn.Module, ABC):
 
     @staticmethod
@@ -694,81 +772,3 @@ class DispatchPooler(Pooler):
             offset += num_items
 
         return PoolerOutput(outputs)
-
-
-def get_prompt_lens(
-    hidden_states: Union[torch.Tensor, list[torch.Tensor]],
-    pooling_metadata: PoolingMetadata,
-) -> torch.Tensor:
-    if isinstance(pooling_metadata, V1PoolingMetadata):
-        return pooling_metadata.prompt_lens
-
-    return PoolingTensors.from_pooling_metadata(
-        pooling_metadata, hidden_states[0].device).prompt_lens
-
-
-def get_prompt_token_ids(
-        pooling_metadata: PoolingMetadata) -> list[torch.Tensor]:
-    if isinstance(pooling_metadata, V1PoolingMetadata):
-        assert pooling_metadata.prompt_token_ids is not None, (
-            "Please set `requires_token_ids=True` in `get_pooling_updates`")
-
-        return [
-            pooling_metadata.prompt_token_ids[i, :num]
-            for i, num in enumerate(pooling_metadata.prompt_lens)
-        ]
-
-    return [
-        torch.tensor(seq_data_i.prompt_token_ids)
-        for seq_data_i in pooling_metadata.seq_data.values()
-    ]
-
-
-def get_pooling_params(
-        pooling_metadata: PoolingMetadata) -> list[PoolingParams]:
-    if isinstance(pooling_metadata, V0PoolingMetadata):
-        pooling_params = [p for _, p in pooling_metadata.seq_groups]
-    else:
-        pooling_params = pooling_metadata.pooling_params
-    return pooling_params
-
-
-def get_tasks(pooling_metadata: PoolingMetadata) -> list[PoolingTask]:
-    pooling_params = get_pooling_params(pooling_metadata)
-
-    tasks: list[PoolingTask] = [
-        task for pooling_param in pooling_params
-        if (task := pooling_param.task) is not None
-    ]
-    assert len(pooling_params) == len(tasks)
-
-    return tasks
-
-
-def get_classification_activation_function(config: PretrainedConfig):
-    return PoolerClassify()
-
-
-def get_cross_encoder_activation_function(config: PretrainedConfig):
-    function_name: Optional[str] = None
-    if (hasattr(config, "sentence_transformers")
-            and "activation_fn" in config.sentence_transformers):
-        function_name = config.sentence_transformers["activation_fn"]
-    elif (hasattr(config, "sbert_ce_default_activation_function")
-          and config.sbert_ce_default_activation_function is not None):
-        function_name = config.sbert_ce_default_activation_function
-
-    if function_name is not None:
-        assert function_name.startswith("torch.nn.modules."), (
-            "Loading of activation functions is restricted to "
-            "torch.nn.modules for security reasons")
-        fn = resolve_obj_by_qualname(function_name)()
-        return PoolerActivation.wraps(fn)
-
-    return PoolerScore()
-
-
-def build_output(
-    all_data: Union[torch.Tensor, list[torch.Tensor]], ) -> PoolerOutput:
-    all_outputs = [PoolingSequenceGroupOutput(data) for data in all_data]
-    return PoolerOutput(outputs=all_outputs)

@@ -193,14 +193,14 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
                 pooling=CLSPool(),
                 classifier=self.classifier,
                 act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                    vllm_config.model_config)
+                    vllm_config.model_config),
             ),
             "score":
             ClassifierPooler(
                 pooling=CLSPool(),
                 classifier=self.classifier,
                 act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                    vllm_config.model_config)
+                    vllm_config.model_config),
             ),
         })
 

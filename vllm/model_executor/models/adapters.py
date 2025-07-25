@@ -193,14 +193,14 @@ def as_seq_cls_model(cls: _T) -> _T:
                     pooling=PoolingMethod.from_pooling_type(pooling_type),
                     classifier=self._classifier,
                     act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                        vllm_config.model_config)
+                        vllm_config.model_config),
                 ),
                 "score":
                 ClassifierPooler(
                     pooling=PoolingMethod.from_pooling_type(pooling_type),
                     classifier=self._classifier,
                     act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                        vllm_config.model_config)
+                        vllm_config.model_config),
                 ),
             })
 
