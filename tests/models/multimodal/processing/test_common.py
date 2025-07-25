@@ -278,6 +278,7 @@ def _test_processing_correctness_one(
     "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
     "moonshotai/Kimi-VL-A3B-Instruct",
     "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
     "llava-hf/llava-1.5-7b-hf",
     "llava-hf/llava-v1.6-mistral-7b-hf",
     "llava-hf/LLaVA-NeXT-Video-7B-hf",
