@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import argparse
 import json
 import os
+import re
+import shlex
 from importlib import util
 from pathlib import Path
+from typing import Any, Dict
 
 import pandas as pd
 import psutil
 from tabulate import tabulate
 
-results_folder = Path("results/")
+# results_folder = Path("results/")
 
 # latency results and the keys that will be printed into markdown
 latency_results = []
@@ -42,14 +46,19 @@ throughput_results_column_mapping = {
 serving_results = []
 serving_column_mapping = {
     "test_name": "Test name",
+    "model_id": "Model",
+    "dataset_name": "Dataset Name",
+    "input_len": "Input Len",
+    "output_len": "Output Len",
     "gpu_type": "GPU",
     "completed": "# of req.",
+    "qps": "qps",
     "max_concurrency": "# of max concurrency.",
     "request_throughput": "Tput (req/s)",
     "total_token_throughput": "Total Token Tput (tok/s)",
     "output_throughput": "Output Tput (tok/s)",
-    "total_input_tokens": "Total input tokens",
-    "total_output_tokens": "Total output tokens",
+    # "total_input_tokens": "Total input tokens",
+    # "total_output_tokens": "Total output tokens",
     "mean_ttft_ms": "Mean TTFT (ms)",
     "median_ttft_ms": "Median TTFT (ms)",
     "p99_ttft_ms": "P99 TTFT (ms)",
@@ -94,7 +103,106 @@ def get_size_with_unit(bytes, suffix="B"):
         bytes /= factor
 
 
+def _coerce(val: str) -> Any:
+    """Best-effort type coercion from string to Python types."""
+    low = val.lower()
+    if low == "null":
+        return None
+    if low == "true":
+        return True
+    if low == "false":
+        return False
+    # integers
+    if re.fullmatch(r"[+-]?\d+", val):
+        try:
+            return int(val)
+        except ValueError:
+            pass
+    # floats (keep 'inf'/'-inf'/'nan' as strings)
+    if re.fullmatch(r"[+-]?\d*\.\d+", val):
+        try:
+            return float(val)
+        except ValueError:
+            pass
+    return val
+
+
+def parse_client_command(cmd: str) -> Dict[str, Any]:
+    """Parse the client_command shell string into {executable, script, args}."""
+    toks = shlex.split(cmd)
+    if len(toks) < 2:
+        raise ValueError("client_command must include an executable and a script")
+    executable, script = toks[0], toks[1]
+    args: Dict[str, Any] = {}
+
+    i = 2
+    while i < len(toks):
+        t = toks[i]
+        if t.startswith("--"):
+            # --key=value or --key (value) or boolean flag
+            if "=" in t:
+                key, val = t.split("=", 1)
+                if key == "--metadata":
+                    md = {}
+                    if val:
+                        if "=" in val:
+                            k, v = val.split("=", 1)
+                            md[k] = _coerce(v)
+                        else:
+                            md[val] = True
+                    args[key] = md
+                else:
+                    args[key] = _coerce(val)
+                i += 1
+                continue
+
+            key = t
+
+            # Special: consume metadata k=v pairs until next --flag
+            if key == "--metadata":
+                i += 1
+                md = {}
+                while i < len(toks) and not toks[i].startswith("--"):
+                    pair = toks[i]
+                    if "=" in pair:
+                        k, v = pair.split("=", 1)
+                        md[k] = _coerce(v)
+                    else:
+                        md[pair] = True
+                    i += 1
+                args[key] = md
+                continue
+
+            # Standard: check if next token is a value (not a flag)
+            if i + 1 < len(toks) and not toks[i + 1].startswith("--"):
+                args[key] = _coerce(toks[i + 1])
+                i += 2
+            else:
+                # lone flag -> True
+                args[key] = True
+                i += 1
+        else:
+            # unexpected positional; skip
+            i += 1
+
+    return {"executable": executable, "script": script, "args": args}
+
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-r",
+        "--result",
+        type=str,
+        default="results",
+        help="input filter string for json file names",
+    )
+    args = parser.parse_args()
+    result = args.result
+    if os.path.exists(result) is False:
+        print("results folder doesn't exit  : ", result)
+        exit(0)
+    results_folder = Path(result)
     # collect results
     for test_file in results_folder.glob("*.json"):
         with open(test_file) as f:
@@ -102,7 +210,6 @@ if __name__ == "__main__":
 
         if "serving" in str(test_file):
             # this result is generated via `vllm bench serve` command
-
             # attach the benchmarking command to raw_result
             try:
                 with open(test_file.with_suffix(".commands")) as f:
@@ -111,11 +218,28 @@ if __name__ == "__main__":
                 print(e)
                 continue
 
+            # Parse Client Command Arg
+            out: Dict[str, Any] = {
+                "client_command": parse_client_command(command["client_command"])
+            }
+            parse_args = [
+                "--dataset-name",
+                "--random-input-len",
+                "--random-output-len",
+                "--request-rate",
+            ]
+            col_mapping = ["dataset_name", "input_len", "output_len", "qps"]
+
+            for index, arg in enumerate(parse_args):
+                if arg in out["client_command"]["args"]:
+                    raw_result.update(
+                        {col_mapping[index]: out["client_command"]["args"][arg]}
+                    )
+            # Add Server, Client command
             raw_result.update(command)
 
             # update the test name of this result
             raw_result.update({"test_name": test_file.stem})
-
             # add the result to raw_result
             serving_results.append(raw_result)
             continue
@@ -245,7 +369,9 @@ if __name__ == "__main__":
     )
 
     # document the result
-    with open(results_folder / "benchmark_results.md", "w") as f:
+    md_file = "benchmark_results.md"
+    json_file = "benchmark_results.json"
+    with open(results_folder / md_file, "w") as f:
         results = read_markdown(
             "../.buildkite/nightly-benchmarks/"
             + "performance-benchmarks-descriptions.md"
@@ -260,7 +386,7 @@ if __name__ == "__main__":
         f.write(results)
 
     # document benchmarking results in json
-    with open(results_folder / "benchmark_results.json", "w") as f:
+    with open(results_folder / json_file, "w") as f:
         results = (
             latency_results.to_dict(orient="records")
             + throughput_results.to_dict(orient="records")
