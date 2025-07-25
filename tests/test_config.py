@@ -116,9 +116,9 @@ def test_score_task(model_id, expected_runner_type, expected_convert_type,
     if expected_runner_type is None:
         with pytest.raises(ValueError):
             config = ModelConfig(model_id, task="score")
-            return
-    else:
-        config = ModelConfig(model_id, task="score")
+        return
+
+    config = ModelConfig(model_id, task="score")
 
     assert config.runner_type == expected_runner_type
     assert config.convert_type == expected_convert_type
@@ -182,9 +182,9 @@ def test_pooling_runner(model_id, expected_runner_type, expected_convert_type,
     if expected_runner_type is None:
         with pytest.raises(ValueError):
             config = ModelConfig(model_id, runner="pooling")
-            return
-    else:
-        config = ModelConfig(model_id, runner="pooling")
+        return
+
+    config = ModelConfig(model_id, runner="pooling")
 
     assert config.runner_type == expected_runner_type
     assert config.convert_type == expected_convert_type
