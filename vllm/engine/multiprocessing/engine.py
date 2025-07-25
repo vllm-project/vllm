@@ -233,8 +233,8 @@ class MQLLMEngine:
         """Engine step wrapper with error handling."""
         try:
             return self.engine.step()
-        except SystemExit:
-            raise
+        except SystemExit as e:
+            raise e from None
         except InputProcessingError as e:
             # Special case where we handle an error preparing the inputs for
             # a single request in the batch
@@ -249,7 +249,7 @@ class MQLLMEngine:
                                is_engine_errored=True,
                                exception=e)
             self._send_outputs(rpc_err)
-            raise e
+            raise e from None
 
     def handle_new_input(self):
         """Handle new input from the socket"""
