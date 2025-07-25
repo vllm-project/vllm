@@ -11,7 +11,7 @@ import psutil
 from tabulate import tabulate
 import argparse
 
-results_folder = Path("results/")
+#results_folder = Path("results/")
 
 # latency results and the keys that will be printed into markdown
 latency_results = []
@@ -101,14 +101,23 @@ if __name__ == "__main__":
     parser.add_argument(
         "-f", "--filter", action="append", type=str, help="input filter string for json file names"
     )
+    parser.add_argument(
+        "-r", "--result", type=str, default="results", help="input filter string for json file names"
+    )
     args = parser.parse_args()
     filters = args.filter
-    print("filter out json file names with : " + ", ".join(filters))
+    result = args.result
+    if os.path.exists(result) is False:
+        print("results folder doesn't exit  : ", result)
+        exit(0)
+    results_folder = Path(result)
+    print("filter out json file names with : ", filters)
     # collect results
     for test_file in results_folder.glob("*.json"):
         if filters:
-            if not any(f in test_file for f in filters):
+            if not all(str(f) in str(test_file) for f in filters):
                 # the test_file is not in the existed filters
+                print("Bypass ",str(test_file))
                 continue
 
         with open(test_file) as f:
