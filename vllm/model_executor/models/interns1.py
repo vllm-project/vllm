@@ -8,7 +8,7 @@
 # --------------------------------------------------------
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, Optional, TypedDict, TypeVar, Union
+from typing import Any, Literal, Optional, TypedDict, TypeVar, Union, List
 
 import numpy.typing as npt
 import torch
@@ -297,6 +297,15 @@ class BaseInternS1MultiModalProcessor(BaseMultiModalProcessor[_I]):
         # we need to pass the image token ID to the model to select the
         # tokens to merge from the vision encoder outputs
         processed_outputs["image_token_id"] = torch.tensor(image_token_id)
+        images = mm_data.get('images', None)
+        image_processor = self.info.get_hf_processor().image_processor
+        if images is not None:
+            image_inputs = image_processor(images=images)
+            image_num_patches = image_inputs.pop("num_patches")
+            if not isinstance(image_num_patches, List):
+                raise ValueError(f'num_patches is supposed to be List, but got {type(image_num_patches)}')
+            image_num_patches = torch.tensor(image_num_patches)
+            processed_outputs['image_num_patches'] = image_num_patches
 
         return processed_outputs
 
@@ -306,13 +315,15 @@ class BaseInternS1MultiModalProcessor(BaseMultiModalProcessor[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
 
-        pixel_values = hf_inputs.get("pixel_values", torch.empty(0, 0, 0, 0))
-        image_num_patches = torch.tensor([pixel_values.shape[0]])
+        image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
+        num_images = len(image_num_patches)
+
         return dict(
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_num_patches),
+            image_num_patches=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
-            image_token_id=MultiModalFieldConfig.shared("image", pixel_values.shape[0]),
+            image_token_id=MultiModalFieldConfig.shared("image", num_images),
         )
 
     def _get_prompt_updates(
@@ -368,7 +379,7 @@ class InternS1ProcessingInfo(BaseInternS1ProcessingInfo):
     @property
     def supports_video(self) -> bool:
         # return self.video_token_id is not None
-        # InternVLProcessor uses the same media placeholder for both images and videos, 
+        # InternVLProcessor uses the same media placeholder for both images and videos,
         # making it challenging to adapt the `_get_mm_fields_config` function
         # https://github.com/huggingface/transformers/blob/e3760501b0f0ce6be6fe31f0dab15d0e5d2c5260/src/transformers/models/internvl/processing_internvl.py#L92
         return False
@@ -670,6 +681,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[InternS1ImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
+        image_num_patches = kwargs.pop("image_num_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
         if pixel_values is None and image_embeds is None:
@@ -694,12 +706,18 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
+            if not isinstance(image_num_patches, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of image_num_patches. "
+                                 f"Got type: {type(image_num_patches)}")
+
             pixel_values = flatten_bn(pixel_values, concat=True)
+            image_num_patches = flatten_bn(image_num_patches, concat=True)
 
             return InternS1ImagePixelInputs(
                 type="pixel_values",
                 pixel_values=self._validate_pixel_values(
-                    pixel_values)
+                    pixel_values),
+                num_patches=image_num_patches,
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -760,17 +778,22 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
 
         image_embeds = self.extract_feature(image_input["pixel_values"])
 
+        num_patches = image_input["num_patches"]
+
+        # Only one image in the current batch
+        if len(num_patches) == 1:
+            return (image_embeds.view(-1,
+                                      self.config.text_config.hidden_size), )
+
         # NOTE: Image embeddings are split into separate tensors for each image
         # by the size of each embedding.
         feature_size = image_embeds.shape[1]
         image_embeds = image_embeds.view(-1,
                                          self.config.text_config.hidden_size)
-        print(f'>>>>>> image_embeds shape {image_embeds.shape}')
-        # image_feature_sizes = [
-        #     num_patches * feature_size for num_patches in num_patches
-        # ]
-        # return image_embeds.split(image_feature_sizes)
-        return image_embeds
+        image_feature_sizes = [
+            num_patches * feature_size for num_patches in num_patches
+        ]
+        return image_embeds.split(image_feature_sizes)
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         modalities = {}

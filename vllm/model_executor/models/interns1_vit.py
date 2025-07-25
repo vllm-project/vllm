@@ -488,7 +488,7 @@ class InternS1VisionModel(nn.Module):
             hidden_states = pixel_embeds
         elif pixel_values is not None:
             if pixel_values.ndim == 4:
-                hidden_states = self.embeddings(pixel_values)
+                hidden_states, _ = self.embeddings(pixel_values)
             else:
                 raise ValueError(
                     f'wrong pixel_values size: {pixel_values.shape}')
