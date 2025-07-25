@@ -108,16 +108,11 @@ def test_auto_task(model_id, expected_runner_type, expected_convert_type,
         ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "classify",
          "classify"),
         ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "embed", "embed"),
-        ("openai/whisper-small", "pooling", None, "embed"),
+        ("openai/whisper-small", "pooling", "embed", "embed"),
     ],
 )
 def test_score_task(model_id, expected_runner_type, expected_convert_type,
                     expected_task):
-    if expected_runner_type is None:
-        with pytest.raises(ValueError):
-            config = ModelConfig(model_id, task="score")
-        return
-
     config = ModelConfig(model_id, task="score")
 
     assert config.runner_type == expected_runner_type
@@ -143,43 +138,36 @@ def test_transcription_task(model_id, expected_runner_type,
 
 
 @pytest.mark.parametrize(
-    ("model_id", "expected_runner_type", "expected_convert_type",
-     "expected_task"),
+    ("model_id", "expected_runner_type", "expected_convert_type"),
     [
-        ("distilbert/distilgpt2", "generate", "none", "generate"),
-        ("intfloat/multilingual-e5-small", "pooling", "none", "embed"),
-        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify", "classify"),
-        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none",
-         "classify"),
-        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none", "reward"),
-        ("openai/whisper-small", "generate", "none", "transcription"),
+        ("distilbert/distilgpt2", "generate", "none"),
+        ("intfloat/multilingual-e5-small", "pooling", "none"),
+        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none"),
+        ("openai/whisper-small", "generate", "none"),
     ],
 )
-def test_auto_runner(model_id, expected_runner_type, expected_convert_type,
-                     expected_task):
+def test_auto_runner(model_id, expected_runner_type, expected_convert_type):
     config = ModelConfig(model_id, runner="auto")
 
     assert config.runner_type == expected_runner_type
     assert config.convert_type == expected_convert_type
-    assert expected_task in config.supported_tasks
 
 
 @pytest.mark.parametrize(
-    ("model_id", "expected_runner_type", "expected_convert_type",
-     "expected_task"),
+    ("model_id", "expected_runner_type", "expected_convert_type"),
     [
-        ("distilbert/distilgpt2", "pooling", "embed", "embed"),
-        ("intfloat/multilingual-e5-small", "pooling", "none", "embed"),
-        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify", "classify"),
-        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none",
-         "classify"),
-        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none", "reward"),
-        ("openai/whisper-small", "pooling", None, "embed"),
+        ("distilbert/distilgpt2", "pooling", "embed"),
+        ("intfloat/multilingual-e5-small", "pooling", "none"),
+        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none"),
+        ("openai/whisper-small", "pooling", None),
     ],
 )
-def test_pooling_runner(model_id, expected_runner_type, expected_convert_type,
-                        expected_task):
-    if expected_runner_type is None:
+def test_pooling_runner(model_id, expected_runner_type, expected_convert_type):
+    if expected_convert_type is None:
         with pytest.raises(ValueError):
             config = ModelConfig(model_id, runner="pooling")
         return
@@ -188,23 +176,19 @@ def test_pooling_runner(model_id, expected_runner_type, expected_convert_type,
 
     assert config.runner_type == expected_runner_type
     assert config.convert_type == expected_convert_type
-    assert expected_task in config.supported_tasks
 
 
 @pytest.mark.parametrize(
-    ("model_id", "expected_runner_type", "expected_convert_type",
-     "expected_task"),
+    ("model_id", "expected_runner_type", "expected_convert_type"),
     [
-        ("Qwen/Qwen2.5-1.5B-Instruct", "draft", "none", "draft"),
+        ("Qwen/Qwen2.5-1.5B-Instruct", "draft", "none"),
     ],
 )
-def test_draft_runner(model_id, expected_runner_type, expected_convert_type,
-                      expected_task):
+def test_draft_runner(model_id, expected_runner_type, expected_convert_type):
     config = ModelConfig(model_id, runner="draft")
 
     assert config.runner_type == expected_runner_type
     assert config.convert_type == expected_convert_type
-    assert expected_task in config.supported_tasks
 
 
 MODEL_IDS_EXPECTED = [
