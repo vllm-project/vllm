@@ -84,9 +84,8 @@ class OpenAISpeechToText(OpenAIServing):
         self,
         request: SpeechToTextRequest,
         audio_data: bytes,
-        previous_text :list[str],
+        previous_text: list[str],
     ) -> AsyncGenerator[tuple[PromptType, float]]:
-        model_cls = cast(SupportsTranscription, self.model_cls)
         # Validate request
         # TODO language should be optional and can be guessed.
         # For now we default to en. See
@@ -106,26 +105,14 @@ class OpenAISpeechToText(OpenAIServing):
         do_split_audio = (self.asr_config.allow_audio_chunking
                           and duration > self.asr_config.max_audio_clip_s)
         chunks = [y] if not do_split_audio else self._split_audio(y, int(sr))
-        prompts = []
+        system_prompt = request.prompt
         for chunk in chunks:
-            prompt = {
-                "encoder_prompt": {
-                    "prompt": "",
-                    "multi_modal_data": {
-                        "audio": (chunk, sr),
-                    },
-                },
-                "decoder_prompt":
-                self._create_prompt_with_previous_context(
-                    system_prompt=model_cls.get_decoder_prompt
-                        (lang, self.task_type,
-                                request.prompt),
-                    previous_text=previous_text,
-                    lang_token=lang
-                )
-            }
-            yield (cast(PromptType, prompt), duration)
-            
+
+            request.prompt = self._create_prompt_with_previous_context(
+                system_prompt=system_prompt,
+                previous_text=previous_text,
+                lang_token=lang)
+
             # The model has control over the construction, as long as it
             # returns a valid PromptType.
             prompt = self.model_cls.get_generation_prompt(
@@ -135,8 +122,7 @@ class OpenAISpeechToText(OpenAIServing):
                 language=lang,
                 task_type=self.task_type,
                 request_prompt=request.prompt)
-            prompts.append(prompt)
-        return prompts, duration
+            yield (cast(PromptType, prompt), duration)
 
     async def _create_speech_to_text(
         self,
@@ -175,16 +161,11 @@ class OpenAISpeechToText(OpenAIServing):
                 return self.create_error_response(
                     "Currently do not support LoRA for "
                     f"{self.task_type.title()}.")
-            if prompt_adapter_request:
-                return self.create_error_response(
-                    f"Currently do not support PromptAdapter for "
-                    f"{self.task_type.title()}.")
             previous_text = [""]
             asyncPromptGenerator = self._preprocess_speech_to_text(
                 request=request,
                 audio_data=audio_data,
-                previous_text=previous_text
-            )
+                previous_text=previous_text)
 
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
@@ -200,11 +181,11 @@ class OpenAISpeechToText(OpenAIServing):
             # streaming response.
             if request.stream:
                 return stream_generator_method(request, asyncPromptGenerator,
-                                            request_id, request_metadata,
-                                            sampling_params, previous_text)
-            
+                                               request_id, request_metadata,
+                                               sampling_params, previous_text)
+
             # Non-streaming response.
-            text= ""
+            text = ""
             async for (prompt, _) in asyncPromptGenerator:
                 partial_text = ""
                 if text == "":
@@ -213,9 +194,8 @@ class OpenAISpeechToText(OpenAIServing):
                         prompt['decoder_prompt'],  # type: ignore
                         params=sampling_params,
                         lora_request=None,
-                        prompt_adapter_request=None
-                    )
-                    
+                        prompt_adapter_request=None)
+
                 request_prompt = self.engine_client.generate(
                     prompt,
                     sampling_params,
@@ -223,7 +203,7 @@ class OpenAISpeechToText(OpenAIServing):
                 )
                 async for op in request_prompt:
                     partial_text += op.outputs[0].text
-                    
+
                 previous_text[0] = partial_text.strip()
                 text += partial_text
 
@@ -241,8 +221,8 @@ class OpenAISpeechToText(OpenAIServing):
         async_result_generator: AsyncGenerator[tuple[PromptType, float]],
         request_id: str,
         request_metadata: RequestResponseMetadata,
-        sampling_params : SamplingParams,
-        previous_context : list[str],
+        sampling_params: SamplingParams,
+        previous_context: list[str],
         chunk_object_type: Literal["translation.chunk", "transcription.chunk"],
         response_stream_choice_class: Union[
             type[TranscriptionResponseStreamChoice],
@@ -275,11 +255,11 @@ class OpenAISpeechToText(OpenAIServing):
                     if res.prompt_token_ids is not None:
                         num_prompt_tokens = len(res.prompt_token_ids)
                         if audio_tokens := self.model_cls.get_num_audio_tokens(
-                                audio_duration_s, self.asr_config,
+                                duration_s, self.asr_config,
                                 self.model_config):
                             num_prompt_tokens += audio_tokens
 
-                    # We need to do it here, 
+                    # We need to do it here,
                     # because if there are exceptions in
                     # the result_generator, it needs to be sent as the FIRST
                     # response (by the try...catch).
@@ -304,23 +284,22 @@ class OpenAISpeechToText(OpenAIServing):
                             stop_reason=output.stop_reason)
 
                     chunk = stream_response_class(id=request_id,
-                                                object=chunk_object_type,
-                                                created=created_time,
-                                                choices=[choice_data],
-                                                model=model_name)
+                                                  object=chunk_object_type,
+                                                  created=created_time,
+                                                  choices=[choice_data],
+                                                  model=model_name)
 
                     # handle usage stats if requested & if continuous
                     if include_continuous_usage:
                         chunk.usage = UsageInfo(
                             prompt_tokens=num_prompt_tokens,
                             completion_tokens=completion_tokens,
-                            total_tokens=num_prompt_tokens 
-                            + completion_tokens,
+                            total_tokens=num_prompt_tokens + completion_tokens,
                         )
 
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
-                    
+
                 previous_context[0] = partial_text.strip()
 
             # Once the final token is handled, if stream_options.include_usage
@@ -404,12 +383,10 @@ class OpenAISpeechToText(OpenAIServing):
                 quietest_idx = i + start_idx
                 min_energy = energy
         return quietest_idx
-    
-    def _create_prompt_with_previous_context(self, 
-            system_prompt: str,
-            previous_text :list[str],
-            lang_token : str
-        ) -> str:
+
+    def _create_prompt_with_previous_context(self, system_prompt: str,
+                                             previous_text: list[str],
+                                             lang_token: str) -> str:
         """
         According to the Whisper prompting guide:
         https://cookbook.openai.com/examples/whisper_prompting_guide
@@ -438,10 +415,10 @@ class OpenAISpeechToText(OpenAIServing):
 
         TOKEN_PER_CHAR = 1 if lang_token == "en" else 3
         MAX_PROMPT_LENGTH = 220 // TOKEN_PER_CHAR
-        
+
         ret_prompt = ""
         ret_prompt_len = 0
-        
+
         request_prompt_list = system_prompt.split(' ')
         previous_text_list = previous_text[0].split(' ')
         for prompt in request_prompt_list:
@@ -451,18 +428,15 @@ class OpenAISpeechToText(OpenAIServing):
                 ret_prompt_len += len(prompt)
             else:
                 break
-        
+
         previous_text_list_rev = []
         for previous_index in range(len(previous_text_list) - 1, 0, -1):
             prompt = previous_text_list[previous_index]
             if len(prompt) + ret_prompt_len <= MAX_PROMPT_LENGTH:
                 previous_text_list_rev.append(prompt)
                 ret_prompt_len += len(prompt)
-            else: 
+            else:
                 break
-            
+
         ret_prompt += ' '.join(reversed(previous_text_list_rev))
-        return  (f"<|prev|>{ret_prompt}<|startoftranscript|>{lang_token}"
-                f"<|{self.task_type}|><|notimestamps|>")
-        
-        
+        return ret_prompt
