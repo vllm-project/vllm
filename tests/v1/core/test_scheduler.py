@@ -1840,7 +1840,7 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
 
 
 def test_priority_scheduling_preemption_victim_iterator_order():
-    """Test that the scheduling order is maintained after 
+    """Test that the scheduling order is maintained after
     preempting lower-priority requests."""
     scheduler = create_scheduler_with_priority(
         max_num_batched_tokens=200,
@@ -1909,13 +1909,13 @@ def test_priority_scheduling_preemption_victim_iterator_order():
     )
     scheduler.update_from_output(output, model_output)
 
-    # At this time, the request with the lowest priority 
+    # At this time, the request with the lowest priority
     # (request.id = 2) will be preempted, freeing up 2 blocks,
     # which exactly meets the resource allocation requirements
     # for request.id = 4 and request.id = 5.
     output = scheduler.schedule()
 
-    # Should schedule the new request without preemption
+    # Should schedule the new request without preemption.
     assert len(scheduler.running) == 4  #
     assert len(scheduler.waiting) == 1  #
 
