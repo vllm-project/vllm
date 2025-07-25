@@ -10,6 +10,7 @@ from transformers import FalconH1Config
 
 from vllm import envs
 from vllm.attention.layer import Attention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
@@ -179,13 +180,15 @@ class FalconH1SSMDecoderLayer(nn.Module):
         mamba2_metadata: Mamba2Metadata,
         **kwargs,
     ):
-        hidden_states = self.mamba(
+        output = torch.empty_like(hidden_states)
+        self.mamba(
             hidden_states,
+            output,
             mamba_cache_params,
             mamba2_metadata=mamba2_metadata,
             mup_vector=self.mup_vector,
         )
-        return hidden_states, residual
+        return output, residual
 
 
 class FalconH1AttentionDecoderLayer(nn.Module):
@@ -398,6 +401,7 @@ class FalconH1ParallelHybrid(nn.Module):
         return hidden_states
 
 
+@support_torch_compile
 class FalconH1Model(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 MODELS = [
     "Qwen/Qwen2.5-1.5B-Instruct",
+    # TODO: Enable this model when fixed.
+    # "Qwen/Qwen1.5-MoE-A2.7B",
     # TODO: Enable this models with v6e
     # "Qwen/Qwen2-7B-Instruct",
     # "meta-llama/Llama-3.1-8B",
@@ -57,7 +59,7 @@ def test_basic(
                 # actually test chunked prompt
                 max_num_batched_tokens=1024,
                 max_model_len=8192,
-                gpu_memory_utilization=0.7,
+                gpu_memory_utilization=0.95,
                 max_num_seqs=max_num_seqs,
                 tensor_parallel_size=tensor_parallel_size) as vllm_model:
             vllm_outputs = vllm_model.generate_greedy(example_prompts,

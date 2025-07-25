@@ -10,14 +10,14 @@ from transformers import RobertaConfig
 
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.pooler import ClassifierPooler, CLSPool
+from vllm.model_executor.layers.pooler import (ClassifierPooler, CLSPool,
+                                               DispatchPooler, Pooler)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.models.bert import BertEmbeddingModel, BertModel
 from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
                                               maybe_prefix)
-from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.sequence import IntermediateTensors
 
 from .bert_with_rope import BertWithRope, JinaRobertaModel
 from .interfaces import SupportsCrossEncoding
@@ -164,6 +164,7 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
        _pooler: An instance of Pooler used for pooling operations.
    """
 
+    is_pooling_model = True
     jina_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             'emb_ln': "embeddings.LayerNorm",
@@ -184,26 +185,34 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
         self.num_labels = config.num_labels
         self.roberta = BertModel(vllm_config=vllm_config,
                                  prefix=maybe_prefix(prefix, "bert"),
-                                 embedding_class=RobertaEmbedding,
-                                 add_pooling_layer=False)
+                                 embedding_class=RobertaEmbedding)
         self.classifier = RobertaClassificationHead(config)
 
-        self._pooler = ClassifierPooler(
-            vllm_config.model_config,
-            pooling=CLSPool(),
-            classifier=self.classifier,
-        )
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+
+        self.pooler = DispatchPooler({
+            "encode":
+            Pooler.for_encode(pooler_config),
+            "classify":
+            ClassifierPooler(
+                pooling=CLSPool(),
+                classifier=self.classifier,
+                act_fn=ClassifierPooler.act_fn_for_seq_cls(
+                    vllm_config.model_config),
+            ),
+            "score":
+            ClassifierPooler(
+                pooling=CLSPool(),
+                classifier=self.classifier,
+                act_fn=ClassifierPooler.act_fn_for_cross_encoder(
+                    vllm_config.model_config),
+            ),
+        })
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.jina_to_vllm_mapper)
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)
 
     def forward(
         self,
