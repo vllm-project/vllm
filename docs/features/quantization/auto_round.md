@@ -7,7 +7,7 @@ AutoRound applies weight-only quantization to transformer-based models, enabling
 inference while maintaining near-original accuracy. It supports a wide range of hardware platforms, including **CPUs,
 Intel GPUs, HPUs, and CUDA-enabled devices**.
 
-Please refer to the [AutoRound readme](https://github.com/intel/auto-round/blob/main/docs/step_by_step.md) for more details.
+Please refer to the [AutoRound guide](https://github.com/intel/auto-round/blob/main/docs/step_by_step.md) for more details.
 
 Key Features:
 
