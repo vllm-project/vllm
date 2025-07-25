@@ -407,7 +407,7 @@ class SmallThinkerWeightsMapper(WeightsMapper):
                     [parts[0], parts[1]], dim=0
                 )
 
-class SmallThinkerForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class SmallThinkerForCausalLM(nn.Module):
     """Causal language model with vLLM optimization."""
     _tied_weights_keys = ["lm_head.weight"]
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
