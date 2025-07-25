@@ -126,7 +126,7 @@ def _make_metadata_with_slice(
 
 
 def split_attn_metadata(
-    ubatch_slices: list[UbatchSlice],
+    ubatch_slices: list[tuple[slice, slice]],
     common_attn_metadata: CommonAttentionMetadata,
 ) -> list[CommonAttentionMetadata]:
     """
@@ -136,8 +136,9 @@ def split_attn_metadata(
     """
     results = []
     for ubatch_slice in ubatch_slices:
-        results.append(
-            _make_metadata_with_slice(ubatch_slice, common_attn_metadata))
+        s = UbatchSlice(request_slice=ubatch_slice[0],
+                        token_slice=ubatch_slice[1])
+        results.append(_make_metadata_with_slice(s, common_attn_metadata))
     return results
 
 

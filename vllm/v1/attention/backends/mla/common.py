@@ -563,8 +563,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                                                            scheduler_output,
                                                            decode_threshold=1)
 
-    def _build_decode(self, block_table_tensor: torch.Tensor,
-                      seq_lens: torch.Tensor):
+    def _build_decode(self,
+                      block_table_tensor: torch.Tensor,
+                      seq_lens: torch.Tensor,
+                      ubatch_id: Optional[int] = None):
         return MLACommonDecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens,
@@ -597,7 +599,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     def build(self,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False) -> M:
+              fast_build: bool = False,
+              ubatch_id: Optional[int] = None) -> M:
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
@@ -720,7 +723,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             decode_metadata = self._build_decode(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
                 seq_lens=seq_lens[:num_decodes],
-            )
+                ubatch_id=ubatch_id)
 
         attn_metadata = self.metadata_cls(
             num_reqs=common_attn_metadata.num_reqs,

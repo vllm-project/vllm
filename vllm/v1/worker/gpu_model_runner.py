@@ -52,7 +52,7 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionBackend
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
-    make_local_attention_virtual_batches)
+    make_local_attention_virtual_batches, split_attn_metadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         ChunkedLocalAttentionSpec,
@@ -878,17 +878,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     .slot_mapping.fill_(-1)
 
             if ubatch_slices is not None:
-                for ubid, (req_slice, token_slice) in enumerate(ubatch_slices):
-                    assert token_slice.stop > token_slice.start
+                common_attn_metadata_list = split_attn_metadata(
+                    ubatch_slices, common_attn_metadata)
+                for ubid, common_attn_metadata in enumerate(
+                        common_attn_metadata_list):
+                    assert common_attn_metadata.max_query_len == 1
                     attn_metadata_i = (
-                        self.attn_metadata_builders[kv_cache_group_id].
-                        build_slice(
-                            req_slice=req_slice,
-                            token_slice=token_slice,
-                            max_query_len=max(tokens[req_slice]),
+                        self.attn_metadata_builders[kv_cache_group_id].build(
                             common_prefix_len=common_prefix_len,
                             common_attn_metadata=common_attn_metadata,
-                        ))
+                            ubatch_id=ubid))
                     for layer_name in kv_cache_group_spec.layer_names:
                         assert type(attn_metadata) is list
                         attn_metadata[ubid][layer_name] = attn_metadata_i
