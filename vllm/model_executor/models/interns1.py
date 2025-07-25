@@ -311,7 +311,8 @@ class BaseInternS1MultiModalProcessor(BaseMultiModalProcessor[_I]):
         return dict(
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_num_patches),
-            image_embeds=MultiModalFieldConfig.batched("image")
+            image_embeds=MultiModalFieldConfig.batched("image"),
+            image_token_id=MultiModalFieldConfig.shared("image", pixel_values.shape[0]),
         )
 
     def _get_prompt_updates(
