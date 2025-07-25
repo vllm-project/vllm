@@ -33,7 +33,8 @@ from transformers import PretrainedConfig
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size, get_ep_group
+from vllm.distributed import (get_pp_group, 
+    get_tensor_model_parallel_world_size, get_ep_group)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -389,8 +390,9 @@ class Ernie4_5_MoeModel(nn.Module):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.config = config
-        enable_eplb = vllm_config.parallel_config.enable_eplb
-        self.num_redundant_experts = vllm_config.parallel_config.num_redundant_experts
+        parallel_config = vllm_config.parallel_config
+        enable_eplb = parallel_config.enable_eplb
+        self.num_redundant_experts = parallel_config.num_redundant_experts
 
 
         if get_pp_group().is_first_rank:
