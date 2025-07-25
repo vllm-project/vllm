@@ -597,10 +597,10 @@ class _ModelRegistry:
         normalized_archs = self._normalize_archs(architectures,
                                                  model_config=model_config)
 
-        for arch, normalized_arch in zip(architectures, normalized_archs):
+        for normalized_arch in normalized_archs:
             model_info = self._try_inspect_model_cls(normalized_arch)
             if model_info is not None:
-                return (model_info, arch)
+                return (model_info, normalized_arch)
 
         return self._raise_for_unsupported(architectures)
 
