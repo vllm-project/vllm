@@ -2662,18 +2662,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         )
                         
                         # Key tensor view at calculated memory offset
-                        k_tensor = raw_tensor.view(dtype)[
-                            k_offset_elements:k_offset_elements + 
-                            num_blocks * elements_per_layer_block
-                        ].view(num_blocks, kv_cache_spec.num_kv_heads,
-                               kv_cache_spec.block_size, kv_cache_spec.head_size)
+# Create tensor views for key and value data with calculated offsets
+                        shape = (num_blocks, kv_cache_spec.num_kv_heads,
+                                 kv_cache_spec.block_size, kv_cache_spec.head_size)
                         
-                        # Value tensor view at calculated memory offset
-                        v_tensor = raw_tensor.view(dtype)[
-                            v_offset_elements:v_offset_elements +
-                            num_blocks * elements_per_layer_block
-                        ].view(num_blocks, kv_cache_spec.num_kv_heads,
-                               kv_cache_spec.block_size, kv_cache_spec.head_size)
+                        # The stride for the block dimension is the size of a giant block in elements.
+                        # The inner strides are for a contiguous tensor.
+                        stride = (kv_cache_spec.page_size_bytes // dtype_size,
+                                  *torch.empty(shape[1:]).stride())
+
+                        k_tensor = torch.as_strided(
+                            raw_tensor.view(dtype), size=shape, stride=stride,
+                            storage_offset=k_offset_elements)
+                        v_tensor = torch.as_strided(
+                            raw_tensor.view(dtype), size=shape, stride=stride,
+                            storage_offset=v_offset_elements)
                         
                         kv_caches[layer_name] = (k_tensor, v_tensor)
                         
