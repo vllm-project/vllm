@@ -315,7 +315,7 @@ class Attention(nn.Module):
         if hasattr(self.impl, "process_weights_after_loading"):
             self.impl.process_weights_after_loading(act_dtype)
 
-    def get_attn_backend(self) -> AttentionBackend:
+    def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
 

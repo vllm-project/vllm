@@ -400,7 +400,8 @@ def make_local_attention_virtual_batches(
 
 
 def make_local_attention_metadata_builder(
-        builder_cls: type[AttentionMetadataBuilder]):
+    builder_cls: type[AttentionMetadataBuilder[M]]
+) -> type[AttentionMetadataBuilder[M]]:
     """
     Return a new subclass of `builder_cls` whose .build(...) method
     first calls make_local_attention_virtual_batches(...) on the metadata.
@@ -410,7 +411,7 @@ def make_local_attention_metadata_builder(
     def build(self,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False):
+              fast_build: bool = False) -> M:
         #print(f"Building local attention metadata builder {type(self)}")
         # TODO(lucas): this requires the attention metadata builder save the
         #  kv_cache_spec, as an attribute; we maybe can do something better here
@@ -429,14 +430,14 @@ def make_local_attention_metadata_builder(
 
 
 def make_local_attention_backend(
-        attention_backend: AttentionBackend) -> AttentionBackend:
+        attention_backend: type[AttentionBackend]) -> type[AttentionBackend]:
     """
     Return a new subclass of `attention_backend` whose .build(...) method
     first calls make_local_attention_virtual_batches(...) on the metadata.
     """
     name = "LocalAttention" + attention_backend.__name__
 
-    def get_builder_cls() -> AttentionMetadataBuilder:
+    def get_builder_cls() -> type[AttentionMetadataBuilder]:
         return make_local_attention_metadata_builder(
             attention_backend.get_builder_cls())
 
