@@ -363,6 +363,7 @@ class Plamo2MambaMixer(nn.Module):
                 dt_softplus=True,
                 state_batch_indices=state_indices_tensor_d,
             )
+            assert self.num_heads % self.tp_size == 0
             ssd_output_list.append(
                 hidden_states_d.view(-1, (self.num_heads // self.tp_size) *
                                      self.head_dim))
