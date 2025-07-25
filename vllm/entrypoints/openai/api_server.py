@@ -149,6 +149,9 @@ async def lifespan(app: FastAPI):
 @asynccontextmanager
 async def build_async_engine_client(
     args: Namespace,
+    *,
+    usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
+    disable_frontend_multiprocessing: Optional[bool] = None,
     client_config: Optional[dict[str, Any]] = None,
 ) -> AsyncIterator[EngineClient]:
 
@@ -156,15 +159,24 @@ async def build_async_engine_client(
     # Ensures everything is shutdown and cleaned up on error/exit
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
+    if disable_frontend_multiprocessing is None:
+        disable_frontend_multiprocessing = bool(
+            args.disable_frontend_multiprocessing)
+
     async with build_async_engine_client_from_engine_args(
-            engine_args, args.disable_frontend_multiprocessing,
-            client_config) as engine:
+            engine_args,
+            usage_context=usage_context,
+            disable_frontend_multiprocessing=disable_frontend_multiprocessing,
+            client_config=client_config,
+    ) as engine:
         yield engine
 
 
 @asynccontextmanager
 async def build_async_engine_client_from_engine_args(
     engine_args: AsyncEngineArgs,
+    *,
+    usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
     disable_frontend_multiprocessing: bool = False,
     client_config: Optional[dict[str, Any]] = None,
 ) -> AsyncIterator[EngineClient]:
@@ -177,7 +189,6 @@ async def build_async_engine_client_from_engine_args(
     """
 
     # Create the EngineConfig (determines if we can use V1).
-    usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
     # V1 AsyncLLM.
@@ -1811,7 +1822,10 @@ async def run_server_worker(listen_address,
     if log_config is not None:
         uvicorn_kwargs['log_config'] = log_config
 
-    async with build_async_engine_client(args, client_config) as engine_client:
+    async with build_async_engine_client(
+            args,
+            client_config=client_config,
+    ) as engine_client:
         maybe_register_tokenizer_info_endpoint(args)
         app = build_app(args)
 
