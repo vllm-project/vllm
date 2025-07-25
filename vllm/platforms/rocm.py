@@ -235,9 +235,12 @@ class RocmPlatform(Platform):
         if envs.VLLM_USE_V1:
             from vllm.attention.selector import choose_attention_backend
 
-            return choose_attention_backend(
+            backend_name, backend_qualname = choose_attention_backend(
                 _BACKEND_NAME_TO_QUALIFIED_NAME_MAPPING, head_size, dtype,
                 kv_cache_dtype, block_size)
+
+            logger.info("Using %s backend on V1 engine.", backend_name)
+            return backend_qualname
 
         if selected_backend == _Backend.ROCM_FLASH:
             if not cls.has_device_capability(90):

@@ -97,8 +97,8 @@ def is_attn_backend_supported(
     attn_backend: Union[str, type[AttentionBackend]],
     head_size: int,
     dtype: torch.dtype,
-    kv_cache_dtype: str,
-    block_size: int,
+    kv_cache_dtype: str = "",
+    block_size: int = 0,
     *,
     allow_import_error: bool = True,
 ) -> _IsSupported:
@@ -280,7 +280,7 @@ def choose_attention_backend(
     dtype: torch.dtype,
     kv_cache_dtype: str,
     block_size: int,
-) -> str:
+) -> tuple[str, str]:
 
     maybe_forced_backend = envs.VLLM_ATTENTION_BACKEND
     if maybe_forced_backend:
@@ -304,7 +304,7 @@ def choose_attention_backend(
                            "auto-selection."
 
                 logger.warning(message)
-                return qualified_name
+                return maybe_forced_backend, qualified_name
 
             else:
                 message =  f"Tried to force {maybe_forced_backend}, " \
@@ -314,21 +314,14 @@ def choose_attention_backend(
 
                 logger.warning(message)
 
-    qualname_list = backend_to_qualname.values()
-    for qualname in qualname_list:
-        backend_obj_name = qualname.rsplit(".", 1)[1].removesuffix("Backend")
-
+    for backend_name, qualname in backend_to_qualname.items():
         if is_attn_backend_supported(qualname,
                                      head_size,
                                      dtype,
                                      kv_cache_dtype,
                                      block_size,
                                      allow_import_error=False):
-
-            message = f"Using {backend_obj_name}"
-            logger.info(message)
-
-            return qualname
+            return backend_name, qualname
 
     raise ValueError(
         "No attention backend supports the current configuration.")

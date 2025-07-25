@@ -31,6 +31,8 @@ argcomplete==3.5.1
     # via datamodel-code-generator
 arrow==1.3.0
     # via isoduration
+async-timeout==5.0.1
+    # via redis
 attrs==24.2.0
     # via
     #   aiohttp
@@ -702,7 +704,6 @@ setuptools==77.0.3
     # via
     #   mamba-ssm
     #   pytablewriter
-    #   torch
     #   triton
 shellingham==1.5.4
     # via typer
