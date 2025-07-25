@@ -597,7 +597,10 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
         num_physical_experts: int,
         num_local_physical_experts: int,
     ) -> None:
-        assert self.num_local_physical_experts == num_local_physical_experts
+        if self.num_local_physical_experts != num_local_physical_experts:
+            raise ValueError(f"Expected num_local_physical_experts to be "
+                             f"{self.num_local_physical_experts}, got "
+                             f"{num_local_physical_experts}")
         self.num_physical_experts = num_physical_experts
         self.num_local_physical_experts = num_local_physical_experts
         self.num_redundant_experts = (num_physical_experts -
