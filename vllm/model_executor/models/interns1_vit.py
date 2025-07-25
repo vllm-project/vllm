@@ -359,10 +359,10 @@ class InternS1VisionLayer(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.attn = self._init_attn(config,
+        self.attention = self._init_attn(config,
                                     quant_config,
                                     num_dummy_heads=num_dummy_heads,
-                                    prefix=f"{prefix}.attn")
+                                    prefix=f"{prefix}.attention")
 
         self.mlp = InternS1VisionMLP(config,
                              quant_config=quant_config,
@@ -414,6 +414,7 @@ class InternS1VisionEncoder(nn.Module):
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         *,
+        num_hidden_layers_override: Optional[int] = None,
         num_dummy_heads: int = 0,
         prefix: str = "",
     ):
@@ -421,12 +422,17 @@ class InternS1VisionEncoder(nn.Module):
 
         self.config = config
 
+        if num_hidden_layers_override is None:
+            num_hidden_layers = config.num_hidden_layers
+        else:
+            num_hidden_layers = num_hidden_layers_override
+
         self.layer = nn.ModuleList([
             InternS1VisionLayer(config,
                                      quant_config,
                                      num_dummy_heads=num_dummy_heads,
                                      prefix=f"{prefix}.layer.{layer_idx}")
-            for layer_idx in range(config.num_hidden_layers)
+            for layer_idx in range(num_hidden_layers)
         ])
 
     def forward(self, inputs_embeds: torch.Tensor):

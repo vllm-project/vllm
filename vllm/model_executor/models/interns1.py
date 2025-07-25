@@ -547,8 +547,8 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
         self.config = config
         self.multimodal_config = multimodal_config
 
-        image_size = config.force_image_size or config.vision_config.image_size
-        patch_size = config.vision_config.patch_size
+        image_size = config.vision_config.image_size[0]
+        patch_size = config.vision_config.patch_size[0]
         self.patch_size = patch_size
         self.num_image_token = int(
             (image_size // patch_size)**2 * (config.downsample_ratio**2))
