@@ -238,8 +238,8 @@ Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown 
         print(generated_text)
     ```
 
-!!! note
-    that `'process_vision_info'` is only applicable to Qwen2.5-VL and similar models
+    !!! note
+        that `'process_vision_info'` is only applicable to Qwen2.5-VL and similar models
 
 Full example: <gh-file:examples/offline_inference/vision_language.py>
 
