@@ -58,6 +58,22 @@ function (find_isa CPUINFO TARGET OUT)
     endif()
 endfunction()
 
+
+function(check_sysctl TARGET OUT)
+    execute_process(COMMAND sysctl -n "${TARGET}"
+                    RESULT_VARIABLE SYSCTL_RET
+                    OUTPUT_VARIABLE SYSCTL_INFO
+                    ERROR_QUIET
+                    OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(SYSCTL_RET EQUAL 0 AND
+      (SYSCTL_INFO STREQUAL "1" OR SYSCTL_INFO GREATER 0))
+        set(${OUT} ON PARENT_SCOPE)
+    else()
+        set(${OUT} OFF PARENT_SCOPE)
+    endif()
+endfunction()
+
+
 function (is_avx512_disabled OUT)
     set(DISABLE_AVX512 $ENV{VLLM_CPU_DISABLE_AVX512})
     if(DISABLE_AVX512 AND DISABLE_AVX512 STREQUAL "true")
@@ -70,7 +86,10 @@ endfunction()
 is_avx512_disabled(AVX512_DISABLED)
 
 if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
-    set(APPLE_SILICON_FOUND TRUE)
+    message(STATUS "Apple Silicon Detected")
+    set(ENABLE_NUMA OFF)
+    check_sysctl(hw.optional.neon ASIMD_FOUND)
+    check_sysctl(hw.optional.arm.FEAT_BF16 ARM_BF16_FOUND)
 else()
     find_isa(${CPUINFO} "avx2" AVX2_FOUND)
     find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
@@ -81,7 +100,6 @@ else()
     find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
     find_isa(${CPUINFO} "S390" S390_FOUND)
 endif()
-
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     list(APPEND CXX_COMPILE_FLAGS
@@ -149,9 +167,6 @@ elseif (ASIMD_FOUND)
         set(MARCH_FLAGS "-march=armv8.2-a+dotprod+fp16")  
     endif()
     list(APPEND CXX_COMPILE_FLAGS ${MARCH_FLAGS})     
-elseif(APPLE_SILICON_FOUND)
-    message(STATUS "Apple Silicon Detected")
-    set(ENABLE_NUMA OFF)
 elseif (S390_FOUND)
     message(STATUS "S390 detected")
     # Check for S390 VXE support
