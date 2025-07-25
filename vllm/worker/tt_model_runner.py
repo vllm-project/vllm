@@ -781,7 +781,10 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             next_token_ids = self._sample_tokens(
                 next_logits, model_input.tt_sampling_params)
         else:
-            next_token_ids = tt_out[:model_input.unpadded_batch_size]
+            if self.llama_tg:
+                next_token_ids = tt_out
+            else:
+                next_token_ids = tt_out[:model_input.unpadded_batch_size]
         if not is_decode or not self.async_torch_proc:
             return next_token_ids
         else:
