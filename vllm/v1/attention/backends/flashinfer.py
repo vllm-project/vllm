@@ -467,7 +467,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self._get_workspace_buffer()
             assert self._workspace_buffer is not None, \
                 "workspace_buffer is not set"
-        query_start_loc = common_attn_metadata.query_start_loc_cpu.to(self.device)
+        query_start_loc = common_attn_metadata.query_start_loc_cpu.to( \
+            self.device)
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
             qo_indptr_cpu=common_attn_metadata.query_start_loc_cpu,
