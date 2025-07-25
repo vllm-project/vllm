@@ -6,13 +6,13 @@ AutoRound applies weight-only quantization to transformer-based models, enabling
 
 Key Features:
 
-✅ **GGUF, AutoGPTQ, AutoAWQ, and AutoRound** are supported:
+✅ **AutoRound, AutoAWQ, AutoGPTQ, and GGUF ** are supported:
 
 ✅ **10+ vision-language models (VLMs)** are supported
 
 ✅ **Per-layer mixed-bit quantization** for fine-grained control
 
-✅ **RTN (Round-To-Nearest) mode** for standard quantization
+✅ **RTN (Round-To-Nearest) mode** for quick quantization with minimal accuracy loss
 
 ✅ **Multiple quantization recipes**: best, base, and light
 
@@ -34,6 +34,13 @@ auto-round \
     --bits 4 \
     --group_size 128 \
     --format "auto_round" \
+    --output_dir ./tmp_autoround
+```
+
+```bash
+auto-round \
+    --model Qwen/Qwen3-0.6B \
+    --format "gguf:q4_k_m" \
     --output_dir ./tmp_autoround
 ```
 
@@ -64,6 +71,23 @@ autoround.quantize_and_save(output_dir, format="auto_round")
 ## Running a quantized model with vLLM
 
 To run an AutoRound quantized model with vLLM, you can
-use [DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2](https://huggingface.co/ModelCloud/DeepSeek-R1-Distill-Qwen-7B-gptqmodel-4bit-vortex-v2)
-with the following command:
+~~~python
+if __name__ == '__main__':
+    from vllm import LLM, SamplingParams
+
+    prompts = [
+        "Hello, my name is",
+    ]
+    sampling_params = SamplingParams(temperature=0.6, top_p=0.95)
+    model_name = "Intel/DeepSeek-R1-0528-Qwen3-8B-int4-AutoRound"
+    llm = LLM(model=model_name)
+
+    outputs = llm.generate(prompts, sampling_params)
+
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+~~~
 
