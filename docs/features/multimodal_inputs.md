@@ -176,6 +176,7 @@ Multi-image input can be extended to perform video captioning. We show this with
 
 You can pass a list of NumPy arrays directly to the `'video'` field of the multi-modal dictionary
 instead of using multi-image input.
+
 Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown in this example using Qwen2.5-VL:
 
 ??? code
