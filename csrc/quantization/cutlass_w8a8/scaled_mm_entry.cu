@@ -293,7 +293,7 @@ void cutlass_moe_mm(
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(
       false,
-      "No compiled cutlass_scaled_mm for CUDA device capability: ", version_num,
+      "No compiled cutlass_moe_mm for CUDA device capability: ", version_num,
       ". Required capability: 90 or 100 and compilation with enviromental",
       "variable VLLM_COMPILE_FP8_BLOCKWISE_CUTLASS_MOE=1");
 }
@@ -315,7 +315,8 @@ void cutlass_blockwise_scaled_grouped_mm_sm90(
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(
       false,
-      "No compiled cutlass_scaled_mm for CUDA device capability: ", version_num,
+      "No compiled cutlass_blockwise_scaled_grouped_mm for CUDA device",
+      "capability: ", version_num,
       ". Required capability: 90 and compilation with enviromental variable",
       "VLLM_COMPILE_FP8_BLOCKWISE_CUTLASS_MOE=1");
 }
