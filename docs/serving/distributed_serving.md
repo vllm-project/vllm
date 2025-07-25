@@ -120,3 +120,5 @@ vllm serve /path/to/the/model/in/the/container \
 
 !!! tip "Pre-download Hugging Face models"
     If you use Hugging Face models, downloading the model before starting vLLM is recommended. Download the model on every node to the same path, or store the model on a distributed file system accessible by all nodes. Then pass the path to the model in place of the repository ID. Otherwise, supply a Hugging Face token by appending `-e HF_TOKEN=<TOKEN>` to `run_cluster.sh`.
+
+For information about distributed debugging, see [Troubleshooting distributed deployments](distributed_troubleshooting.md).
