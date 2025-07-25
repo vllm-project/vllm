@@ -623,9 +623,7 @@ class OpenAIServingChat(OpenAIServing):
 
                     # handle streaming deltas for tools with named tool_choice
                     if tool_choice_function_name:
-                        assert reasoning_end_arr is not None
-                        if (not reasoning_end_arr[i] 
-                                and self.reasoning_parser
+                        if (self.reasoning_parser and not reasoning_end_arr[i]
                                 and not reasoning_parser.is_reasoning_end(
                                     previous_token_ids)):
                             assert reasoning_parser is not None
