@@ -20,6 +20,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.utils import round_up
 
 
 def swizzle_mxfp4(quant_tensor, scale):
@@ -35,6 +36,7 @@ def swizzle_mxfp4(quant_tensor, scale):
             "epilogue_subtile": 1,
         }
         opt_flags.update_opt_flags_constraints(constraints)
+    # transpose the tensor so that the quantization axis is on dim1
     quant_tensor = quant_tensor.transpose(-2, -1)
     scale = scale.transpose(-2, -1)
     quant_tensor = convert_layout(wrap_torch_tensor(quant_tensor, dtype=FP4),
@@ -55,7 +57,7 @@ class Mxfp4Config(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 90
+        return 80
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -63,7 +65,7 @@ class Mxfp4Config(QuantizationConfig):
 
     @classmethod
     def get_supported_act_dtypes(cls) -> list[torch.dtype]:
-        return [torch.bfloat16, torch.float8_e4m3fn]
+        return [torch.bfloat16]
 
     @classmethod
     def get_config_filenames(cls) -> list[str]:
@@ -96,6 +98,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         weight_dtype = torch.uint8
         scale_dtype = torch.uint8
 
+        # FIXME (zyongye): ship after torch and safetensors support mxfp4
         # is_torch_mxfp4_available = hasattr(torch, "float4_e2m1fn_x2") and hasattr(torch, "float8_e8m0fnu")
         # if is_torch_mxfp4_available:
         #     weight_dtype = torch.float4_e2m1fn_x2
@@ -103,17 +106,16 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         mxfp4_block = 32
 
-        smallest_even_divide_number = lambda x, n: (x // n + 1
-                                                    ) * n if x % n != 0 else x
-        intermediate_size_per_partition_after_pad = smallest_even_divide_number(
-            intermediate_size_per_partition, 128)
-        hidden_size_after_pad = smallest_even_divide_number(hidden_size, 256)
+        # pad the intermediate size to be a multiple of 2 * mxfp4_block
+        # for to hold non-uniform sharded tensor as well as swizzling
+        intermediate_size_per_partition_after_pad = round_up(
+            intermediate_size_per_partition, 64)
 
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(torch.zeros(
             num_experts,
             2 * intermediate_size_per_partition_after_pad,
-            hidden_size_after_pad // 2,
+            hidden_size // 2,
             dtype=weight_dtype),
                                         requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
@@ -122,7 +124,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w13_weight_scale = torch.nn.Parameter(torch.zeros(
             num_experts,
             2 * intermediate_size_per_partition_after_pad,
-            hidden_size_after_pad // mxfp4_block,
+            hidden_size // mxfp4_block,
             dtype=scale_dtype),
                                               requires_grad=False)
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
@@ -139,7 +141,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         # down_proj (row parallel)
         w2_weight = torch.nn.Parameter(torch.zeros(
             num_experts,
-            hidden_size_after_pad,
+            hidden_size,
             intermediate_size_per_partition_after_pad // 2,
             dtype=weight_dtype),
                                        requires_grad=False)
@@ -148,7 +150,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         w2_weight_scale = torch.nn.Parameter(torch.zeros(
             num_experts,
-            hidden_size_after_pad,
+            hidden_size,
             intermediate_size_per_partition_after_pad // mxfp4_block,
             dtype=scale_dtype),
                                              requires_grad=False)
@@ -156,7 +158,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
         w2_bias = torch.nn.Parameter(torch.zeros(num_experts,
-                                                 hidden_size_after_pad,
+                                                 hidden_size,
                                                  dtype=torch.bfloat16),
                                      requires_grad=False)
         layer.register_parameter("w2_bias", w2_bias)
@@ -180,12 +182,15 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.w2_precision_config = PrecisionConfig(
             weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex))
 
+        self.w13_weight_triton_tensor = w13_weight
+        self.w2_weight_triton_tensor = w2_weight
+
+        # need to delete the original weights to save memory on single GPU
         del layer.w13_weight
         del layer.w2_weight
+        layer.w13_weight = None
+        layer.w2_weight = None
         torch.cuda.empty_cache()
-
-        layer.w13_weight_triton_tensor = w13_weight
-        layer.w2_weight_triton_tensor = w2_weight
 
     def apply(
         self,
@@ -218,8 +223,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         return triton_kernel_moe_forward(
             hidden_states=x,
-            w1=layer.w13_weight_triton_tensor,
-            w2=layer.w2_weight_triton_tensor,
+            w1=self.w13_weight_triton_tensor,
+            w2=self.w2_weight_triton_tensor,
             gating_output=router_logits,
             topk=top_k,
             renormalize=renormalize,
