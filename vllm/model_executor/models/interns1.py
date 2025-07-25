@@ -135,7 +135,6 @@ def get_internvl_target_ratios(
     return sorted(target_ratios, key=lambda x: x[0] * x[1])
 
 def resolve_min_max_num(
-        self,
         min_dynamic_patch: int,
         max_dynamic_patch: int,
         dynamic_image_size: bool,
@@ -177,7 +176,10 @@ class BaseInternS1ProcessingInfo(BaseProcessingInfo):
 
         if not isinstance(processor, GotOcr2ImageProcessorFast):
             raise ValueError(f'GotOcr2ImageProcessorFast is expected but got {type(processor)}')
-        num_image_patches = processor.get_number_of_image_tokens(image_height, image_width)
+        num_image_patches = processor.get_number_of_image_tokens(
+            image_height,
+            image_width,
+            images_kwargs=dict())
         num_image_tokens = 2 + self.get_hf_processor().image_seq_length * num_image_patches
         return num_image_tokens
 
