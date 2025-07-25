@@ -277,10 +277,11 @@ class InternSdpaAttention(nn.Module):
         self.dummy_dim = (num_dummy_heads + self.num_heads) * self.head_dim
 
         self.scale = self.head_dim**-0.5
-        self.qkv_proj = nn.Linear(self.embed_dim,
-                             3 * self.dummy_dim,
-                             bias=config.attention_bias)
-        
+
+        self.q_proj = nn.Linear(self.embed_dim, self.num_heads * self.head_dim, bias=config.attention_bias)
+        self.k_proj = nn.Linear(self.embed_dim, self.num_heads * self.head_dim, bias=config.attention_bias)
+        self.v_proj = nn.Linear(self.embed_dim, self.num_heads * self.head_dim, bias=config.attention_bias)
+
         self.qk_normalization = config.use_qk_norm
         if self.qk_normalization:
             self.q_norm = RMSNorm(self.dummy_dim,
@@ -294,9 +295,11 @@ class InternSdpaAttention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
-    
-        qkv = self.qkv_proj(x)
-        q, k, v = qkv.chunk(3, dim=-1)
+
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+
         q = q.view(B, N, self.num_heads, self.head_dim)
         k = k.view(B, N, self.num_heads, self.head_dim)
         v = v.view(B, N, self.num_heads, self.head_dim)
@@ -499,27 +502,12 @@ class InternS1VisionModel(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params

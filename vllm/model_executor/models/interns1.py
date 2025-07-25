@@ -18,6 +18,7 @@ from PIL import Image
 from transformers import BatchEncoding, PretrainedConfig, TensorType
 from transformers import AutoProcessor
 from transformers.models.internvl import InternVLProcessor
+from transformers.activations import ACT2FN
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.interns1_vit import InternS1VisionModel
@@ -43,7 +44,7 @@ from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
-from transformers.models.got_ocr2.image_processing_got_ocr2_fast import GotOcr2ImageProcessorFast 
+from transformers.models.got_ocr2.image_processing_got_ocr2_fast import GotOcr2ImageProcessorFast
 
 IMG_START = '<img>'
 IMG_END = '</img>'
@@ -51,6 +52,23 @@ IMG_CONTEXT = '<IMG_CONTEXT>'
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+
+class InternS1MultiModalProjector(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.layer_norm = nn.LayerNorm(config.vision_config.hidden_size * int(1 / config.downsample_ratio) ** 2)
+        self.linear_1 = nn.Linear(
+            config.vision_config.hidden_size * int(1 / config.downsample_ratio) ** 2, config.text_config.hidden_size
+        )
+        self.act = ACT2FN[config.projector_hidden_act]
+        self.linear_2 = nn.Linear(config.text_config.hidden_size, config.text_config.hidden_size)
+
+    def forward(self, image_features):
+        hidden_states = self.layer_norm(image_features)
+        hidden_states = self.linear_1(hidden_states)
+        hidden_states = self.act(hidden_states)
+        hidden_states = self.linear_2(hidden_states)
+        return hidden_states
 
 
 class InternS1ImagePixelInputs(TypedDict):
@@ -64,7 +82,7 @@ class InternS1ImagePixelInputs(TypedDict):
 class InternS1ImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: Union[torch.Tensor, list[torch.Tensor]]
-    """ 
+    """
     A tensor of shape `(num_images, total_image_feature_size, hidden_size)`
     or a list of tensors of shape `(total_image_feature_size, hidden_size)`
 
@@ -91,7 +109,7 @@ class InternS1VideoPixelInputs(TypedDict):
 class InternS1VideoEmbeddingInputs(TypedDict):
     type: Literal["video_embeds"]
     data: Union[torch.Tensor, list[torch.Tensor]]
-    """ 
+    """
     A tensor of shape `(num_videos, total_video_feature_size, hidden_size)`
     or a list of tensors of shape `(total_video_feature_size, hidden_size)`
 
@@ -190,7 +208,7 @@ class BaseInternS1ProcessingInfo(BaseProcessingInfo):
                                                use_thumbnail=use_thumbnail)
 
         return get_interns1_target_ratios(min_num, max_num)
-    
+
     def get_image_size_with_most_features(self) -> ImageSize:
         processor = self.get_hf_processor()
 
@@ -321,7 +339,7 @@ class BaseInternS1MultiModalProcessor(BaseMultiModalProcessor[_I]):
 
             repl_features = IMG_CONTEXT * feature_size
             repl_full = IMG_START + repl_features + IMG_END
-            return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)            
+            return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
 
         return [
             PromptReplacement(
@@ -339,14 +357,14 @@ class InternS1ProcessingInfo(BaseInternS1ProcessingInfo):
     def image_token_id(self) -> int:
         processor = self.get_hf_processor()
         return processor.image_token_id
-    
+
     @property
     def video_token_id(self) -> Optional[int]:
         processor = self.get_hf_processor()
         if processor.video_token is None:
             return None
         return processor.tokenizer.get_vocab().get(processor.video_token, None)
-    
+
     @property
     def supports_video(self) -> bool:
         # TODO:
@@ -361,7 +379,7 @@ class InternS1ProcessingInfo(BaseInternS1ProcessingInfo):
         num_image_token = int(
             (image_size // patch_size)**2 * (hf_config.downsample_ratio**2))
         return num_image_token
-        
+
     def get_supported_mm_limits(self):
         video_limit = {"video": None} if self.supports_video else {}
         return {**super().get_supported_mm_limits(), **video_limit}
@@ -389,13 +407,13 @@ class InternS1ProcessingInfo(BaseInternS1ProcessingInfo):
         **kwargs: object,
     ) -> GotOcr2ImageProcessorFast:
         return cached_image_processor_from_config(self.ctx.model_config)
-        
+
     def get_video_processor(
         self,
         **kwargs: object):
         from transformers import AutoVideoProcessor
         return AutoVideoProcessor.from_pretrained(self.ctx.model_config.model, trust_remote_code=True)
-    
+
     def get_hf_processor(
         self,
         **kwargs: object,
@@ -532,10 +550,12 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            "model.language_model.": "language_model.",
+            "lm_head.": "language_model.lm_head.",
+            "model.language_model.": "language_model.model.",
             "model.vision_tower.": "vision_tower.",
+            "model.multi_modal_projector.": "multi_modal_projector.",
         })
-    
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
@@ -597,18 +617,9 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
             num_hidden_layers_override=num_hidden_layers,
             prefix=prefix,
         )
-       
-    def _init_mlp1(self, config: PretrainedConfig) -> nn.Sequential:
-        vit_hidden_size = config.vision_config.hidden_size
-        llm_hidden_size = config.text_config.hidden_size
 
-        return nn.Sequential(
-            nn.LayerNorm(vit_hidden_size * int(1 / self.downsample_ratio)**2),
-            nn.Linear(vit_hidden_size * int(1 / self.downsample_ratio)**2,
-                      llm_hidden_size),
-            nn.GELU(),
-            nn.Linear(llm_hidden_size, llm_hidden_size),
-        )
+    def _init_mlp1(self, config: PretrainedConfig) -> nn.Sequential:
+        return InternS1MultiModalProjector(config)
 
     def pixel_shuffle(self, x, scale_factor=0.5):
         n, w, h, c = x.size()
@@ -631,7 +642,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
                                         scale_factor=self.downsample_ratio)
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], -1,
                                         vit_embeds.shape[-1])
-        
+
         vit_embeds = self.multi_modal_projector(vit_embeds)
         return vit_embeds
 
@@ -885,7 +896,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """
