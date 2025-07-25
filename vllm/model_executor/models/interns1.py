@@ -508,7 +508,7 @@ class InternS1MultiModalProcessor(
             mm_items, hf_processor_mm_kwargs, out_mm_kwargs)
 
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        print(f'>>>>>>>>>>>>_get_prompt_updates out_mm_kwargs {out_mm_kwargs}')
+
         if "video_num_patches" in out_mm_kwargs:
             video_num_patches = out_mm_kwargs["video_num_patches"]
             assert isinstance(video_num_patches, torch.Tensor)
