@@ -13,9 +13,9 @@ The FusedMoEModularKernel framework groups these operations into logical compone
 
 ## ModularKernel Components:
 FusedMoEModularKernel splits the FusedMoE operation into 3 parts,
-    1. TopKWeightAndReduce
-    2. FusedMoEPrepareAndFinalize
-    3. FusedMoEPermuteExpertsUnpermute
+1. TopKWeightAndReduce
+2. FusedMoEPrepareAndFinalize
+3. FusedMoEPermuteExpertsUnpermute
 
 ### TopKWeightAndReduce
 The TopK Weight Application and Reduction components happen right after the Unpermute operation and before the All2All Combine. Note that the `FusedMoEPermuteExpertsUnpermute` is responsible for the Unpermute and `FusedMoEPrepareAndFinalize` is responsible for the All2All Combine. There is value in doing the TopK Weight Application and Reduction in the `FusedMoEPermuteExpertsUnpermute`. But some implementations choose to do it `FusedMoEPrepareAndFinalize`. In order to enable this flexibility, we have a TopKWeightAndReduce abstract class.
@@ -25,8 +25,8 @@ The `FusedMoEModularKernel` acts as a bridge between the `FusedMoEPermuteExperts
 
 `FusedMoEPrepareAndFinalize::finalize()` method accepts a `TopKWeightAndReduce` argument that is invoked inside the method. This is queried from the `FusedMoEPermuteExpertsUnpermute` implementation.
 
-`FusedMoEPermuteAndUnpermute` returns `TopKWeightAndReduceNoOp` if the `FusedMoEPermuteAndUnpermute` implementation does the weight application and reduction itself.
-`FusedMoEPermuteAndUnpermute` returns `TopKWeightAndReduceContiguous` / `TopKWeightAndReduceNaiveBatched` / `TopKWeightAndReduceDelegate` if the `FusedMoEPermuteAndUnpermute` implementation needs the `FusedMoEPrepareAndFinalize::finalize()` to do the weight application and reduction.
+`FusedMoEPermuteExpertsUnpermute` returns `TopKWeightAndReduceNoOp` if the `FusedMoEPermuteExpertsUnpermute` implementation does the weight application and reduction itself.
+`FusedMoEPermuteExpertsUnpermute` returns `TopKWeightAndReduceContiguous` / `TopKWeightAndReduceNaiveBatched` / `TopKWeightAndReduceDelegate` if the `FusedMoEPermuteExpertsUnpermute` implementation needs the `FusedMoEPrepareAndFinalize::finalize()` to do the weight application and reduction.
 
 ### FusedMoEPrepareAndFinalize
 The `FusedMoEPrepareAndFinalize` abstract class exposes `prepare` and `finalize` functions.
@@ -36,9 +36,9 @@ The `prepare` function is responsible for input activation Quantization and All2
 
 ### FusedMoEPermuteExpertsUnpermute
 The `FusedMoEPermuteExpertsUnpermute` class is where most of the operations happen. The `FusedMoEPermuteExpertsUnpermute` abstract class exposes a few important functions,
-    - workspace_shapes()
-    - finalize_weight_and_reduce_impl()
-    - apply()
+* apply()
+* workspace_shapes()
+* finalize_weight_and_reduce_impl()
 
 #### apply()
 The `apply` method is where the implementations should perform
