@@ -12,7 +12,7 @@ Key Features:
 
 ✅ **Per-layer mixed-bit quantization** for fine-grained control
 
-✅ **RTN (Round-To-Nearest) mode** for quick quantization with minimal accuracy loss
+✅ **RTN (Round-To-Nearest) mode** for quick quantization with slight accuracy loss
 
 ✅ **Multiple quantization recipes**: best, base, and light
 
