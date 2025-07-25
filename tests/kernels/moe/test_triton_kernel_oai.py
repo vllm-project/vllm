@@ -17,6 +17,7 @@ from triton_kernels.testing import assert_close
 from vllm.model_executor.layers.fused_moe.triton_kernels_moe import (
     triton_kernel_moe_forward)
 from vllm.model_executor.layers.utils import shuffle_weight
+from vllm.utils import round_up
 
 
 def deshuffle(w: torch.Tensor):
@@ -75,7 +76,7 @@ def oai_moe_forward(
     mlp1_weight = w1[expert_indices, ...]
     mlp1_bias = w1_bias[expert_indices, ...]
     t = torch.einsum("beck,bk->bec", mlp1_weight, t) + mlp1_bias
-    t = swiglu(t, limit=None)
+    t = swiglu(t, limit=7)
 
     # MLP #2
     mlp2_weight = w2[expert_indices, ...]
@@ -87,13 +88,6 @@ def oai_moe_forward(
     t = torch.einsum("bec,be->bc", t, expert_weights)
 
     return t
-
-
-def smallest_even_divide_number(x, n):
-    if x % n == 0:
-        return x
-    divisor = x // n
-    return (divisor + 1) * n
 
 
 @dataclass
@@ -172,12 +166,10 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
     if w_dtype != "mx4":
         pytest.skip("NYI")
     else:  # quantize to mx4
-        # add padding to enable hbm_swizzle
-        # make the tensor 64 x 256
-        w1_bottom_pad = smallest_even_divide_number(w1_tri.shape[1],
-                                                    256) - w1_tri.shape[1]
-        w1_right_pad = smallest_even_divide_number(w1_tri.shape[2],
-                                                   256) - w1_tri.shape[2]
+        # careful on the padding here, the activation padding need to be
+        # multiple of 64, the actual engine is not implemented
+        w1_bottom_pad = round_up(w1_tri.shape[1], 64) - w1_tri.shape[1]
+        w1_right_pad = round_up(w1_tri.shape[2], 128) - w1_tri.shape[2]
 
         w2_bottom_pad = w1_right_pad // 2
         w2_right_pad = w1_bottom_pad

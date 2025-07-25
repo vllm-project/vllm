@@ -678,15 +678,7 @@ class FusedMoE(torch.nn.Module):
         self.use_triton_kernels = False
         if quant_config.get_name() == "mxfp4":
             if has_triton_kernels:
-                smallest_even_divide_number = lambda x, n: (
-                    x // n + 1) * n if x % n != 0 else x
-
                 self.use_triton_kernels = True
-                self.hidden_size_pad = smallest_even_divide_number(
-                    hidden_size, 256) - hidden_size
-
-                self.w13_weight_triton_tensor = None
-                self.w2_weight_triton_tensor = None
             else:
                 raise ValueError("triton_kernels must be installed first")
 
@@ -1512,12 +1504,6 @@ class FusedMoE(torch.nn.Module):
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)
 
-        if self.hidden_size_pad is not None:
-            hidden_states = F.pad(hidden_states,
-                                  (0, self.hidden_size_pad, 0, 0),
-                                  mode="constant",
-                                  value=0)
-
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
             layer=self,
@@ -1549,7 +1535,7 @@ class FusedMoE(torch.nn.Module):
                 final_hidden_states)
 
         # manually crop the tensor since oai kernel pad the output
-        return final_hidden_states[..., :self.hidden_size].contiguous()
+        return final_hidden_states
 
     @classmethod
     def make_expert_params_mapping(

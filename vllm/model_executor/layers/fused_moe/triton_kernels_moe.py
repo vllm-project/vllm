@@ -88,7 +88,6 @@ def triton_kernel_fused_experts(
 ) -> torch.Tensor:
 
     # type check, uint8 means mxfp4
-    #TODO: fp8 x mxfp4 on blackwell
     assert hidden_states.dtype == torch.bfloat16
     # assert w1.dtype in (torch.bfloat16, torch.uint8)
     # assert w2.dtype in (torch.bfloat16, torch.uint8)
@@ -97,9 +96,9 @@ def triton_kernel_fused_experts(
 
     # Shape check, only check non-mxfp4
     # if w1.dtype != torch.uint8:
-    #     assert hidden_states.ndim == 2
-    #     assert hidden_states.shape[-1] == w1.shape[-2]
-    #     assert w2.shape[-1] == w1.shape[1]
+    assert hidden_states.ndim == 2
+    assert hidden_states.shape[-1] == w1.shape[-2]
+    assert w2.shape[-1] == w1.shape[1]
 
     M, K = hidden_states.shape
     E, _, N = w1.shape
