@@ -142,7 +142,7 @@ def get_attn_backend(
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
-    is_attention_free: bool,
+    is_attention_free: bool = False,
     use_mla: bool = False,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
