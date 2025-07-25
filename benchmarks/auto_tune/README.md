@@ -48,12 +48,49 @@ You must set the following variables at the top of the script before execution.
 
 ## How to Run
 
-1. **Configure**: Edit the script and set the variables in the [Configuration](#configuration) section.
+1. **Configure**: Specify the options to set the variables in the [Configuration](#configuration) section.
+
+    ```bash
+    cd <FOLDER_OF_THIS_SCRIPT>
+    chmod +x auto_tune.sh
+    ./auto_tune.sh -h
+    Usage: ./auto_tune.sh -b BASE [OPTIONS]
+
+    Required:
+    -b BASE                        Base directory containing vLLM repo
+    -m MODEL                       Model name (default: meta-llama/Llama-3.1-8B-Instruct)
+    -s SYSTEM                      Hardware: TPU or GPU (default: TPU)
+    -t TP                          Tensor parallelism (default: 1)
+    -d DOWNLOAD_DIR                Download directory (default: "")
+    -i INPUT_LEN                   Input length (default: 4000)
+    -o OUTPUT_LEN                  Output length (default: 16)
+
+    Optional (defaults shown):
+    -c MIN_CACHE_HIT_PCT           Min cache hit % (default: 0)
+    -l MAX_LATENCY_ALLOWED_MS      Max latency ms (default: no limit)
+    -n NUM_SEQS_LIST               Num seqs list (default: "128 256")
+    -k NUM_BATCHED_TOKENS_LIST     Num tokens list (default: "512 1024 2048 4096")
+    -p PORT                        Server port (default: 8004)
+    ```
+
 2. **Execute**: Run the script. Since the process can take a long time, it is highly recommended to use a terminal multiplexer like `tmux` or `screen` to prevent the script from stopping if your connection is lost.
 
-```
-cd <FOLDER_OF_THIS_SCRIPT>
-bash auto_tune.sh
+e.g.
+
+```bash
+./auto_tune.sh \
+    -b $HOME \
+    -m meta-llama/Llama-3.1-8B-Instruct \
+    -s GPU \
+    -t 2 \
+    -d "/data/models" \
+    -i 4000 \
+    -o 100 \
+    -c 60 \
+    -l 500 \
+    -n "64 128 256 512" \
+    -k "1024 2048 4096 8192" \
+    -p 8005
 ```
 
     Please note that the `bash auto_tune.sh` command cannot contain full or partial path with keyword `vllm`, otherwise `pkill -f vllm` command will also kill this script itself.

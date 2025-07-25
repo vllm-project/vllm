@@ -15,6 +15,57 @@ MIN_CACHE_HIT_PCT=0
 MAX_LATENCY_ALLOWED_MS=100000000000
 NUM_SEQS_LIST="128 256"
 NUM_BATCHED_TOKENS_LIST="512 1024 2048 4096"
+PORT=8004
+
+while getopts "b:m:s:t:d:i:o:c:l:n:k:p:h" opt; do
+    case $opt in
+        b) BASE="$OPTARG" ;;
+        m) MODEL="$OPTARG" ;;
+        s) SYSTEM="$OPTARG" ;;
+        t) TP="$OPTARG" ;;
+        d) DOWNLOAD_DIR="$OPTARG" ;;
+        i) INPUT_LEN="$OPTARG" ;;
+        o) OUTPUT_LEN="$OPTARG" ;;
+        c) MIN_CACHE_HIT_PCT="$OPTARG" ;;
+        l) MAX_LATENCY_ALLOWED_MS="$OPTARG" ;;
+        n) NUM_SEQS_LIST="$OPTARG" ;;
+        k) NUM_BATCHED_TOKENS_LIST="$OPTARG" ;;
+        p) PORT="$OPTARG" ;;
+        h)
+            cat << EOF
+Usage: $0 -b BASE [OPTIONS]
+
+Required:
+  -b BASE                        Base directory containing vLLM repo
+  -m MODEL                       Model name (default: meta-llama/Llama-3.1-8B-Instruct)
+  -s SYSTEM                      Hardware: TPU or GPU (default: TPU)
+  -t TP                          Tensor parallelism (default: 1)
+  -d DOWNLOAD_DIR                Download directory (default: "")
+  -i INPUT_LEN                   Input length (default: 4000)
+  -o OUTPUT_LEN                  Output length (default: 16)
+
+ Optional (defaults shown): 
+  -c MIN_CACHE_HIT_PCT           Min cache hit % (default: 0)
+  -l MAX_LATENCY_ALLOWED_MS      Max latency ms (default: no limit)
+  -n NUM_SEQS_LIST               Num seqs list (default: "128 256")
+  -k NUM_BATCHED_TOKENS_LIST     Num tokens list (default: "512 1024 2048 4096")
+  -p PORT                        Server port (default: 8004)
+EOF
+            exit 0
+            ;;
+        \?) echo "Invalid option -$OPTARG"; exit 1 ;;
+    esac
+done
+
+if [[ -z "$BASE" ]]; then
+    echo "Error: -b BASE is required"
+    exit 1
+fi
+
+if [[ ! -d "$BASE/vllm" ]]; then
+    echo "Error: $BASE/vllm directory not found"
+    exit 1
+fi
 
 LOG_FOLDER="$BASE/auto-benchmark/$TAG"
 RESULT="$LOG_FOLDER/result.txt"
@@ -52,7 +103,7 @@ start_server() {
 
     VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 VLLM_TORCH_PROFILER_DIR=$profile_dir vllm serve $MODEL \
         --disable-log-requests \
-        --port 8004 \
+        --port $PORT \
         --gpu-memory-utilization $gpu_memory_utilization \
         --max-num-seqs $max_num_seqs \
         --max-num-batched-tokens $max_num_batched_tokens \
@@ -65,7 +116,7 @@ start_server() {
     # wait for 10 minutes...
     server_started=0
     for i in {1..60}; do  
-        RESPONSE=$(curl -s -X GET "http://0.0.0.0:8004/health" -w "%{http_code}" -o /dev/stdout)
+        RESPONSE=$(curl -s -X GET "http://0.0.0.0:$PORT/health" -w "%{http_code}" -o /dev/stdout)
         STATUS_CODE=$(echo "$RESPONSE" | tail -n 1) 
         if [[ "$STATUS_CODE" -eq 200 ]]; then
             server_started=1
@@ -140,7 +191,7 @@ adjusted_input_len=$(( INPUT_LEN - prefix_len ))
         --goodput e2el:$MAX_LATENCY_ALLOWED_MS \
         --num-prompts 1000 \
         --random-prefix-len $prefix_len \
-        --port 8004 \
+        --port $PORT \
         --profile &> "$bm_log"
     throughput=$(grep "Request throughput (req/s):" "$bm_log" | sed 's/[^0-9.]//g')
     e2el=$(grep "P99 E2EL (ms):" "$bm_log" | awk '{print $NF}')
@@ -157,7 +208,7 @@ adjusted_input_len=$(( INPUT_LEN - prefix_len ))
         while ((request_rate > 0)); do
             profile_index=$((profile_index+1))
             # clear prefix cache
-            curl -X POST http://0.0.0.0:8004/reset_prefix_cache
+            curl -X POST http://0.0.0.0:$PORT/reset_prefix_cache
             sleep 5
             bm_log="$LOG_FOLDER/bm_log_${max_num_seqs}_${max_num_batched_tokens}_requestrate_${request_rate}.txt"
             python3 benchmarks/benchmark_serving.py \
@@ -173,7 +224,7 @@ adjusted_input_len=$(( INPUT_LEN - prefix_len ))
                 --goodput e2el:$MAX_LATENCY_ALLOWED_MS \
                 --num-prompts 100 \
                 --random-prefix-len $prefix_len \
-                --port 8004 &> "$bm_log"
+                --port $PORT &> "$bm_log"
             throughput=$(grep "Request throughput (req/s):" "$bm_log" | sed 's/[^0-9.]//g')
             e2el=$(grep "P99 E2EL (ms):" "$bm_log" | awk '{print $NF}')
             goodput=$(grep "Request goodput (req/s):" "$bm_log" | sed 's/[^0-9.]//g')
@@ -245,4 +296,3 @@ done
 echo "finish permutations"
 echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput, profile saved in: $PROFILE_PATH"
 echo "best_max_num_seqs: $best_max_num_seqs, best_num_batched_tokens: $best_num_batched_tokens, best_throughput: $best_throughput, profile saved in: $PROFILE_PATH" >> "$RESULT"
-
