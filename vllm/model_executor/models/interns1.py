@@ -108,9 +108,48 @@ InternVLVideoInputs = Union[InternVLVideoPixelInputs,
                             InternVLVideoEmbeddingInputs]
 
 
+def resolve_internvl_min_max_num(
+    *,
+    min_dynamic_patch: int,
+    max_dynamic_patch: int,
+    dynamic_image_size: bool,
+    use_thumbnail: bool,
+) -> tuple[int, int]:
+    min_dynamic_patch = min_dynamic_patch if dynamic_image_size else 1
+    max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
 
-class BaseInternVLProcessingInfo(BaseProcessingInfo):
-    """Basic image-only ProcessingInfo for InternVL-style models."""
+    if use_thumbnail and max_dynamic_patch != 1:
+        max_dynamic_patch += 1
+
+    return min_dynamic_patch, max_dynamic_patch
+
+
+def get_internvl_target_ratios(
+    min_num: int,
+    max_num: int,
+) -> list[tuple[int, int]]:
+    target_ratios = {(i, j)
+                     for n in range(min_num, max_num + 1)
+                     for i in range(1, n + 1)
+                     for j in range(1, n + 1) if min_num <= i * j <= max_num}
+    return sorted(target_ratios, key=lambda x: x[0] * x[1])
+
+def resolve_min_max_num(
+        self,
+        min_dynamic_patch: int,
+        max_dynamic_patch: int,
+        dynamic_image_size: bool,
+        use_thumbnail: bool,
+    ) -> tuple[int, int]:
+        return resolve_internvl_min_max_num(
+            min_dynamic_patch=min_dynamic_patch,
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+            use_thumbnail=use_thumbnail,
+        )
+
+class BaseInternS1ProcessingInfo(BaseProcessingInfo):
+    """Basic image-only ProcessingInfo for InternS1-style models."""
 
     @abstractmethod
     def get_hf_processor(
@@ -134,18 +173,34 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
         processor: Optional['GotOcr2ImageProcessorFast'] = None,
     ) -> int:
         if processor is None:
-            processor = self.get_hf_processor()
+            processor = self.get_hf_processor().image_processor
 
-        return processor.get_num_image_tokens(
-            image_width=image_width,
-            image_height=image_height,
-        )
+        if not isinstance(processor, GotOcr2ImageProcessorFast):
+            raise ValueError(f'GotOcr2ImageProcessorFast is expected but got {type(processor)}')
+        num_image_patches = processor.get_number_of_image_tokens(image_height, image_width)
+        num_image_tokens = 2 + self.get_hf_processor().image_seq_length * num_image_patches
+        return num_image_tokens
 
+    def resolve_target_ratios(self, use_thumbnail: Optional[bool] = None):
+        image_processor = self.get_hf_processor().image_processor
+        min_dynamic_patch = image_processor.min_patches
+        max_dynamic_patch = image_processor.max_patches
+        dynamic_image_size = True
+        if use_thumbnail is None:
+            use_thumbnail = True
+        min_num, max_num = resolve_min_max_num(min_dynamic_patch,
+                                                    max_dynamic_patch,
+                                                    dynamic_image_size,
+                                                    use_thumbnail=use_thumbnail)
+
+        return get_internvl_target_ratios(min_num, max_num)
+    
     def get_image_size_with_most_features(self) -> ImageSize:
         processor = self.get_hf_processor()
 
-        base_size = processor.image_size
-        target_ratios = processor.resolve_target_ratios()
+        hf_config = self.ctx.get_hf_config()
+        base_size = hf_config.vision_config.image_size
+        target_ratios = self.resolve_target_ratios()
 
         largest_feature_size, largest_feature_pinpoint = 0, None
         for wr, hr in target_ratios:
@@ -154,7 +209,7 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
             feat_size = self.get_num_image_tokens(
                 image_width=width,
                 image_height=height,
-                processor=processor,
+                processor=processor.image_processor,
             )
             if feat_size > largest_feature_size:
                 largest_feature_size = feat_size
@@ -173,11 +228,11 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
         return self.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
-            processor=processor,
+            processor=processor.image_processor,
         )
 
 
-_I = TypeVar("_I", bound=BaseInternVLProcessingInfo)
+_I = TypeVar("_I", bound=BaseInternS1ProcessingInfo)
 
 
 class BaseInternVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
@@ -296,28 +351,36 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         ]
 
 
-class InternS1ProcessingInfo(BaseInternVLProcessingInfo):
+class InternS1ProcessingInfo(BaseInternS1ProcessingInfo):
     """InternVL ProcessingInfo extended for video processing"""
 
     @property
-    def supports_video(self):
-        # return self.get_hf_processor().supports_video
-        return True
+    def image_token_id(self) -> int:
+        processor = self.get_hf_processor()
+        return processor.image_token_id
+    
+    @property
+    def video_token_id(self) -> Optional[int]:
+        processor = self.get_hf_processor()
+        if processor.video_token is None:
+            return None
+        return processor.tokenizer.get_vocab().get(processor.video_token, None)
+    
+    @property
+    def supports_video(self) -> bool:
+        return self.video_token_id is not None
 
     def get_supported_mm_limits(self):
         video_limit = {"video": None} if self.supports_video else {}
         return {**super().get_supported_mm_limits(), **video_limit}
 
     def get_video_token(self) -> Optional[str]:
-        text_model_type = self.get_hf_config().get_text_config().model_type
-        if text_model_type == "qwen2":
-            return "<|video_pad|>"
-        return None
+        return self.get_hf_processor().video_token
 
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        mm_counts: Mapping[str, int]
     ) -> int:
         max_images = mm_counts.get("image", 0)
         max_videos = mm_counts.get("video", 0)
@@ -403,7 +466,7 @@ class InternS1MultiModalProcessor(
 
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
         if self.info.supports_video and (
-                video_token_id := hf_processor.video_token_id) is not None:
+                video_token_id := self.info.video_token_id) is not None:
             processed_outputs["video_token_id"] = torch.tensor(video_token_id)
         return processed_outputs
 
@@ -448,24 +511,26 @@ class InternS1MultiModalProcessor(
         else:
             video_num_patches = []
 
-        def get_video_replacement_internvl(item_idx: int):
-            feature_size = hf_processor.num_image_token
-            num_patches = video_num_patches[item_idx]
-            if num_patches is not None:
-                assert isinstance(num_patches, int)
+        # !! TODO
+        # def get_video_replacement_internvl(item_idx: int):
+        #     # TODO: find `hf_processor.num_image_token`
+        #     feature_size = hf_processor.num_image_token
+        #     num_patches = video_num_patches[item_idx]
+        #     if num_patches is not None:
+        #         assert isinstance(num_patches, int)
+        #     # TODO: find `hf_processor.get_video_repl`
+        #     return hf_processor.get_video_repl(
+        #         feature_size,
+        #         num_patches,
+        #         video_context_token=hf_processor.video_token)
 
-            return hf_processor.get_video_repl(
-                feature_size,
-                num_patches,
-                video_context_token=hf_processor.video_token)
-
-        if self.info.supports_video:
-            prompt_repl.append(
-                PromptReplacement(
-                    modality="video",
-                    target="<video>",
-                    replacement=get_video_replacement_internvl,
-                ))
+        # if self.info.supports_video:
+        #     prompt_repl.append(
+        #         PromptReplacement(
+        #             modality="video",
+        #             target="<video>",
+        #             replacement=get_video_replacement_internvl,
+        #         ))
         return prompt_repl
 
 
