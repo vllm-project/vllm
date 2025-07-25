@@ -88,11 +88,16 @@ class _IsSupported:
     kv_cache_dtype: bool
     block_size: bool
     device_capabality: bool
+    reasons: list[str]
 
     def __bool__(self) -> bool:
         return (self.can_import and self.head_size and self.dtype
                 and self.kv_cache_dtype and self.block_size
                 and self.device_capabality)
+
+    def get_humanized_reasons(self) -> str:
+        return "\n".join(f"{i+1}. {item}"
+                         for i, item in enumerate(self.reasons))
 
 
 def is_attn_backend_supported(
@@ -104,19 +109,21 @@ def is_attn_backend_supported(
     *,
     allow_import_error: bool = True,
 ) -> _IsSupported:
+    reasons = []
     if isinstance(attn_backend, str):
         try:
             attn_backend = resolve_obj_by_qualname(attn_backend)
         except ImportError:
             if not allow_import_error:
                 raise
-
+            reasons.append("Could not import attention backend")
             return _IsSupported(can_import=False,
                                 head_size=False,
                                 dtype=False,
                                 kv_cache_dtype=False,
                                 block_size=False,
-                                device_capabality=False)
+                                device_capabality=False,
+                                reasons=reasons)
 
     assert isinstance(attn_backend, type)
 
@@ -129,7 +136,8 @@ def is_attn_backend_supported(
         try:
             validate_head_size(head_size)
             is_head_size_supported = True
-        except Exception:
+        except Exception as e:
+            reasons.append(str(e))
             is_head_size_supported = False
     else:
         raise NotImplementedError(f"{attn_backend.__name__} does not support "
@@ -147,7 +155,8 @@ def is_attn_backend_supported(
                                           "validate_kv_cache_dtype", None):
         try:
             validate_kv_cache_dtype(kv_cache_dtype)
-        except Exception:
+        except Exception as e:
+            reasons.append(str(e))
             is_kv_cache_dtype_supported = False
 
     is_device_capabality_supported = True
@@ -156,7 +165,8 @@ def is_attn_backend_supported(
                                              None):
         try:
             validate_device_capabality()
-        except Exception:
+        except Exception as e:
+            reasons.append(str(e))
             is_device_capabality_supported = False
 
     is_block_size_supported = True
@@ -164,17 +174,17 @@ def is_attn_backend_supported(
                                       None):
         try:
             validate_block_size(block_size)
-        except Exception:
+        except Exception as e:
+            reasons.append(str(e))
             is_block_size_supported = False
 
-    return _IsSupported(
-        can_import=True,
-        head_size=is_head_size_supported,
-        dtype=is_dtype_supported,
-        kv_cache_dtype=is_kv_cache_dtype_supported,
-        block_size=is_block_size_supported,
-        device_capabality=is_device_capabality_supported,
-    )
+    return _IsSupported(can_import=True,
+                        head_size=is_head_size_supported,
+                        dtype=is_dtype_supported,
+                        kv_cache_dtype=is_kv_cache_dtype_supported,
+                        block_size=is_block_size_supported,
+                        device_capabality=is_device_capabality_supported,
+                        reasons=reasons)
 
 
 def get_attn_backend(
@@ -289,18 +299,18 @@ def choose_attention_backend(
         if maybe_forced_backend not in backend_to_qualname:
             message = f"VLLM_ATTENTION_BACKEND is set, but " \
                       f"{maybe_forced_backend} is not a valid " \
-                       "attention backend. Reverting back to " \
-                       "auto-selection."
+                       "attention backend."
 
             logger.warning(message)
         else:
             qualified_name = backend_to_qualname[maybe_forced_backend]
-            if is_attn_backend_supported(qualified_name,
-                                         head_size,
-                                         dtype,
-                                         kv_cache_dtype,
-                                         block_size,
-                                         allow_import_error=False):
+            if is_supported := is_attn_backend_supported(
+                    qualified_name,
+                    head_size,
+                    dtype,
+                    kv_cache_dtype,
+                    block_size,
+                    allow_import_error=False):
                 message = f"{maybe_forced_backend} has been forced. " \
                           f"Unset VLLM_ATTENTION_BACKEND to enable " \
                            "auto-selection."
@@ -309,12 +319,15 @@ def choose_attention_backend(
                 return maybe_forced_backend, qualified_name
 
             else:
+                failure_reasons = is_supported.get_humanized_reasons()
                 message =  f"Tried to force {maybe_forced_backend}, " \
                             "but it is not supported with the given " \
-                            "configuration. Reverting back to " \
-                            "auto-selection."
+                            "configuration for the following reasons: " \
+                           f"\n{failure_reasons}."
 
                 logger.warning(message)
+
+        logger.info("Reverting back to auto-selection for attention backend.")
 
     for backend_name, qualname in backend_to_qualname.items():
         if is_attn_backend_supported(qualname,

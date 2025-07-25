@@ -157,18 +157,20 @@ class TritonAttentionBackend(AttentionBackend):
         if head_size not in supported_head_sizes:
             attn_type = cls.__name__.removesuffix("Backend")
             raise ValueError(
-                f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {supported_head_sizes}. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes.")
+                f"Head size {head_size} is not supported by {attn_type}. " \
+                f"Supported head sizes are: {supported_head_sizes}. " \
+                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use " \
+                "FlexAttention backend which supports all head sizes."
+            )
 
     @classmethod
     def validate_block_size(cls, block_size: int) -> None:
         if not is_power_of_two(block_size):
             attn_type = cls.__name__.removesuffix("Backend")
             raise ValueError(
-                f"Block size {block_size} is not supported by {attn_type}."
-                f"For {attn_type}, block size must be a power of 2")
+                f"Block size {block_size} is not supported by " \
+                f"{attn_type}. Block size must be a power of 2."
+            )
 
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
