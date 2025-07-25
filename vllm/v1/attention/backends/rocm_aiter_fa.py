@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with AiterFlashAttention."""
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
@@ -286,8 +286,8 @@ class AiterFlashAttentionBackend(AttentionBackend):
                 f"{attn_type} is only supported on gfx9 architectures")
 
     @classmethod
-    def validate_kv_cache_dtype(cls,
-                                kv_cache_dtype: str | torch.dtype) -> None:
+    def validate_kv_cache_dtype(
+            cls, kv_cache_dtype: Union[str, torch.dtype]) -> None:
         if "fp8" in str(kv_cache_dtype) or "int8" in str(kv_cache_dtype):
             attn_type = cls.__name__.removesuffix("Backend")
             raise NotImplementedError(
