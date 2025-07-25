@@ -41,10 +41,9 @@ def in_wsl() -> bool:
 class _Backend(enum.Enum):
     FLASH_ATTN = enum.auto()
     FLASH_ATTN_VLLM_V1 = enum.auto()
+    ROCM_AITER_FLASH_ATTENTION_V1 = enum.auto()
     TRITON_SPLIT_PREFILL_DECODE_ATTENTION_V1 = enum.auto()
     TRITON_UNIFIED_ATTENTION_V1 = enum.auto()
-    TRITON_UNIFIED_ATTN_VLLM_V1 = enum.auto()
-    TRITON_SPLIT_PREFILL_DECODE_ATTN_VLLM_V1 = enum.auto()
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
     ROCM_AITER_MLA = enum.auto()  # Supported by V1

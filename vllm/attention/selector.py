@@ -90,7 +90,9 @@ class _IsSupported:
     device_capabality: bool
 
     def __bool__(self) -> bool:
-        return self.can_import and self.head_size and self.dtype
+        return (self.can_import and self.head_size and self.dtype
+                and self.kv_cache_dtype and self.block_size
+                and self.device_capabality)
 
 
 def is_attn_backend_supported(

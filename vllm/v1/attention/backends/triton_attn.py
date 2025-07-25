@@ -18,7 +18,8 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
-                                              CommonAttentionMetadata)
+                                              CommonAttentionMetadata,
+                                              is_power_of_two)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
@@ -163,11 +164,11 @@ class TritonAttentionBackend(AttentionBackend):
 
     @classmethod
     def validate_block_size(cls, block_size: int) -> None:
-        if block_size % 16 != 0:
+        if not is_power_of_two(block_size):
             attn_type = cls.__name__.removesuffix("Backend")
             raise ValueError(
                 f"Block size {block_size} is not supported by {attn_type}."
-                f"For {attn_type}, block size must be a multiple of 16")
+                f"For {attn_type}, block size must be a power of 2")
 
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
@@ -180,8 +181,6 @@ class TritonAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod

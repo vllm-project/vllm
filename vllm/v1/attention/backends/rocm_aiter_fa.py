@@ -8,13 +8,13 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType,
-                                              is_quantized_kv_cache)
+                                              AttentionMetadata, AttentionType)
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx9
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
+                                              is_power_of_two)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if current_platform.is_rocm():
@@ -270,11 +270,12 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def validate_block_size(cls, block_size: int) -> None:
-        if block_size % 16 != 0:
+        if not is_power_of_two(block_size):
             attn_type = cls.__name__.removesuffix("Backend")
             raise ValueError(
                 f"Block size {block_size} is not supported by {attn_type}."
-                f"For {attn_type}, block size must be a multiple of 16")
+                f"For {attn_type}, block size must be a power of 2")
+        pass
 
     @classmethod
     def validate_device_capabality(cls) -> None:
@@ -284,15 +285,16 @@ class AiterFlashAttentionBackend(AttentionBackend):
                 f"{attn_type} is only supported on gfx9 architectures")
 
     @classmethod
-    def validate_kv_cache_dtype(cls, kv_cache_dtype: str) -> None:
-        if is_quantized_kv_cache(kv_cache_dtype):
+    def validate_kv_cache_dtype(cls,
+                                kv_cache_dtype: str | torch.dtype) -> None:
+        if "fp8" in str(kv_cache_dtype) or "int8" in str(kv_cache_dtype):
             attn_type = cls.__name__.removesuffix("Backend")
             raise NotImplementedError(
-                f"{attn_type} does not support fp8 kv-cache.")
+                f"{attn_type} does not support 8 bit quantized kv-cache.")
 
     @staticmethod
     def get_name() -> str:
-        return "FLASH_ATTN_VLLM_V1"
+        return "ROCM_AITER_FLASH_ATTENTION_V1"
 
     @staticmethod
     def get_impl_cls() -> type["AiterFlashAttentionImpl"]:
@@ -313,8 +315,6 @@ class AiterFlashAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
 
@@ -391,10 +391,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                                       "are not implemented for "
                                       "FlashAttentionImpl")
         self.use_irope = use_irope
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError(
-                "AiterFlashAttention does not support fp8 kv-cache on this "
-                "device.")
 
     def forward(
         self,

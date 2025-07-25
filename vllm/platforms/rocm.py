@@ -232,14 +232,14 @@ class RocmPlatform(Platform):
         if selected_backend is None or selected_backend == _Backend.FLASH_ATTN:
             selected_backend = _Backend.ROCM_FLASH
 
-        if envs.VLLM_USE_V1:
+        if use_v1:
             from vllm.attention.selector import choose_attention_backend
 
             backend_name, backend_qualname = choose_attention_backend(
                 _BACKEND_NAME_TO_QUALIFIED_NAME_MAPPING, head_size, dtype,
                 kv_cache_dtype, block_size)
 
-            logger.info("Using %s backend on V1 engine.", backend_name)
+            logger.info_once("Using %s backend on V1 engine.", backend_name)
             return backend_qualname
 
         if selected_backend == _Backend.ROCM_FLASH:
