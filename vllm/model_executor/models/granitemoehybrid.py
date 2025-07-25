@@ -497,6 +497,11 @@ class GraniteMoeHybridModel(nn.Module):
                 gate_name = n.replace('.block_sparse_moe.router.layer.weight',
                                       ".block_sparse_moe.gate.weight")
                 _load(gate_name, p)
+            elif n.endswith('.block_sparse_moe.router.layer.weight_scale'):
+                gate_name = n.replace(
+                    '.block_sparse_moe.router.layer.weight_scale',
+                    ".block_sparse_moe.gate.weight_scale")
+                _load(gate_name, p)
             else:
                 loaded = False
                 for param_name, weight_name, shard_id in stacked_params_mapping:
