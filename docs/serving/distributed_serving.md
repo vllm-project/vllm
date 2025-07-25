@@ -1,4 +1,4 @@
-# Distributed inference and serving
+# Parallelism and scaling
 
 ## Distributed inference strategies for a single-model replica
 
@@ -58,7 +58,19 @@ vllm serve gpt2 \
 
 ## Multi-node deployment
 
-If a single node lacks sufficient GPUs to hold the model, deploy vLLM across multiple nodes. Multi-node deployments require Ray as the runtime engine. Ensure that every node provides an identical execution environment, including the model path and Python packages. Using container images is recommended because they provide a convenient way to keep environments consistent and to hide host heterogeneity.
+If a single node lacks sufficient GPUs to hold the model, deploy vLLM across multiple nodes. Ensure that every node provides an identical execution environment, including the model path and Python packages. Using container images is recommended because they provide a convenient way to keep environments consistent and to hide host heterogeneity.
+
+### What is Ray?
+
+Ray is a distributed computing framework that makes your code scale-agnostic. Multi-node vLLM deployments require Ray as the runtime engine.
+
+vLLM uses Ray to manage the distributed execution of tasks across multiple nodes and control where execution happens.
+
+Conversely, Ray provides APIs to enable large-scale [offline batch inference](https://docs.ray.io/en/latest/data/working-with-llms.html) and [online serving](https://docs.ray.io/en/latest/serve/llm/serving-llms.html) workloads using vLLM as the engine. These extend vLLM with production-grade fault tolerance, scalability, and distributed observability tools.
+
+For more information about Ray, see the [Ray documentation](https://docs.ray.io/en/latest/index.html).
+
+### Ray cluster setup with containers
 
 ### Ray cluster setup with containers
 
