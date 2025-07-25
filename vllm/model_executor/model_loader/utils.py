@@ -185,9 +185,10 @@ def get_model_architecture(
             and "MixtralForCausalLM" in architectures):
         architectures = ["QuantMixtralForCausalLM"]
 
-    registry = model_config.registry
-    model_cls, arch = registry.resolve_model_cls(architectures,
-                                                 model_config=model_config)
+    model_cls, arch = model_config.registry.resolve_model_cls(
+        architectures,
+        model_config=model_config,
+    )
 
     if arch == model_config._get_transformers_backend_cls():
         assert model_config.model_impl != ModelImpl.VLLM
