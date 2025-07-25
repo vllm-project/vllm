@@ -167,7 +167,8 @@ async def run_vllm_async(
     from vllm import SamplingParams
 
     async with build_async_engine_client_from_engine_args(
-        engine_args, disable_frontend_multiprocessing
+        engine_args,
+        disable_frontend_multiprocessing=disable_frontend_multiprocessing,
     ) as llm:
         model_config = await llm.get_model_config()
         assert all(
