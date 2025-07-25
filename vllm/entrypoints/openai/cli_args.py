@@ -133,6 +133,9 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     """If specified, API server will add X-Request-Id header to responses. 
     Caution: this hurts performance at high QPS."""
     enable_auto_tool_choice: bool = False
+    """If specified, exclude tool definitions in prompts when 
+    tool_choice='none'."""
+    exclude_tools_when_tool_choice_none: bool = False
     """Enable auto tool choice for supported models. Use `--tool-call-parser` 
     to specify which parser to use."""
     tool_call_parser: Optional[str] = None
@@ -222,13 +225,6 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default=False,
         help="Run in headless mode. See multi-node data parallel "
         "documentation for more details.")
-    parser.add_argument(
-        "--data-parallel-start-rank",
-        "-dpr",
-        type=int,
-        default=0,
-        help="Starting data parallel rank for secondary nodes. "
-        "Requires --headless.")
     parser.add_argument("--api-server-count",
                         "-asc",
                         type=int,
