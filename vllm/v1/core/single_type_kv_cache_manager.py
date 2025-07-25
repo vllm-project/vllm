@@ -303,6 +303,38 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
         self._null_block = block_pool.null_block
+        # Cache for recently checked hash patterns to avoid redundant lookups
+        self._hash_pattern_cache: dict[tuple[int, ...], bool] = {}
+
+    def _get_hash_pattern_key(self, block_hashes: list[BlockHash], 
+                              start_idx: int, window_size: int) -> tuple[int, ...]:
+        """Create a cache key from a window of block hashes."""
+        end_idx = min(start_idx + window_size, len(block_hashes))
+        return tuple(block_hashes[i].hash_value for i in range(start_idx, end_idx))
+
+    def _check_contiguous_window(self, block_hashes: list[BlockHash], 
+                                 start_idx: int, window_size: int,
+                                 kv_cache_group_ids: list[int],
+                                 block_pool: BlockPool) -> tuple[bool, list[tuple[int, list[KVCacheBlock]]]]:
+        """Check if a contiguous window of blocks are all cached."""
+        cached_blocks_batch = []
+        end_idx = min(start_idx + window_size, len(block_hashes))
+        
+        for i in range(start_idx, end_idx):
+            if cached_block := block_pool.get_cached_block(
+                    block_hashes[i], kv_cache_group_ids):
+                cached_blocks_batch.append((i, cached_block))
+            else:
+                return False, []
+        
+        return True, cached_blocks_batch
+
+    def _trim_computed_blocks_inplace(self, computed_blocks: tuple[list[KVCacheBlock], ...], 
+                                      final_size: int) -> None:
+        """Trim computed blocks to final size in-place to avoid expensive del operations."""
+        for computed in computed_blocks:
+            while len(computed) > final_size:
+                computed.pop()
 
     @classmethod
     def find_longest_cache_hit(
@@ -328,38 +360,83 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # the last matched block.
             sliding_window_contiguous_blocks += 1
 
-        # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
-        # optimize the time complexity from O(max_num_blocks) to
-        # O(max_num_blocks / sliding_window_contiguous_blocks +
-        # sliding_window_contiguous_blocks),
-        # which is good for low cache hit rate scenarios.
         max_num_blocks = max_length // kv_cache_spec.block_size
         computed_blocks = tuple([block_pool.null_block] * max_num_blocks
                                 for _ in range(len(kv_cache_group_ids)))
+        
+        # Optimized jump-based search: start from rightmost possible position
+        # and jump by window size on cache misses to reduce O(n) to O(n/w + w)
+        i = max_num_blocks - 1
+        while i >= sliding_window_contiguous_blocks - 1:
+            # Check if we can form a contiguous window ending at position i
+            window_start = i - sliding_window_contiguous_blocks + 1
+            
+            # Try to find a complete contiguous window
+            all_cached = True
+            cached_blocks_batch = []
+            
+            for j in range(window_start, i + 1):
+                if cached_block := block_pool.get_cached_block(
+                        block_hashes[j], kv_cache_group_ids):
+                    cached_blocks_batch.append((j, cached_block))
+                else:
+                    all_cached = False
+                    break
+            
+            if all_cached:
+                # Found valid contiguous window - populate and return
+                for j, cached_block in cached_blocks_batch:
+                    for computed, cached in zip(computed_blocks, cached_block):
+                        computed[j] = cached
+                
+                # Trim trailing blocks in-place to avoid expensive del operations
+                final_size = i + 1
+                for computed in computed_blocks:
+                    while len(computed) > final_size:
+                        computed.pop()
+                
+                if use_eagle and computed_blocks[0]:
+                    for computed in computed_blocks:
+                        computed.pop()
+                return computed_blocks
+            
+            # No valid window found - jump by window size for efficiency
+            i -= sliding_window_contiguous_blocks
+        
+        # Fallback: handle remaining positions with smaller windows
+        return cls._fallback_search_smaller_windows(
+            block_hashes, max_num_blocks, kv_cache_group_ids, block_pool, use_eagle)
+
+    @classmethod
+    def _fallback_search_smaller_windows(
+        cls,
+        block_hashes: list[BlockHash],
+        max_num_blocks: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        use_eagle: bool,
+    ) -> tuple[list[KVCacheBlock], ...]:
+        """Fallback search for partial windows when no full window is found."""
+        computed_blocks = tuple([block_pool.null_block] * max_num_blocks
+                                for _ in range(len(kv_cache_group_ids)))
         num_contiguous_blocks = 0
-        match_found = False
-        # Search from right to left and early stop when a match is found.
+        
+        # Search from right to left for any partial match
         for i in range(max_num_blocks - 1, -1, -1):
             if cached_block := block_pool.get_cached_block(
                     block_hashes[i], kv_cache_group_ids):
                 for computed, cached in zip(computed_blocks, cached_block):
                     computed[i] = cached
                 num_contiguous_blocks += 1
-                if num_contiguous_blocks >= sliding_window_contiguous_blocks:
-                    # Trim the trailing blocks.
-                    # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
-                    # when sliding_window_contiguous_blocks=2.
-                    for computed in computed_blocks:
-                        del computed[i + num_contiguous_blocks:]
-                    match_found = True
-                    break
             else:
                 num_contiguous_blocks = 0
-        if not match_found:
-            # The first `num_contiguous_blocks` is a cache hit even if
-            # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
-            for computed in computed_blocks:
-                del computed[num_contiguous_blocks:]
+        
+        # Trim to the actual number of contiguous blocks found
+        final_size = max(0, max_num_blocks - num_contiguous_blocks) + num_contiguous_blocks
+        for computed in computed_blocks:
+            while len(computed) > final_size:
+                computed.pop()
+        
         if use_eagle and computed_blocks[0]:
             for computed in computed_blocks:
                 computed.pop()
