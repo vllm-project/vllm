@@ -12,7 +12,7 @@ from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from inspect import isclass, signature
 from logging import DEBUG
-from typing import Any, Callable, Optional, TypeVar, Union, get_args
+from typing import Any, Callable, Optional, TypeVar, Union
 
 import msgspec
 import zmq
@@ -23,7 +23,7 @@ from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
-from vllm.tasks import PoolingTask, SupportedTask
+from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import (bind_process_name, make_zmq_socket,
@@ -202,10 +202,9 @@ class EngineCore:
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
         if pooling_params := request.pooling_params:
-            pooling_tasks = get_args(PoolingTask)
             supported_pooling_tasks = [
                 task for task in self.get_supported_tasks()
-                if task in pooling_tasks
+                if task in POOLING_TASKS
             ]
 
             if pooling_params.task not in supported_pooling_tasks:
