@@ -76,6 +76,13 @@ However, you need to be careful to choose the padding gap. If the gap is too sma
 - v5e has int4/int8 hardware acceleration in the MXU
 - v6e has int4/int8 hardware acceleration in the MXU
 
+Supported quantized formats and features in vLLM on TPU [Jul '25]
+- INT8 W8A8
+- INT8 W8A16
+- FP8 KV cache
+- [WIP] FP8 W8A8
+- [WIP] AWQ
+
 **Don't set TP to be less than the number of chips on a single-host deployment**
 
 Although it’s common to do this with GPUs, don't try to fragment 2 or 8 different workloads across 8 chips on a single host. If you need 1 or 4 chips, just create an instance with 1 or 4 chips (these are partial-host machine types).
