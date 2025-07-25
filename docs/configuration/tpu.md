@@ -37,7 +37,7 @@ To manage this, vLLM performs a one-time "warmup" process when you first launch 
 
 Although the first compilation can take some time, for all subsequent server launches, vLLM can load these graphs directly from the cache, eliminating the compilation time for future runs. 
 
-Use `VLLM_XLA_CACHE_PATH` environment variable to write to shareable storage for future launches. 
+Use `VLLM_XLA_CACHE_PATH` environment variable to write to shareable storage for future deployed nodes (like when using autoscaling). 
 
 #### Reducing compilation time
 This initial compilation time ranges significantly and is impacted by many of the arguments discussed in this optimization doc. Factors that influence the length of time to compile are things like model size and `--max-num-batch-tokens`. Other arguments you can tune are things like `VLLM_TPU_MOST_MODEL_LEN`. 
