@@ -140,26 +140,19 @@ The `compare-json-results.py` helps to compare benchmark results JSON files conv
 When run, benchmark script generates results under `benchmark/results` folder, along with the `benchmark_results.md` and `benchmark_results.json`.
 `compare-json-results.py` compares two `benchmark_results.json` files and provides performance ratio e.g. for Output Tput, Median TTFT and Median TPOT.
 
-Here is an example using the script to compare result_a and result_b without detail test name.
-`python3 compare-json-results.py -f results_a/benchmark_results.json -f results_b/benchmark_results.json --ignore_test_name`
+Here is an example using the script to compare result_a and result_b with Model, Dataset name, input/output lenght, max concurrency and qps.
+`python3 compare-json-results.py -f results_a/benchmark_results.json -f results_b/benchmark_results.json `
 
-|    | results_a/benchmark_results.json | results_b/benchmark_results.json | perf_ratio        |
-|----|----------------------------------------|----------------------------------------|----------|
-| 0  | 142.633982                             | 156.526018                             | 1.097396 |
-| 1  | 241.620334                             | 294.018783                             | 1.216863 |
-| 2  | 218.298905                             | 262.664916                             | 1.203235 |
-| 3  | 242.743860                             | 299.816190                             | 1.235113 |
+|   | Model | Dataset Name | Input Len | Output Len | # of max concurrency | qps  | results_a/benchmark_results.json | results_b/benchmark_results.json | perf_ratio        |
+|----|---------------------------------------|--------|-----|-----|------|-----|-----------|----------|----------|
+| 0  | meta-llama/Meta-Llama-3.1-8B-Instruct | random | 128 | 128 | 1000 | 1 | 142.633982                             | 156.526018                             | 1.097396 |
+| 1  | meta-llama/Meta-Llama-3.1-8B-Instruct | random | 128 | 128 | 1000 | inf| 241.620334                             | 294.018783                             | 1.216863 |
 
-Here is an example using the script to compare result_a and result_b with detail test name.
-`python3 compare-json-results.py -f results_a/benchmark_results.json -f results_b/benchmark_results.json`
 
-|   | results_a/benchmark_results.json_name | results_a/benchmark_results.json | results_b/benchmark_results.json_name | results_b/benchmark_results.json | perf_ratio        |
-|---|---------------------------------------------|----------------------------------------|---------------------------------------------|----------------------------------------|----------|
-| 0 | serving_llama8B_tp1_sharegpt_qps_1          | 142.633982                             | serving_llama8B_tp1_sharegpt_qps_1          | 156.526018                             | 1.097396 |
-| 1 | serving_llama8B_tp1_sharegpt_qps_16         | 241.620334                             | serving_llama8B_tp1_sharegpt_qps_16         | 294.018783                             | 1.216863 |
-| 2 | serving_llama8B_tp1_sharegpt_qps_4          | 218.298905                             | serving_llama8B_tp1_sharegpt_qps_4          | 262.664916                             | 1.203235 |
-| 3 | serving_llama8B_tp1_sharegpt_qps_inf        | 242.743860                             | serving_llama8B_tp1_sharegpt_qps_inf        | 299.816190                             | 1.235113 |
-| 4 | serving_llama8B_tp2_random_1024_128_qps_1   | 96.613390                              | serving_llama8B_tp4_random_1024_128_qps_1   | 108.404853                             | 1.122048 |
+A comparison diagram will be generated below the table. 
+Here is an example to compare between 96c/results_gnr_96c_091_tp2pp3 and 128c/results_gnr_128c_091_tp2pp3
+<img width="1886" height="828" alt="image" src="https://github.com/user-attachments/assets/c02a43ef-25d0-4fd6-90e5-2169a28682dd" />
+
 
 ## Nightly test details
 
