@@ -20,10 +20,10 @@ def test_bind_kv_cache():
         'layers.3.self_attn': Attention(32, 128, 0.1),
     }
     kv_cache = {
-        'layers.0.self_attn': torch.zeros((1,)),
-        'layers.1.self_attn': torch.zeros((1,)),
-        'layers.2.self_attn': torch.zeros((1,)),
-        'layers.3.self_attn': torch.zeros((1,)),
+        'layers.0.self_attn': torch.zeros((1, )),
+        'layers.1.self_attn': torch.zeros((1, )),
+        'layers.2.self_attn': torch.zeros((1, )),
+        'layers.3.self_attn': torch.zeros((1, )),
     }
     runner_kv_caches: list[torch.Tensor] = []
     bind_kv_cache(kv_cache, ctx, runner_kv_caches)
@@ -51,8 +51,8 @@ def test_bind_kv_cache_non_attention():
         'model.layers.28.attn': Attention(32, 128, 0.1),
     }
     kv_cache = {
-        'model.layers.20.attn': torch.zeros((1,)),
-        'model.layers.28.attn': torch.zeros((1,)),
+        'model.layers.20.attn': torch.zeros((1, )),
+        'model.layers.28.attn': torch.zeros((1, )),
     }
 
     runner_kv_caches: list[torch.Tensor] = []
