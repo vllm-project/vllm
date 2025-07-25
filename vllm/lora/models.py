@@ -160,7 +160,7 @@ class LoRAModel(AdapterModel):
                 assert embedding_padding_modules is not None
                 if any(name in module_name
                        for name in embedding_padding_modules
-                      ) and target_embedding_padding is not None:
+                       ) and target_embedding_padding is not None:
                     lora_b = loras[module_name].lora_b
                     assert target_embedding_padding >= lora_b.shape[1]
                     addition = target_embedding_padding - lora_b.shape[1]
@@ -387,8 +387,7 @@ class LoRAModelManager(AdapterModelManager):
         if lora_id in self._active_adapters:
             return False
         first_free_slot = next(
-            ((i, lora_id)
-             for i, lora_id in enumerate(self.lora_index_to_id)
+            ((i, lora_id) for i, lora_id in enumerate(self.lora_index_to_id)
              if lora_id is None), None)
         if first_free_slot is None:
             raise ValueError("No free lora slots")
@@ -406,8 +405,8 @@ class LoRAModelManager(AdapterModelManager):
                 bias = module_lora.bias
                 if ((torch.is_tensor(bias) or
                      (isinstance(bias, Sequence) and any(b is not None
-                                                         for b in bias))) and
-                        not self.lora_config.bias_enabled):
+                                                         for b in bias)))
+                        and not self.lora_config.bias_enabled):
                     module_lora.bias = None
                     raise ValueError(
                         f"Adapter bias cannot be used for {module_name}"
@@ -527,9 +526,9 @@ class LoRAModelManager(AdapterModelManager):
         model = LoRAModel(lora_id, rank, {})
         for module_name, module in self.model.named_modules():
             bias_enabled = self.lora_config.bias_enabled
-            if (not self._match_target_modules(module_name) or
-                    not isinstance(module, BaseLayerWithLoRA) or
-                    self._filter_unsupported_mm_module(module_name)):
+            if (not self._match_target_modules(module_name)
+                    or not isinstance(module, BaseLayerWithLoRA)
+                    or self._filter_unsupported_mm_module(module_name)):
                 continue
             parts = module_name.split(".")
             if module_name not in self.packed_modules:

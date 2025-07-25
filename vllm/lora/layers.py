@@ -359,7 +359,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                     dtype=lora_config.lora_dtype,
                     device=self.device,
                 ) for _ in range(self.n_slices))
-        self.output_slices = (self.lora_b_stacked[0].shape[2],)
+        self.output_slices = (self.lora_b_stacked[0].shape[2], )
 
     def reset_lora(self, index: int):
         for s_index in range(self.n_slices):
@@ -460,7 +460,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
 
     def __init__(self, base_layer: ReplicatedLinear) -> None:
-        super().__init__(base_layer,)
+        super().__init__(base_layer, )
         # To ensure interface compatibility, set to 1 always.
         self.tp_size = 1
         self.output_size = self.base_layer.output_size
@@ -603,8 +603,8 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         model_config: Optional[PretrainedConfig],
     ) -> bool:
         return type(source_layer) is ColumnParallelLinear or (
-            type(source_layer) is MergedColumnParallelLinear and
-            len(packed_modules_list) == 1)
+            type(source_layer) is MergedColumnParallelLinear
+            and len(packed_modules_list) == 1)
 
 
 class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
@@ -629,7 +629,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         self.output_slices = tuple(
             divide(output_size, self.tp_size) for output_size in output_sizes)
         self.n_slices = len(self.output_slices)
-        self.output_ids = (self.tp_rank,) * self.n_slices
+        self.output_ids = (self.tp_rank, ) * self.n_slices
 
     def create_lora_weights(
         self,
@@ -745,8 +745,8 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         packed_modules_list: list,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        return (type(source_layer) is MergedColumnParallelLinear and
-                len(packed_modules_list) == 2)
+        return (type(source_layer) is MergedColumnParallelLinear
+                and len(packed_modules_list) == 2)
 
 
 class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
@@ -874,8 +874,8 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         packed_modules_list: list,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        return (type(source_layer) is QKVParallelLinear and
-                len(packed_modules_list) == 3)
+        return (type(source_layer) is QKVParallelLinear
+                and len(packed_modules_list) == 3)
 
 
 #TODO: Implement this

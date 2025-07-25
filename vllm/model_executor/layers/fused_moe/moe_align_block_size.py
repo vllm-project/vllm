@@ -103,11 +103,11 @@ def moe_align_block_size_triton(
     num_tokens_post_pad: torch.Tensor,
 ) -> None:
     numel = topk_ids.numel()
-    grid = (num_experts,)
+    grid = (num_experts, )
     tokens_cnts = torch.zeros((num_experts + 1, num_experts),
                               dtype=torch.int32,
                               device=topk_ids.device)
-    cumsum = torch.zeros((num_experts + 1,),
+    cumsum = torch.zeros((num_experts + 1, ),
                          dtype=torch.int32,
                          device=topk_ids.device)
     tokens_per_thread = cdiv(numel, num_experts)
@@ -125,7 +125,7 @@ def moe_align_block_size_triton(
         tokens_cnts,
         num_experts,
     )
-    moe_align_block_size_stage3[(1,)](
+    moe_align_block_size_stage3[(1, )](
         num_tokens_post_pad,
         tokens_cnts,
         cumsum,
@@ -204,11 +204,11 @@ def moe_align_block_size(
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     if pad_sorted_ids:
         max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
-    sorted_ids = torch.empty((max_num_tokens_padded,),
+    sorted_ids = torch.empty((max_num_tokens_padded, ),
                              dtype=torch.int32,
                              device=topk_ids.device)
     max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
-    expert_ids = torch.empty((max_num_m_blocks,),
+    expert_ids = torch.empty((max_num_m_blocks, ),
                              dtype=torch.int32,
                              device=topk_ids.device)
     num_tokens_post_pad = torch.empty((1),
@@ -236,14 +236,14 @@ def moe_lora_align_block_size(
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     if pad_sorted_ids:
         max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
-    sorted_ids = torch.full((max_loras * max_num_tokens_padded,),
+    sorted_ids = torch.full((max_loras * max_num_tokens_padded, ),
                             topk_ids.numel(),
                             dtype=torch.int32,
                             device=topk_ids.device)
     max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
     # Expert ids must be zeroed out to prevent index out of bounds error while
     # mapping global expert ids to local expert ids in expert parallelism.
-    expert_ids = torch.full((max_loras * max_num_m_blocks,),
+    expert_ids = torch.full((max_loras * max_num_m_blocks, ),
                             num_experts,
                             dtype=torch.int32,
                             device=topk_ids.device)

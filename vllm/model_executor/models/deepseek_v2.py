@@ -868,13 +868,13 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
             device: torch.device) -> IntermediateTensors:
         return IntermediateTensors({
             "hidden_states":
-                torch.zeros((batch_size, self.config.hidden_size),
-                            dtype=dtype,
-                            device=device),
+            torch.zeros((batch_size, self.config.hidden_size),
+                        dtype=dtype,
+                        device=device),
             "residual":
-                torch.zeros((batch_size, self.config.hidden_size),
-                            dtype=dtype,
-                            device=device),
+            torch.zeros((batch_size, self.config.hidden_size),
+                        dtype=dtype,
+                        device=device),
         })
 
     def load_weights(self, weights: Iterable[tuple[str,

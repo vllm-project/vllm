@@ -136,8 +136,8 @@ def parse_fine_tuned_lora_name(
     start_index = 2 if name.startswith("base_model.model.") else 0
 
     parts = name.split(".")
-    if parts[-1] == "weight" and (parts[-2] == "lora_A" or
-                                  parts[-2] == "lora_B"):
+    if parts[-1] == "weight" and (parts[-2] == "lora_A"
+                                  or parts[-2] == "lora_B"):
         new_name = ".".join(parts[start_index:-2])
         return new_name, parts[-2] == "lora_A", False
 
@@ -199,10 +199,10 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
                 supported_lora_modules.add(name)
 
         # get all the linear subfixes.
-        if isinstance(module, (LinearBase,)):
+        if isinstance(module, (LinearBase, )):
             supported_lora_modules.add(name.split(".")[-1])
 
-        if isinstance(module, (FusedMoE,)):
+        if isinstance(module, (FusedMoE, )):
             supported_lora_modules.add(name.split(".")[-1])
 
     return list(supported_lora_modules)

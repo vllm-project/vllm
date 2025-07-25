@@ -105,7 +105,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
         if moe.use_flashinfer_cutlass_kernels:
             prepare_finalize = FlashInferCutlassMoEPrepareAndFinalize(
-                quant_dtype=moe.quant_dtype,)
+                quant_dtype=moe.quant_dtype, )
         if moe.use_pplx_kernels:
             hidden_dim_bytes, hidden_scale_bytes = pplx_hidden_dim_scale_bytes(
                 moe.max_num_tokens,
@@ -170,10 +170,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
             # Note : We may want to use FP8 dispatch even otherwise just to
             # reduce datamovement
-            use_fp8_dispatch = (moe.quant_config is not None and
-                                moe.quant_config.quant_dtype
-                                == current_platform.fp8_dtype() and
-                                moe.quant_config.block_shape
+            use_fp8_dispatch = (moe.quant_config is not None
+                                and moe.quant_config.quant_dtype
+                                == current_platform.fp8_dtype()
+                                and moe.quant_config.block_shape
                                 == DEEPEP_QUANT_BLOCK_SHAPE)
 
             prepare_finalize = DeepEPLLPrepareAndFinalize(
@@ -302,9 +302,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
         # Pad the weight tensor. This is an optimization on ROCm platform, which
         # can benefit from tensors located far enough from one another in memory
-        if (envs.VLLM_ROCM_MOE_PADDING and current_platform.is_rocm() and
-                weight.stride(-1) == 1 and
-            (weight.stride(-2) * weight.element_size()) % 512 == 0):
+        if (envs.VLLM_ROCM_MOE_PADDING and current_platform.is_rocm()
+                and weight.stride(-1) == 1
+                and (weight.stride(-2) * weight.element_size()) % 512 == 0):
             num_pad = 256 // weight.element_size()
             weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
             torch.cuda.empty_cache()
@@ -331,9 +331,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
                 from vllm.model_executor.layers.fused_moe import cpu_fused_moe
                 dtype = layer.w13_weight.dtype
-                if (envs.VLLM_CPU_SGL_KERNEL and
-                        torch._C._cpu._is_amx_tile_supported() and
-                        dtype == torch.bfloat16):
+                if (envs.VLLM_CPU_SGL_KERNEL
+                        and torch._C._cpu._is_amx_tile_supported()
+                        and dtype == torch.bfloat16):
                     packed_w13_weight = torch.ops._C.convert_weight_packed(
                         layer.w13_weight)
                     assert packed_w13_weight.size() == layer.w13_weight.size()
@@ -620,7 +620,7 @@ def determine_expert_map(
     local_num_experts = global_num_experts // ep_size
 
     # Create a tensor of size num_experts filled with -1
-    expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
+    expert_map = torch.full((global_num_experts, ), -1, dtype=torch.int32)
     # Create a expert map for the local experts
     if ep_rank < (ep_size - 1):
         # Each non-last rank gets local_num_experts experts.
@@ -799,16 +799,12 @@ class FusedMoE(torch.nn.Module):
                                           "quantization for now.")
 
         moe_quant_params = {
-            "num_experts":
-                self.local_num_experts,
-            "hidden_size":
-                hidden_size,
+            "num_experts": self.local_num_experts,
+            "hidden_size": hidden_size,
             "intermediate_size_per_partition":
-                self.intermediate_size_per_partition,
-            "params_dtype":
-                params_dtype,
-            "weight_loader":
-                self.weight_loader,
+            self.intermediate_size_per_partition,
+            "params_dtype": params_dtype,
+            "weight_loader": self.weight_loader,
         }
         # need full intermediate size pre-sharding for WNA16 act order
         if (self.quant_method.__class__.__name__
@@ -824,9 +820,9 @@ class FusedMoE(torch.nn.Module):
         # Chunked all2all staging tensor
         self.batched_hidden_states: Optional[torch.Tensor] = None
         self.batched_router_logits: Optional[torch.Tensor] = None
-        if (self.moe_parallel_config.use_pplx_kernels or
-                self.moe_parallel_config.use_deepep_ll_kernels or
-                self.moe_parallel_config.use_flashinfer_cutlass_kernels):
+        if (self.moe_parallel_config.use_pplx_kernels
+                or self.moe_parallel_config.use_deepep_ll_kernels
+                or self.moe_parallel_config.use_flashinfer_cutlass_kernels):
             self.batched_hidden_states = torch.zeros(
                 (moe.max_num_tokens, self.hidden_size),
                 dtype=moe.in_dtype,
@@ -1121,9 +1117,9 @@ class FusedMoE(torch.nn.Module):
             # this is needed for compressed-tensors only
             loaded_weight = loaded_weight.to(param.data.device)
 
-            if ("compressed" in quant_method_name.lower() and
-                    param.data[expert_id] != 1 and
-                (param.data[expert_id] - loaded_weight).abs() > 1e-5):
+            if ("compressed" in quant_method_name.lower()
+                    and param.data[expert_id] != 1
+                    and (param.data[expert_id] - loaded_weight).abs() > 1e-5):
                 raise ValueError(
                     "input_scales of w1 and w3 of a layer "
                     f"must be equal. But got {param.data[expert_id]} "
@@ -1172,8 +1168,8 @@ class FusedMoE(torch.nn.Module):
             return True if return_success else None
 
         # Case weight scales, zero_points and offset, weight/input global scales
-        if ("scale" in weight_name or "zero" in weight_name or
-                "offset" in weight_name):
+        if ("scale" in weight_name or "zero" in weight_name
+                or "offset" in weight_name):
             # load the weight scales and zp based on the quantization scheme
             # supported weight scales/zp can be found in
             # FusedMoeWeightScaleSupported
@@ -1240,8 +1236,7 @@ class FusedMoE(torch.nn.Module):
         }
 
         return [
-            weight.view(self.local_num_experts, -1)
-            for name, weight in weights
+            weight.view(self.local_num_experts, -1) for name, weight in weights
             if name not in NON_EXPERT_WEIGHTS
         ]
 
@@ -1412,16 +1407,16 @@ class FusedMoE(torch.nn.Module):
         Therefore it is required that we reduce the shared_experts output
         early.
         """
-        return (self.use_pplx_kernels or self.use_deepep_ht_kernels or
-                self.use_deepep_ll_kernels)
+        return (self.use_pplx_kernels or self.use_deepep_ht_kernels
+                or self.use_deepep_ll_kernels)
 
     def maybe_all_reduce_tensor_model_parallel(
             self, final_hidden_states: torch.Tensor):
         """
         The pplx combine kernel reduces across GPU ranks by default.
         """
-        if (self.use_pplx_kernels or self.use_deepep_ht_kernels or
-                self.use_deepep_ll_kernels):
+        if (self.use_pplx_kernels or self.use_deepep_ht_kernels
+                or self.use_deepep_ll_kernels):
             return final_hidden_states
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
@@ -1518,17 +1513,17 @@ class FusedMoE(torch.nn.Module):
         # Route to the chunked forward path using the FlashInfer Cutlass kernel
         # only when data parallelism (DP) is enabled.
         use_flashinfer_cutlass_kernels = (
-            self.dp_size > 1 and
-            self.moe_parallel_config.use_flashinfer_cutlass_kernels)
-        if (self.moe_parallel_config.use_pplx_kernels or
-                self.moe_parallel_config.use_deepep_ll_kernels or
-                use_flashinfer_cutlass_kernels):
+            self.dp_size > 1
+            and self.moe_parallel_config.use_flashinfer_cutlass_kernels)
+        if (self.moe_parallel_config.use_pplx_kernels
+                or self.moe_parallel_config.use_deepep_ll_kernels
+                or use_flashinfer_cutlass_kernels):
             return self.forward_impl_chunked(hidden_states, router_logits)
 
         do_naive_dispatch_combine: bool = (
-            self.dp_size > 1 and
-            not self.moe_parallel_config.use_deepep_ht_kernels and
-            not self.moe_parallel_config.use_flashinfer_cutlass_kernels)
+            self.dp_size > 1
+            and not self.moe_parallel_config.use_deepep_ht_kernels
+            and not self.moe_parallel_config.use_flashinfer_cutlass_kernels)
         if do_naive_dispatch_combine:
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)
@@ -1589,8 +1584,7 @@ class FusedMoE(torch.nn.Module):
             ("experts.w13_" if weight_name
              in [ckpt_gate_proj_name, ckpt_up_proj_name] else "experts.w2_",
              f"experts.{physical_to_logical_map[expert_id]}.{weight_name}.",
-             expert_id, shard_id)
-            for expert_id in range(num_physical_experts)
+             expert_id, shard_id) for expert_id in range(num_physical_experts)
             for shard_id, weight_name in [
                 ("w1", ckpt_gate_proj_name),
                 ("w2", ckpt_down_proj_name),
@@ -1639,7 +1633,7 @@ direct_register_custom_op(
     mutates_args=["hidden_states"],
     fake_impl=moe_forward_fake,
     dispatch_key=current_platform.dispatch_key,
-    tags=(torch.Tag.needs_fixed_stride_order,),
+    tags=(torch.Tag.needs_fixed_stride_order, ),
 )
 
 # Mark the FusedMoE weight_loader as supporting MoE-specific parameters

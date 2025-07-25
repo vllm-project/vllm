@@ -19,7 +19,7 @@ def CEILDIV(x, y):
 def sample_data(num_experts, max_loras, num_tokens, topk_num):
 
     topk_ids = torch.zeros((num_tokens, topk_num), dtype=torch.int32)
-    token_lora_mapping = torch.zeros((num_tokens,), dtype=torch.int32)
+    token_lora_mapping = torch.zeros((num_tokens, ), dtype=torch.int32)
 
     for i in range(num_tokens):
         pool = list(range(num_experts))
@@ -50,13 +50,13 @@ def test_moe_lora_align_block_size(M, topk_num, num_experts, max_loras,
     max_num_m_blocks = CEILDIV(max_num_tokens_padded, block_size)
 
     # init output tensors
-    sorted_token_ids = torch.full((max_loras * max_num_tokens_padded,),
+    sorted_token_ids = torch.full((max_loras * max_num_tokens_padded, ),
                                   topk_ids.numel(),
                                   dtype=torch.int32).to('cuda')
-    expert_ids = torch.full((max_loras * max_num_m_blocks,),
+    expert_ids = torch.full((max_loras * max_num_m_blocks, ),
                             num_experts,
                             dtype=torch.int32).to('cuda')
-    num_tokens_post_pad = torch.zeros((max_loras,),
+    num_tokens_post_pad = torch.zeros((max_loras, ),
                                       dtype=torch.int32).to('cuda')
 
     # call kernel
