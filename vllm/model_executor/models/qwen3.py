@@ -47,7 +47,8 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsLoRA, SupportsPP
 from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen2 import Qwen2Model
-from .utils import AutoWeightsLoader, PPMissingLayer, maybe_prefix
+from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
+                    maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -313,9 +314,15 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
+        weights_list = list(weights)
+        mapper = None
+        has_model_prefix = any(
+            name.startswith("model.") for name, _ in weights_list)
+        if not has_model_prefix:
+            mapper = WeightsMapper(orig_to_new_prefix={"": "model."})
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]
                            if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(weights)
+        return loader.load_weights(weights_list, mapper=mapper)
