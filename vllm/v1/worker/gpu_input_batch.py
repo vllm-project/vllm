@@ -3,7 +3,7 @@
 # Datastructures defining a GPU input batch
 
 from dataclasses import dataclass
-from typing import Optional, cast
+from typing import Any, Optional, cast
 
 import numpy as np
 import torch
@@ -209,6 +209,7 @@ class InputBatch:
 
         # req_idx -> bool
         self.run_additional_heads: dict[int, bool] = {}
+        self.additional_heads_extra_inputs: dict[int, dict[str, Any]] = {}
 
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
@@ -267,8 +268,8 @@ class InputBatch:
         return req_index
 
     def add_request(
-            self,
-            request: "CachedRequestState",
+        self,
+        request: "CachedRequestState",
     ) -> int:
         req_index = self._register_add_request(request)
 
@@ -286,11 +287,11 @@ class InputBatch:
         num_prompt_tokens = len(request.prompt_token_ids)
         self.num_prompt_tokens[req_index] = num_prompt_tokens
         self.token_ids_cpu[
-        req_index, :num_prompt_tokens] = request.prompt_token_ids
+            req_index, :num_prompt_tokens] = request.prompt_token_ids
         start_idx = num_prompt_tokens
         end_idx = start_idx + len(request.output_token_ids)
         self.token_ids_cpu[req_index,
-        start_idx:end_idx] = request.output_token_ids
+                           start_idx:end_idx] = request.output_token_ids
         # Number of token ids in token_ids_cpu.
         # NOTE(woosuk): This may include spec decode tokens.
         self.num_tokens[req_index] = request.num_tokens
@@ -347,6 +348,9 @@ class InputBatch:
 
             if sampling_params.additional_heads:
                 self.run_additional_heads[req_index] = True
+                if sampling_params.additional_heads_extra_inputs is not None:
+                    self.additional_heads_extra_inputs[req_index] = \
+                        sampling_params.additional_heads_extra_inputs
 
             if sampling_params.allowed_token_ids:
                 self.has_allowed_token_ids.add(req_id)
@@ -419,7 +423,7 @@ class InputBatch:
         self.num_logprobs.pop(req_id, None)
         self.num_prompt_logprobs.pop(req_id, None)
         self.run_additional_heads.pop(req_index, None)
-        self.run_additional_heads.pop(req_index, None)
+        self.additional_heads_extra_inputs.pop(req_index, None)
         self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
 
         # LoRA

@@ -250,6 +250,7 @@ class SamplingParams(
 
     # Fields used for additional heads (e.g. classifiers)
     additional_heads: Optional[bool] = None
+    additional_heads_extra_inputs: Optional[dict[str, Any]] = None
 
     @staticmethod
     def from_optional(
@@ -605,6 +606,7 @@ class BeamSearchParams(
     temperature: float = 0.0
     length_penalty: float = 1.0
     include_stop_str_in_output: bool = False
+
 
 class ChunkwiseBeamSearchParams(
         msgspec.Struct,

@@ -1429,16 +1429,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if run_additional_heads:
             assert hasattr(self.model, "compute_additional_head")
+            additional_heads_extra_inputs: Optional[list[Optional[dict[
+                str, Any]]]] = [
+                    self.input_batch.additional_heads_extra_inputs.get(
+                        i, None) for i in range(self.input_batch.num_reqs)
+                ]
+            if additional_heads_extra_inputs is not None and not any(
+                    additional_heads_extra_inputs):
+                additional_heads_extra_inputs = None
 
             # NOTE: In theory not all logit indices need additional
             # head outputs and we could save some flops by masking.
             # In practice, this is a small number of flops and this
             # is simpler/introduces less overhead.
-            additional_heads_tensor = self.model.compute_additional_head(
-                sample_hidden_states, )
+            additional_heads_output_data: Union[torch.Tensor, list[dict[
+                str, float]]] = self.model.compute_additional_head(
+                    sample_hidden_states, additional_heads_extra_inputs)
 
-            # Should be num_decode_tokens x additional_head_size
-            assert len(additional_heads_tensor.shape) == 2
+            if isinstance(additional_heads_output_data, torch.Tensor):
+                additional_heads_output_data = \
+                    additional_heads_output_data.detach().cpu().tolist()
 
             # Don't return the additional head outputs where they aren't needed.
             additional_head_outputs = AdditionalHeadOutputs(
@@ -1448,7 +1458,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         additional_head_outputs_per_request, )
                     if mask else None
                     for additional_head_outputs_per_request, mask in zip(
-                        additional_heads_tensor.tolist(),
+                        additional_heads_output_data,
                         additional_head_indices_mask)
                 ], )
 
@@ -1586,7 +1596,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             get_kv_transfer_group().clear_connector_metadata()
 
         self.eplb_step()
-
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,

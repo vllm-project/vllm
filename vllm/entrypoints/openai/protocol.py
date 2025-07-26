@@ -873,22 +873,20 @@ class CompletionRequest(OpenAIBaseModel):
     # --8<-- [end:completion-extra-params]
     accumulate: Optional[bool] = Field(
         default=None,
-        description=(
-            "Special kind of echo where in the response instead of delta we return the accumulated text"
-        )
-    )
+        description=
+        ("Special kind of echo where in the response instead of delta we return the accumulated text"
+         ))
     arrival_time: Optional[float] = Field(
         default=None,
-        description=(
-            "The arrival time of the request. This is used for priority scheduling."
-        )
-    )
+        description=
+        ("The arrival time of the request. This is used for priority scheduling."
+         ))
     use_chunkwise_beam_search: Optional[bool] = Field(
         default=None,
-        description=(
-            "If set to True, chunkwise beam search will be used for the "
-            "completion request. If the model does not support chunkwise beam search, it will raise 400")
-    )
+        description=
+        ("If set to True, chunkwise beam search will be used for the "
+         "completion request. If the model does not support chunkwise beam search, it will raise 400"
+         ))
     # doc: end-completion-extra-params
 
     # Default sampling parameters for completion requests
@@ -1387,47 +1385,6 @@ class ScoreResponse(OpenAIBaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     data: list[ScoreResponseData]
-    usage: UsageInfo
-
-
-class ClassificationRequest(OpenAIBaseModel):
-    model: Optional[str] = None
-    input: Union[list[str], str]
-    truncate_prompt_tokens: Optional[int] = None
-    user: Optional[str] = None
-
-    # --8<-- [start:classification-pooling-params]
-    additional_data: Optional[Any] = None
-    # --8<-- [end:classification-pooling-params]
-
-    # --8<-- [start:classification-extra-params]
-    priority: int = Field(
-        default=0,
-        description=(
-            "The priority of the request (lower means earlier handling; "
-            "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."),
-    )
-
-    # --8<-- [end:classification-extra-params]
-
-    def to_pooling_params(self):
-        return PoolingParams(additional_data=self.additional_data)
-
-
-class ClassificationData(OpenAIBaseModel):
-    index: int
-    label: Optional[str]
-    probs: list[float]
-    num_classes: int
-
-
-class ClassificationResponse(OpenAIBaseModel):
-    id: str = Field(default_factory=lambda: f"classify-{random_uuid()}")
-    object: str = "list"
-    created: int = Field(default_factory=lambda: int(time.time()))
-    model: str
-    data: list[ClassificationData]
     usage: UsageInfo
 
 

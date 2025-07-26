@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from typing import Union
 
 from vllm.logger import init_logger
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
@@ -16,7 +18,7 @@ class AdditionalHeadsProcessor:
     """
 
     # Additional head outputs for this request
-    additional_head_outputs: list[list[float]]
+    additional_head_outputs: list[Union[list[float], dict[str, float]]]
 
     @classmethod
     def from_new_request(
