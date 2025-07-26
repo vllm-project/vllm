@@ -128,28 +128,18 @@ run_and_track_test() {
 }
 
 # --- Actual Test Execution ---
-run_and_track_test 0 "test_perf.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_perf.py"
-run_and_track_test 1 "test_compilation.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_compilation.py"
-run_and_track_test 2 "test_basic.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_basic.py"
-run_and_track_test 3 "test_accuracy.py::test_lm_eval_accuracy_v1_engine" \
-    "HF_HUB_DISABLE_XET=1 python3 -m pytest -s -v /workspace/vllm/tests/entrypoints/llm/test_accuracy.py::test_lm_eval_accuracy_v1_engine"
-run_and_track_test 4 "test_quantization_accuracy.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_quantization_accuracy.py"
-run_and_track_test 5 "examples/offline_inference/tpu.py" \
-    "python3 /workspace/vllm/examples/offline_inference/tpu.py"
-run_and_track_test 6 "test_tpu_model_runner.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/worker/test_tpu_model_runner.py"
-run_and_track_test 7 "test_sampler.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_sampler.py"
-run_and_track_test 8 "test_topk_topp_sampler.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_topk_topp_sampler.py"
-run_and_track_test 9 "test_multimodal.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_multimodal.py"
-run_and_track_test 10 "test_pallas.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_pallas.py"
+run_and_track_test 1 "test_struct_output_generate.py" \
+    "HF_HUB_DISABLE_XET=1 python3 -m pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py -k \"not test_structured_output_with_reasoning_matrices\""
+run_and_track_test 2 "test_moe_pallas.py" \
+    "python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_moe_pallas.py"
+run_and_track_test 3 "test_lora.py" \
+    "VLLM_XLA_CHECK_RECOMPILATION=0 python3 -m pytest -s -v /workspace/vllm/tests/tpu/lora/test_lora.py"
+run_and_track_test 4 "test_tpu_qkv_linear.py" \
+    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_tpu_qkv_linear.py"
+run_and_track_test 5 "test_spmd_model_weight_loading.py" \
+    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_spmd_model_weight_loading.py"
+run_and_track_test 6 "test_kv_cache_update_kernel.py" \
+    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_kv_cache_update_kernel.py"
 
 # After all tests have been attempted, exit with the overall status.
 if [ "$overall_script_exit_code" -ne 0 ]; then
