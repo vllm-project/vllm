@@ -93,6 +93,7 @@ def create_common_attn_metadata(
         max_query_len=max_query_len,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
+        causal=True,
     )
 
 

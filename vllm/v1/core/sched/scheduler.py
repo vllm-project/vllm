@@ -19,7 +19,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
-from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
@@ -58,6 +58,7 @@ class Scheduler(SchedulerInterface):
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
+        self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -150,11 +151,17 @@ class Scheduler(SchedulerInterface):
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
 
+        enable_caching = self.cache_config.enable_prefix_caching or False
+        if self.is_encoder_decoder:
+            # prefix caching for encoder-decoder models is not currently
+            # supported
+            enable_caching = False
+
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
-            enable_caching=self.cache_config.enable_prefix_caching,
+            enable_caching=enable_caching,
             caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
@@ -399,6 +406,7 @@ class Scheduler(SchedulerInterface):
 
                 encoder_inputs_to_schedule = None
                 new_encoder_budget = encoder_budget
+                new_cross_blocks: Optional[KVCacheBlocks] = None
 
                 # KVTransfer: loading remote KV, do not allocate for new work.
                 if load_kv_async:
@@ -436,6 +444,22 @@ class Scheduler(SchedulerInterface):
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
                             break
+                        if self.is_encoder_decoder:
+                            # For encoder-decoder models, we allocate slots for
+                            # the cross-attention blocks based on the max
+                            # encoder length. This is a single static allocation
+                            # and does not grow with the number of decoder
+                            # tokens.
+                            max_encoder_len = (self.vllm_config.model_config.
+                                               hf_config.max_source_positions)
+                            new_cross_blocks = (self.kv_cache_manager.
+                                                allocate_slots_for_cross_attn(
+                                                    request,
+                                                    max_encoder_len,
+                                                ))
+                            if new_cross_blocks is None:
+                                # The request cannot be scheduled.
+                                break
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -454,9 +478,12 @@ class Scheduler(SchedulerInterface):
                 # This information is used to determine if a load is
                 # needed for this request.
                 if self.connector is not None:
+                    update_blocks = new_computed_blocks + new_blocks
+                    if new_cross_blocks is not None:
+                        update_blocks += new_cross_blocks
                     self.connector.update_state_after_alloc(
                         request,
-                        new_computed_blocks + new_blocks,
+                        update_blocks,
                         num_external_computed_tokens,
                     )
 
