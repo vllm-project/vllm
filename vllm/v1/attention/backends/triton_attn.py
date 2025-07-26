@@ -62,8 +62,8 @@ class TritonAttentionMetadataBuilder(
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         self.device = device
-        self.kv_cache_spec = kv_cache_spec
         self.block_size = kv_cache_spec.block_size
+        self.kv_cache_spec = kv_cache_spec
 
         model_config = vllm_config.model_config
         self.num_heads_q = model_config.get_num_attention_heads(

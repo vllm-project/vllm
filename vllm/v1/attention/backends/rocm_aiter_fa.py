@@ -178,8 +178,8 @@ class AiterFlashAttentionMetadataBuilder:
         self.num_heads_kv = self.model_config.get_num_kv_heads(
             self.parallel_config)
         self.headdim = self.model_config.get_head_size()
-        self.kv_cache_spec = kv_cache_spec
         self.block_size = kv_cache_spec.block_size
+        self.kv_cache_spec = kv_cache_spec
 
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
