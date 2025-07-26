@@ -140,6 +140,10 @@ _SUFFIX_TO_DEFAULTS: list[tuple[str, tuple[RunnerType, ConvertType]]] = [
 ]
 
 
+def iter_architecture_defaults():
+    yield from _SUFFIX_TO_DEFAULTS
+
+
 def try_match_architecture_defaults(
     architecture: str,
     *,
@@ -147,7 +151,7 @@ def try_match_architecture_defaults(
     convert_type: Optional[ConvertType] = None,
 ) -> Optional[tuple[str, tuple[RunnerType, ConvertType]]]:
     for suffix, (default_runner_type,
-                 default_convert_type) in _SUFFIX_TO_DEFAULTS:
+                 default_convert_type) in iter_architecture_defaults():
         if ((runner_type is None or runner_type == default_runner_type) and
             (convert_type is None or convert_type == default_convert_type)
                 and architecture.endswith(suffix)):
@@ -616,8 +620,9 @@ class ModelConfig:
 
         architectures = self.architectures
         registry = self.registry
-        is_generative_model = registry.is_text_generation_model(architectures)
-        is_pooling_model = registry.is_pooling_model(architectures)
+        is_generative_model = registry.is_text_generation_model(
+            architectures, self)
+        is_pooling_model = registry.is_pooling_model(architectures, self)
 
         def _task_to_convert(task: TaskOption) -> ConvertType:
             if task == "embedding" or task == "embed":
@@ -704,7 +709,7 @@ class ModelConfig:
         self.supported_tasks = self._get_supported_tasks(
             architectures, self.runner_type, self.convert_type)
 
-        _, arch = registry.inspect_model_cls(architectures, model_config=self)
+        _, arch = registry.inspect_model_cls(architectures, self)
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
 
@@ -759,14 +764,6 @@ class ModelConfig:
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
         self.multimodal_config = self._init_multimodal_config()
-
-        self.model_supports_multimodal_raw_input = (
-            registry.supports_multimodal_raw_input(architectures))
-        self.is_attention_free = registry.is_attention_free_model(
-            architectures)
-        self.is_hybrid = registry.is_hybrid_model(architectures)
-        self.has_noops = registry.is_noops_model(architectures)
-        self.has_inner_state = registry.model_has_inner_state(architectures)
 
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
@@ -881,7 +878,7 @@ class ModelConfig:
             self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
-        if self.registry.is_multimodal_model(self.architectures):
+        if self.registry.is_multimodal_model(self.architectures, self):
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
                 media_io_kwargs=self.media_io_kwargs,
@@ -957,9 +954,9 @@ class ModelConfig:
 
         for arch in architectures:
             if arch in registry.get_supported_archs():
-                if registry.is_pooling_model(architectures):
+                if registry.is_pooling_model(architectures, self):
                     return "pooling"
-                if registry.is_text_generation_model(architectures):
+                if registry.is_text_generation_model(architectures, self):
                     return "generate"
 
             match = try_match_architecture_defaults(arch)
@@ -995,10 +992,11 @@ class ModelConfig:
         for arch in architectures:
             if arch in registry.get_supported_archs():
                 if (runner_type == "generate"
-                        and registry.is_text_generation_model(architectures)):
+                        and registry.is_text_generation_model(
+                            architectures, self)):
                     return "none"
                 if (runner_type == "pooling"
-                        and registry.is_pooling_model(architectures)):
+                        and registry.is_pooling_model(architectures, self)):
                     return "none"
 
             match = try_match_architecture_defaults(arch,
@@ -1040,16 +1038,16 @@ class ModelConfig:
     ) -> list[_ResolvedTask]:
         registry = self.registry
 
-        if registry.is_transcription_only_model(architectures):
+        if registry.is_transcription_only_model(architectures, self):
             return ["transcription"]
 
         # TODO: Use get_supported_generation_tasks once V0 is removed
         supported_tasks = list[_ResolvedTask]()
-        if (registry.is_text_generation_model(architectures)
+        if (registry.is_text_generation_model(architectures, self)
                 or convert_type in _RUNNER_CONVERTS["generate"]):
             supported_tasks.append("generate")
 
-        if registry.is_transcription_model(architectures):
+        if registry.is_transcription_model(architectures, self):
             supported_tasks.append("transcription")
 
         return supported_tasks
@@ -1058,7 +1056,7 @@ class ModelConfig:
         self,
         architectures: list[str],
     ) -> Literal["embed", "classify", "reward"]:
-        if self.registry.is_cross_encoder_model(architectures):
+        if self.registry.is_cross_encoder_model(architectures, self):
             return "classify"
 
         for arch in architectures:
@@ -1080,7 +1078,7 @@ class ModelConfig:
 
         # TODO: Use get_supported_pooling_tasks once V0 is removed
         supported_tasks = list[_ResolvedTask]()
-        if (registry.is_pooling_model(architectures)
+        if (registry.is_pooling_model(architectures, self)
                 or convert_type in _RUNNER_CONVERTS["pooling"]):
             supported_tasks.append("encode")
 
@@ -1333,7 +1331,8 @@ class ModelConfig:
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1:
-            if not self.registry.is_pp_supported_model(self.architectures):
+            if not self.registry.is_pp_supported_model(self.architectures,
+                                                       self):
                 raise NotImplementedError(
                     "Pipeline parallelism is not supported for this model. "
                     "Supported models implement the `SupportsPP` interface.")
@@ -1673,19 +1672,39 @@ class ModelConfig:
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
 
-    @property
+    @cached_property
     def is_cross_encoder(self) -> bool:
-        return (self.registry.is_cross_encoder_model(self.architectures)
+        return (self.registry.is_cross_encoder_model(self.architectures, self)
                 or self.convert_type == "classify")
+
+    @cached_property
+    def model_supports_multimodal_raw_input(self):
+        return self.registry.supports_multimodal_raw_input(
+            self.architectures, self)
+
+    @cached_property
+    def is_attention_free(self):
+        return self.registry.is_attention_free_model(self.architectures, self)
+
+    @cached_property
+    def is_hybrid(self):
+        return self.registry.is_hybrid_model(self.architectures, self)
+
+    @cached_property
+    def has_noops(self):
+        return self.registry.is_noops_model(self.architectures, self)
+
+    @cached_property
+    def has_inner_state(self):
+        return self.registry.model_has_inner_state(self.architectures, self)
 
     @property
     def use_mla(self) -> bool:
         return self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE
 
-    @property
+    @cached_property
     def is_v1_compatible(self) -> bool:
-        architectures = getattr(self.hf_config, "architectures", [])
-        return self.registry.is_v1_compatible(architectures)
+        return self.registry.is_v1_compatible(self.architectures, self)
 
     @property
     def is_matryoshka(self) -> bool:
