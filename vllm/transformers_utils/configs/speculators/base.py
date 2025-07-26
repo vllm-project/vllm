@@ -52,8 +52,10 @@ class SpeculatorsConfig(PretrainedConfig):
         except (KeyError, IndexError, TypeError) as e:
             raise ValueError("Invalid speculators config structure") from e
 
-        if "transformer_layer_config" in config_dict and not isinstance(
-                config_dict["transformer_layer_config"], dict):
+        if "transformer_layer_config" not in config_dict:
+            raise ValueError("Must provide transformer_layer_config")
+
+        if not isinstance(config_dict["transformer_layer_config"], dict):
             raise TypeError(
                 "'transformer_layer_config' must be a dictionary if provided")
 
@@ -85,5 +87,5 @@ class SpeculatorsConfig(PretrainedConfig):
             "num_lookahead_tokens": num_lookahead_tokens,
             "target_model": spec_config.get("verifier")["name_or_path"]
         }
-        vllm_config.update(config_dict.get("transformer_layer_config"))
+        vllm_config.update(config_dict["transformer_layer_config"])
         return vllm_config
