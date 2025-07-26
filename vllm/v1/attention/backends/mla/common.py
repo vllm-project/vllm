@@ -264,7 +264,7 @@ class MLACommonBackend(AttentionBackend):
         num_kv_heads: int,  # assumed to be 1 for MLA
         head_size: int,
     ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
+        return num_blocks, block_size, head_size
 
     @classmethod
     def get_supported_dtypes(cls) -> list[torch.dtype]:

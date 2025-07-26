@@ -693,7 +693,7 @@ def maybe_register_config_serialize_by_value() -> None:
         # serialization of VllmConfig objects that may contain custom configs
         # from transformers_modules
         def _reduce_config(config: VllmConfig):
-            return (pickle.loads, (cloudpickle.dumps(config), ))
+            return pickle.loads, (cloudpickle.dumps(config), )
 
         multiprocessing.reducer.register(VllmConfig, _reduce_config)
 

@@ -131,7 +131,7 @@ def get_pp_indices(num_hidden_layers: int, pp_rank: int,
     start_layer = sum(partitions[:pp_rank])
     end_layer = start_layer + partitions[pp_rank]
 
-    return (start_layer, end_layer)
+    return start_layer, end_layer
 
 
 @dataclasses.dataclass

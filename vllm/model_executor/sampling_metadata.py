@@ -492,7 +492,7 @@ class SamplingTensors:
             device,
             dtype,
         )
-        return (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p)
+        return sampling_tensors, do_penalties, do_top_p_top_k, do_min_p
 
     @classmethod
     def from_lists(

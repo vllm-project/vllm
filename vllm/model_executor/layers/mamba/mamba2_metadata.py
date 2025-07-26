@@ -55,7 +55,7 @@ def get_platform_metadata_classes() -> tuple[type[AttentionMetadata], ...]:
     if current_platform.is_rocm():
         from vllm.attention.backends.rocm_flash_attn import (
             ROCmFlashAttentionMetadata)
-        return (ROCmFlashAttentionMetadata, PlaceholderAttentionMetadata)
+        return ROCmFlashAttentionMetadata, PlaceholderAttentionMetadata
     elif current_platform.is_cuda():
         from vllm.attention.backends.flash_attn import FlashAttentionMetadata
         from vllm.attention.backends.xformers import XFormersMetadata

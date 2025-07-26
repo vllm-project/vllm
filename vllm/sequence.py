@@ -362,7 +362,7 @@ class SequenceData(msgspec.Struct,
             return (self._prompt_token_ids_tuple,
                     tuple(self._output_token_ids[:num_tokens - prompt_length]))
         else:
-            return (self._prompt_token_ids_tuple[:num_tokens], None)
+            return self._prompt_token_ids_tuple[:num_tokens], None
 
     def get_num_computed_tokens(self) -> int:
         """Return the number of prefill tokens that are already computed."""

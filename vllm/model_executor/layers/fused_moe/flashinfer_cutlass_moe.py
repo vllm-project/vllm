@@ -126,7 +126,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace1 = output_shape
         # The workspace is determined by `aq`, since it comes after any
         # potential communication op and is involved in the expert computation.
-        return (workspace1, workspace2, output_shape, workspace_dtype)
+        return workspace1, workspace2, output_shape, workspace_dtype
 
     def apply(
         self,

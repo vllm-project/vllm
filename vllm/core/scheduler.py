@@ -177,7 +177,7 @@ class SchedulerOutputs:
             if 0 < self.num_prefill_groups < len(self.scheduled_seq_groups):
                 # Sort sequence groups so that all prefills come before all
                 # decodes as required by chunked prefill.
-                return (not group.seq_group.is_prefill(), *key)
+                return not group.seq_group.is_prefill(), *key
             return key
 
         self.scheduled_seq_groups = sorted(self.scheduled_seq_groups,

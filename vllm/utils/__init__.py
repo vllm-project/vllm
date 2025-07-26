@@ -437,7 +437,7 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         else:
             lru_key = next(iter(self.order))
         value = self.pop(cast(_K, lru_key))
-        return (lru_key, value)
+        return lru_key, value
 
     def clear(self) -> None:
         while len(self) > 0:
@@ -682,14 +682,14 @@ class AsyncMicrobatchTokenizer:
         max_length = kwargs.get("max_length")
 
         if not truncation:
-            return ("encode", add_special_tokens, False, None)
+            return "encode", add_special_tokens, False, None
 
         model_max = getattr(self.tokenizer, "model_max_length", None)
         if max_length is None or (model_max is not None
                                   and max_length == model_max):
-            return ("encode", add_special_tokens, True, "model_max")
+            return "encode", add_special_tokens, True, "model_max"
 
-        return ("encode", "other")
+        return "encode", "other"
 
     def __del__(self):
         for task in self._batcher_tasks:

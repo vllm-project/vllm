@@ -417,7 +417,7 @@ def create_sources(impl_configs: list[ImplConfig], num_impl_files=8):
         # For now we we can just use the first accumulator type seen since
         # the tensor core shapes/layouts don't vary based on accumulator
         # type so we can generate less code this way
-        return (prepack_type.a, prepack_type.b_num_bits, prepack_type.convert)
+        return prepack_type.a, prepack_type.b_num_bits, prepack_type.convert
 
     unique_prepack_types = []
     prepack_types_seen = set()

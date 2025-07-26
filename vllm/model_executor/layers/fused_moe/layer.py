@@ -589,7 +589,7 @@ def determine_expert_map(
         """
     assert ep_size > 0
     if ep_size == 1:
-        return (global_num_experts, None)
+        return global_num_experts, None
 
     # Distribute experts as evenly as possible to each rank.
     base_experts = global_num_experts // ep_size
@@ -605,7 +605,7 @@ def determine_expert_map(
     start_idx = ep_rank * base_experts + min(ep_rank, remainder)
     expert_map[start_idx:start_idx + local_num_experts] = torch.arange(
         0, local_num_experts, dtype=torch.int32)
-    return (local_num_experts, expert_map)
+    return local_num_experts, expert_map
 
 
 class FusedMoE(torch.nn.Module):

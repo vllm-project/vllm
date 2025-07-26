@@ -1723,7 +1723,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace1 = (M, topk, max(N // 2, K))
         workspace2 = (M, topk, max(N, K))
         output = (M, K)
-        return (workspace1, workspace2, output, a.dtype)
+        return workspace1, workspace2, output, a.dtype
 
     def apply(
         self,

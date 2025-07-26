@@ -361,11 +361,11 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
         if temperature == 0.0:
             # Enable greedy sampling on zero temperature
-            return (1, 1.0, 1.0)
+            return 1, 1.0, 1.0
         if top_k < 1 or top_k > self._MAX_NEURON_SAMPLING_TOP_K:
             top_k = self._MAX_NEURON_SAMPLING_TOP_K
 
-        return (top_k, top_p, temperature)
+        return top_k, top_p, temperature
 
     @torch.inference_mode()
     def execute_model(

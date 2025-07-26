@@ -66,7 +66,7 @@ class FlexAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> tuple[int, ...]:
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        return 2, num_blocks, block_size, num_kv_heads, head_size
 
     @staticmethod
     def get_builder_cls() -> type["FlexAttentionMetadataBuilder"]:

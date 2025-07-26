@@ -58,7 +58,7 @@ class DifferentialFlashAttentionBackend(AttentionBackend):
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         assert num_kv_heads % 2 == 0, "num_kv_heads must be divisible by 2"
-        return (2, 2, num_blocks, block_size, num_kv_heads // 2, head_size)
+        return 2, 2, num_blocks, block_size, num_kv_heads // 2, head_size
 
     @staticmethod
     def get_name() -> str:

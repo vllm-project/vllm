@@ -102,7 +102,7 @@ def find_all_indices(string: str, substring: str) -> list[int]:
 # JSONDecoder.raw_decode doesn't support partial JSON
 def partial_json_loads(input_str: str, flags: Allow) -> tuple[Any, int]:
     try:
-        return (partial_json_parser.loads(input_str, flags), len(input_str))
+        return partial_json_parser.loads(input_str, flags), len(input_str)
     except JSONDecodeError as e:
         if "Extra data" in e.msg:
             dec = JSONDecoder()

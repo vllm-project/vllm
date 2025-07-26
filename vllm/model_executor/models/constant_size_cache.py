@@ -53,7 +53,7 @@ class ConstantSizeCache(ABC):
             cache_tensors, state_indices_tensor = kwargs[
                 "seqlen_agnostic_capture_inputs"]
 
-        return (cache_tensors, state_indices_tensor)
+        return cache_tensors, state_indices_tensor
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         """
@@ -87,7 +87,7 @@ class ConstantSizeCache(ABC):
         state_indices_tensor = torch.as_tensor([PAD_SLOT_ID] * batch_size,
                                                dtype=torch.int32,
                                                device="cuda")
-        return (self.cache, state_indices_tensor)
+        return self.cache, state_indices_tensor
 
     def _assign_seq_id_to_cache_index(self, cur_rid: str, seq_id: int,
                                       finished_requests_ids) -> int:

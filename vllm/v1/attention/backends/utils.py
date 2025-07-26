@@ -437,7 +437,7 @@ def split_decodes_and_prefills(
     num_prefills = num_reqs - num_decodes
     num_decode_tokens = query_start_loc[first_prefill].item()
     num_prefill_tokens = num_tokens - num_decode_tokens
-    return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
+    return num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens
 
 
 def reorder_batch_to_split_decodes_and_prefills(

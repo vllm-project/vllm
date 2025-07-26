@@ -535,7 +535,7 @@ class _ModelRegistry:
         for arch in architectures:
             model_info = self._try_inspect_model_cls(arch)
             if model_info is not None:
-                return (model_info, arch)
+                return model_info, arch
 
         return self._raise_for_unsupported(architectures)
 
@@ -548,7 +548,7 @@ class _ModelRegistry:
         for arch in architectures:
             model_cls = self._try_load_model_cls(arch)
             if model_cls is not None:
-                return (model_cls, arch)
+                return model_cls, arch
 
         return self._raise_for_unsupported(architectures)
 
