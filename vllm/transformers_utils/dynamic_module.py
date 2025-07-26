@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from typing import Optional, Union
+from unittest.mock import patch
 
 from transformers.dynamic_module_utils import get_cached_module_file
 
 
-def get_transformers_dynamic_module(
+def get_dynamic_module_file(
     class_reference: str,
     pretrained_model_name_or_path: str,
     cache_dir: Optional[Union[str, os.PathLike]] = None,
@@ -19,10 +20,11 @@ def get_transformers_dynamic_module(
     repo_type: Optional[str] = None,
     code_revision: Optional[str] = None,
     **kwargs,
-):
+) -> str:
     """
     As [transformers.dynamic_module_utils.get_class_from_dynamic_module][],
-    but does not open the module to avoid unnecessary import errors.
+    but only makes sure that the module has been downloaded without checking
+    imports within the module.
     """
     if "--" in class_reference:
         repo_id, class_reference = class_reference.split("--")
@@ -34,15 +36,17 @@ def get_transformers_dynamic_module(
     if code_revision is None and pretrained_model_name_or_path == repo_id:
         code_revision = revision
 
-    return get_cached_module_file(
-        repo_id,
-        module_file + ".py",
-        cache_dir=cache_dir,
-        force_download=force_download,
-        resume_download=resume_download,
-        proxies=proxies,
-        token=token,
-        revision=code_revision,
-        local_files_only=local_files_only,
-        repo_type=repo_type,
-    )
+    with patch("transformers.dynamic_module_utils.check_imports",
+               lambda _: []):
+        return get_cached_module_file(
+            repo_id,
+            module_file + ".py",
+            cache_dir=cache_dir,
+            force_download=force_download,
+            resume_download=resume_download,
+            proxies=proxies,
+            token=token,
+            revision=code_revision,
+            local_files_only=local_files_only,
+            repo_type=repo_type,
+        )
