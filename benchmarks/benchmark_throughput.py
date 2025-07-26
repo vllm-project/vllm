@@ -15,6 +15,7 @@ import torch
 import uvloop
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
+from typing_extensions import deprecated
 
 from benchmark_dataset import (
     AIMODataset,
@@ -382,6 +383,10 @@ def get_requests(args, tokenizer):
     return dataset_cls(**common_kwargs).sample(**sample_kwargs)
 
 
+@deprecated(
+    "benchmark_throughput.py is deprecated and will be removed in a "
+    "future version. Please use 'vllm bench throughput' instead.",
+)
 def main(args: argparse.Namespace):
     if args.seed is None:
         args.seed = 0
