@@ -11,7 +11,7 @@ from typing import Literal, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import InternVLProcessor, PretrainedConfig
 from transformers.activations import ACT2FN
 from transformers.models.got_ocr2.image_processing_got_ocr2_fast import (
     GotOcr2ImageProcessorFast)
@@ -37,8 +37,6 @@ from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
-
-IMG_CONTEXT = '<IMG_CONTEXT>'
 
 
 class InternS1MultiModalProjector(nn.Module):
@@ -143,6 +141,9 @@ def get_interns1_target_ratios(
 class InternS1ProcessingInfo(BaseProcessingInfo):
     """Basic image-only ProcessingInfo for InternS1-style models."""
 
+    def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
+        return self.ctx.get_hf_processor(InternVLProcessor, **kwargs)
+
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
@@ -169,9 +170,10 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         image_processor = self.get_hf_processor().image_processor
         min_dynamic_patch = image_processor.min_patches
         max_dynamic_patch = image_processor.max_patches
+        # HF format's InternVL processor uses `crop_to_patches` which is
+        # equivalent to `use_thumbnail` in original format.
+        use_thumbnail = image_processor.crop_to_patches
         dynamic_image_size = True
-        if use_thumbnail is None:
-            use_thumbnail = True
         min_num, max_num = resolve_interns1_min_max_num(
             min_dynamic_patch,
             max_dynamic_patch,
@@ -223,8 +225,9 @@ class InternS1DummyInputsBuilder(BaseDummyInputsBuilder[InternS1ProcessingInfo]
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
+        image_token = self.info.get_hf_processor().image_token
 
-        return IMG_CONTEXT * num_images
+        return image_token * num_images
 
     def get_dummy_mm_data(
         self,
@@ -359,7 +362,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
         # transformers InternVLProcessor uses <IMG_CONTEXT> as the seperator
         # refer to https://github.com/huggingface/transformers/blob/f90de364c2484c7c325bbe05befdcf487bd75b63/src/transformers/models/internvl/processing_internvl.py#L116
         if modality.startswith("image"):
-            return IMG_CONTEXT
+            return '<IMG_CONTEXT>'
         if modality.startswith("video"):
             return "<video>"
 
