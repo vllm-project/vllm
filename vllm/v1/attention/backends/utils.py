@@ -59,6 +59,8 @@ class CommonAttentionMetadata:
     block_table_tensor: torch.Tensor
     slot_mapping: torch.Tensor
 
+    causal: bool = True
+
 
 M = TypeVar("M")
 
@@ -395,6 +397,7 @@ def make_local_attention_virtual_batches(
         max_query_len=seqlens_q_local.max(),
         block_table_tensor=block_table_local,
         slot_mapping=common_attn_metadata.slot_mapping,
+        causal=True,
     )
 
 

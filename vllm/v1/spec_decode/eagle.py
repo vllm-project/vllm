@@ -330,6 +330,7 @@ class EagleProposer:
             max_query_len=new_query_len_per_req.max().item(),
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[token_indices],
+            causal=True,
         )
 
         return spec_common_attn_metadata, token_indices
