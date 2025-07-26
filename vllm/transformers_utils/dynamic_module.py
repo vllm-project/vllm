@@ -8,7 +8,7 @@ from transformers.dynamic_module_utils import get_cached_module_file
 
 def get_transformers_dynamic_module(
     class_reference: str,
-    pretrained_model_name_or_path: Union[str, os.PathLike],
+    pretrained_model_name_or_path: str,
     cache_dir: Optional[Union[str, os.PathLike]] = None,
     force_download: bool = False,
     resume_download: Optional[bool] = None,
