@@ -156,8 +156,16 @@ class SharedStorageConnector(KVConnectorBase_V1):
             logger.info("Inject KV cache of %d tokens to the paged memory",
                         len(request.slot_mapping))
             for layer_name in forward_context.no_compile_layers:
-                attn_layer = forward_context.no_compile_layers[layer_name]
-                kv_cache_layer = attn_layer.kv_cache[\
+                layer = forward_context.no_compile_layers[layer_name]
+
+                # Only process layers that have kv_cache
+                # attribute (attention layers) Skip non-attention
+                # layers like FusedMoE/MLP etc.
+                kv_cache_attr = getattr(layer, 'kv_cache', None)
+                if kv_cache_attr is None:
+                    continue
+
+                kv_cache_layer = kv_cache_attr[ \
                         forward_context.virtual_engine]
 
                 filename = self._generate_filename_debug(
