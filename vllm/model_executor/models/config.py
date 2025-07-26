@@ -254,7 +254,9 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             use_mla=model_config.use_mla).page_size_bytes
 
         model_cls, _ = ModelRegistry.resolve_model_cls(
-            model_config.architecture)
+            model_config.architecture,
+            model_config=model_config,
+        )
 
         # get mamba page size
         mamba_page_size = MambaSpec(

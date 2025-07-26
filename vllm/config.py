@@ -796,8 +796,8 @@ class ModelConfig:
         model = self.model
         revision = self.revision
 
-        from transformers.dynamic_module_utils import (
-            get_class_from_dynamic_module)
+        from vllm.transformers_utils.dynamic_module import (
+            get_transformers_dynamic_module)
 
         auto_map: dict[str, str] = getattr(self.hf_config, "auto_map",
                                            None) or dict()
@@ -810,10 +810,11 @@ class ModelConfig:
         #     "AutoModelFor<Task>": "<your-repo-name>--<config-name>",
         # },
         auto_modules = {
-            name: get_class_from_dynamic_module(module,
-                                                model,
-                                                revision=revision)
+            name: get_transformers_dynamic_module(module,
+                                                  model,
+                                                  revision=revision)
             for name, module in sorted(auto_map.items(), key=lambda x: x[0])
+            if "." in module  # Ignore entries that are improperly formatted
         }
 
         return auto_map, auto_modules
@@ -1678,7 +1679,11 @@ class ModelConfig:
                 or self.convert_type == "classify")
 
     @cached_property
-    def model_supports_multimodal_raw_input(self):
+    def is_pp_supported(self) -> bool:
+        return self.registry.is_pp_supported_model(self.architectures, self)
+
+    @cached_property
+    def is_multimodal_raw_input_supported(self):
         return self.registry.supports_multimodal_raw_input(
             self.architectures, self)
 

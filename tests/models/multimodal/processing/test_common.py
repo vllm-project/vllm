@@ -52,13 +52,10 @@ def _test_processing_correctness(
 
     model_config = ModelConfig(
         model_id,
-        runner="auto",
         tokenizer=model_info.tokenizer or model_id,
         tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
-        seed=0,
-        dtype="auto",
-        revision=None,
         hf_overrides=model_info.hf_overrides,
     )
 

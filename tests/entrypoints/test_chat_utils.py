@@ -1143,6 +1143,7 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
         model,
         tokenizer=model_info.tokenizer or model,
         tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
     )
@@ -1198,6 +1199,7 @@ def test_resolve_content_format_hf_defined(model, expected_format):
         model,
         tokenizer=model_info.tokenizer or model,
         tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
     )
@@ -1257,6 +1259,7 @@ def test_resolve_content_format_fallbacks(model, expected_format):
         model,
         tokenizer=model_info.tokenizer or model,
         tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
     )

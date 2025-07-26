@@ -283,6 +283,7 @@ def build_model_context(
         runner=runner,
         tokenizer=model_info.tokenizer or model_id,
         tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         dtype=dtype,
         seed=0,

@@ -499,9 +499,28 @@ class _ModelRegistry:
         if architecture in _TRANSFORMERS_BACKEND_MODELS:
             return architecture
 
-        auto_map, auto_modules = model_config._resolve_transformers_backend()
-
         import transformers
+        from transformers.dynamic_module_utils import (
+            get_class_from_dynamic_module)
+
+        auto_map: dict[str, str] = getattr(model_config.hf_config, "auto_map",
+                                           None) or dict()
+        # Make sure that config class is always initialized before model class,
+        # otherwise the model class won't be able to access the config class,
+        # the expected auto_map should have correct order like:
+        # "auto_map": {
+        #     "AutoConfig": "<your-repo-name>--<config-name>",
+        #     "AutoModel": "<your-repo-name>--<config-name>",
+        #     "AutoModelFor<Task>": "<your-repo-name>--<config-name>",
+        # },
+        auto_modules = {
+            name:
+            get_class_from_dynamic_module(module,
+                                          model_config.model,
+                                          revision=model_config.revision)
+            for name, module in sorted(auto_map.items(), key=lambda x: x[0])
+            if "." in module  # Ignore entries that are improperly formatted
+        }
 
         model_module = getattr(transformers, architecture, None)
 
