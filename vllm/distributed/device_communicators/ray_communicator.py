@@ -55,10 +55,9 @@ class RayPPCommunicator(Communicator):
 
         if rank is not None:
             # Rank is not None, this is Ray worker
-            assert ray.get_gpu_ids(
-            ), "RayCudaCommunicator has no GPUs assigned"
+            assert ray.get_gpu_ids(), "RayPPCommunicator has no GPUs assigned"
             assert cuda_stream is not None, (
-                "RayCudaCommunicator must specify cuda_stream")
+                "RayPPCommunicator must specify cuda_stream")
 
             self._comm = get_pp_group().device_communicator
             assert self._comm.pynccl_comm is not None, (
@@ -106,7 +105,7 @@ class RayPPCommunicator(Communicator):
         """
         Hash an actor handle to a 32-bit integer.
         """
-        return hash(actor._ray_actor_id) % (2**31)
+        return hash(actor._actor_id) % (2**31)
 
     def initialize(self, rank: int) -> None:
         # No additional initialization is needed.
@@ -138,7 +137,7 @@ class RayPPCommunicator(Communicator):
 
     def get_world_size(self) -> int:
         """
-        Return the number of ranks in the RayCudaCommunicator group.
+        Return the number of ranks in the RayPPCommunicator group.
         """
         return self._world_size
 
@@ -159,7 +158,7 @@ class RayPPCommunicator(Communicator):
             peer_rank: The rank of the actor to send to.
         """
         if self._closed:
-            raise RayChannelError("RayCudaCommunicator has been destroyed.")
+            raise RayChannelError("RayPPCommunicator has been destroyed.")
 
         # We call _comm.pynccl_comm.send() instead of _comm.send() to be
         # able to pass in the CUDA stream.
@@ -186,9 +185,9 @@ class RayPPCommunicator(Communicator):
             allocator: The allocator to use to create the received tensor.
         """
         if self._closed:
-            raise RayChannelError("RayCudaCommunicator has been destroyed.")
+            raise RayChannelError("RayPPCommunicator has been destroyed.")
         assert allocator is not None, (
-            "RayCudaCommunicator requires a tensor allocator")
+            "RayPPCommunicator requires a tensor allocator")
         buf = allocator(shape, dtype)
 
         # We call _comm.pynccl_comm.recv() instead of _comm.recv() to be
@@ -203,7 +202,7 @@ class RayPPCommunicator(Communicator):
         self._cuda_stream.synchronize()
 
         if self._closed:
-            raise RayChannelError("RayCudaCommunicator has been destroyed.")
+            raise RayChannelError("RayPPCommunicator has been destroyed.")
         return buf
 
     def allgather(
