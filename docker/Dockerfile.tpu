@@ -1,4 +1,4 @@
-ARG NIGHTLY_DATE="20250714"
+ARG NIGHTLY_DATE="20250724"
 ARG BASE_IMAGE="us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.12_tpuvm_$NIGHTLY_DATE"
 
 FROM $BASE_IMAGE
