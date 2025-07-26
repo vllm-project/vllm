@@ -301,9 +301,11 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
     return config
 
 
-def maybe_override_with_speculators_target_model(model: str, tokenizer: str,
-                                                 revision: str,
-                                                 trust_remote_code: bool):
+def maybe_override_with_speculators_target_model(
+        model: str,
+        tokenizer: str,
+        trust_remote_code: bool,
+        revision: Optional[str] = None):
     """
     If running a speculators config, override running model with target model
     """
