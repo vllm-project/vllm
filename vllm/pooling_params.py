@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Optional, assert_never
+from typing import TYPE_CHECKING, Optional
 
 import msgspec
 
@@ -106,7 +106,7 @@ class PoolingParams(
             if self.softmax is None:
                 self.softmax = True
         else:
-            assert_never(self.task)
+            raise ValueError(f"Unknown pooling task: {self.task}")
 
         invalid_parameters = []
         for k in self.all_parameters:
@@ -118,10 +118,15 @@ class PoolingParams(
 
         if invalid_parameters:
             raise ValueError(
-                f"{self.task} only supports {legal_parameters} parameters, "
-                f"does not support {invalid_parameters} parameters")
+                f"Task {self.task} only supports {legal_parameters} "
+                f"parameters, does not support "
+                f"{invalid_parameters} parameters")
 
-    def merge_default_parameters(self, pooler_config: "PoolerConfig") -> None:
+    def merge_default_parameters(
+            self, pooler_config: Optional["PoolerConfig"]) -> None:
+        if pooler_config is None:
+            return
+
         for k in self.all_parameters:
             if getattr(self, k, None) is None:
                 setattr(self, k, getattr(pooler_config, k))
