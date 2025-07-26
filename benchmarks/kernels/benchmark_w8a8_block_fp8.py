@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any
 
 import torch
-import tqdm
+from tqdm import tqdm
 import triton
 
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
