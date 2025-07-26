@@ -1,0 +1,63 @@
+all:
+    just llama-scout-bf16 && \
+    just llama-scout-fp8 && \
+    just llama-maverick && \
+    just qwen-30b && \
+    just qwen-30b-fp8 && \
+    just qwen-235b && \
+    just deepseek-r1 
+
+
+llama-scout-bf16:
+  python3 benchmark_moe.py \
+    --model meta-llama/Llama-4-Scout-17B-16E-Instruct \
+    --tp-size 1 \
+    --ep-size 8 \
+    --tune
+
+llama-scout-fp8:
+  python3 benchmark_moe.py \
+    --model meta-llama/Llama-4-Scout-17B-16E-Instruct \
+    --tp-size 1 \
+    --ep-size 8 \
+    --dtype fp8_w8a8 \
+    --tune
+
+llama-maverick:
+  python3 benchmark_moe.py \
+    --model meta-llama/Llama-4-Maverick-17B-128E-Instruct \
+    --tp-size 1 \
+    --ep-size 8 \
+    --dtype fp8_w8a8 \
+    --tune
+
+qwen-30b:
+  python3 benchmark_moe.py \
+    --model Qwen/Qwen3-30B-A3B \
+    --tp-size 1 \
+    --ep-size 8 \
+    --tune
+
+qwen-30b-fp8:
+  python3 benchmark_moe.py \
+    --model Qwen/Qwen3-30B-A3B-FP8 \
+    --tp-size 1 \
+    --ep-size 8 \
+    --dtype fp8_w8a8 \
+    --tune
+
+qwen-235b:
+  python3 benchmark_moe.py \
+    --model Qwen/Qwen3-235B-A22B \
+    --tp-size 1 \
+    --ep-size 8 \
+    --dtype fp8_w8a8 \
+    --tune
+
+deepseek-r1:
+  python3 benchmark_moe.py \
+    --model deepseek-ai/DeepSeek-R1-0528 \
+    --tp-size 1 \
+    --ep-size 8 \
+    --dtype fp8_w8a8 \
+    --tune
