@@ -3,12 +3,12 @@
 import argparse
 import datetime
 import os
-import re
 from typing import Union
 
 import albumentations
 import numpy as np
 import rasterio
+import regex as re
 import torch
 from einops import rearrange
 from terratorch.datamodules import Sen1Floods11NonGeoDataModule

@@ -111,6 +111,12 @@ class EngineCore:
                 "compatibility may not be maintained.",
                 vllm_config.scheduler_config.scheduler_cls)
 
+        if len(kv_cache_config.kv_cache_groups) == 0:
+            # Encoder models without KV cache don't support
+            # chunked prefill. But do SSM models?
+            logger.info("Disabling chunked prefill for model without KVCache")
+            vllm_config.scheduler_config.chunked_prefill_enabled = False
+
         self.scheduler: SchedulerInterface = Scheduler(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,

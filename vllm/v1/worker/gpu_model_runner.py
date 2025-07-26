@@ -127,6 +127,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         self.is_multimodal_model = model_config.is_multimodal_model
         self.is_pooling_model = model_config.pooler_config is not None
+        self.is_encoder_only_model = False
         self.model_supports_multimodal_raw_input = (
             model_config.model_supports_multimodal_raw_input)
         self.max_model_len = model_config.max_model_len
@@ -736,6 +737,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         spec_decode_common_attn_metadata = None
 
         attn_metadata: dict[str, Any] = {}
+
+        # Prepare encoder attention metadata separately
+        # (encoder layers are not in KV cache groups)
+        if self.is_encoder_only_model:
+            common_attn_metadata, encoder_attn_metadata = \
+                self._build_encoder_only_attn_metadata(
+                scheduler_output)
+
+            # Add encoder attention metadata for all encoder layers
+            attention_layers = get_layers_from_vllm_config(
+                self.vllm_config, Attention)
+            for layer_name, attn_module in attention_layers.items():
+                if attn_module.attn_type == AttentionType.ENCODER_ONLY:
+                    attn_metadata[layer_name] = encoder_attn_metadata
+
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -761,6 +777,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 max_query_len=max_num_scheduled_tokens,
                 block_table_tensor=blk_table_tensor,
                 slot_mapping=slot_mapping,
+                causal=True,
             )
 
             if self.speculative_config and \
@@ -2103,7 +2120,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     block_table_tensor=self.input_batch.block_table[
                         kv_cache_group_id].get_device_tensor()[:num_reqs],
                     slot_mapping=self.input_batch.
-                    block_table[kv_cache_group_id].slot_mapping[:num_tokens])
+                    block_table[kv_cache_group_id].slot_mapping[:num_tokens],
+                    causal=True)
 
                 attn_metadata_i = self.attn_metadata_builders[
                     kv_cache_group_id].build_for_cudagraph_capture(
@@ -2467,6 +2485,49 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / (1 << 30))
 
+    def _initialize_single_attn_backend(
+        self, kv_cache_spec: KVCacheSpec
+    ) -> tuple[AttentionBackend, AttentionMetadataBuilder]:
+        if isinstance(kv_cache_spec, AttentionSpec):
+            attn_backend_i = get_attn_backend(
+                kv_cache_spec.head_size,
+                self.dtype,
+                kv_cache_spec.dtype,
+                kv_cache_spec.block_size,
+                self.model_config.is_attention_free,
+                use_mla=kv_cache_spec.use_mla,
+            )
+            if attn_backend_i is None:
+                error_msg = (f"Error with get_attn_backend: "
+                             f"{kv_cache_spec.head_size=}, "
+                             f"{self.dtype=}, {kv_cache_spec.dtype=}, "
+                             f"{kv_cache_spec.block_size=}, "
+                             f"{self.model_config.is_attention_free=}, "
+                             f"{kv_cache_spec.use_mla=}")
+                logger.error(error_msg)
+                raise NotImplementedError(
+                    "Non-Attention backend is not supported by V1 "
+                    "GPUModelRunner.")
+        elif isinstance(kv_cache_spec, MambaSpec):
+            attn_backend_i = Mamba2AttentionBackend
+        else:
+            raise ValueError(
+                f"Unknown KV cache spec type: {type(kv_cache_spec)}")
+
+        attn_metadata_builder_i = attn_backend_i.get_builder_cls()(
+            kv_cache_spec,
+            self.vllm_config,
+            self.device,
+        )
+
+        if (self.full_cuda_graph
+                and not attn_metadata_builder_i.full_cudagraph_supported):
+            raise ValueError(
+                f"Full CUDAGraph not supported for "
+                f"{attn_backend_i.__name__}. Turn off CompilationConfig."
+                f"full_cuda_graph or use a different attention backend.")
+        return attn_backend_i, attn_metadata_builder_i
+
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize the attention backends and attention metadata builders.
@@ -2477,47 +2538,44 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for i, kv_cache_group_spec in enumerate(
                 kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-            if isinstance(kv_cache_spec, AttentionSpec):
-                attn_backend_i = get_attn_backend(
-                    kv_cache_spec.head_size,
-                    self.dtype,
-                    kv_cache_spec.dtype,
-                    kv_cache_spec.block_size,
-                    self.model_config.is_attention_free,
-                    use_mla=kv_cache_spec.use_mla,
-                )
-                if attn_backend_i is None:
-                    error_msg = (f"Error with get_attn_backend: "
-                                 f"{kv_cache_spec.head_size=}, "
-                                 f"{self.dtype=}, {kv_cache_spec.dtype=}, "
-                                 f"{kv_cache_spec.block_size=}, "
-                                 f"{self.model_config.is_attention_free=}, "
-                                 f"{kv_cache_spec.use_mla=}")
-                    logger.error(error_msg)
-                    raise NotImplementedError(
-                        "Non-Attention backend is not supported by V1 "
-                        "GPUModelRunner.")
-            elif isinstance(kv_cache_spec, MambaSpec):
-                attn_backend_i = Mamba2AttentionBackend
-            else:
-                raise ValueError(
-                    f"Unknown KV cache spec type: {type(kv_cache_spec)}")
 
-            attn_metadata_builder_i = attn_backend_i.get_builder_cls()(
-                kv_cache_spec,
-                self.vllm_config,
-                self.device,
-            )
-
-            if (self.full_cuda_graph
-                    and not attn_metadata_builder_i.full_cudagraph_supported):
-                raise ValueError(
-                    f"Full CUDAGraph not supported for "
-                    f"{attn_backend_i.__name__}. Turn off CompilationConfig."
-                    f"full_cuda_graph or use a different attention backend.")
-
+            attn_backend_i, attn_metadata_builder_i = \
+                self._initialize_single_attn_backend(kv_cache_spec)
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)
+
+        if len(self.attn_backends) > 0:
+            return
+
+        # Check if model is encoder-only
+        block_size = self.vllm_config.cache_config.block_size
+        use_mla = self.vllm_config.model_config.use_mla
+        attn_specs = list[AttentionSpec]()
+        attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+        for attn_module in attn_layers.values():
+
+            if attn_module.attn_type == AttentionType.ENCODER_ONLY:
+                assert attn_module.sliding_window is None, "Sliding "
+                "window attention is not supported for encoder-only models"
+
+                attn_specs.append(
+                    FullAttentionSpec(block_size=block_size,
+                                      num_kv_heads=attn_module.num_kv_heads,
+                                      head_size=attn_module.head_size,
+                                      dtype=self.kv_cache_dtype,
+                                      use_mla=use_mla))
+            else:
+                raise ValueError("Expected only encoder-only layers")
+
+        if len(attn_specs) > 0:
+            assert len(attn_specs) == len(attn_layers), \
+                "All or none of the layers are expected to be encoder-only"
+
+            attn_backend, attn_metadata_builder = \
+                self._initialize_single_attn_backend(attn_specs[0])
+            self.attn_backends.append(attn_backend)
+            self.attn_metadata_builders.append(attn_metadata_builder)
+            self.is_encoder_only_model = True
 
     def may_reinitialize_input_batch(self,
                                      kv_cache_config: KVCacheConfig) -> None:
@@ -2842,3 +2900,53 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     page_size_padded=page_size_padded)
 
         return kv_cache_spec
+
+    def _build_encoder_only_attn_metadata(
+            self, scheduler_output: "SchedulerOutput") -> \
+                tuple[CommonAttentionMetadata, Any]:
+        """Prepare encoder attention metadata for encoder-only models.
+
+        Args:
+            scheduler_output: Scheduler output
+
+        Returns:
+            dict[str, Any]: Encoder attention metadata
+        """
+        num_reqs = self.input_batch.num_reqs
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+        # Get the number of scheduled tokens for each request.
+        req_ids = self.input_batch.req_ids
+        tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+        max_num_scheduled_tokens = max(tokens)
+
+        # Use the first attention metadata builder
+        # to create encoder attention metadata
+        builder = self.attn_metadata_builders[0]
+
+        dummy_block_table = torch.zeros((num_reqs, 1),
+                                        dtype=torch.int32,
+                                        device=self.device)
+        dummy_slot_mapping = torch.zeros((total_num_scheduled_tokens, ),
+                                         dtype=torch.int32,
+                                         device=self.device)
+
+        common_metadata = CommonAttentionMetadata(
+            query_start_loc=self.query_start_loc[:num_reqs + 1],
+            query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
+            seq_lens=self.seq_lens[:num_reqs],
+            seq_lens_cpu=self.seq_lens_cpu[:num_reqs],
+            num_computed_tokens_cpu=self.input_batch.
+            num_computed_tokens_cpu_tensor[:num_reqs],
+            num_reqs=num_reqs,
+            num_actual_tokens=total_num_scheduled_tokens,
+            max_query_len=max_num_scheduled_tokens,
+            block_table_tensor=dummy_block_table,
+            slot_mapping=dummy_slot_mapping,
+            causal=False,
+        )
+
+        return common_metadata, builder.build(
+            common_prefix_len=0,  # No cascade for encoder
+            common_attn_metadata=common_metadata,
+        )
