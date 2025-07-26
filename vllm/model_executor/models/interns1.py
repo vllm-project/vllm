@@ -46,9 +46,6 @@ IMG_START = '<img>'
 IMG_END = '</img>'
 IMG_CONTEXT = '<IMG_CONTEXT>'
 
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
-
 
 class InternS1MultiModalProjector(nn.Module):
 
@@ -327,6 +324,9 @@ class BaseInternS1MultiModalProcessor(BaseMultiModalProcessor[_I]):
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        img_context_token = hf_processor.image_token
+        start_image_token = hf_processor.start_image_token
+        end_image_token = hf_processor.end_image_token
 
         def get_replacement(item_idx: int):
             images = mm_items.get_items(
@@ -342,14 +342,15 @@ class BaseInternS1MultiModalProcessor(BaseMultiModalProcessor[_I]):
                     processor=hf_processor.image_processor,
                 )
 
-            repl_features = IMG_CONTEXT * feature_size
-            repl_full = IMG_START + repl_features + IMG_END
-            return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
+            repl_features = img_context_token * feature_size
+            repl_full = start_image_token + repl_features + end_image_token
+            return PromptUpdateDetails.select_text(repl_full,
+                                                   img_context_token)
 
         return [
             PromptReplacement(
                 modality="image",
-                target=IMG_CONTEXT,
+                target=img_context_token,
                 replacement=get_replacement,
             )
         ]
