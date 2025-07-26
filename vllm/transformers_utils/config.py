@@ -574,13 +574,11 @@ def get_pooling_config_name(pooling_name: str) -> Union[str, None]:
     supported_pooling_types = ['LAST', 'ALL', 'CLS', 'STEP', 'MEAN']
     pooling_type_name = pooling_name.upper()
 
-    try:
-        if pooling_type_name in supported_pooling_types:
-            return pooling_type_name
-    except NotImplementedError as e:
-        logger.debug("Pooling type not supported", e)
-        return None
-    return None
+    if pooling_type_name in supported_pooling_types:
+        return pooling_type_name
+
+    raise NotImplementedError(
+        f"Pooling type {pooling_type_name} not supported")
 
 
 @cache
