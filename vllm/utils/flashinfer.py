@@ -82,7 +82,8 @@ autotune = _lazy_import_wrapper(
 @functools.cache
 def has_flashinfer_moe() -> bool:
     """Return ``True`` if FlashInfer MoE module is available."""
-    return importlib.util.find_spec("flashinfer.fused_moe") is not None
+    return has_flashinfer() and importlib.util.find_spec(
+        "flashinfer.fused_moe") is not None
 
 
 @functools.cache
