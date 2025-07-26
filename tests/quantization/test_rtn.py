@@ -8,7 +8,10 @@ import pytest
 
 from tests.quantization.utils import is_quant_method_supported
 
-MODELS = ["microsoft/Phi-3-mini-4k-instruct"]
+MODELS = [
+    "microsoft/Phi-3-mini-4k-instruct",  # dense model
+    "ai21labs/Jamba-tiny-dev",  # MoE model
+]
 
 
 @pytest.mark.skipif(not is_quant_method_supported("rtn"),
