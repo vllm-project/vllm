@@ -414,6 +414,10 @@ class NullBlock(Block):
     def prev_block(self):
         return self._proxy.prev_block
 
+    @prev_block.setter
+    def prev_block(self, value: Optional[Block]) -> None:
+        raise ValueError("null block should not be modified")
+
     @property
     def extra_hash(self):
         return None
