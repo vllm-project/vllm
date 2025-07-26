@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, ClassVar, Optional
 
 import torch
 
@@ -87,6 +87,8 @@ class Mamba2AttentionMetadata:
 class Mamba2AttentionMetadataBuilder(
         AttentionMetadataBuilder[Mamba2AttentionMetadata]):
 
+    reorder_batch_threshold: ClassVar[int] = 1
+
     def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
                  device: torch.device):
         assert isinstance(kv_cache_spec, MambaSpec)
@@ -97,9 +99,10 @@ class Mamba2AttentionMetadataBuilder(
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
-        return reorder_batch_to_split_decodes_and_prefills(input_batch,
-                                                           scheduler_output,
-                                                           decode_threshold=1)
+        return reorder_batch_to_split_decodes_and_prefills(
+            input_batch,
+            scheduler_output,
+            decode_threshold=self.reorder_batch_threshold)
 
     def build(self,
               common_prefix_len: int,

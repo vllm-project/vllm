@@ -3,7 +3,7 @@
 """Attention layer with FlashAttention."""
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Optional
+from typing import ClassVar, Optional
 
 import torch
 from torch.nn.attention.flex_attention import (BlockMask, _mask_mod_signature,
@@ -257,6 +257,8 @@ class FlexAttentionMetadata:
 
 class FlexAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlexAttentionMetadata]):
+
+    reorder_batch_threshold: ClassVar[Optional[int]] = None
 
     def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
                  device: torch.device):
