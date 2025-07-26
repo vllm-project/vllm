@@ -472,7 +472,10 @@ class ModelConfig:
             # If we're not running the draft model, check for speculators config
             # If speculators config, set model / tokenizer to be target model
             self.model, self.tokenizer = maybe_override_with_speculators_target_model(  # noqa: E501
-                model=self.model, tokenizer=self.tokenizer)
+                model=self.model,
+                tokenizer=self.tokenizer,
+                revision=self.revision,
+                trust_remote_code=self.trust_remote_code)
 
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(self.model,

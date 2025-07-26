@@ -301,12 +301,16 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
     return config
 
 
-def maybe_override_with_speculators_target_model(model: str, tokenizer: str):
+def maybe_override_with_speculators_target_model(model: str, tokenizer: str,
+                                                 revision: str,
+                                                 trust_remote_code: bool):
     """
     If running a speculators config, override running model with target model
     """
     config_dict, _ = PretrainedConfig.get_config_dict(
         model,
+        revision=revision,
+        trust_remote_code=trust_remote_code,
         token=_get_hf_token(),
     )
     spec_config = config_dict.get("speculators_config")
