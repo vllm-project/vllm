@@ -38,6 +38,7 @@ from typing import Any, Literal, Optional
 import numpy as np
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
+from typing_extensions import deprecated
 
 from backend_request_func import (
     ASYNC_REQUEST_FUNCS,
@@ -593,6 +594,10 @@ def save_to_pytorch_benchmark_format(
         write_to_json(pt_file, pt_records)
 
 
+@deprecated(
+    "benchmark_serving.py is deprecated and will be removed in a future "
+    "version. Please use 'vllm bench serve' instead.",
+)
 def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)

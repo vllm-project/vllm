@@ -77,7 +77,7 @@ done
 echo "run benchmark test..."
 echo "logging to $BM_LOG"
 echo
-python benchmarks/benchmark_serving.py \
+vllm bench serve \
     --backend vllm \
     --model $MODEL  \
     --dataset-name sonnet \

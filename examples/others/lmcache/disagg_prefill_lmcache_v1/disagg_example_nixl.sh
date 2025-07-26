@@ -122,7 +122,7 @@ main() {
 
     # begin benchmark
     cd ../../../../benchmarks/
-    python3 benchmark_serving.py --port 9000 --seed $(date +%s) \
+    vllm bench serve --port 9000 --seed $(date +%s) \
         --model meta-llama/Llama-3.1-8B-Instruct \
         --dataset-name random --random-input-len 7500 --random-output-len 200 \
         --num-prompts 200 --burstiness 100 --request-rate 3.6 | tee benchmark.log
