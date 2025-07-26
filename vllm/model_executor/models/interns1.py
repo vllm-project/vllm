@@ -6,9 +6,8 @@
 # Copyright (c) 2025 Shanghai AI Lab
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
-from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Literal, Optional, TypedDict, TypeVar, Union
+from typing import Literal, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -16,7 +15,6 @@ from transformers import PretrainedConfig
 from transformers.activations import ACT2FN
 from transformers.models.got_ocr2.image_processing_got_ocr2_fast import (
     GotOcr2ImageProcessorFast)
-from transformers.models.internvl import InternVLProcessor
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -33,8 +31,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processor import (
-    cached_image_processor_from_config)
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
@@ -42,8 +38,6 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
 
-IMG_START = '<img>'
-IMG_END = '</img>'
 IMG_CONTEXT = '<IMG_CONTEXT>'
 
 
@@ -146,19 +140,8 @@ def get_interns1_target_ratios(
     return sorted(target_ratios, key=lambda x: x[0] * x[1])
 
 
-class BaseInternS1ProcessingInfo(BaseProcessingInfo):
+class InternS1ProcessingInfo(BaseProcessingInfo):
     """Basic image-only ProcessingInfo for InternS1-style models."""
-
-    @abstractmethod
-    def get_hf_processor(
-        self,
-        *,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        **kwargs: object,
-    ):
-        raise NotImplementedError
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -218,8 +201,8 @@ class BaseInternS1ProcessingInfo(BaseProcessingInfo):
                 largest_feature_pinpoint = ImageSize(width=width,
                                                      height=height)
 
-        if largest_feature_size == 0 or largest_feature_pinpoint is None:
-            raise ValueError("Cannot have a largest feature size of 0!")
+        assert not (largest_feature_size == 0 or largest_feature_pinpoint
+                    is None), ("Cannot have a largest feature size of 0!")
 
         return largest_feature_pinpoint
 
@@ -234,10 +217,8 @@ class BaseInternS1ProcessingInfo(BaseProcessingInfo):
         )
 
 
-_I = TypeVar("_I", bound=BaseInternS1ProcessingInfo)
-
-
-class BaseInternS1DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
+class InternS1DummyInputsBuilder(BaseDummyInputsBuilder[InternS1ProcessingInfo]
+                                 ):
     """Basic image-only DummyInputsBuilder for InternS1-style models."""
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
@@ -262,7 +243,8 @@ class BaseInternS1DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         }
 
 
-class BaseInternS1MultiModalProcessor(BaseMultiModalProcessor[_I]):
+class InternS1MultiModalProcessor(
+        BaseMultiModalProcessor[InternS1ProcessingInfo]):
     """ Basic image-only MultiModalProcessor for InternS1-style models."""
 
     def _call_hf_processor(
@@ -354,194 +336,6 @@ class BaseInternS1MultiModalProcessor(BaseMultiModalProcessor[_I]):
                 replacement=get_replacement,
             )
         ]
-
-
-class InternS1ProcessingInfo(BaseInternS1ProcessingInfo):
-    """InternS1 ProcessingInfo extended for video processing"""
-
-    @property
-    def image_token_id(self) -> int:
-        processor = self.get_hf_processor()
-        return processor.image_token_id
-
-    @property
-    def video_token_id(self) -> Optional[int]:
-        processor = self.get_hf_processor()
-        if processor.video_token is None:
-            return None
-        return processor.tokenizer.get_vocab().get(processor.video_token, None)
-
-    @property
-    def supports_video(self) -> bool:
-        # InternVLProcessor uses the same media placeholder for both images
-        # and videos, making it challenging to adapt `_get_mm_fields_config`
-        # refer to https://github.com/huggingface/transformers/blob/e3760501b0f0ce6be6fe31f0dab15d0e5d2c5260/src/transformers/models/internvl/processing_internvl.py#L92  # noqa: E501
-        return False
-        # return self.video_token_id is not None
-
-    @property
-    def num_image_token(self) -> int:
-        hf_config = self.get_hf_config()
-        image_size: int = hf_config.vision_config.image_size[0]
-        patch_size: int = hf_config.vision_config.patch_size[0]
-        num_image_token = int(
-            (image_size // patch_size)**2 * (hf_config.downsample_ratio**2))
-        return num_image_token
-
-    def get_supported_mm_limits(self):
-        video_limit = {"video": None} if self.supports_video else {}
-        return {**super().get_supported_mm_limits(), **video_limit}
-
-    def get_video_token(self) -> Optional[str]:
-        return self.get_hf_processor().video_token
-
-    def get_num_frames_with_most_features(self, seq_len: int,
-                                          mm_counts: Mapping[str, int]) -> int:
-        max_images = mm_counts.get("image", 0)
-        max_videos = mm_counts.get("video", 0)
-
-        max_image_tokens = self.get_max_image_tokens() * max_images
-        max_total_frames = (seq_len - max_image_tokens) // self.num_image_token
-        max_frames_per_video = max_total_frames // max(max_videos, 1)
-
-        return max(max_frames_per_video, 1)
-
-    def get_image_processor(
-        self,
-        **kwargs: object,
-    ) -> GotOcr2ImageProcessorFast:
-        return cached_image_processor_from_config(self.ctx.model_config)
-
-    def get_video_processor(self, **kwargs: object):
-        from transformers import AutoVideoProcessor
-        return AutoVideoProcessor.from_pretrained(self.ctx.model_config.model,
-                                                  trust_remote_code=True)
-
-    def get_hf_processor(
-        self,
-        **kwargs: object,
-    ) -> InternVLProcessor:
-        return self.ctx.get_hf_processor(
-            InternVLProcessor,
-            image_processor=self.get_image_processor(),
-            video_processor=self.get_video_processor(),
-        )
-
-
-class InternS1DummyInputsBuilder(
-        BaseInternS1DummyInputsBuilder[InternS1ProcessingInfo]):
-    """InternS1 DummyInputsBuilder extended for video support"""
-
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        num_videos = mm_counts.get("video", 0)
-
-        return super().get_dummy_text(mm_counts) + "<video>" * num_videos
-
-    def get_dummy_mm_data(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> MultiModalDataDict:
-        dummy_image = super().get_dummy_mm_data(seq_len=seq_len,
-                                                mm_counts=mm_counts)
-        if self.info.supports_video:
-            config = self.info.get_hf_config()
-            height, width = config.vision_config.image_size
-            target_num_frames = \
-                self.info.get_num_frames_with_most_features(seq_len, mm_counts)
-            num_videos = mm_counts.get("video", 0)
-            dummy_video = {
-                "video":
-                self._get_dummy_videos(width=width,
-                                       height=height,
-                                       num_frames=target_num_frames,
-                                       num_videos=num_videos)
-            }
-        else:
-            dummy_video = {}
-        return {**dummy_image, **dummy_video}
-
-
-class InternS1MultiModalProcessor(
-        BaseInternS1MultiModalProcessor[InternS1ProcessingInfo]):
-    """InternS1 MultiModalProcessor extended for video support"""
-
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> Mapping[str, NestedTensors]:
-        processed_outputs = super()._call_hf_processor(prompt, mm_data,
-                                                       mm_kwargs, tok_kwargs)
-        if self.info.supports_video and (video_token_id :=
-                                         self.info.video_token_id) is not None:
-            processed_outputs["video_token_id"] = torch.tensor(video_token_id)
-        return processed_outputs
-
-    def _get_mm_fields_config(
-        self,
-        hf_inputs: Mapping[str, NestedTensors],
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> Mapping[str, MultiModalFieldConfig]:
-        image_fields = super()._get_mm_fields_config(hf_inputs,
-                                                     hf_processor_mm_kwargs)
-        if self.info.supports_video:
-            pixel_values = hf_inputs.get("pixel_values",
-                                         torch.empty(0, 0, 0, 0))
-            video_num_patches = torch.tensor([pixel_values.shape[0]])
-            video_fields = dict(
-                pixel_values=MultiModalFieldConfig.flat_from_sizes(
-                    "video", video_num_patches), )
-        else:
-            video_fields = {}
-
-        return image_fields | video_fields
-
-    def _get_prompt_updates(
-        self,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
-    ) -> Sequence[PromptUpdate]:
-        prompt_repl: list[PromptUpdate] = super()._get_prompt_updates(
-            mm_items, hf_processor_mm_kwargs, out_mm_kwargs)
-
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-
-        if "video_num_patches" in out_mm_kwargs:
-            video_num_patches = out_mm_kwargs["video_num_patches"]
-            assert isinstance(video_num_patches, torch.Tensor)
-            video_num_patches = video_num_patches.tolist()
-        else:
-            video_num_patches = []
-
-        def get_video_replacement(item_idx: int):
-            # feature_size = hf_processor.num_image_token
-            num_patches = video_num_patches[item_idx]
-            if num_patches is not None:
-                assert isinstance(num_patches, int)
-
-            video_context_token = hf_processor.video_token
-            repl_features = video_context_token * hf_processor.num_image_token
-            repl_features_with_sep = IMG_START + repl_features + IMG_END
-            # num_patches is equal to num_frames
-            repl_full = ''.join([
-                f'Frame{i+1}: {repl_features_with_sep}'
-                for i in range(num_patches)
-            ])
-            return PromptUpdateDetails.select_text(repl_full,
-                                                   video_context_token)
-
-        if self.info.supports_video:
-            prompt_repl.append(
-                PromptReplacement(
-                    modality="video",
-                    target="<video>",
-                    replacement=get_video_replacement,
-                ))
-        return prompt_repl
 
 
 @MULTIMODAL_REGISTRY.register_processor(
