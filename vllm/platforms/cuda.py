@@ -170,7 +170,7 @@ class CudaPlatformBase(Platform):
                             "CUTLASS_MLA_VLLM_V1 backend.")
 
         # lazy import to avoid circular import
-        from vllm.config import CUDAGraphMode
+        from vllm.config import CUDAGraphMode, CompilationLevel
 
         compilation_config = vllm_config.compilation_config
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
@@ -183,6 +183,8 @@ class CudaPlatformBase(Platform):
                 "compatible. Set the all_to_all backend to deepep_low_latency "
                 "to use those kernels instead.")
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            # also disable compilation because we enforce eager.
+            compilation_config.level = CompilationLevel.NO_COMPILATION
             if model_config is not None:
                 model_config.enforce_eager = True
 

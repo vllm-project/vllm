@@ -31,7 +31,8 @@ class PiecewiseBackend:
                  vllm_backend: VllmBackend):
         """
         The backend for piecewise compilation.
-        It mainly handles the compilation.
+        It mainly handles the compilation of static shapes and 
+        dispatching based on runtime shape.
 
         We will compile `self.graph` once for the general shape,
         and then compile for different shapes specified in

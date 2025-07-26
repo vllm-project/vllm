@@ -4294,6 +4294,11 @@ class CompilationConfig:
             func = __import__(module).__dict__[func_name]
             self.inductor_compile_config[k] = func if isinstance(
                 func, InductorPass) else CallableInductorPass(func)
+        
+        if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+            assert self.level == CompilationLevel.PIECEWISE, (
+                "compilation level should be CompilationLevel.PIECEWISE "
+                "when cudagraph_mode is CUDAGraphMode.PIECEWISE")
 
         if isinstance(self.pass_config, dict):
             self.pass_config = PassConfig(**self.pass_config)
@@ -4693,9 +4698,11 @@ class VllmConfig:
         if self.compilation_config.level is None:
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
-        # disable cudagraph if enforce eager execution
+        # disable compilation and cudagraph if enforce eager execution
         if self.model_config is not None and self.model_config.enforce_eager:
-            logger.info("Cudagraph is disabled under eager mode.")
+            logger.info("Compilation and cudagraph are both disabled under "
+                        "eager mode.")
+            self.compilation_config.level = CompilationLevel.NO_COMPILATION
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         self._set_cudagraph_sizes()

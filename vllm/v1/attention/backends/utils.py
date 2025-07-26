@@ -82,7 +82,7 @@ class AttentionCGSupport(enum.Enum):
 
 
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
-    # Does this backend/builder support CUDA Graphs for attention.
+    # Does this backend/builder support CUDA Graphs for attention (default: no).
     attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.NEVER
 

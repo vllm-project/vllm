@@ -27,8 +27,8 @@ class CudagraphDispatcher:
         }
 
         # Verify if correctly piecewise compilation for attention.
-        piecewise_compilation = not vllm_config.model_config.enforce_eager\
-            and self.compilation_config.level == CompilationLevel.PIECEWISE
+        piecewise_compilation = self.compilation_config.level ==\
+             CompilationLevel.PIECEWISE
         self.piecewise_attn_compilation = piecewise_compilation and\
             self.compilation_config.is_attention_splitting
 
@@ -40,9 +40,8 @@ class CudagraphDispatcher:
             f"Invalid cudagraph runtime mode: {runtime_mode}"
         self.cudagraph_keys[runtime_mode].add(batch_descriptor)
 
-    def initialize_cudagraph_keys(self, capture_mixed_batches: bool,
-                                  uniform_decode_query_len: int,
-                                  attn_cg_support: AttentionCGSupport):
+    def initialize_cudagraph_keys(self, create_mixed_batch_full_cg: bool,
+                                  uniform_decode_query_len: int):
         # This should be called only after attention backend is initialized.
 
         # Note: we create all valid keys possible for cudagraph but do not
@@ -53,26 +52,20 @@ class CudagraphDispatcher:
         # CompilationConfig.cudagraph_mode. In addition, if we allow lazy
         # capturing in future PR, some keys may never be triggered.
 
-        if self.compilation_config.level == CompilationLevel.PIECEWISE\
-                and len(self.compilation_config.splitting_ops)>0:
+        if self.piecewise_attn_compilation:
             # add piecewise cudagraph keys.
             for bs in self.compilation_config.cudagraph_capture_sizes:
                 self.add_cudagraph_key(
                     CUDAGraphMode.PIECEWISE,
-                    BatchDescriptor(num_tokens=bs, is_uniform=None))
+                    BatchDescriptor(num_tokens=bs, uniform_decode=False))
 
-        # if we need capture full cudagraph for mixed prefill-decode batches.
-        create_mixed_batch_full_cg = attn_cg_support in [
-                            AttentionCGSupport.ALWAYS_UNIFIED,
-                            AttentionCGSupport.ALWAYS_SEPARATE] and \
-                            capture_mixed_batches
         if self.cudagraph_mode == CUDAGraphMode.FULL:
             # full cudagraph for mix prefill-decode/general batches
             if create_mixed_batch_full_cg:
                 for bs in self.compilation_config.cudagraph_capture_sizes:
                     self.add_cudagraph_key(
                         CUDAGraphMode.FULL,
-                        BatchDescriptor(num_tokens=bs, is_uniform=False))
+                        BatchDescriptor(num_tokens=bs, uniform_decode=False))
 
             # always create full cudagraph for uniform batches if cudagraph
             # separate routine is enabled.
@@ -86,7 +79,7 @@ class CudagraphDispatcher:
                 for bs in cudagraph_capture_sizes_for_decode:
                     self.add_cudagraph_key(
                         CUDAGraphMode.FULL,
-                        BatchDescriptor(num_tokens=bs, is_uniform=True))
+                        BatchDescriptor(num_tokens=bs, uniform_decode=True))
         self.keys_initialized = True
 
     def dispatch(
@@ -98,24 +91,20 @@ class CudagraphDispatcher:
                                 "initialized. No cudagraph will be used.")
             return CUDAGraphMode.NONE, None
 
-        assert batch_descriptor.is_uniform is not None, \
-            "is_uniform is required for cudagraph dispatching."
-
-        # always treat is_uniform=False if cudagraph_separate_routine disabled.
-        if not self.compilation_config.cudagraph_separate_routine:
-            batch_descriptor = BatchDescriptor(
-                num_tokens=batch_descriptor.num_tokens, is_uniform=False)
-
         # check if key exists for full cudagraph
         if batch_descriptor in self.cudagraph_keys[CUDAGraphMode.FULL]:
             return CUDAGraphMode.FULL, batch_descriptor
 
-        # otherwise, check if key exists for more "general" piecewise cudagraph
-        new_batch_descriptor = BatchDescriptor(
-            num_tokens=batch_descriptor.num_tokens, is_uniform=None)
-        if new_batch_descriptor in self.cudagraph_keys[
+        # otherwise, check if non-uniform key exists
+        non_uniform_key = batch_descriptor.non_uniform
+        if non_uniform_key in self.cudagraph_keys[CUDAGraphMode.FULL]:
+            return CUDAGraphMode.FULL, non_uniform_key
+
+        # also check if non-uniform key exists for more "general" 
+        # piecewise cudagraph
+        if non_uniform_key in self.cudagraph_keys[
                 CUDAGraphMode.PIECEWISE]:
-            return CUDAGraphMode.PIECEWISE, new_batch_descriptor
+            return CUDAGraphMode.PIECEWISE, non_uniform_key
 
         # finally, just return no cudagraphs
         return CUDAGraphMode.NONE, None

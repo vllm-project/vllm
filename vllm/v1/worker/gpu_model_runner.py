@@ -229,8 +229,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cudagraph_batch_sizes = list(
             reversed(self.compilation_config.cudagraph_capture_sizes))
 
-        self.full_cuda_graph = self.cudagraph_mode == CUDAGraphMode.FULL
-
         # Cache the device properties.
         self._init_device_properties()
 
@@ -324,7 +322,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # full cudagraph for pure decode batches.
         self.capture_mixed_batches = self.cudagraph_mode != CUDAGraphMode.NONE
         self.no_piecewise_compilation = self.compilation_config.level != \
-            CompilationLevel.PIECEWISE or self.model_config.enforce_eager
+            CompilationLevel.PIECEWISE
 
         self.uniform_decode_query_len = 1 if not self.speculative_config else \
             1 + self.speculative_config.num_speculative_tokens
@@ -1448,12 +1446,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # compilation_config.cudagraph_separate_routine is True, this
         # flag helps to determine the correct cudagraph routine (optimized
         # for attention ops).
-        is_uniform = max_query_len == self.uniform_decode_query_len and \
+        uniform_decode = max_query_len == self.uniform_decode_query_len and \
             num_scheduled_tokens == self.input_batch.num_reqs*max_query_len
         cudagraph_runtime_mode, batch_descriptor = \
             self.cudagraph_dispatcher.dispatch(
                 BatchDescriptor(num_tokens=num_input_tokens,
-                                is_uniform=is_uniform))
+                                uniform_decode=uniform_decode))
         # sanity check, in case speculative decoding on uniform batch
         # is not supported with full cudagraph
         if cudagraph_runtime_mode == CUDAGraphMode.FULL:
@@ -2106,7 +2104,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens: int,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         force_attention: bool = False,
-        is_uniform: bool = False,
+        uniform_decode: bool = False,
         skip_eplb: bool = False,
         is_profile: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -2121,14 +2119,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # separately during capturing. Uniform batch means that all
         # requests have identical query length, except a potential virtual
         # request (shorter) in the batch account for padding.
-        # Uniform batch could either be common pure decode, where
+        # Uniform decode batch could either be common pure decode, where
         # max_query_len == 1, or speculative decode, where
         # max_query_len == 1 + num_spec_decode_tokens.
 
         # When setting max_query_len = 1, we switch to and capture the optimized
         # routine of FA2 for pure decode, i.e., Flashdecode + an optimization
         # for GQA/MQA.
-        max_query_len = self.uniform_decode_query_len if is_uniform else \
+        max_query_len = self.uniform_decode_query_len if uniform_decode else \
                                                                 num_tokens
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
@@ -2136,7 +2134,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # has num_tokens in total.
         assert num_tokens <= self.scheduler_config.max_num_batched_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
-        if is_uniform:
+        if uniform_decode:
             num_reqs = cdiv(num_tokens, max_query_len)
             assert num_reqs <= max_num_reqs, \
                 "Do not capture num_reqs > max_num_reqs for uniform batch"
@@ -2157,7 +2155,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         attn_metadata: Optional[dict[str, Any]] = None
 
         # If force_attention is True, we always capture attention. Otherwise,
-        # it depends on the cudagraph_runtime_mode to be FULL or PIECEWISE.
+        # it only happens for cudagraph_runtime_mode=FULL.  
         if force_attention or cudagraph_runtime_mode == \
                 CUDAGraphMode.FULL:
             attn_metadata = {}
@@ -2225,14 +2223,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 batch_descriptor = None
             else:
                 # filter out the valid batch descriptor
-                _cg_style, batch_descriptor = \
+                _cg_mode, batch_descriptor = \
                     self.cudagraph_dispatcher.dispatch(
                         BatchDescriptor(num_tokens=num_tokens,
-                                        is_uniform=is_uniform))
+                                        uniform_decode=uniform_decode))
                 # sanity check
-                assert cudagraph_runtime_mode == _cg_style, (
+                assert cudagraph_runtime_mode == _cg_mode, (
                     f"Cudagraph runtime mode mismatch at dummy_run. "
-                    f"Expected {_cg_style}, but got {cudagraph_runtime_mode}.")
+                    f"Expected {_cg_mode}, but got {cudagraph_runtime_mode}.")
 
             with self.maybe_randomize_inputs(input_ids), set_forward_context(
                     attn_metadata,
@@ -2532,6 +2530,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
+        set_cudagraph_capturing_enabled(True)
         with freeze_gc(), graph_capture(device=self.device):
             if self.capture_mixed_batches:
                 # select between full cudagraph and piecewise cudagraph
@@ -2556,7 +2555,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self._capture_cudagraphs(
                     compilation_cases,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
-                    is_uniform=False)
+                    uniform_decode=False)
 
             if self.compilation_config.cudagraph_separate_routine:
                 # Capture full cudagraph for uniform batches (pure decode/
@@ -2574,7 +2573,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self._capture_cudagraphs(
                     compilation_cases=compilation_cases_decode,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
-                    is_uniform=True)
+                    uniform_decode=True)
 
         # Disable cudagraph capturing globally, so any unexpected cudagraph
         # capturing will be detected and raise an error after here.
@@ -2593,11 +2592,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _capture_cudagraphs(self, compilation_cases: list[int],
                             cudagraph_runtime_mode: CUDAGraphMode,
-                            is_uniform: bool):
+                            uniform_decode: bool):
         assert cudagraph_runtime_mode != CUDAGraphMode.NONE and \
             cudagraph_runtime_mode in [CUDAGraphMode.FULL,
                                         CUDAGraphMode.PIECEWISE]
-        set_cudagraph_capturing_enabled(True)
 
         # Only rank 0 should print progress bar during capture
         if is_global_first_rank():
@@ -2605,7 +2603,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 compilation_cases,
                 disable=not self.load_config.use_tqdm_on_load,
                 desc="Capturing CUDA graphs ({})".format(
-                    "decode" if is_uniform else "mixed prefill-decode"))
+                    "decode" if uniform_decode else "mixed prefill-decode"))
         # We skip EPLB here since we don't want to record dummy metrics
         for num_tokens in compilation_cases:
             for _ in range(self.compilation_config.cudagraph_num_of_warmups):
@@ -2619,11 +2617,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self._dummy_run(num_tokens,
                                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
                                 force_attention=force_attention,
-                                is_uniform=is_uniform,
+                                uniform_decode=uniform_decode,
                                 skip_eplb=True)
             self._dummy_run(num_tokens,
                             cudagraph_runtime_mode=cudagraph_runtime_mode,
-                            is_uniform=is_uniform,
+                            uniform_decode=uniform_decode,
                             skip_eplb=True)
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
@@ -2771,8 +2769,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Trigger cudagraph dispatching keys initialization here (after
         # initializing attn backends).
         # TODO: move this to better place.
+        # if we need capture full cudagraph for mixed prefill-decode batches.
+        create_mixed_batch_full_cg = attn_cg in [
+                            AttentionCGSupport.ALWAYS_UNIFIED,
+                            AttentionCGSupport.ALWAYS_SEPARATE] and \
+                            self.capture_mixed_batches
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
-            self.capture_mixed_batches, self.uniform_decode_query_len, attn_cg)
+            create_mixed_batch_full_cg, self.uniform_decode_query_len)
 
     def may_reinitialize_input_batch(self,
                                      kv_cache_config: KVCacheConfig) -> None:

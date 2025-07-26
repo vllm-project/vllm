@@ -48,7 +48,7 @@ def validate_cudagraph_capturing_enabled():
     # if an illegal cudagraph capturing happens, raise an error.
     global cudagraph_capturing_enabled
     if not cudagraph_capturing_enabled:
-        raise ValueError("CUDA graph capturing detected at an inappropriate "
+        raise RuntimeError("CUDA graph capturing detected at an inappropriate "
                          "time. This operation is currently disabled.")
 
 

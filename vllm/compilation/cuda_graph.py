@@ -39,9 +39,20 @@ class CUDAGraphOptions:
 
 
 class CUDAGraphWrapper:
-    """
-    This class simply wrap a runnable for cudagraph functionality,
-    taking responsibility of capturing cudagraph and running the replay.
+    """Wraps a runnable to add CUDA graph capturing and replaying ability. And
+    provide attribute access to the underlying `runnable` via `__getattr__`.
+
+    The workflow of this wrapper in the cudagraph dispatching is as follows:
+    1. At initialization, a runtime mode is assigned to the wrapper (FULL or
+    PIECEWISE). 
+    2. At runtime, the wrapper receives a runtime_mode and a 
+    batch_descriptor(key) from the forward context and blindly trust them
+    for cudagraph dispatching. 
+    3. If runtime_mode is NONE or runtime_mode does not match the mode of the
+    wrapper, just call the runnable directly.
+    4. Otherwise, i.e., the runtime_mode matches the mode of the wrapper,
+    the wrapper will perform cudagraph capture(if key does not exist, create
+    a new entry and cache it) or replay (if key exists in the cache).
     """
 
     def __init__(self,

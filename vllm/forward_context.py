@@ -33,9 +33,18 @@ class BatchDescriptor(NamedTuple):
     batch for cudagraph.
     """
     num_tokens: int
-    # Be aware that `is_uniform` should be default None
-    # for both piecewise cudagraphs and no cudagraphs.
-    is_uniform: Optional[bool] = None
+    is_uniform: bool = False
+    """
+    False can also be used for a uniform batch to dispatch to the 
+    cudagraph supporting non-uniform batches.
+    """
+
+    @property
+    def non_uniform(self) -> "BatchDescriptor":
+        """
+        Return a non-uniform version of current batch descriptor.
+        """
+        return BatchDescriptor(self.num_tokens, is_uniform=False)
 
 
 @dataclass
