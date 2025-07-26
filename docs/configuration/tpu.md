@@ -2,7 +2,7 @@
 
 This doc serves as a collection of handy tips for optimizing your vLLM on TPU workload.
 
-### Get started
+## Get started
 
 Looking for setup and installation instructions? Find them [here](../getting_started/installation/google_tpu.md).
 
@@ -17,7 +17,7 @@ The following colab [calculator](https://colab.research.google.com/github/ericeh
 - TPU/GPU memory allocated for the KV cache
 - Maximum \# of requests you can approximately set (--max-num-seqs)
 
-This approach serves as a general rule of thumb. 
+This approach serves as a general rule of thumb.
 
 #### Latency-throughput tradeoff
 
@@ -35,12 +35,12 @@ Coming from a GPU background, one of the key differences you'll notice with TPUs
 
 To manage this, vLLM performs a one-time "warmup" process when you first launch the server. During this phase, it pre-compiles the model for various common input shapes and saves these compiled graphs to a cache on disk or remote storage (located at `~/.cache/vllm/xla_cache` by default). This process can range significantly, anywhere from a few minutes to an hour depending on the size of the model and context length used.
 
-Although the first compilation can take some time, for all subsequent server launches, vLLM can load these graphs directly from the cache, eliminating the compilation time for future runs. 
+Although the first compilation can take some time, for all subsequent server launches, vLLM can load these graphs directly from the cache, eliminating the compilation time for future runs.
 
-Use `VLLM_XLA_CACHE_PATH` environment variable to write to shareable storage for future deployed nodes (like when using autoscaling). 
+Use `VLLM_XLA_CACHE_PATH` environment variable to write to shareable storage for future deployed nodes (like when using autoscaling).
 
 #### Reducing compilation time
-This initial compilation time ranges significantly and is impacted by many of the arguments discussed in this optimization doc. Factors that influence the length of time to compile are things like model size and `--max-num-batch-tokens`. Other arguments you can tune are things like `VLLM_TPU_MOST_MODEL_LEN`. 
+This initial compilation time ranges significantly and is impacted by many of the arguments discussed in this optimization doc. Factors that influence the length of time to compile are things like model size and `--max-num-batch-tokens`. Other arguments you can tune are things like `VLLM_TPU_MOST_MODEL_LEN`.
 
 ### Optimize based on your data
 
@@ -61,9 +61,9 @@ For online serving with latency requirements, consider switching to bucket paddi
 The server pads the requests into fixed lengths before sending them to the model to avoid recompilation. To read more about tpu padding, see [here](https://cloud.google.com/tpu/docs/performance-guide#xla-efficiencies). Currently, there are 2 ways to pad the requests:
 
 1) the default exponential padding (pad to the nearest power of 2)
-2) bucket padding (pad to the nearest linearly increasing bucket). 
+2) bucket padding (pad to the nearest linearly increasing bucket).
 
-When using bucket padding, the buckets start from 16, end at max_model_len, and increment by `VLLM_TPU_BUCKET_PADDING_GAP`. 
+When using bucket padding, the buckets start from 16, end at max_model_len, and increment by `VLLM_TPU_BUCKET_PADDING_GAP`.
 
 For example, max_model_len=512, padding_gap=64, the buckets will be [16, 32, 64, 128, 192, 256, 320, 384, 448, 512].
 
@@ -92,8 +92,7 @@ Although it’s common to do this with GPUs, don't try to fragment 2 or 8 differ
 
 Although we try to have great default configs, we strongly recommend you check out the [vLLM auto-tuner](../../benchmarks/auto_tune/README.md) to optimize your workloads for your use case.
 
-
-### Future Topics We'll Cover 
+### Future Topics We'll Cover
 
 #### Profiling
 
