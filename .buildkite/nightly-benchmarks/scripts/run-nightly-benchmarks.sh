@@ -95,12 +95,14 @@ json2args() {
 }
 
 kill_gpu_processes() {
-  pkill -f python
-  pkill -f python3
-  pkill -f tritonserver
-  pkill -f pt_main_thread
-  pkill -f text-generation
-  pkill -f lmdeploy
+  pkill -f '[p]ython'
+  pkill -f '[p]ython3'
+  pkill -f '[t]ritonserver'
+  pkill -f '[p]t_main_thread'
+  pkill -f '[t]ext-generation'
+  pkill -f '[l]mdeploy'
+  # vLLM now names the process with VLLM prefix after https://github.com/vllm-project/vllm/pull/21445
+  pkill -f '[V]LLM'
 
   while [ "$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1)" -ge 1000 ]; do
     sleep 1
