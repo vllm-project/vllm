@@ -84,3 +84,43 @@ def test_embed_models_using_normalize(
     assert torch.allclose(
         F.normalize(wo_normalize, p=2, dim=-1), w_normalize,
         atol=1e-2), "w_normal should be close to normal(wo_normal)."
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "Qwen/Qwen2.5-Math-PRM-7B",
+    ],
+)
+@pytest.mark.parametrize("dtype", ["half"])
+def test_reward_models_using_softmax(
+    hf_runner,
+    vllm_runner,
+    math_step_prompts,
+    model: str,
+    dtype: str,
+) -> None:
+
+    with vllm_runner(
+            model,
+            max_model_len=1024,
+            dtype=dtype,
+            override_pooler_config=PoolerConfig(softmax=False)) as vllm_model:
+        wo_softmax = vllm_model.encode(math_step_prompts)
+
+    with vllm_runner(
+            model,
+            max_model_len=1024,
+            dtype=dtype,
+            override_pooler_config=PoolerConfig(softmax=True)) as vllm_model:
+        w_softmax = vllm_model.encode(math_step_prompts)
+
+    for wo, w in zip(wo_softmax, w_softmax):
+        wo = torch.tensor(wo)
+        w = torch.tensor(w)
+
+        assert not torch.allclose(
+            wo, w, atol=1e-2), "override_pooler_config softmax is not working"
+        assert torch.allclose(
+            F.softmax(wo, dim=-1), w,
+            atol=1e-2), "w_softmax should be close to softmax(wo_softmax)."

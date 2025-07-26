@@ -64,6 +64,7 @@ def test_embed_dimensions(model_info: EmbedModelInfo):
         pooling_params.verify(task=task, model_config=model_config)
 
     if model_info.is_matryoshka:
+        assert model_info.matryoshka_dimensions is not None
         pooling_params = PoolingParams(
             dimensions=model_info.matryoshka_dimensions[0])
         pooling_params.verify(task=task, model_config=model_config)
