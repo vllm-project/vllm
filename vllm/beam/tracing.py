@@ -1,3 +1,4 @@
+import logging
 from functools import wraps
 from typing import Optional, Union, AsyncGenerator
 import time
@@ -7,10 +8,13 @@ from vllm.tracing import extract_trace_context, SpanAttributes, init_tracer
 from vllm.v1.request import Request
 from opentelemetry import trace
 
-tracer = init_tracer(
+try:
+    tracer = init_tracer(
     "vllm.entrypoints.openai.serving_completion",
     "http://localhost:4317")
-
+except Exception as e:
+    tracer = None
+    logging.getLogger(__name__).warning(f"Failed to initialize tracer: {e}. OpenTelemetry tracing will not be available.")
 
 def trace_streaming_completion(tracer_attr='tracer'):
     """

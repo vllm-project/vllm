@@ -159,7 +159,7 @@ class OpenAIServingCompletion(OpenAIServing):
         
             yield "data: [DONE]\n\n"
 
-            report_metrics(request, output, final)
+            report_metrics(request, output, beams)
     
         return _chunk_generator()
 
