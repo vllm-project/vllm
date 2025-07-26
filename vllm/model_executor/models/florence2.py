@@ -962,7 +962,7 @@ class Florence2ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         if pixel_values is not None:
             size = self.processor_config["size"]
-            expected_h = expected_w = size["height"], size["width"]
+            expected_h, expected_w = size["height"], size["width"]
 
             return Florence2ImagePixelInputs(
                 type="pixel_values",
