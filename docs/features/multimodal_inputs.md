@@ -187,7 +187,7 @@ Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown 
     from qwen_vl_utils import process_vision_info
 
     model_path = "Qwen/Qwen2.5-VL-3B-Instruct/"
-    video_path ="https://content.pexels.com/videos/free-videos.mp4"
+    video_path = "https://content.pexels.com/videos/free-videos.mp4"
 
     llm = LLM(
         model=model_path,
@@ -239,7 +239,7 @@ Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown 
     ```
 
     !!! note
-        that `'process_vision_info'` is only applicable to Qwen2.5-VL and similar models
+        'process_vision_info' is only applicable to Qwen2.5-VL and similar models.
 
 Full example: <gh-file:examples/offline_inference/vision_language.py>
 
