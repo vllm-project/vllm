@@ -327,7 +327,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             layer.w13_weight.data = shuffled_w13
             layer.w2_weight.data = shuffled_w2
 
-        if current_platform.is_cpu():
+        if current_platform.is_xpu():
+            import intel_extension_for_pytorch as ipex
+            layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
+                layer.w13_weight,
+                layer.w2_weight,
+                use_prepack=True,
+            )
+        elif current_platform.is_cpu():
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
                 from vllm.model_executor.layers.fused_moe import cpu_fused_moe
                 dtype = layer.w13_weight.dtype
@@ -507,6 +514,30 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             e_score_correction_bias,
             apply_router_weight_on_input,
             activation,
+        )
+
+    def forward_xpu(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        custom_routing_function: Optional[Callable] = None,
+        **kwargs,
+    ):
+        assert custom_routing_function is None
+        return layer.ipex_fusion(
+            x,
+            use_grouped_topk,
+            top_k,
+            router_logits,
+            renormalize,
+            topk_group,
+            num_expert_group,
         )
 
     def forward_tpu(
