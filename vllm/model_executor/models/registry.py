@@ -81,6 +81,7 @@ _TEXT_GENERATION_MODELS = {
     "Grok1ModelForCausalLM": ("grok1", "Grok1ForCausalLM"),
     "HunYuanMoEV1ForCausalLM": ("hunyuan_v1", "HunYuanMoEV1ForCausalLM"),
     "HunYuanDenseV1ForCausalLM": ("hunyuan_v1", "HunYuanDenseV1ForCausalLM"),
+    "HCXVisionForCausalLM": ("hyperclovax_vision", "HCXVisionForCausalLM"),
     "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
@@ -88,6 +89,7 @@ _TEXT_GENERATION_MODELS = {
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
+    "Llama4ForCausalLM": ("llama4", "Llama4ForCausalLM"),  # noqa: E501
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
@@ -255,7 +257,11 @@ _SPECULATIVE_DECODING_MODELS = {
     # "MLPSpeculatorPreTrainedModel": ("mlp_speculator", "MLPSpeculator"),
 }
 
-_TRANSFORMERS_MODELS = {
+_TRANSFORMERS_SUPPORTED_MODELS = {
+    "Emu3ForConditionalGeneration": ("transformers", "TransformersForMultimodalLM"),  # noqa: E501
+}
+
+_TRANSFORMERS_BACKEND_MODELS = {
     "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"), # noqa: E501
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
 }
@@ -267,7 +273,8 @@ _VLLM_MODELS = {
     **_CROSS_ENCODER_MODELS,
     **_MULTIMODAL_MODELS,
     **_SPECULATIVE_DECODING_MODELS,
-    **_TRANSFORMERS_MODELS,
+    **_TRANSFORMERS_SUPPORTED_MODELS,
+    **_TRANSFORMERS_BACKEND_MODELS,
 }
 
 # This variable is used as the args for subprocess.run(). We

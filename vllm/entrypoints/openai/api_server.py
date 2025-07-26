@@ -101,8 +101,9 @@ from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (Device, FlexibleArgumentParser, get_open_zmq_ipc_path,
-                        is_valid_ipv6_address, set_ulimit)
+from vllm.utils import (Device, FlexibleArgumentParser, bind_process_name,
+                        get_open_zmq_ipc_path, is_valid_ipv6_address,
+                        set_ulimit)
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -148,6 +149,9 @@ async def lifespan(app: FastAPI):
 @asynccontextmanager
 async def build_async_engine_client(
     args: Namespace,
+    *,
+    usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
+    disable_frontend_multiprocessing: Optional[bool] = None,
     client_config: Optional[dict[str, Any]] = None,
 ) -> AsyncIterator[EngineClient]:
 
@@ -155,15 +159,24 @@ async def build_async_engine_client(
     # Ensures everything is shutdown and cleaned up on error/exit
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
+    if disable_frontend_multiprocessing is None:
+        disable_frontend_multiprocessing = bool(
+            args.disable_frontend_multiprocessing)
+
     async with build_async_engine_client_from_engine_args(
-            engine_args, args.disable_frontend_multiprocessing,
-            client_config) as engine:
+            engine_args,
+            usage_context=usage_context,
+            disable_frontend_multiprocessing=disable_frontend_multiprocessing,
+            client_config=client_config,
+    ) as engine:
         yield engine
 
 
 @asynccontextmanager
 async def build_async_engine_client_from_engine_args(
     engine_args: AsyncEngineArgs,
+    *,
+    usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
     disable_frontend_multiprocessing: bool = False,
     client_config: Optional[dict[str, Any]] = None,
 ) -> AsyncIterator[EngineClient]:
@@ -176,7 +189,6 @@ async def build_async_engine_client_from_engine_args(
     """
 
     # Create the EngineConfig (determines if we can use V1).
-    usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
     # V1 AsyncLLM.
@@ -1574,6 +1586,14 @@ async def init_app_state(
     state.vllm_config = vllm_config
     model_config = vllm_config.model_config
 
+    if envs.VLLM_USE_V1:
+        supported_tasks = await engine_client \
+            .get_supported_tasks()  # type: ignore
+    else:
+        supported_tasks = model_config.supported_tasks
+
+    logger.info("Supported_tasks: %s", supported_tasks)
+
     resolved_chat_template = load_chat_template(args.chat_template)
     if resolved_chat_template is not None:
         # Get the tokenizer to check official template
@@ -1635,7 +1655,7 @@ async def init_app_state(
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
-    ) if "generate" in model_config.supported_tasks else None
+    ) if "generate" in supported_tasks else None
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,
@@ -1652,7 +1672,7 @@ async def init_app_state(
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
-    ) if "generate" in model_config.supported_tasks else None
+    ) if "generate" in supported_tasks else None
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
         model_config,
@@ -1661,7 +1681,7 @@ async def init_app_state(
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
-    ) if "generate" in model_config.supported_tasks else None
+    ) if "generate" in supported_tasks else None
     state.openai_serving_pooling = OpenAIServingPooling(
         engine_client,
         model_config,
@@ -1669,7 +1689,7 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if "encode" in model_config.supported_tasks else None
+    ) if "encode" in supported_tasks else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,
@@ -1677,24 +1697,22 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if "embed" in model_config.supported_tasks else None
+    ) if "embed" in supported_tasks else None
     state.openai_serving_classification = ServingClassification(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if "classify" in model_config.supported_tasks else None
+    ) if "classify" in supported_tasks else None
 
-    enable_serving_reranking = ("classify" in model_config.supported_tasks
-                                and getattr(model_config.hf_config,
-                                            "num_labels", 0) == 1)
+    enable_serving_reranking = ("classify" in supported_tasks and getattr(
+        model_config.hf_config, "num_labels", 0) == 1)
     state.openai_serving_scores = ServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if ("embed" in model_config.supported_tasks
-          or enable_serving_reranking) else None
+    ) if ("embed" in supported_tasks or enable_serving_reranking) else None
 
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
@@ -1709,13 +1727,13 @@ async def init_app_state(
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if "transcription" in model_config.supported_tasks else None
+    ) if "transcription" in supported_tasks else None
     state.openai_serving_translation = OpenAIServingTranslation(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if "transcription" in model_config.supported_tasks else None
+    ) if "transcription" in supported_tasks else None
     state.task = model_config.task
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
@@ -1804,13 +1822,16 @@ async def run_server_worker(listen_address,
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
     server_index = client_config.get("client_index", 0) if client_config else 0
-
+    bind_process_name("APIServer", str(server_index))
     # Load logging config for uvicorn if specified
     log_config = load_log_config(args.log_config_file)
     if log_config is not None:
         uvicorn_kwargs['log_config'] = log_config
 
-    async with build_async_engine_client(args, client_config) as engine_client:
+    async with build_async_engine_client(
+            args,
+            client_config=client_config,
+    ) as engine_client:
         maybe_register_tokenizer_info_endpoint(args)
         app = build_app(args)
 
