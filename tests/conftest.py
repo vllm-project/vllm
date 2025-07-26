@@ -761,8 +761,7 @@ class VllmRunner:
     - `max_model_len`: Set to `1024` instead of `None` to reduce memory usage.
     - `block_size`: To reduce memory usage, set default to `64` if on XPU
         devices, otherwise default to `16`.
-    - `enable_chunked_prefill`: Set to `False` instead of `None` for
-      test reproducibility.
+    - `enable_chunked_prefill`: Set to `None` to support V1 tests.
     - `enforce_eager`: Set to `False` to test CUDA graph.
     """
 
@@ -779,7 +778,7 @@ class VllmRunner:
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
         block_size: int = 16 if not torch.xpu.is_available() else 64,
-        enable_chunked_prefill: Optional[bool] = False,
+        enable_chunked_prefill: Optional[bool] = None,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = False,
         **kwargs,
