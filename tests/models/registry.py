@@ -223,6 +223,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                                 "fp8": "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8"}),  # noqa: E501
     "LLaMAForCausalLM": _HfExamplesInfo("decapoda-research/llama-7b-hf",
                                         is_available_online=False),
+    "Llama4ForCausalLM": _HfExamplesInfo("meta-llama/Llama-4-Scout-17B-16E-Instruct", # noqa: E501
+                                         is_available_online=False),
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
     "Mamba2ForCausalLM": _HfExamplesInfo("mistralai/Mamba-Codestral-7B-v0.1"),
     "FalconMambaForCausalLM": _HfExamplesInfo("tiiuae/falcon-mamba-7b-instruct"),  # noqa: E501

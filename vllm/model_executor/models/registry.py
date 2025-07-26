@@ -88,8 +88,9 @@ _TEXT_GENERATION_MODELS = {
     "InternLM3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
-    "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     "Lfm2ForCausalLM": ("lfm2", "Lfm2ForCausalLM"),
+    "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
+    "Llama4ForCausalLM": ("llama4", "Llama4ForCausalLM"),  # noqa: E501
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
