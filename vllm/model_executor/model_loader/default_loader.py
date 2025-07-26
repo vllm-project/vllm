@@ -69,10 +69,10 @@ class DefaultModelLoader(BaseModelLoader):
             # pylint: disable=C.
             from modelscope.hub.snapshot_download import snapshot_download
 
-            if not os.path.exists(model):
-                # Use file lock to prevent multiple processes from
-                # downloading the same model weights at the same time.
-                with get_lock(model, self.load_config.download_dir):
+            # Use file lock to prevent multiple processes from
+            # downloading the same model weights at the same time.
+            with get_lock(model, self.load_config.download_dir):
+                if not os.path.exists(model):
                     model_path = snapshot_download(
                         model_id=model,
                         cache_dir=self.load_config.download_dir,
@@ -81,8 +81,8 @@ class DefaultModelLoader(BaseModelLoader):
                         revision=revision,
                         ignore_file_pattern=self.load_config.ignore_patterns,
                     )
-            else:
-                model_path = model
+                else:
+                    model_path = model
             return model_path
         return None
 
