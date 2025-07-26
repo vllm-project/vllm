@@ -1575,9 +1575,30 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # separate storage from the original `logits` tensor. Therefore,
             # it is safe to update `target_logits` in place.
             target_logits = logits[spec_decode_metadata.target_logits_indices]
+
+            draft_probs_list: list[torch.Tensor] = []
+            has_draft_probs: list[bool] = []
+            for i, req_id in enumerate(self.input_batch.req_ids):
+                draft_length = spec_decode_metadata.num_draft_tokens[i]
+                if draft_length > 0:
+                    draft_probs = self.requests[req_id].draft_probs
+                    if draft_probs is not None:
+                        # <= since not every draft token is necessarily
+                        # scheduled
+                        assert draft_length <= draft_probs.shape[0]
+                        has_draft_probs.append(True)
+                        # Not every draft token is necessarily scheduled
+                        draft_probs_list.append(draft_probs[:draft_length])
+                    else:
+                        has_draft_probs.append(False)
+            assert all(has_draft_probs) or not any(has_draft_probs), (
+                "Some requests have draft logits while others do not.")
+
+            draft_probs = (torch.cat(draft_probs_list, dim=0)
+                           if len(draft_probs_list) > 0 else None)
             output_token_ids = self.rejection_sampler(
                 spec_decode_metadata,
-                None,  # draft_probs
+                draft_probs,
                 target_logits,
                 bonus_token_ids,
                 sampling_metadata,
@@ -1660,10 +1681,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         if not self.speculative_config:
             # Speculative decoding is not enabled.
-            spec_token_ids = None
+            spec_token_ids = spec_probs = None
         else:
             assert spec_decode_common_attn_metadata is not None
-            spec_token_ids = self.propose_draft_token_ids(
+            spec_token_ids, spec_probs = self.propose_draft(
                 scheduler_output,
                 valid_sampled_token_ids,
                 sampling_metadata,
@@ -1673,6 +1694,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 spec_decode_metadata,
                 spec_decode_common_attn_metadata,
             )
+            # Save the draft probs for future use, usually the next step.
+            if spec_probs is not None:
+                for i, spec_prob in enumerate(spec_probs):
+                    req_id = self.input_batch.req_ids[i]
+                    self.requests[req_id].draft_probs = spec_prob
 
         self.eplb_step()
 
@@ -1689,7 +1715,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_nans_in_logits=num_nans_in_logits,
         )
 
-    def propose_draft_token_ids(
+    def propose_draft(
         self,
         scheduler_output: "SchedulerOutput",
         sampled_token_ids: list[list[int]],
@@ -1699,12 +1725,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         aux_hidden_states: Optional[torch.Tensor],
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         common_attn_metadata: CommonAttentionMetadata,
-    ) -> list[list[int]]:
+    ) -> tuple[list[list[int]], Optional[list[torch.Tensor]]]:
+        """Generate the draft for the next step.
+        
+        Returns:
+            - The draft token ids.
+            - The draft probs (optional).
+        """
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.speculative_config.method == "ngram":
             assert isinstance(self.drafter, NgramProposer)
             spec_token_ids = self.propose_ngram_draft_token_ids(
                 sampled_token_ids)
+            spec_probs = None
         elif self.speculative_config.method == "medusa":
             assert isinstance(self.drafter, MedusaProposer)
             if sample_hidden_states.shape[0] == len(sampled_token_ids):
@@ -1725,6 +1758,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 target_hidden_states=hidden_states,
                 sampling_metadata=sampling_metadata,
             )
+            spec_probs = None
         elif self.speculative_config.use_eagle():
             assert isinstance(self.drafter, EagleProposer)
             # TODO(woosuk): Refactor the loop.
@@ -1778,7 +1812,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         [h[token_indices] for h in aux_hidden_states], dim=-1)
                 else:
                     target_hidden_states = hidden_states[token_indices]
-            draft_token_ids = self.drafter.propose(
+            spec_token_ids, spec_probs = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
@@ -1786,8 +1820,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
                 common_attn_metadata=common_attn_metadata,
             )
-            spec_token_ids = draft_token_ids.tolist()
-        return spec_token_ids
+        else:
+            raise ValueError(f"Unsupported speculative decoding method: "
+                             f"{self.speculative_config.method}")
+        return spec_token_ids, spec_probs
 
     def propose_ngram_draft_token_ids(
         self,
@@ -2249,10 +2285,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 draft_token_ids, self.device)
 
             num_tokens = sum(len(ids) for ids in draft_token_ids)
-            # draft_probs = torch.randn(
-            #     num_tokens, logits.shape[-1], device=self.device,
-            #     dtype=logits.dtype)
-            draft_probs = None
+            draft_probs = torch.randn(num_tokens,
+                                      logits.shape[-1],
+                                      device=self.device,
+                                      dtype=logits.dtype)
             target_logits = torch.randn(num_tokens,
                                         logits.shape[-1],
                                         device=self.device,
