@@ -484,8 +484,9 @@ class IsHybrid(Protocol):
         cls,
         vllm_config: "VllmConfig",
         use_v1: bool = True,
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
-        """Calculate shapes for Mamba's convolutional and state caches.
+    ) -> tuple[tuple[int, int], ...]:
+        """Calculate shapes for mamba caches. Currently used for 
+        convolutional and/or SSM state caches (e.g. Mamba, ShortConv).
 
         Args:
             vllm_config: vLLM config

@@ -28,6 +28,7 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import DPMetadata, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaBase
+from vllm.model_executor.layers.mamba.short_conv import ShortConv
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.models.interfaces import (is_mixture_of_experts,
@@ -52,7 +53,7 @@ from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         ChunkedLocalAttentionSpec,
                                         FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec, MambaSpec,
+                                        KVCacheSpec, MambaSpec, ShortConvSpec,
                                         SlidingWindowSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
@@ -2497,6 +2498,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         "Non-Attention backend is not supported by V1 "
                         "GPUModelRunner.")
             elif isinstance(kv_cache_spec, MambaSpec):
+                # ShortConv uses many of the same attributes as Mamba2 path,
+                # except chunking
                 attn_backend_i = Mamba2AttentionBackend
             else:
                 raise ValueError(
@@ -2592,7 +2595,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             corresponding memory buffer for KV cache.
         """
         kv_caches: dict[str, torch.Tensor] = {}
-        has_attn, has_mamba = False, False
+        has_attn, has_mamba_like_layers = False, False
         for i, kv_cache_group_spec in enumerate(
                 kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
@@ -2631,7 +2634,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         layer_name].view(dtype).view(kv_cache_shape).permute(
                             *inv_order)
                 elif isinstance(kv_cache_spec, MambaSpec):
-                    has_mamba = True
+                    has_mamba_like_layers = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     dtype = kv_cache_spec.dtype
                     num_element_per_page = (kv_cache_spec.page_size_bytes //
@@ -2655,7 +2658,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     raise NotImplementedError
 
-        if has_attn and has_mamba:
+        if has_attn and has_mamba_like_layers:
             self._verify_hybrid_attention_mamba_layout(kv_cache_config,
                                                        kv_cache_raw_tensors)
 
@@ -2810,24 +2813,32 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 raise ValueError(
                     f"Unknown attention type: {attn_module.attn_type}")
 
-        mamba_layers = get_layers_from_vllm_config(self.vllm_config, MambaBase)
-        if len(mamba_layers) > 0:
+        for layer_cls, spec_cls in zip((MambaBase, ShortConv),
+                                       (MambaSpec, ShortConvSpec)):
+            mamba_like_layers = get_layers_from_vllm_config(
+                self.vllm_config, layer_cls)
+            if len(mamba_like_layers) > 0:
+                break
+
+        if len(mamba_like_layers) > 0:
             if self.vllm_config.speculative_config is not None:
                 raise NotImplementedError(
-                    "Mamba with speculative decoding is not supported yet.")
+                    "Mamba-like models with speculative decoding is not "
+                    "yet supported.")
             if self.vllm_config.cache_config.enable_prefix_caching:
                 raise NotImplementedError(
-                    "Prefix caching is not supported for Mamba yet.")
+                    "Prefix caching for mamba-like models is not "
+                    "yet supported.")
             max_model_len = self.vllm_config.model_config.max_model_len
 
             page_size_padded = (
                 self.vllm_config.cache_config.mamba_page_size_padded)
 
-            # Set block_size to max_model_len, so that mamba model will always
-            # have only one block in the KV cache.
-            for layer_name, mamba_module in mamba_layers.items():
-                kv_cache_spec[layer_name] = MambaSpec(
-                    shapes=mamba_module.get_state_shape(),
+            # Set block_size to max_model_len, so that the mamba-like
+            # hybrid model will always have only one block in the KV cache.
+            for layer_name, module in mamba_like_layers.items():
+                kv_cache_spec[layer_name] = spec_cls(
+                    shapes=module.get_state_shape(),
                     dtype=self.kv_cache_dtype,
                     block_size=max_model_len,
                     page_size_padded=page_size_padded)

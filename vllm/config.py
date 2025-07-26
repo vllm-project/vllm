@@ -1419,6 +1419,13 @@ class ModelConfig:
             # Hybrid model Jamba
             layers_block_type_value = getattr(self.hf_config,
                                               "layers_block_type", None)
+
+            # Hybrid models in transformers >= 4.54.0.dev0
+            # populate a `layer_types` attribute
+            if layers_block_type_value is None:
+                layers_block_type_value = getattr(self.hf_text_config,
+                                                  "layer_types", None)
+
             if layers_block_type_value is not None:
                 if hasattr(self.hf_text_config,
                            "model_type") and (self.hf_text_config.model_type
@@ -1428,8 +1435,14 @@ class ModelConfig:
                                    for t in layers_block_type_value[start:end])
                     else:
                         return self.get_num_layers(parallel_config)
-                return sum(t == block_type.value
-                           for t in layers_block_type_value[start:end])
+
+                # Support with hybrid transformers configs >= 4.54.0.dev0
+                if attn_block_type:
+                    return sum(t in ("full_attention", "attention")
+                               for t in layers_block_type_value[start:end])
+                else:
+                    return sum(t == block_type.value
+                               for t in layers_block_type_value[start:end])
 
             # Hybrid model Minimax
             attn_type_list = getattr(self.hf_config, "attn_type_list", None)
@@ -1675,8 +1688,9 @@ class CacheConfig:
     cpu_kvcache_space_bytes: Optional[int] = None
     """(CPU backend only) CPU key-value cache space."""
     mamba_page_size_padded: Optional[int] = None
-    """ Optional override for mamba page size; used by hybrid mamba/attention
-    models to ensure exact alignment with attention page size."""
+    """ Optional override for mamba page size; used by hybrid mamba (e.g. mamba,
+    short-conv) / attention models to ensure exact alignment with attention page
+    size."""
 
     # Will be set after profiling.
     num_gpu_blocks: Optional[int] = field(default=None, init=False)
@@ -4307,6 +4321,7 @@ class CompilationConfig:
                 "vllm.unified_attention",
                 "vllm.unified_attention_with_output",
                 "vllm.mamba_mixer2",
+                "vllm.short_conv",
             ]
 
 

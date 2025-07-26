@@ -35,6 +35,7 @@ HYBRID_MODELS = [
     "nvidia/Nemotron-H-8B-Base-8K",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
+    "LiquidAI/LFM2-1.2B"
 ]
 
 HF_UNSUPPORTED_MODELS = [
@@ -53,12 +54,10 @@ HF_UNSUPPORTED_MODELS = [
 ]
 
 V1_SUPPORTED_MODELS = [
-    "mistralai/Mamba-Codestral-7B-v0.1",
-    "ibm-ai-platform/Bamba-9B-v1",
-    "Zyphra/Zamba2-1.2B-instruct",
-    "nvidia/Nemotron-H-8B-Base-8K",
-    "ibm-granite/granite-4.0-tiny-preview",
-    "tiiuae/Falcon-H1-0.5B-Base",
+    "mistralai/Mamba-Codestral-7B-v0.1", "ibm-ai-platform/Bamba-9B-v1",
+    "Zyphra/Zamba2-1.2B-instruct", "nvidia/Nemotron-H-8B-Base-8K",
+    "ibm-granite/granite-4.0-tiny-preview", "tiiuae/Falcon-H1-0.5B-Base",
+    "LiquidAI/LFM2-1.2B"
 ]
 
 # Avoid OOM
@@ -326,7 +325,10 @@ def test_state_cleanup(
     If its not cleaned, an error would be expected.
     """
     try:
-        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+        with vllm_runner(
+                model,
+                max_num_seqs=MAX_NUM_SEQS,
+        ) as vllm_model:
             for _ in range(10):
                 vllm_model.generate_greedy([example_prompts[0]] * 100, 1)
     except ValueError:
@@ -342,13 +344,19 @@ def test_multistep_correctness(
     model: str,
     max_tokens: int,
 ) -> None:
-    with vllm_runner(model, num_scheduler_steps=8,
-                     max_num_seqs=2) as vllm_model:
+    with vllm_runner(
+            model,
+            num_scheduler_steps=8,
+            max_num_seqs=2,
+    ) as vllm_model:
         vllm_outputs_multistep = vllm_model.generate_greedy(
             example_prompts, max_tokens)
 
-    with vllm_runner(model, num_scheduler_steps=1,
-                     max_num_seqs=2) as vllm_model:
+    with vllm_runner(
+            model,
+            num_scheduler_steps=1,
+            max_num_seqs=2,
+    ) as vllm_model:
         vllm_outputs_single_step = vllm_model.generate_greedy(
             example_prompts, max_tokens)
 
@@ -371,13 +379,19 @@ def test_distributed_correctness(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    with vllm_runner(model, tensor_parallel_size=1,
-                     max_num_seqs=2) as vllm_model:
+    with vllm_runner(
+            model,
+            tensor_parallel_size=1,
+            max_num_seqs=2,
+    ) as vllm_model:
         vllm_outputs_tp_1 = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
-    with vllm_runner(model, tensor_parallel_size=2,
-                     max_num_seqs=2) as vllm_model:
+    with vllm_runner(
+            model,
+            tensor_parallel_size=2,
+            max_num_seqs=2,
+    ) as vllm_model:
         vllm_outputs_tp_2 = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
