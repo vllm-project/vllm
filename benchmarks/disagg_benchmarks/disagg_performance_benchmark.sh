@@ -18,6 +18,8 @@ kill_gpu_processes() {
   # kill all processes on GPU.
   pgrep pt_main_thread | xargs -r kill -9
   pgrep python3 | xargs -r kill -9
+  # vLLM now names the process with VLLM prefix after https://github.com/vllm-project/vllm/pull/21445
+  pgrep VLLM | xargs -r kill -9
   for port in 8000 8100 8200; do lsof -t -i:$port | xargs -r kill -9; done
   sleep 1
 }
