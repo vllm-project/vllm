@@ -288,6 +288,13 @@ class MultiprocExecutor(Executor):
         self.rpc_broadcast_mq = None
 
     def check_health(self) -> None:
+        # First, check if each local worker process is alive.
+        # Then, call the worker-side `check_health()` via RPC.
+        for w in self.workers:
+            if not w.proc.is_alive():
+                raise RuntimeError(
+                    f"Worker Process {w.proc.name} is not alive")
+
         self.collective_rpc("check_health", timeout=10)
         return
 
