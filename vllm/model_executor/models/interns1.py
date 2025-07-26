@@ -259,7 +259,7 @@ class BaseInternS1DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
-        return "<IMG_CONTEXT>" * num_images
+        return IMG_CONTEXT * num_images
 
     def get_dummy_mm_data(
         self,
@@ -362,7 +362,7 @@ class BaseInternS1MultiModalProcessor(BaseMultiModalProcessor[_I]):
         return [
             PromptReplacement(
                 modality="image",
-                target="<IMG_CONTEXT>",
+                target=IMG_CONTEXT,
                 replacement=get_replacement,
             )
         ]
@@ -577,7 +577,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
         # transformers InternVLProcessor uses <IMG_CONTEXT> as the seperator
         # refer to https://github.com/huggingface/transformers/blob/f90de364c2484c7c325bbe05befdcf487bd75b63/src/transformers/models/internvl/processing_internvl.py#L116
         if modality.startswith("image"):
-            return "<IMG_CONTEXT>"
+            return IMG_CONTEXT
         if modality.startswith("video"):
             return "<video>"
 
