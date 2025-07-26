@@ -2664,21 +2664,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if should_freeze:
                     gc.unfreeze()
 
-        @contextmanager
-        def freeze_gc():
-            # Optimize garbage collection during CUDA graph capture.
-            # Clean up, then freeze all remaining objects from being included
-            # in future collections.
-            gc.collect()
-            should_freeze = not envs.VLLM_ENABLE_CUDAGRAPH_GC
-            if should_freeze:
-                gc.freeze()
-            try:
-                yield
-            finally:
-                if should_freeze:
-                    gc.unfreeze()
-
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
