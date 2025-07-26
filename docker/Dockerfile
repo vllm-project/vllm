@@ -158,6 +158,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/cuda.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
+# Build from source to unblock PyTorch 2.8.0 update
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.5"
+
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
 # explicitly set the list to avoid issues with torch 2.2
@@ -460,6 +464,10 @@ ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
+
+# Build from source to unblock PyTorch 2.8.0 update
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.5"
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
