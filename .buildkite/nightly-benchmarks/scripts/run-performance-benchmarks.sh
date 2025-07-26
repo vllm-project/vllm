@@ -126,7 +126,8 @@ kill_gpu_processes() {
   ps -aux
   lsof -t -i:8000 | xargs -r kill -9
   pgrep python3 | xargs -r kill -9
-
+  # vLLM now names the process with VLLM prefix after https://github.com/vllm-project/vllm/pull/21445
+  pgrep VLLM | xargs -r kill -9
 
   # wait until GPU memory usage smaller than 1GB
   if command -v nvidia-smi; then
@@ -205,7 +206,7 @@ run_latency_tests() {
       fi
     fi
 
-    latency_command=" $latency_envs python3 benchmark_latency.py \
+    latency_command=" $latency_envs vllm bench latency \
       --output-json $RESULTS_FOLDER/${test_name}.json \
       $latency_args"
 
@@ -272,7 +273,7 @@ run_throughput_tests() {
       fi
     fi
 
-    throughput_command=" $throughput_envs python3 benchmark_throughput.py \
+    throughput_command=" $throughput_envs vllm bench throughput \
       --output-json $RESULTS_FOLDER/${test_name}.json \
       $throughput_args"
 
@@ -393,7 +394,7 @@ run_serving_tests() {
 
       # pass the tensor parallel size to the client so that it can be displayed
       # on the benchmark dashboard
-      client_command="python3 benchmark_serving.py \
+      client_command="vllm bench serve \
         --save-result \
         --result-dir $RESULTS_FOLDER \
         --result-filename ${new_test_name}.json \

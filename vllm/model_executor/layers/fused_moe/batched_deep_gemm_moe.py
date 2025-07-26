@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.triton_utils import tl, triton
+from vllm.utils.deep_gemm import (fp8_m_grouped_gemm_nt_masked,
+                                  is_blackwell_deep_gemm_used)
 
 logger = init_logger(__name__)
 
@@ -47,9 +51,11 @@ def _silu_mul_fp8_quant_deep_gemm(
     eps: tl.constexpr,
     fp8_min: tl.constexpr,
     fp8_max: tl.constexpr,
+    use_ue8m0: tl.constexpr,
 
     # Meta ---------------------------------------------------------------
     BLOCK: tl.constexpr,
+    NUM_STAGES: tl.constexpr,
 ):
     G = H // GROUP_SIZE
 
@@ -68,8 +74,7 @@ def _silu_mul_fp8_quant_deep_gemm(
     cols = cols.to(tl.int64)
     mask_h = cols < BLOCK
 
-    t = tl.zeros([], tl.int64)
-    while t < n_tokens:
+    for t in tl.range(0, n_tokens, num_stages=NUM_STAGES):
         base_i_offset = (e * stride_i_e + t * stride_i_t +
                          g * GROUP_SIZE * stride_i_h)
         base_yq_offset = (e * stride_yq_e + t * stride_yq_t +
@@ -89,13 +94,13 @@ def _silu_mul_fp8_quant_deep_gemm(
         y = x * y2
 
         _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
-        y_s = _absmax / fp8_max
+        scale_raw = _absmax / fp8_max
+        y_s = tl.math.exp2(tl.ceil(
+            tl.log2(scale_raw))) if use_ue8m0 else scale_raw
         y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
         tl.store(y_q_ptr + base_yq_offset + cols * stride_yq_h, y_q, mask=mask)
         tl.store(y_s_ptr + base_ys_offset, y_s)
-
-        t += 1
 
 
 def silu_mul_fp8_quant_deep_gemm(
@@ -171,8 +176,10 @@ def silu_mul_fp8_quant_deep_gemm(
         eps,
         fp8_min,
         fp8_max,
+        is_blackwell_deep_gemm_used(),
         BLOCK=group_size,
-        num_warps=4,
+        NUM_STAGES=8,
+        num_warps=1,
     )
 
     return y_q, y_s
@@ -217,6 +224,10 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_expert_map(self) -> bool:
         return False
 
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        # Let PrepareAndFinalize::finalize() decide the impl.
+        return TopKWeightAndReduceDelegate()
+
     def workspace_shapes(
         self,
         a: torch.Tensor,
@@ -227,6 +238,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
+        expert_tokens_metadata: Optional[mk.ExpertTokensMetadata],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
         # FIXME (varun): We should be able to dispatch only from the leader
@@ -242,27 +254,21 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         output = (num_experts, max_num_tokens * num_dispatchers, K)
         return (workspace13, workspace2, output, a.dtype)
 
-    def apply(
-        self,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: str,
-        global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_num_tokens: Optional[torch.Tensor],
-    ):
-        import deep_gemm as dg
+    def apply(self, output: torch.Tensor, hidden_states: torch.Tensor,
+              w1: torch.Tensor, w2: torch.Tensor, topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor, activation: str, global_num_experts: int,
+              expert_map: Optional[torch.Tensor],
+              w1_scale: Optional[torch.Tensor],
+              w2_scale: Optional[torch.Tensor], w1_zp: Optional[torch.Tensor],
+              w2_zp: Optional[torch.Tensor], a1q_scale: Optional[torch.Tensor],
+              a2_scale: Optional[torch.Tensor], workspace13: torch.Tensor,
+              workspace2: torch.Tensor,
+              expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+              apply_router_weight_on_input: bool,
+              extra_expert_args: Optional[dict[str, Any]]):
+        assert expert_tokens_meta is not None
+        expert_num_tokens = expert_tokens_meta.expert_num_tokens
+
         assert hidden_states.ndim == 3
         assert self.block_shape is not None
 
@@ -280,19 +286,11 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # for the M expectation of each batch, correctly setting this value
         # may lead to better performance.
         expected_m = max_num_tokens
+        fp8_m_grouped_gemm_nt_masked((a1q, a1q_scale), (w1, w1_scale),
+                                     workspace1, expert_num_tokens, expected_m)
 
-        dg.m_grouped_gemm_fp8_fp8_bf16_nt_masked((a1q, a1q_scale),
-                                                 (w1, w1_scale),
-                                                 out=workspace1,
-                                                 masked_m=expert_num_tokens,
-                                                 expected_m=expected_m)
-
-        assert expert_num_tokens is not None
         a2q, a2q_scale = silu_mul_fp8_quant_deep_gemm(workspace1,
                                                       expert_num_tokens)
 
-        dg.m_grouped_gemm_fp8_fp8_bf16_nt_masked((a2q, a2q_scale),
-                                                 (w2, w2_scale),
-                                                 out=output,
-                                                 masked_m=expert_num_tokens,
-                                                 expected_m=expected_m)
+        fp8_m_grouped_gemm_nt_masked((a2q, a2q_scale), (w2, w2_scale), output,
+                                     expert_num_tokens, expected_m)

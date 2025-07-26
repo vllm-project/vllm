@@ -1,7 +1,4 @@
----
-title: Anything LLM
----
-[](){ #deployment-anything-llm }
+# Anything LLM
 
 [Anything LLM](https://github.com/Mintplex-Labs/anything-llm) is a full-stack application that enables you to turn any document, resource, or piece of content into context that any LLM can use as references during chatting.
 

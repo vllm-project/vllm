@@ -13,8 +13,7 @@ from transformers import LlavaConfig as HfLlavaConfig
 from transformers import PretrainedConfig, SiglipVisionConfig
 from transformers.image_utils import ImageInput, get_image_size, to_numpy_array
 from transformers.models.llava import LlavaProcessor
-from transformers.processing_utils import (ProcessingKwargs, Unpack,
-                                           _validate_images_text_input_order)
+from transformers.processing_utils import ProcessingKwargs, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 
 from vllm.config import VllmConfig
@@ -93,9 +92,6 @@ class TarsierProcessor(LlavaProcessor):
         if images is None and text is None:
             raise ValueError(
                 "You have to specify at least one of `images` or `text`.")
-
-        # check if images and text inputs are reversed for BC
-        images, text = _validate_images_text_input_order(images, text)
 
         output_kwargs = self._merge_kwargs(
             TarsierProcessorKwargs,

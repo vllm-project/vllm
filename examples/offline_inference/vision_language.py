@@ -98,7 +98,7 @@ def run_blip2(questions: list[str], modality: str) -> ModelRequestData:
     # See https://huggingface.co/Salesforce/blip2-opt-2.7b/discussions/15#64ff02f3f8cf9e4f5b038262 #noqa
     prompts = [f"Question: {question} Answer:" for question in questions]
     engine_args = EngineArgs(
-        model="Salesforce/blip2-opt-6.7b",
+        model="Salesforce/blip2-opt-2.7b",
         limit_mm_per_prompt={modality: 1},
     )
 
@@ -316,6 +316,85 @@ def run_h2ovl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B
+def run_hyperclovax_seed_vision(
+    questions: list[str], modality: str
+) -> ModelRequestData:
+    model_name = "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B"
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192 if modality == "image" else 16384,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    messages = list()
+    for question in questions:
+        if modality == "image":
+            """
+            ocr: List the words in the image in raster order. 
+                Even if the word order feels unnatural for reading, 
+                the model will handle it as long as it follows raster order.
+                e.g. "Naver, CLOVA, bigshane"
+            lens_keywords: List the entity names in the image.
+                e.g. "iPhone"
+            lens_local_keywords: List the entity names with quads in the image.
+                e.g. "[0.07, 0.21, 0.92, 0.90] iPhone"
+            """
+            messages.append(
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "ocr": "",
+                                "lens_keywords": "",
+                                "lens_local_keywords": "",
+                            },
+                            {
+                                "type": "text",
+                                "text": question,
+                            },
+                        ],
+                    }
+                ]
+            )
+        elif modality == "video":
+            messages.append(
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "video",
+                            },
+                            {
+                                "type": "text",
+                                "text": question,
+                            },
+                        ],
+                    }
+                ]
+            )
+        else:
+            raise ValueError(f"Unsupported modality: {modality}")
+
+    prompts = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        stop_token_ids=None,
+    )
+
+
 # Idefics3-8B-Llama3
 def run_idefics3(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -389,6 +468,37 @@ def run_tarsier(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Intern-S1
+def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "internlm/Intern-S1"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+        enforce_eager=True,
+    )
+
+    placeholder = "<IMG_CONTEXT>"
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [
+        [{"role": "user", "content": f"{placeholder}\n{question}"}]
+        for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # InternVL
 def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "OpenGVLab/InternVL3-2B"
@@ -404,6 +514,44 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
         placeholder = "<image>"
     elif modality == "video":
         placeholder = "<video>"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [
+        [{"role": "user", "content": f"{placeholder}\n{question}"}]
+        for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    # Stop tokens for InternVL
+    # models variants may have different stop tokens
+    # please refer to the model card for the correct "stop words":
+    # https://huggingface.co/OpenGVLab/InternVL2-2B/blob/main/conversation.py
+    stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|end|>"]
+    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
+    stop_token_ids = [token_id for token_id in stop_token_ids if token_id is not None]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        stop_token_ids=stop_token_ids,
+    )
+
+
+# Nemontron_VL
+def run_nemotron_vl(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    assert modality == "image"
+    placeholder = "<image>"
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     messages = [
@@ -971,7 +1119,7 @@ def run_pixtral_hf(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# Qwen
+# Qwen-VL
 def run_qwen_vl(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
@@ -1184,8 +1332,11 @@ model_example_map = {
     "glm4v": run_glm4v,
     "glm4_1v": run_glm4_1v,
     "h2ovl_chat": run_h2ovl,
+    "hyperclovax_seed_vision": run_hyperclovax_seed_vision,
     "idefics3": run_idefics3,
+    "interns1": run_interns1,
     "internvl_chat": run_internvl,
+    "nemotron_vl": run_nemotron_vl,
     "keye_vl": run_keye_vl,
     "kimi_vl": run_kimi_vl,
     "llava": run_llava,
