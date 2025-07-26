@@ -49,7 +49,7 @@ def validate_cudagraph_capturing_enabled():
     global cudagraph_capturing_enabled
     if not cudagraph_capturing_enabled:
         raise RuntimeError("CUDA graph capturing detected at an inappropriate "
-                         "time. This operation is currently disabled.")
+                           "time. This operation is currently disabled.")
 
 
 def set_cudagraph_capturing_enabled(enabled: bool):

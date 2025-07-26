@@ -27,7 +27,6 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture, is_global_first_rank,
     prepare_communication_buffer_for_model)
-
 from vllm.forward_context import (BatchDescriptor, DPMetadata,
                                   set_forward_context)
 from vllm.logger import init_logger
@@ -2138,7 +2137,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         attn_metadata: Optional[dict[str, Any]] = None
 
         # If force_attention is True, we always capture attention. Otherwise,
-        # it only happens for cudagraph_runtime_mode=FULL.  
+        # it only happens for cudagraph_runtime_mode=FULL.
         if force_attention or cudagraph_runtime_mode == \
                 CUDAGraphMode.FULL:
             attn_metadata = {}

@@ -4284,7 +4284,7 @@ class CompilationConfig:
             func = __import__(module).__dict__[func_name]
             self.inductor_compile_config[k] = func if isinstance(
                 func, InductorPass) else CallableInductorPass(func)
-        
+
         if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
             assert self.level == CompilationLevel.PIECEWISE, (
                 "compilation level should be CompilationLevel.PIECEWISE "

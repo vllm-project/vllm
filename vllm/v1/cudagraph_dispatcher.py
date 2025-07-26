@@ -5,7 +5,6 @@ from typing import Optional
 from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 logger = init_logger(__name__)
 
@@ -100,10 +99,9 @@ class CudagraphDispatcher:
         if non_uniform_key in self.cudagraph_keys[CUDAGraphMode.FULL]:
             return CUDAGraphMode.FULL, non_uniform_key
 
-        # also check if non-uniform key exists for more "general" 
+        # also check if non-uniform key exists for more "general"
         # piecewise cudagraph
-        if non_uniform_key in self.cudagraph_keys[
-                CUDAGraphMode.PIECEWISE]:
+        if non_uniform_key in self.cudagraph_keys[CUDAGraphMode.PIECEWISE]:
             return CUDAGraphMode.PIECEWISE, non_uniform_key
 
         # finally, just return no cudagraphs

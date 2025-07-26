@@ -33,9 +33,9 @@ class BatchDescriptor(NamedTuple):
     batch for cudagraph.
     """
     num_tokens: int
-    is_uniform: bool = False
+    uniform_decode: bool = False
     """
-    False can also be used for a uniform batch to dispatch to the 
+    False can also be used for an uniform decode batch to dispatch to the 
     cudagraph supporting non-uniform batches.
     """
 
@@ -44,7 +44,7 @@ class BatchDescriptor(NamedTuple):
         """
         Return a non-uniform version of current batch descriptor.
         """
-        return BatchDescriptor(self.num_tokens, is_uniform=False)
+        return BatchDescriptor(self.num_tokens, uniform_decode=False)
 
 
 @dataclass

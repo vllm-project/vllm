@@ -170,7 +170,7 @@ class CudaPlatformBase(Platform):
                             "CUTLASS_MLA_VLLM_V1 backend.")
 
         # lazy import to avoid circular import
-        from vllm.config import CUDAGraphMode, CompilationLevel
+        from vllm.config import CompilationLevel, CUDAGraphMode
 
         compilation_config = vllm_config.compilation_config
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
