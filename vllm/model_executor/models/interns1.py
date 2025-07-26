@@ -149,20 +149,6 @@ def get_interns1_target_ratios(
     return sorted(target_ratios, key=lambda x: x[0] * x[1])
 
 
-def resolve_min_max_num(
-    min_dynamic_patch: int,
-    max_dynamic_patch: int,
-    dynamic_image_size: bool,
-    use_thumbnail: bool,
-) -> tuple[int, int]:
-    return resolve_interns1_min_max_num(
-        min_dynamic_patch=min_dynamic_patch,
-        max_dynamic_patch=max_dynamic_patch,
-        dynamic_image_size=dynamic_image_size,
-        use_thumbnail=use_thumbnail,
-    )
-
-
 class BaseInternS1ProcessingInfo(BaseProcessingInfo):
     """Basic image-only ProcessingInfo for InternS1-style models."""
 
@@ -206,10 +192,11 @@ class BaseInternS1ProcessingInfo(BaseProcessingInfo):
         dynamic_image_size = True
         if use_thumbnail is None:
             use_thumbnail = True
-        min_num, max_num = resolve_min_max_num(min_dynamic_patch,
-                                               max_dynamic_patch,
-                                               dynamic_image_size,
-                                               use_thumbnail=use_thumbnail)
+        min_num, max_num = resolve_interns1_min_max_num(
+            min_dynamic_patch,
+            max_dynamic_patch,
+            dynamic_image_size,
+            use_thumbnail=use_thumbnail)
 
         return get_interns1_target_ratios(min_num, max_num)
 
