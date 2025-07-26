@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from typing import Any
 
 import torch
+import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -58,6 +59,9 @@ class CPUModelRunner(GPUModelRunner):
             self.model = self.load_lora_model(self.model, self.model_config,
                                               self.scheduler_config,
                                               self.lora_config, self.device)
+
+    def get_model(self) -> nn.Module:
+        return self.model
 
     def warming_up_model(self) -> None:
         logger.info("Warming up model for the compilation...")

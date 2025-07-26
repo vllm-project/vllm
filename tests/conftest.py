@@ -1062,8 +1062,17 @@ class VllmRunner:
         return [req_output.outputs.score for req_output in req_outputs]
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
-        executor = self.llm.llm_engine.model_executor
-        return executor.apply_model(func)
+        if hasattr(self.llm.llm_engine, "model_executor"):
+            # This works either in V0 or in V1 with
+            # VLLM_ENABLE_V1_MULTIPROCESSING=0
+            executor = self.llm.llm_engine.model_executor
+            return executor.apply_model(func)
+
+        # This works in V1 with VLLM_ALLOW_INSECURE_SERIALIZATION=1
+        def _apply_model(self):
+            return func(self.get_model())
+
+        return self.llm.llm_engine.collective_rpc(_apply_model)
 
     def __enter__(self):
         return self

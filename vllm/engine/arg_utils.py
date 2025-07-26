@@ -1649,7 +1649,8 @@ class EngineArgs:
 
         if (self.max_num_seqs is None
                 and usage_context in default_max_num_seqs):
-            self.max_num_seqs = default_max_num_seqs[usage_context]
+            self.max_num_seqs = min(default_max_num_seqs[usage_context],
+                                    self.max_num_batched_tokens or sys.maxsize)
 
             logger.debug("Setting max_num_seqs to %d for %s usage context.",
                          self.max_num_seqs, use_context_value)
