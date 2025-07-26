@@ -29,7 +29,7 @@ PROXY_PORT=${PROXY_PORT:-30001}
 PREFILL_GPUS=${PREFILL_GPUS:-0}
 DECODE_GPUS=${DECODE_GPUS:-1,2,3}
 PREFILL_PORTS=${PREFILL_PORTS:-20003}
-DECODE_PORTS=${DECODE_PORTS:-20005,20007,20009} 
+DECODE_PORTS=${DECODE_PORTS:-20005,20007,20009}
 
 echo "Warning: P2P NCCL disaggregated prefill XpYd support for vLLM v1 is experimental and subject to change."
 echo ""
@@ -164,7 +164,7 @@ main() {
         local gpu_id=${PREFILL_GPU_ARRAY[$i]}
         local port=${PREFILL_PORT_ARRAY[$i]}
         local kv_port=$((21001 + i))
-        
+
         echo "  Prefill server $((i+1)): GPU $gpu_id, Port $port, KV Port $kv_port"
         CUDA_VISIBLE_DEVICES=$gpu_id VLLM_USE_V1=1 vllm serve $MODEL \
         --enforce-eager \
@@ -193,7 +193,7 @@ main() {
         local gpu_id=${DECODE_GPU_ARRAY[$i]}
         local port=${DECODE_PORT_ARRAY[$i]}
         local kv_port=$((22001 + i))
-        
+
         echo "  Decode server $((i+1)): GPU $gpu_id, Port $port, KV Port $kv_port"
         VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=$gpu_id vllm serve $MODEL \
         --enforce-eager \
@@ -233,7 +233,7 @@ main() {
     # Run Benchmark
     # =============================================================================
     cd ../../../benchmarks/
-    python3 benchmark_serving.py --port 10001 --seed $(date +%s) \
+    vllm bench serve --port 10001 --seed $(date +%s) \
         --model $MODEL \
         --dataset-name random --random-input-len 7500 --random-output-len 200 \
         --num-prompts 200 --burstiness 100 --request-rate 2 | tee benchmark.log
