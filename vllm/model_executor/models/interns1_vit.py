@@ -8,7 +8,6 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 from collections.abc import Iterable
-from functools import partial
 from typing import Optional
 
 import torch
@@ -17,15 +16,9 @@ import torch.nn.functional as F
 from transformers import PretrainedConfig
 from transformers.utils import torch_int
 
-from vllm.attention.layer import MultiHeadAttention
-from vllm.distributed import (divide, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              split_tensor_along_last_dim,
-                              tensor_model_parallel_all_gather)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -164,92 +157,6 @@ class InternS1VisionEmbeddings(nn.Module):
                 embeddings, height, width)
 
         return embeddings, (patch_height, patch_width)
-
-
-class InternParallelAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
-
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        *,
-        num_dummy_heads: int = 0,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-
-        self.config = config
-        self.embed_dim = config.hidden_size
-        self.num_heads = config.num_attention_heads
-        self.head_dim = self.embed_dim // self.num_heads
-        if self.head_dim * self.num_heads != self.embed_dim:
-            raise ValueError(
-                f'embed_dim must be divisible by num_heads '
-                f'(got `embed_dim`: {self.embed_dim} and `num_heads`:'
-                f' {self.num_heads}).')
-
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
-
-        # Additional dummy heads are used to enable TP for common GPU counts.
-        self.dummy_dim = (num_dummy_heads + self.num_heads) * self.head_dim
-        self.num_heads_per_partition = divide(num_dummy_heads + self.num_heads,
-                                              self.tp_size)
-
-        self.scale = self.head_dim**-0.5
-        self.qkv_proj = QKVParallelLinear(
-            self.embed_dim,
-            self.head_dim,
-            num_dummy_heads + self.num_heads,
-            bias=config.attention_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
-        )
-
-        self.qk_normalization = config.use_qk_norm
-        if self.qk_normalization:
-            self.q_norm = RMSNorm(self.dummy_dim,
-                                  eps=config.layer_norm_eps,
-                                  var_hidden_size=self.embed_dim)
-            self.k_norm = RMSNorm(self.dummy_dim,
-                                  eps=config.layer_norm_eps,
-                                  var_hidden_size=self.embed_dim)
-
-        self.projection_layer = RowParallelLinear(
-            self.dummy_dim,
-            self.embed_dim,
-            quant_config=quant_config,
-            prefix=f"{prefix}.proj",
-        )
-
-        self.attn = MultiHeadAttention(self.num_heads_per_partition,
-                                       self.head_dim, self.scale)
-
-    def _apply_qk_norm(self, q: torch.Tensor, k: torch.Tensor):
-        if self.tp_size > 1:
-            q = tensor_model_parallel_all_gather(q.contiguous())
-            k = tensor_model_parallel_all_gather(k.contiguous())
-        q = self.q_norm(q)
-        k = self.k_norm(k)
-        if self.tp_size > 1:
-            splitter = partial(split_tensor_along_last_dim,
-                               num_partitions=self.tp_size)
-            q = splitter(q)[self.tp_rank]
-            k = splitter(k)[self.tp_rank]
-        return q, k
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, N, _ = x.shape
-        qkv, _ = self.qkv_proj(x)
-        q, k, v = qkv.chunk(3, dim=-1)
-
-        if self.qk_normalization:
-            q, k = self._apply_qk_norm(q, k)
-
-        out = self.attn(q, k, v)
-        out, _ = self.projection_layer(out)
-        return out
 
 
 class InternSdpaAttention(nn.Module):
@@ -397,16 +304,6 @@ class InternS1VisionLayer(nn.Module):
         num_dummy_heads: int,
         prefix: str = "",
     ):
-        # fallback to sdpa attention if tp unavailable
-        tp_size = get_tensor_model_parallel_world_size()
-        num_heads = config.num_attention_heads
-
-        if (num_heads + num_dummy_heads) % tp_size == 0:
-            return InternParallelAttention(config,
-                                           quant_config=quant_config,
-                                           num_dummy_heads=num_dummy_heads,
-                                           prefix=prefix)
-
         return InternSdpaAttention(config, num_dummy_heads=num_dummy_heads)
 
     def forward(
