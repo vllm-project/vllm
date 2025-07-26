@@ -468,6 +468,37 @@ def run_tarsier(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Intern-S1
+def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "internlm/Intern-S1"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+        enforce_eager=True,
+    )
+
+    placeholder = "<IMG_CONTEXT>"
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [
+        [{"role": "user", "content": f"{placeholder}\n{question}"}]
+        for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # InternVL
 def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "OpenGVLab/InternVL3-2B"
@@ -1303,6 +1334,7 @@ model_example_map = {
     "h2ovl_chat": run_h2ovl,
     "hyperclovax_seed_vision": run_hyperclovax_seed_vision,
     "idefics3": run_idefics3,
+    "interns1": run_interns1,
     "internvl_chat": run_internvl,
     "nemotron_vl": run_nemotron_vl,
     "keye_vl": run_keye_vl,
