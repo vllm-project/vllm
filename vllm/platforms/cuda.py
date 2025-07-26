@@ -519,6 +519,26 @@ class CudaPlatformBase(Platform):
         return supported
 
     @classmethod
+    def reset_peak_memory_stats(cls):
+        torch.cuda.reset_peak_memory_stats()
+
+    @classmethod
+    def mem_get_info(cls):
+        return torch.cuda.mem_get_info()
+
+    @classmethod
+    def memory_stats(cls):
+        return torch.cuda.memory_stats()
+
+    @classmethod
+    def memory_reserved(cls):
+        return torch.cuda.memory_reserved()
+
+    @classmethod
+    def empty_cache(cls):
+        torch.cuda.empty_cache()
+
+    @classmethod
     def get_num_sms(cls, device: torch.device):
         device_properties = torch.cuda.get_device_properties(device)
         num_sms = device_properties.multi_processor_count
