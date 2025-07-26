@@ -4285,11 +4285,6 @@ class CompilationConfig:
             self.inductor_compile_config[k] = func if isinstance(
                 func, InductorPass) else CallableInductorPass(func)
 
-        if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
-            assert self.level == CompilationLevel.PIECEWISE, (
-                "compilation level should be CompilationLevel.PIECEWISE "
-                "when cudagraph_mode is CUDAGraphMode.PIECEWISE")
-
         if isinstance(self.pass_config, dict):
             self.pass_config = PassConfig(**self.pass_config)
 
@@ -4719,6 +4714,11 @@ class VllmConfig:
                         "cascade attention currently. Disabling cascade"
                         "attention.")
             self.model_config.disable_cascade_attn = True
+
+        if self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+            assert self.compilation_config.level == CompilationLevel.PIECEWISE,\
+                "Compilation level should be CompilationLevel.PIECEWISE "\
+                "when cudagraph_mode is CUDAGraphMode.PIECEWISE"
 
         disable_chunked_prefill_reasons: list[str] = []
 
