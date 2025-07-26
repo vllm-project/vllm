@@ -1127,6 +1127,7 @@ def flashinfer_fused_moe_blockscale_fp8(
         tile_tokens_dim=_get_tile_tokens_dim(x.shape[0], top_k,
                                              global_num_experts),
         routing_method_type=2,  # DeepSeek-styled routing method
+        use_shuffled_weight=False,
     )
 
 
