@@ -1129,7 +1129,7 @@ class LLM:
             pooling_params.verify(pooling_task, model_config)
         else:
             for pooling_param in pooling_params:
-                pooling_params.merge_default_parameters(
+                pooling_param.merge_default_parameters(
                     model_config.pooler_config)
                 pooling_param.verify(pooling_task, model_config)
 
@@ -1305,10 +1305,8 @@ class LLM:
             pooling_params = PoolingParams(task="score")
 
         model_config = self.llm_engine.model_config
-        pooling_task = "score"
-
         pooling_params.merge_default_parameters(model_config.pooler_config)
-        pooling_params.verify(pooling_task, model_config)
+        pooling_params.verify("score", model_config)
 
         tokenization_kwargs: dict[str, Any] = {}
         _validate_truncation_size(self.llm_engine.model_config.max_model_len,
