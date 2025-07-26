@@ -797,7 +797,7 @@ class ModelConfig:
         revision = self.revision
 
         from vllm.transformers_utils.dynamic_module import (
-            get_transformers_dynamic_module)
+            get_dynamic_module_file)
 
         auto_map: dict[str, str] = getattr(self.hf_config, "auto_map",
                                            None) or dict()
@@ -810,9 +810,7 @@ class ModelConfig:
         #     "AutoModelFor<Task>": "<your-repo-name>--<config-name>",
         # },
         auto_modules = {
-            name: get_transformers_dynamic_module(module,
-                                                  model,
-                                                  revision=revision)
+            name: get_dynamic_module_file(module, model, revision=revision)
             for name, module in sorted(auto_map.items(), key=lambda x: x[0])
             if "." in module  # Ignore entries that are improperly formatted
         }
