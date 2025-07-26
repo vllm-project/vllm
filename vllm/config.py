@@ -121,7 +121,7 @@ _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
 # Some model suffixes are based on auto classes from Transformers:
 # https://huggingface.co/docs/transformers/en/model_doc/auto
 # NOTE: Items higher on this list priority over lower ones
-SUFFIX_TO_DEFAULTS: list[tuple[str, tuple[RunnerType, ConvertType]]] = [
+_SUFFIX_TO_DEFAULTS: list[tuple[str, tuple[RunnerType, ConvertType]]] = [
     ("ForCausalLM", ("generate", "none")),
     ("ForConditionalGeneration", ("generate", "none")),
     ("ChatModel", ("generate", "none")),
@@ -138,6 +138,22 @@ SUFFIX_TO_DEFAULTS: list[tuple[str, tuple[RunnerType, ConvertType]]] = [
     # Let other `*Model`s take priority
     ("Model", ("pooling", "embed")),
 ]
+
+
+def try_match_architecture_defaults(
+    architecture: str,
+    *,
+    runner_type: Optional[RunnerType] = None,
+    convert_type: Optional[ConvertType] = None,
+) -> Optional[tuple[str, tuple[RunnerType, ConvertType]]]:
+    for suffix, (default_runner_type,
+                 default_convert_type) in _SUFFIX_TO_DEFAULTS:
+        if ((runner_type is None or runner_type == default_runner_type) and
+            (convert_type is None or convert_type == default_convert_type)
+                and architecture.endswith(suffix)):
+            return suffix, (default_runner_type, default_convert_type)
+
+    return None
 
 
 @runtime_checkable
@@ -594,10 +610,14 @@ class ModelConfig:
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, hf_token=self.hf_token, revision=self.revision)
 
+        # NOTE: We need to resolve this early, otherwise the temporary
+        # transformers modules might not be available to child processes
+        self._resolve_transformers_backend()
+
         architectures = self.architectures
-        is_generative_model = self.registry.is_text_generation_model(
-            architectures)
-        is_pooling_model = self.registry.is_pooling_model(architectures)
+        registry = self.registry
+        is_generative_model = registry.is_text_generation_model(architectures)
+        is_pooling_model = registry.is_pooling_model(architectures)
 
         def _task_to_convert(task: TaskOption) -> ConvertType:
             if task == "embedding" or task == "embed":
@@ -684,8 +704,7 @@ class ModelConfig:
         self.supported_tasks = self._get_supported_tasks(
             architectures, self.runner_type, self.convert_type)
 
-        _, arch = self.registry.inspect_model_cls(self.architectures,
-                                                  model_config=self)
+        _, arch = registry.inspect_model_cls(architectures, model_config=self)
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
 
@@ -740,17 +759,17 @@ class ModelConfig:
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
         self.multimodal_config = self._init_multimodal_config()
+
         self.model_supports_multimodal_raw_input = (
-            self.registry.supports_multimodal_raw_input(self.architectures))
+            registry.supports_multimodal_raw_input(architectures))
+        self.is_attention_free = registry.is_attention_free_model(
+            architectures)
+        self.is_hybrid = registry.is_hybrid_model(architectures)
+        self.has_noops = registry.is_noops_model(architectures)
+        self.has_inner_state = registry.model_has_inner_state(architectures)
+
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
-
-        self.is_attention_free = self.registry.is_attention_free_model(
-            architectures)
-        self.is_hybrid = self.registry.is_hybrid_model(architectures)
-        self.has_noops = self.registry.is_noops_model(architectures)
-        self.has_inner_state = self.registry.model_has_inner_state(
-            architectures)
 
         if (not current_platform.is_neuron() and self.override_neuron_config):
             raise ValueError(
@@ -776,6 +795,32 @@ class ModelConfig:
                 "max_model_len must be an integer after __post_init__.")
         return self
 
+    def _resolve_transformers_backend(self):
+        model = self.model
+        revision = self.revision
+
+        from transformers.dynamic_module_utils import (
+            get_class_from_dynamic_module)
+
+        auto_map: dict[str, str] = getattr(self.hf_config, "auto_map",
+                                           None) or dict()
+        # Make sure that config class is always initialized before model class,
+        # otherwise the model class won't be able to access the config class,
+        # the expected auto_map should have correct order like:
+        # "auto_map": {
+        #     "AutoConfig": "<your-repo-name>--<config-name>",
+        #     "AutoModel": "<your-repo-name>--<config-name>",
+        #     "AutoModelFor<Task>": "<your-repo-name>--<config-name>",
+        # },
+        auto_modules = {
+            name: get_class_from_dynamic_module(module,
+                                                model,
+                                                revision=revision)
+            for name, module in sorted(auto_map.items(), key=lambda x: x[0])
+        }
+
+        return auto_map, auto_modules
+
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
@@ -792,20 +837,7 @@ class ModelConfig:
 
     @property
     def architectures(self) -> list[str]:
-        # architectures in the model config.
-        architectures = getattr(self.hf_config, "architectures", [])
-        # The registry assumes that it can always inspect the vLLM model class
-        # for a given architecture. This assumption breaks down for the
-        # Transformers backend, which may use a different class depending on
-        # the model type. To work around this, we add the correct Transformers
-        # backend class to the architectures list. We must do this here because
-        # we need access to the `hf_config` to determine the backend class.
-        transformers_backend_cls = self._get_transformers_backend_cls()
-        if (self.model_impl != ModelImpl.VLLM.value
-                and all(arch != transformers_backend_cls
-                        for arch in architectures)):
-            architectures.append(transformers_backend_cls)
-        return architectures
+        return getattr(self.hf_config, "architectures", [])
 
     @cached_property
     def architecture(self) -> str:
@@ -930,9 +962,10 @@ class ModelConfig:
                 if registry.is_text_generation_model(architectures):
                     return "generate"
 
-            for suffix, (runner_type, _) in SUFFIX_TO_DEFAULTS:
-                if arch.endswith(suffix):
-                    return runner_type
+            match = try_match_architecture_defaults(arch)
+            if match:
+                _, (runner_type, _) = match
+                return runner_type
 
         return "generate"
 
@@ -968,11 +1001,11 @@ class ModelConfig:
                         and registry.is_pooling_model(architectures)):
                     return "none"
 
-            for suffix, (default_runner_type,
-                         convert_type) in SUFFIX_TO_DEFAULTS:
-                if (default_runner_type == runner_type
-                        and arch.endswith(suffix)):
-                    return convert_type
+            match = try_match_architecture_defaults(arch,
+                                                    runner_type=runner_type)
+            if match:
+                _, (_, convert_type) = match
+                return convert_type
 
         # This is to handle Sentence Transformers models that use *ForCausalLM
         # and also multi-modal pooling models which are not defined as
@@ -1029,10 +1062,12 @@ class ModelConfig:
             return "classify"
 
         for arch in architectures:
-            for suffix, (runner_type, convert_type) in SUFFIX_TO_DEFAULTS:
-                if runner_type == "pooling" and arch.endswith(suffix):
-                    assert convert_type != "none"
-                    return convert_type
+            match = try_match_architecture_defaults(arch,
+                                                    runner_type="pooling")
+            if match:
+                _, (_, convert_type) = match
+                assert convert_type != "none"
+                return convert_type
 
         return "embed"
 

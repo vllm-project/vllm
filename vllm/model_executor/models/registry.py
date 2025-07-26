@@ -18,7 +18,7 @@ from typing import Callable, Optional, TypeVar, Union
 
 import torch.nn as nn
 
-from vllm.config import SUFFIX_TO_DEFAULTS, ModelConfig, ModelImpl
+from vllm.config import ModelConfig, ModelImpl, try_match_architecture_defaults
 from vllm.logger import init_logger
 
 from .interfaces import (has_inner_state, has_noops, is_attention_free,
@@ -490,40 +490,24 @@ class _ModelRegistry:
 
         return _try_inspect_model_cls(model_arch, self.models[model_arch])
 
-    def _resolve_transformers(self, architecture: str,
-                              model_config: ModelConfig):
+    def _try_resolve_transformers(
+        self,
+        architecture: str,
+        model_config: ModelConfig,
+    ) -> Optional[str]:
         if architecture in _TRANSFORMERS_BACKEND_MODELS:
             return architecture
-        if model_config.model_impl == ModelImpl.VLLM:
-            return architecture
+
+        auto_map, auto_modules = model_config._resolve_transformers_backend()
 
         import transformers
-        from transformers.dynamic_module_utils import (
-            get_class_from_dynamic_module)
 
-        auto_map: dict[str, str] = getattr(model_config.hf_config, "auto_map",
-                                           None) or dict()
-        # Make sure that config class is always initialized before model class,
-        # otherwise the model class won't be able to access the config class,
-        # the expected auto_map should have correct order like:
-        # "auto_map": {
-        #     "AutoConfig": "<your-repo-name>--<config-name>",
-        #     "AutoModel": "<your-repo-name>--<config-name>",
-        #     "AutoModelFor<Task>": "<your-repo-name>--<config-name>",
-        # },
-        auto_modules = {
-            name:
-            get_class_from_dynamic_module(module,
-                                          model_config.model,
-                                          revision=model_config.revision)
-            for name, module in sorted(auto_map.items(), key=lambda x: x[0])
-        }
         model_module = getattr(transformers, architecture, None)
 
         if model_module is None:
             if "AutoModel" not in auto_map:
-                if model_config.model_impl == ModelImpl.AUTO:
-                    return architecture
+                if model_config.model_impl != ModelImpl.TRANSFORMERS:
+                    return None
 
                 raise ValueError(
                     f"Cannot find model module. {architecture!r} is not a "
@@ -535,8 +519,8 @@ class _ModelRegistry:
             model_module = auto_modules["AutoModel"]
 
         if not model_module.is_backend_compatible():
-            if model_config.model_impl == ModelImpl.AUTO:
-                return architecture
+            if model_config.model_impl != ModelImpl.TRANSFORMERS:
+                return None
 
             raise ValueError(
                 f"The Transformers implementation of {architecture!r} "
@@ -550,27 +534,19 @@ class _ModelRegistry:
         *,
         model_config: Optional[ModelConfig],
     ) -> str:
-        # model_config is required for further normalization
-        if model_config is None:
-            return architecture
-
-        # Use Transformers backend architecture if the config specifies it
-        # or if the architecture is not in the registry and the config allows
-        # for Transformers backend fallback behaviour
-        if (model_config.model_impl == ModelImpl.TRANSFORMERS
-                or model_config.model_impl == ModelImpl.AUTO
-                and architecture not in self.models):
-            return self._resolve_transformers(architecture, model_config)
-
         if architecture in self.models:
             return architecture
 
-        for suffix, (default_runner_type,
-                     default_convert_type) in SUFFIX_TO_DEFAULTS:
-            if (model_config.runner_type == default_runner_type
-                    and model_config.convert_type == default_convert_type
-                    and architecture.endswith(suffix)):
-                return architecture.replace(suffix, "ForCausalLM")
+        match = try_match_architecture_defaults(
+            architecture,
+            runner_type=None
+            if model_config is None else model_config.runner_type,
+            convert_type=None
+            if model_config is None else model_config.convert_type,
+        )
+        if match:
+            suffix, _ = match
+            return architecture.replace(suffix, "ForCausalLM")
 
         return architecture
 
@@ -588,20 +564,6 @@ class _ModelRegistry:
             for arch in architectures
         ]
 
-    def _get_inspected_arch(
-        self,
-        orig_architecture: str,
-        normalized_architecture: str,
-        *,
-        model_config: Optional[ModelConfig],
-    ) -> str:
-        if (model_config is not None and normalized_architecture
-                == model_config._get_transformers_backend_cls()):
-            return normalized_architecture
-
-        # Avoid breaking `verify_and_update_config`
-        return orig_architecture
-
     def inspect_model_cls(
         self,
         architectures: Union[str, list[str]],
@@ -614,13 +576,30 @@ class _ModelRegistry:
         normalized_archs = self._normalize_archs(architectures,
                                                  model_config=model_config)
 
+        # Require transformers impl
+        if (model_config is not None
+                and model_config.model_impl == ModelImpl.TRANSFORMERS):
+            arch = self._try_resolve_transformers(architectures[0],
+                                                  model_config)
+            if arch is not None:
+                model_info = self._try_inspect_model_cls(arch)
+                if model_info is not None:
+                    return (model_info, arch)
+
         for arch, normalized_arch in zip(architectures, normalized_archs):
             model_info = self._try_inspect_model_cls(normalized_arch)
             if model_info is not None:
-                out_arch = self._get_inspected_arch(arch,
-                                                    normalized_arch,
-                                                    model_config=model_config)
-                return (model_info, out_arch)
+                return (model_info, arch)
+
+        # Fallback to transformers impl
+        if (model_config is not None
+                and model_config.model_impl != ModelImpl.VLLM):
+            arch = self._try_resolve_transformers(architectures[0],
+                                                  model_config)
+            if arch is not None:
+                model_info = self._try_inspect_model_cls(arch)
+                if model_info is not None:
+                    return (model_info, arch)
 
         return self._raise_for_unsupported(architectures)
 
@@ -636,13 +615,30 @@ class _ModelRegistry:
         normalized_archs = self._normalize_archs(architectures,
                                                  model_config=model_config)
 
+        # Require transformers impl
+        if (model_config is not None
+                and model_config.model_impl == ModelImpl.TRANSFORMERS):
+            arch = self._try_resolve_transformers(architectures[0],
+                                                  model_config)
+            if arch is not None:
+                model_cls = self._try_load_model_cls(arch)
+                if model_cls is not None:
+                    return (model_cls, arch)
+
         for arch, normalized_arch in zip(architectures, normalized_archs):
             model_cls = self._try_load_model_cls(normalized_arch)
             if model_cls is not None:
-                out_arch = self._get_inspected_arch(arch,
-                                                    normalized_arch,
-                                                    model_config=model_config)
-                return (model_cls, out_arch)
+                return (model_cls, arch)
+
+        # Fallback to transformers impl
+        if (model_config is not None
+                and model_config.model_impl != ModelImpl.VLLM):
+            arch = self._try_resolve_transformers(architectures[0],
+                                                  model_config)
+            if arch is not None:
+                model_cls = self._try_load_model_cls(arch)
+                if model_cls is not None:
+                    return (model_cls, arch)
 
         return self._raise_for_unsupported(architectures)
 
