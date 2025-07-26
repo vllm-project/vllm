@@ -98,7 +98,7 @@ Then run the benchmarking script
 ```bash
 # download dataset
 # wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-python3 vllm/benchmarks/benchmark_serving.py \
+vllm bench serve \
   --backend vllm \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --endpoint /v1/completions \
@@ -111,25 +111,25 @@ If successful, you will see the following output
 
 ```
 ============ Serving Benchmark Result ============
-Successful requests:                     10        
-Benchmark duration (s):                  5.78      
-Total input tokens:                      1369      
-Total generated tokens:                  2212      
-Request throughput (req/s):              1.73      
-Output token throughput (tok/s):         382.89    
-Total Token throughput (tok/s):          619.85    
+Successful requests:                     10
+Benchmark duration (s):                  5.78
+Total input tokens:                      1369
+Total generated tokens:                  2212
+Request throughput (req/s):              1.73
+Output token throughput (tok/s):         382.89
+Total Token throughput (tok/s):          619.85
 ---------------Time to First Token----------------
-Mean TTFT (ms):                          71.54     
-Median TTFT (ms):                        73.88     
-P99 TTFT (ms):                           79.49     
+Mean TTFT (ms):                          71.54
+Median TTFT (ms):                        73.88
+P99 TTFT (ms):                           79.49
 -----Time per Output Token (excl. 1st token)------
-Mean TPOT (ms):                          7.91      
-Median TPOT (ms):                        7.96      
-P99 TPOT (ms):                           8.03      
+Mean TPOT (ms):                          7.91
+Median TPOT (ms):                        7.96
+P99 TPOT (ms):                           8.03
 ---------------Inter-token Latency----------------
-Mean ITL (ms):                           7.74      
-Median ITL (ms):                         7.70      
-P99 ITL (ms):                            8.39      
+Mean ITL (ms):                           7.74
+Median ITL (ms):                         7.70
+P99 ITL (ms):                            8.39
 ==================================================
 ```
 
@@ -141,7 +141,7 @@ If the dataset you want to benchmark is not supported yet in vLLM, even then you
 {"prompt": "What is the capital of India?"}
 {"prompt": "What is the capital of Iran?"}
 {"prompt": "What is the capital of China?"}
-``` 
+```
 
 ```bash
 # start server
@@ -150,7 +150,7 @@ VLLM_USE_V1=1 vllm serve meta-llama/Llama-3.1-8B-Instruct --disable-log-requests
 
 ```bash
 # run benchmarking script
-python3 benchmarks/benchmark_serving.py --port 9001 --save-result --save-detailed \
+vllm bench serve --port 9001 --save-result --save-detailed \
   --backend vllm \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --endpoint /v1/completions \
@@ -174,7 +174,7 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct --disable-log-requests
 ```
 
 ```bash
-python3 vllm/benchmarks/benchmark_serving.py \
+vllm bench serve \
   --backend openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
@@ -194,7 +194,7 @@ VLLM_USE_V1=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
 ```
 
 ``` bash
-python3 benchmarks/benchmark_serving.py \
+vllm bench serve \
     --model meta-llama/Meta-Llama-3-8B-Instruct \
     --dataset-name hf \
     --dataset-path likaixin/InstructCoder \
@@ -210,7 +210,7 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct --disable-log-requests
 **`lmms-lab/LLaVA-OneVision-Data`**
 
 ```bash
-python3 vllm/benchmarks/benchmark_serving.py \
+vllm bench serve \
   --backend openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
@@ -224,7 +224,7 @@ python3 vllm/benchmarks/benchmark_serving.py \
 **`Aeala/ShareGPT_Vicuna_unfiltered`**
 
 ```bash
-python3 vllm/benchmarks/benchmark_serving.py \
+vllm bench serve \
   --backend openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
@@ -237,7 +237,7 @@ python3 vllm/benchmarks/benchmark_serving.py \
 **`AI-MO/aimo-validation-aime`**
 
 ``` bash
-python3 vllm/benchmarks/benchmark_serving.py \
+vllm bench serve \
     --model Qwen/QwQ-32B \
     --dataset-name hf \
     --dataset-path AI-MO/aimo-validation-aime \
@@ -248,7 +248,7 @@ python3 vllm/benchmarks/benchmark_serving.py \
 **`philschmid/mt-bench`**
 
 ``` bash
-python3 vllm/benchmarks/benchmark_serving.py \
+vllm bench serve \
     --model Qwen/QwQ-32B \
     --dataset-name hf \
     --dataset-path philschmid/mt-bench \
@@ -261,7 +261,7 @@ When using OpenAI-compatible backends such as `vllm`, optional sampling
 parameters can be specified. Example client command:
 
 ```bash
-python3 vllm/benchmarks/benchmark_serving.py \
+vllm bench serve \
   --backend vllm \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --endpoint /v1/completions \
@@ -296,7 +296,7 @@ The following arguments can be used to control the ramp-up:
 <br/>
 
 ```bash
-python3 vllm/benchmarks/benchmark_throughput.py \
+vllm bench throughput \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --dataset-name sonnet \
   --dataset-path vllm/benchmarks/sonnet.txt \
@@ -314,7 +314,7 @@ Total num output tokens:  1500
 **VisionArena Benchmark for Vision Language Models**
 
 ``` bash
-python3 vllm/benchmarks/benchmark_throughput.py \
+vllm bench throughput \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --backend vllm-chat \
   --dataset-name hf \
@@ -336,7 +336,7 @@ Total num output tokens:  1280
 ``` bash
 VLLM_WORKER_MULTIPROC_METHOD=spawn \
 VLLM_USE_V1=1 \
-python3 vllm/benchmarks/benchmark_throughput.py \
+vllm bench throughput \
     --dataset-name=hf \
     --dataset-path=likaixin/InstructCoder \
     --model=meta-llama/Meta-Llama-3-8B-Instruct \
@@ -360,7 +360,7 @@ Total num output tokens:  204800
 **`lmms-lab/LLaVA-OneVision-Data`**
 
 ```bash
-python3 vllm/benchmarks/benchmark_throughput.py \
+vllm bench throughput \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --backend vllm-chat \
   --dataset-name hf \
@@ -373,7 +373,7 @@ python3 vllm/benchmarks/benchmark_throughput.py \
 **`Aeala/ShareGPT_Vicuna_unfiltered`**
 
 ```bash
-python3 vllm/benchmarks/benchmark_throughput.py \
+vllm bench throughput \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --backend vllm-chat \
   --dataset-name hf \
@@ -385,7 +385,7 @@ python3 vllm/benchmarks/benchmark_throughput.py \
 **`AI-MO/aimo-validation-aime`**
 
 ```bash
-python3 benchmarks/benchmark_throughput.py \
+vllm bench throughput \
   --model Qwen/QwQ-32B \
   --backend vllm \
   --dataset-name hf \
@@ -399,7 +399,7 @@ python3 benchmarks/benchmark_throughput.py \
 ``` bash
 # download dataset
 # wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-python3 vllm/benchmarks/benchmark_throughput.py \
+vllm bench throughput \
   --model meta-llama/Llama-2-7b-hf \
   --backend vllm \
   --dataset_path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
