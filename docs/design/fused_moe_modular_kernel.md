@@ -1,7 +1,14 @@
 ## Introduction
 FusedMoEModularKernel is implemented [here](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/modular_kernel.py)
 
-The FusedMoE operation is generally made of multiple operations as described in the diagrams below
+Based on the format of the input activations, FusedMoE implementations are broadly classified into 2 types.
+* Contiguous / Standard / Non-Batched, and
+* Batched
+The input activation format completely depends on the All2All Dispatch being used.
+* In the Contiguous variant, the All2All Dispatch returns the activations as a contiguous tensor of shape (M, K) along with TopK Ids and TopK weights of shape (M, num_topk)
+* In the Batched variant, the All2All Dispatch returns the activations as a tensor of shape (num_experts, max_tokens, K). Here, the activations/tokens that subscribe to the same expert are grouped together. Note that not all entries of the tensor are valid. The activations tensor is typically accompanied by an `expert_num_tokens` tensor of size `num_experts`, where `expert_num_tokens[i]` indicates the number of valid tokens that subscribe to the ith expert.
+
+The FusedMoE operation is generally made of multiple operations, in both the Contiguous and Batched variants, as described in the diagrams below
 
 ![](../assets/design/fused_moe_modular_kernel/fused_moe_non_batched.png "FusedMoE Non-Batched")
 
@@ -47,7 +54,7 @@ The `FusedMoEPermuteExpertsUnpermute` class is where the crux of the MoE operati
 
 #### apply()
 The `apply` method is where the implementations perform
-* Premute
+* Permute
 * Matmul with weight W1
 * Act + Mul
 * Quantization
@@ -56,7 +63,7 @@ The `apply` method is where the implementations perform
 * Maybe TopK Weight Application + Reduction
 
 #### workspace_shapes()
-The core FusedMoE implementation performs a series of operations. It would be inefficient to create output memory for each of these operations separately. To that effect, the implementations are required to provide 2 workspace shapes that could be used as intermediate buffers between operations. The `workspace_shapes()` function declares these workspace shapes that are allocated in `FusedMoEModularKernel::forward()` and passed to the `FusedMoEPermuteExpertsUnpermute::apply()` function.
+The core FusedMoE implementation performs a series of operations. It would be inefficient to create output memory for each of these operations separately. To that effect, implementations are required to declare 2 workspace shapes, the workspace datatype and the FusedMoE output shape as outputs of the workspace_shapes() method. This information is used to allocate the workspace tensors and the output tensor in `FusedMoEModularKernel::forward()` and passed on to the `FusedMoEPermuteExpertsUnpermute::apply()` method. The workspaces could then be used as intermediate buffers in the FusedMoE implementation.
 
 #### finalize_weight_and_reduce_impl()
 It is sometimes efficient to perform TopK weight application and Reduction inside the `FusedMoEPermuteExpertsUnpermute::apply()`. An example is [here](https://github.com/vllm-project/vllm/pull/20228). We have a `TopKWeightAndReduce` abstract class to facilitate such implementations. Please refer to the TopKWeightAndReduce section.
