@@ -235,15 +235,18 @@ class TestModel:
                                          "text_2": text_2,
                                          "activation": activation
                                      })
-            outputs = response.json()
+            if response.status_code != 200:
+                return response
 
+            outputs = response.json()
             return torch.tensor([x['score'] for x in outputs["data"]])
 
-        default = get_outputs(activation=None)
-        w_activation = get_outputs(activation=True)
-        wo_activation = get_outputs(activation=False)
-
         if model["is_cross_encoder"]:
+
+            default = get_outputs(activation=None)
+            w_activation = get_outputs(activation=True)
+            wo_activation = get_outputs(activation=False)
+
             assert torch.allclose(default, w_activation,
                                   atol=1e-2), "Default should use activation."
             assert not torch.allclose(
@@ -253,6 +256,8 @@ class TestModel:
                 F.sigmoid(wo_activation), w_activation, atol=1e-2
             ), "w_activation should be close to activation(wo_activation)."
         else:
+            get_outputs(activation=None)
+
             # The activation parameter only works for the is_cross_encoder model
-            assert torch.allclose(default, w_activation, atol=1e-2)
-            assert torch.allclose(wo_activation, w_activation, atol=1e-2)
+            response = get_outputs(activation=True)
+            assert response.status_code == 400

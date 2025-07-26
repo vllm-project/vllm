@@ -1251,13 +1251,11 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."),
     )
-    normalize: Optional[bool] = None
 
     # --8<-- [end:embedding-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(dimensions=self.dimensions,
-                             normalize=self.normalize)
+        return PoolingParams(dimensions=self.dimensions)
 
 
 class EmbeddingChatRequest(OpenAIBaseModel):
@@ -1304,7 +1302,6 @@ class EmbeddingChatRequest(OpenAIBaseModel):
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."),
     )
-    normalize: Optional[bool] = None
     # --8<-- [end:chat-embedding-extra-params]
 
     @model_validator(mode="before")
@@ -1317,8 +1314,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         return data
 
     def to_pooling_params(self):
-        return PoolingParams(dimensions=self.dimensions,
-                             normalize=self.normalize)
+        return PoolingParams(dimensions=self.dimensions)
 
 
 EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
@@ -1333,7 +1329,6 @@ class ScoreRequest(OpenAIBaseModel):
     text_1: Union[list[str], str, ScoreMultiModalParam]
     text_2: Union[list[str], str, ScoreMultiModalParam]
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
-    activation: Optional[bool] = None
 
     # --8<-- [start:score-extra-params]
 
@@ -1353,7 +1348,7 @@ class ScoreRequest(OpenAIBaseModel):
     # --8<-- [end:score-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(activation=self.activation)
+        return PoolingParams()
 
 
 class RerankRequest(OpenAIBaseModel):
@@ -1362,7 +1357,6 @@ class RerankRequest(OpenAIBaseModel):
     documents: Union[list[str], ScoreMultiModalParam]
     top_n: int = Field(default_factory=lambda: 0)
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
-    activation: Optional[bool] = None
 
     # --8<-- [start:rerank-extra-params]
 
@@ -1382,7 +1376,7 @@ class RerankRequest(OpenAIBaseModel):
     # --8<-- [end:rerank-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(activation=self.activation)
+        return PoolingParams()
 
 
 class RerankDocument(BaseModel):
@@ -1519,7 +1513,6 @@ class ClassificationRequest(OpenAIBaseModel):
     input: Union[list[str], str]
     truncate_prompt_tokens: Optional[int] = None
     user: Optional[str] = None
-    activation: Optional[bool] = None
 
     # --8<-- [start:classification-extra-params]
     priority: int = Field(
@@ -1533,7 +1526,7 @@ class ClassificationRequest(OpenAIBaseModel):
     # --8<-- [end:classification-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(activation=self.activation)
+        return PoolingParams()
 
 
 class ClassificationData(OpenAIBaseModel):
