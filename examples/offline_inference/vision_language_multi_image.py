@@ -253,6 +253,33 @@ def load_smolvlm(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_interns1(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "internlm/Intern-S1"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = "\n".join(
+        f"Image-{i}: <IMG_CONTEXT>\n" for i, _ in enumerate(image_urls, start=1)
+    )
+    messages = [{"role": "user", "content": f"{placeholders}\n{question}"}]
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    prompt = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "OpenGVLab/InternVL2-2B"
 
@@ -946,6 +973,7 @@ model_example_map = {
     "gemma3": load_gemma3,
     "h2ovl_chat": load_h2ovl,
     "idefics3": load_idefics3,
+    "interns1": load_interns1,
     "internvl_chat": load_internvl,
     "hyperclovax_seed_vision": load_hyperclovax_seed_vision,
     "keye_vl": load_keye_vl,
