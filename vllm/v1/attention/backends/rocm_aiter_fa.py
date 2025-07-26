@@ -14,7 +14,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 if current_platform.is_rocm():
     import aiter
@@ -165,7 +165,7 @@ logger = init_logger(__name__)
 
 class AiterFlashAttentionMetadataBuilder:
 
-    def __init__(self, kv_cache_spec: KVCacheSpec, layer_names: list[str],
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -179,7 +179,7 @@ class AiterFlashAttentionMetadataBuilder:
             self.parallel_config)
         self.headdim = self.model_config.get_head_size()
         self.kv_cache_spec = kv_cache_spec
-        self.block_size = self.kv_cache_spec.block_size
+        self.block_size = kv_cache_spec.block_size
 
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.

@@ -11,7 +11,7 @@ from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
     reorder_batch_to_split_decodes_and_prefills, split_decodes_and_prefills)
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -87,7 +87,7 @@ class Mamba2AttentionMetadata:
 class Mamba2AttentionMetadataBuilder(
         AttentionMetadataBuilder[Mamba2AttentionMetadata]):
 
-    def __init__(self, kv_cache_spec: KVCacheSpec, layer_names: list[str],
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         assert isinstance(kv_cache_spec, MambaSpec)
         self.kv_cache_spec = kv_cache_spec

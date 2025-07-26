@@ -23,7 +23,7 @@ from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata, get_kv_cache_layout,
     get_per_layer_parameters, infer_global_hyperparameters,
     reorder_batch_to_split_decodes_and_prefills, split_decodes_and_prefills)
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -223,7 +223,7 @@ class FlashInferMetadata:
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
-    def __init__(self, kv_cache_spec: KVCacheSpec, layer_names: list[str],
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         self.device = device
         self._workspace_buffer = None
@@ -237,7 +237,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         self.vllm_config = vllm_config
         self.cache_config = vllm_config.cache_config
-        assert isinstance(kv_cache_spec, AttentionSpec)
         self.kv_cache_spec = kv_cache_spec
 
     def reorder_batch(self, input_batch: InputBatch,

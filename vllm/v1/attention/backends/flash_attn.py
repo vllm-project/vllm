@@ -28,7 +28,7 @@ from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
                                               get_kv_cache_layout)
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 
@@ -146,7 +146,7 @@ class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
     full_cudagraph_supported: ClassVar[bool] = get_flash_attn_version() == 3
 
-    def __init__(self, kv_cache_spec: KVCacheSpec, layer_names: list[str],
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config

@@ -22,7 +22,7 @@ import vllm.envs as envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout)
 from vllm.logger import init_logger
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 _KV_CACHE_LAYOUT_OVERRIDE = None
@@ -68,9 +68,9 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     full_cudagraph_supported: ClassVar[bool] = False
 
     @abstractmethod
-    def __init__(self, kv_cache_spec: KVCacheSpec, layer_names: list[str],
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
-        pass
+        self.kv_cache_spec = kv_cache_spec
 
     @abstractmethod
     def build(self,

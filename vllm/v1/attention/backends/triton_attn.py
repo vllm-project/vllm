@@ -20,7 +20,7 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
-from vllm.v1.kv_cache_interface import KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 
@@ -59,11 +59,11 @@ class TritonAttentionMetadataBuilder(
         AttentionMetadataBuilder[TritonAttentionMetadata]):
     full_cudagraph_supported: ClassVar[bool] = True
 
-    def __init__(self, kv_cache_spec: KVCacheSpec, layer_names: list[str],
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         self.device = device
         self.kv_cache_spec = kv_cache_spec
-        self.block_size = self.kv_cache_spec.block_size
+        self.block_size = kv_cache_spec.block_size
 
         model_config = vllm_config.model_config
         self.num_heads_q = model_config.get_num_attention_heads(

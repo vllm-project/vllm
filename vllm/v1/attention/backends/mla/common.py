@@ -213,7 +213,7 @@ from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
     get_per_layer_parameters, infer_global_hyperparameters,
     reorder_batch_to_split_decodes_and_prefills, split_decodes_and_prefills)
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
@@ -405,14 +405,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     """
 
     def __init__(self,
-                 kv_cache_spec: KVCacheSpec,
+                 kv_cache_spec: AttentionSpec,
                  layer_names: list[str],
                  vllm_config: VllmConfig,
                  device: torch.device,
                  metadata_cls: Optional[type[M]] = None):
         self.metadata_cls = metadata_cls \
             if metadata_cls is not None else MLACommonMetadata
-        assert isinstance(kv_cache_spec, AttentionSpec)
         self.kv_cache_spec = kv_cache_spec
         self.device = device
         scheduler_config = vllm_config.scheduler_config
