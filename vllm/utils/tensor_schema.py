@@ -163,7 +163,6 @@ class TensorSchema:
 
             # Field exists, proceed with validation
             value = getattr(self, field_name)
-            #
             if get_origin(field_type) is not None:
                 args = get_args(field_type)
 
@@ -200,7 +199,7 @@ class TensorSchema:
                             raise ValueError(
                                 f"{field_name} is not one of the expected "
                                 f"types: {expected_types}")
-                        # print('performed validation')
+
                         self._validate_tensor_shape_expected(
                             actual_shape, expected_shape, field_name,
                             shape_env, arg.dynamic_dims)

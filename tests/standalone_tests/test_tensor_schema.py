@@ -128,7 +128,7 @@ def test_tensor_schema_with_invalid_resolve_binding_dims():
 
 
 def test_tensor_schema_with_list_of_symbolic_dim():
-    flat_data = [torch.randn(768) for _ in range(3)]  # (bn=3, fn)
+    flat_data = torch.stack([torch.randn(768) for _ in range(3)])  # (bn=3, fn)
     patches_per_image = [64, 64, 64]  # len = bn = 3
 
     FuyuImagePatchInputs(
@@ -138,7 +138,7 @@ def test_tensor_schema_with_list_of_symbolic_dim():
 
 
 def test_tensor_schema_with_list_of_symbolic_dim_mismatch_in_length():
-    flat_data = [torch.randn(768) for _ in range(4)]  # (bn=4, fn)
+    flat_data = torch.stack([torch.randn(768) for _ in range(4)])  # (bn=4, fn)
     patches_per_image = [64, 64, 64]  # len = 3 ≠ bn
 
     with pytest.raises(ValueError, match="expected 'bn'=4, got 3"):
