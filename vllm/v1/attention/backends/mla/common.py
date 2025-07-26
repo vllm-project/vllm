@@ -234,25 +234,25 @@ try:
 except ImportError:
     flashinfer_available = False
 
+if envs.VLLM_AITER_TRITON_FP8_BMM:
+    def dynamic_per_batched_tensor_quant(
+        x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn
+    ):
+        DTYPE_MAX = torch.finfo(dtype).max
+        min_val, max_val = x.aminmax()
+        amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-10)
+        scale = DTYPE_MAX / amax
+        x_scl_sat = (x * scale).clamp(min=-DTYPE_MAX, max=DTYPE_MAX)
+        return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
 
-def dynamic_per_batched_tensor_quant(
-    x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn
-):
-    DTYPE_MAX = torch.finfo(dtype).max
-    min_val, max_val = x.aminmax()
-    amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-10)
-    scale = DTYPE_MAX / amax
-    x_scl_sat = (x * scale).clamp(min=-DTYPE_MAX, max=DTYPE_MAX)
-    return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
-
-from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant
-@torch.compiler.disable
-def aiter_triton_fp8_bmm_wrapper(x, w, w_s, y = None, transpose_bm = False):
-    if y is not None:
-        batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant(x, w, w_s, YQ=y, transpose_bm=transpose_bm)
-    else:
-        y = batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant(x, w, w_s, transpose_bm = transpose_bm)
-        return y
+    from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant
+    @torch.compiler.disable
+    def aiter_triton_fp8_bmm_wrapper(x, w, w_s, group_size = 128, y = None, transpose_bm = False):
+        if y is not None:
+            batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant(x, w, w_s, group_size = group_size, YQ=y, transpose_bm=transpose_bm)
+        else:
+            y = batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant(x, w, w_s, group_size = group_size, transpose_bm = transpose_bm)
+            return y
             
 logger = init_logger(__name__)
 
@@ -972,11 +972,18 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
     def _v_up_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
-        # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
-        x = aiter_triton_fp8_bmm_wrapper(x, self.W_V, self.W_V_scale, transpose_bm = False)
-        # x = torch.bmm(x, self.W_UV)
-        # Convert from (N, B, V) to (B, N * V)
-        return x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+        if envs.VLLM_AITER_TRITON_FP8_BMM:
+            # Multiply + Transpose (N, B, L) x (N, L, V) -> (N, B, V) -> (B, N, V)
+            x = aiter_triton_fp8_bmm_wrapper(x, self.W_V, self.W_V_scale, group_size = 256, transpose_bm = True)
+            # Convert from (B, N, V) to (B, N * V)
+            x = x.reshape(-1, self.num_heads * self.v_head_dim)
+        else:
+            # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
+            x = torch.bmm(x, self.W_UV)
+            # Convert from (N, B, V) to (B, N * V)
+            x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+        return x
+
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
 
@@ -1025,15 +1032,16 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         W_UK, W_UV = kv_b_proj_weight.split(
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         
-        W_K = W_UK.transpose(0, 1) # 16 512 128
-        W_V = W_UV.permute(1, 2, 0) # 16 128 512
-        self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(W_K, dtype=torch.float8_e4m3fnuz)
-        self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(W_V, dtype=torch.float8_e4m3fnuz)
-
-        # # Convert from (L, N, V) to (N, L, V)
-        # self.W_UV = W_UV.transpose(0, 1)
-        # # Convert from (L, N, P) to (N, P, L)
-        # self.W_UK_T = W_UK.permute(1, 2, 0)
+        if envs.VLLM_AITER_TRITON_FP8_BMM:
+            W_K = W_UK.transpose(0, 1) # 16 512 128
+            W_V = W_UV.permute(1, 2, 0) # 16 128 512
+            self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(W_K, dtype=torch.float8_e4m3fnuz)
+            self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(W_V, dtype=torch.float8_e4m3fnuz)
+        else:
+            # Convert from (L, N, V) to (N, L, V)
+            self.W_UV = W_UV.transpose(0, 1)
+            # Convert from (L, N, P) to (N, P, L)
+            self.W_UK_T = W_UK.permute(1, 2, 0)
 
     def _compute_prefill_context(
         self,
