@@ -17,7 +17,7 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 try:
@@ -315,9 +315,9 @@ class TorchSDPAMetadata(AttentionMetadata):
 
 class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
 
-    def __init__(self, kv_cache_group_spec: KVCacheGroupSpec,
+    def __init__(self, kv_cache_spec: KVCacheSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device) -> None:
-        self.kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+        self.kv_cache_spec = kv_cache_spec
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
 

@@ -2432,7 +2432,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     f"Unknown KV cache spec type: {type(kv_cache_spec)}")
 
             attn_metadata_builder_i = attn_backend_i.get_builder_cls()(
-                kv_cache_group_spec,
+                kv_cache_spec,
+                kv_cache_group_spec.layer_names,
                 self.vllm_config,
                 self.device,
             )

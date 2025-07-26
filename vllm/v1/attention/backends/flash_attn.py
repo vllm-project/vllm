@@ -28,7 +28,7 @@ from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata,
                                               get_kv_cache_layout)
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -146,7 +146,7 @@ class FlashAttentionMetadataBuilder(
         AttentionMetadataBuilder[FlashAttentionMetadata]):
     full_cudagraph_supported: ClassVar[bool] = get_flash_attn_version() == 3
 
-    def __init__(self, kv_cache_group_spec: KVCacheGroupSpec,
+    def __init__(self, kv_cache_spec: KVCacheSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -160,7 +160,7 @@ class FlashAttentionMetadataBuilder(
         self.num_heads_kv = self.model_config.get_num_kv_heads(
             self.parallel_config)
         self.headdim = self.model_config.get_head_size()
-        self.block_size = kv_cache_group_spec.kv_cache_spec.block_size
+        self.block_size = kv_cache_spec.block_size
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.aot_schedule = (get_flash_attn_version() == 3)

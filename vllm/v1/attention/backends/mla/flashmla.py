@@ -18,7 +18,7 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -56,9 +56,9 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
     full_cudagraph_supported: ClassVar[bool] = True  # Decode-only
 
-    def __init__(self, kv_cache_group_spec: KVCacheGroupSpec,
+    def __init__(self, kv_cache_spec: KVCacheSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
-        super().__init__(kv_cache_group_spec, vllm_config, device,
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device,
                          FlashMLAMetadata)
 
         self.compilation_config = vllm_config.compilation_config

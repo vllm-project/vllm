@@ -17,7 +17,7 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 # yapf: enable
 
@@ -66,9 +66,9 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     full_cudagraph_supported: ClassVar[bool] = True  # decode only
 
-    def __init__(self, kv_cache_group_spec: KVCacheGroupSpec,
+    def __init__(self, kv_cache_spec: KVCacheSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
-        super().__init__(kv_cache_group_spec, vllm_config, device,
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device,
                          AiterMLAMetadata)
         assert self.kv_cache_spec.block_size == 1, "AITER MLA" \
             "only supports block size 1."
