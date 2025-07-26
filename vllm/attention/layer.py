@@ -82,6 +82,7 @@ class Attention(nn.Module):
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
+        attn_backend: Optional[type[AttentionBackend]] = None,
         **extra_impl_args,
     ) -> None:
         """
@@ -139,15 +140,6 @@ class Attention(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
 
-        # For v1 we have backend agnostic iRoPE (local chunked attention)
-        # we have to store the flag on the layer so gpu model runner can
-        # set KVSpec appropriately (and pop it so it doesnt get passed to
-        # the backends)
-        if envs.VLLM_USE_V1:
-            self.use_irope = extra_impl_args.pop("use_irope", False)
-        else:
-            self.use_irope = extra_impl_args.get("use_irope", False)
-
         quant_method = quant_config.get_quant_method(
             self, prefix=prefix) if quant_config else None
         if quant_method is not None and not isinstance(
@@ -168,15 +160,15 @@ class Attention(nn.Module):
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
-        self.attn_backend = get_attn_backend(head_size,
-                                             dtype,
-                                             kv_cache_dtype,
-                                             block_size,
-                                             is_attention_free,
-                                             use_mla=use_mla)
-
-        if envs.VLLM_USE_V1 and self.use_irope:
-            self.attn_backend = make_local_attention_backend(self.attn_backend)
+        if attn_backend is None:
+            self.attn_backend = get_attn_backend(head_size,
+                                                 dtype,
+                                                 kv_cache_dtype,
+                                                 block_size,
+                                                 is_attention_free,
+                                                 use_mla=use_mla)
+        else:
+            self.attn_backend = attn_backend
 
         impl_cls = self.attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
@@ -317,6 +309,46 @@ class Attention(nn.Module):
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
+
+
+class ChunkedLocalAttention(Attention):
+
+    def __init__(self,
+                 num_heads: int,
+                 head_size: int,
+                 scale: float,
+                 num_kv_heads: Optional[int] = None,
+                 alibi_slopes: Optional[List[float]] = None,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
+        dtype = torch.get_default_dtype()
+        if cache_config is not None:
+            kv_cache_dtype = cache_config.cache_dtype
+            block_size = cache_config.block_size
+        else:
+            kv_cache_dtype = "auto"
+            block_size = 16
+
+        # For v1 we have backend agnostic iRoPE (local chunked attention)
+        # we have to store the flag on the layer so gpu model runner can
+        # set KVSpec appropriately (and pop it so it doesnt get passed to
+        # the backends)
+        if envs.VLLM_USE_V1:
+            attn_backend = make_local_attention_backend(
+                get_attn_backend(head_size, dtype, kv_cache_dtype, block_size))
+        else:
+            attn_backend = None
+
+        super().__init__(num_heads=num_heads,
+                         head_size=head_size,
+                         scale=scale,
+                         num_kv_heads=num_kv_heads,
+                         alibi_slopes=alibi_slopes,
+                         cache_config=cache_config,
+                         quant_config=quant_config,
+                         prefix=prefix,
+                         attn_backend=attn_backend)
 
 
 class MultiHeadAttention(nn.Module):

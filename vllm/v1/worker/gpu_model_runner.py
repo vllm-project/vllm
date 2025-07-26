@@ -18,7 +18,7 @@ from tqdm import tqdm
 import vllm.envs as envs
 from vllm.attention import AttentionType
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.attention.layer import Attention
+from vllm.attention.layer import Attention, ChunkedLocalAttention
 from vllm.compilation.counter import compilation_counter
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config, update_config)
@@ -2751,8 +2751,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             # TODO: Support other attention modules, e.g., cross-attention
             if attn_module.attn_type == AttentionType.DECODER:
-                use_local_attention = (self.attention_chunk_size is not None
-                                       and attn_module.use_irope)
                 if attn_module.sliding_window is not None:
                     kv_cache_spec[layer_name] = SlidingWindowSpec(
                         block_size=block_size,
@@ -2761,10 +2759,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         dtype=self.kv_cache_dtype,
                         sliding_window=attn_module.sliding_window,
                         use_mla=use_mla)
-                    assert not use_local_attention, (
-                        "attention module can not be with ",
-                        "both local attention and sliding window")
-                elif use_local_attention:
+                elif self.attention_chunk_size is not None \
+                        and isinstance(attn_module, ChunkedLocalAttention):
                     kv_cache_spec[layer_name] = ChunkedLocalAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
