@@ -1,4 +1,11 @@
-# This vLLM Dockerfile is used to construct image that can build and run vLLM on x86 CPU platform.
+# This vLLM Dockerfile is used to build images that can run vLLM on both x86_64 and arm64 CPU platforms.
+#
+# Supported platforms:
+#   - linux/amd64 (x86_64)
+#   - linux/arm64 (aarch64)
+#
+# Use the `--platform` option with `docker buildx build` to specify the target architecture, e.g.:
+#   docker buildx build --platform=linux/arm64 -f docker/Dockerfile.cpu .
 #
 # Build targets:
 #   vllm-openai (default): used for serving deployment
@@ -53,7 +60,20 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --upgrade pip && \
     uv pip install -r requirements/cpu.txt
 
-ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/opt/venv/lib/libiomp5.so:$LD_PRELOAD"
+ARG TARGETARCH
+ENV TARGETARCH=${TARGETARCH}
+
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        PRELOAD_PATH="/usr/lib/aarch64-linux-gnu/libtcmalloc_minimal.so.4"; \
+    else \
+        PRELOAD_PATH="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/opt/venv/lib/libiomp5.so"; \
+    fi && \
+    echo "export LD_PRELOAD=$PRELOAD_PATH" >> ~/.bashrc
+
+# Ensure that the LD_PRELOAD environment variable for export is in effect.
+SHELL ["/bin/bash", "-c"]
+
+ENV LD_PRELOAD=${LD_PRELOAD}
 
 RUN echo 'ulimit -c 0' >> ~/.bashrc
 
