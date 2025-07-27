@@ -9,11 +9,15 @@ import partial_json_parser
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import random_tool_call_id
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall)
+                                              FunctionCall, ResponsesRequest,
+                                              ToolCall)
+# yapf: enable
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.entrypoints.openai.tool_parsers.utils import (
@@ -32,7 +36,10 @@ class Internlm2ToolParser(ToolParser):
         self.position = 0
 
     def adjust_request(
-            self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        self, request: Union[ChatCompletionRequest, ResponsesRequest]
+    ) -> Union[ChatCompletionRequest, ResponsesRequest]:
+        if not isinstance(request, ChatCompletionRequest):
+            return request
         if request.tools and request.tool_choice != 'none':
             # do not skip special tokens because internlm use the special
             # tokens to indicated the start and end of the tool calls
@@ -183,7 +190,7 @@ class Internlm2ToolParser(ToolParser):
     def extract_tool_calls(
         self,
         model_output: str,
-        request: ChatCompletionRequest,
+        request: Union[ChatCompletionRequest, ResponsesRequest],
     ) -> ExtractedToolCallInformation:
         text = model_output
         tools = request.tools
