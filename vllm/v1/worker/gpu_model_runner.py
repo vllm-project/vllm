@@ -2522,11 +2522,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.full_cuda_graph:
             if attn_metadata_builder_i.attn_cudagraph_support == \
                 AttentionCGSupport.NEVER:
-                raise ValueError(
-                    f"Full CUDAGraph not supported for "
-                    f"{attn_backend_i.__name__}. Turn off "
-                    f"CompilationConfig.full_cuda_graph or use a "
-                    f" different attention backend.")
+                raise ValueError(f"Full CUDAGraph not supported for "
+                                 f"{attn_backend_i.__name__}. Turn off "
+                                 f"CompilationConfig.full_cuda_graph or use a "
+                                 f" different attention backend.")
             if attn_metadata_builder_i.attn_cudagraph_support == \
                 AttentionCGSupport.PURE_DECODE_ONLY:
                 # Limit the max cudagraph size to the max number of
