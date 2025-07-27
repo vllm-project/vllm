@@ -23,6 +23,7 @@ from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
+from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.utils import (bind_process_name, make_zmq_socket,
@@ -110,6 +111,12 @@ class EngineCore:
                 "compatibility may not be maintained.",
                 vllm_config.scheduler_config.scheduler_cls)
 
+        if len(kv_cache_config.kv_cache_groups) == 0:
+            # Encoder models without KV cache don't support
+            # chunked prefill. But do SSM models?
+            logger.info("Disabling chunked prefill for model without KVCache")
+            vllm_config.scheduler_config.chunked_prefill_enabled = False
+
         self.scheduler: SchedulerInterface = Scheduler(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
@@ -195,11 +202,17 @@ class EngineCore:
                      "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
+    def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return self.model_executor.supported_tasks
+
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
         if pooling_params := request.pooling_params:
-            supported_pooling_tasks = (
-                self.model_executor.supported_pooling_tasks)
+            supported_pooling_tasks = [
+                task for task in self.get_supported_tasks()
+                if task in POOLING_TASKS
+            ]
+
             if pooling_params.task not in supported_pooling_tasks:
                 raise ValueError(f"Unsupported task: {pooling_params.task!r} "
                                  f"Supported tasks: {supported_pooling_tasks}")
