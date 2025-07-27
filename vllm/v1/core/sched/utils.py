@@ -29,7 +29,7 @@ def check_stop(request: Request,
         request.status = RequestStatus.FINISHED_STOPPED
         return True
 
-    if last_token_id in (sampling_params.stop_token_ids or ()):
+    if last_token_id in (sampling_params.all_stop_token_ids or ()):
         request.status = RequestStatus.FINISHED_STOPPED
         request.stop_reason = last_token_id
         return True
