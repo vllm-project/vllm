@@ -130,6 +130,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         self.is_multimodal_model = model_config.is_multimodal_model
         self.is_pooling_model = model_config.pooler_config is not None
+        self.is_encoder_only_model = False
         self.model_supports_multimodal_raw_input = (
             model_config.model_supports_multimodal_raw_input)
         self.max_model_len = model_config.max_model_len
@@ -747,6 +748,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         spec_decode_common_attn_metadata = None
 
         attn_metadata: dict[str, Any] = {}
+
+        # Prepare encoder attention metadata separately
+        # (encoder layers are not in KV cache groups)
+        if self.is_encoder_only_model:
+            common_attn_metadata, encoder_attn_metadata = \
+                self._build_encoder_only_attn_metadata(
+                scheduler_output)
+
+            # Add encoder attention metadata for all encoder layers
+            attention_layers = get_layers_from_vllm_config(
+                self.vllm_config, Attention)
+            for layer_name, attn_module in attention_layers.items():
+                if attn_module.attn_type == AttentionType.ENCODER_ONLY:
+                    attn_metadata[layer_name] = encoder_attn_metadata
+
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -772,6 +788,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 max_query_len=max_num_scheduled_tokens,
                 block_table_tensor=blk_table_tensor,
                 slot_mapping=slot_mapping,
+                causal=True,
             )
 
             if self.speculative_config and \
@@ -2164,7 +2181,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     block_table_tensor=self.input_batch.block_table[
                         kv_cache_group_id].get_device_tensor()[:num_reqs],
                     slot_mapping=self.input_batch.
-                    block_table[kv_cache_group_id].slot_mapping[:num_tokens])
+                    block_table[kv_cache_group_id].slot_mapping[:num_tokens],
+                    causal=True)
 
                 attn_metadata_i = self.attn_metadata_builders[
                     kv_cache_group_id].build_for_cudagraph_capture(
@@ -2606,6 +2624,126 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             uniform_decode=uniform_decode,
                             skip_eplb=True)
 
+    def _initialize_single_attn_backend(
+        self, kv_cache_spec: KVCacheSpec
+    ) -> tuple[AttentionBackend, AttentionMetadataBuilder]:
+        if isinstance(kv_cache_spec, AttentionSpec):
+            attn_backend_i = get_attn_backend(
+                kv_cache_spec.head_size,
+                self.dtype,
+                kv_cache_spec.dtype,
+                kv_cache_spec.block_size,
+                self.model_config.is_attention_free,
+                use_mla=kv_cache_spec.use_mla,
+            )
+            if attn_backend_i is None:
+                error_msg = (f"Error with get_attn_backend: "
+                             f"{kv_cache_spec.head_size=}, "
+                             f"{self.dtype=}, {kv_cache_spec.dtype=}, "
+                             f"{kv_cache_spec.block_size=}, "
+                             f"{self.model_config.is_attention_free=}, "
+                             f"{kv_cache_spec.use_mla=}")
+                logger.error(error_msg)
+                raise NotImplementedError(
+                    "Non-Attention backend is not supported by V1 "
+                    "GPUModelRunner.")
+        elif isinstance(kv_cache_spec, MambaSpec):
+            attn_backend_i = Mamba2AttentionBackend
+        else:
+            raise ValueError(
+                f"Unknown KV cache spec type: {type(kv_cache_spec)}")
+
+        attn_metadata_builder_i = attn_backend_i.get_builder_cls()(
+            kv_cache_spec,
+            self.vllm_config,
+            self.device,
+        )
+
+        if self.cudagraph_mode == CUDAGraphMode.FULL:
+            attn_cg_i = attn_metadata_builder_i.attn_cudagraph_support
+            if attn_cg_i == AttentionCGSupport.NEVER:
+                raise ValueError(
+                    f"Full CUDAGraph for {attn_backend_i.__name__} is "
+                    f"no supported. Set CompilationConfig.cudagraph_mode "
+                    f"to `NONE` or `PIECEWISE`, or use a different "
+                    f"attention backend.")
+
+            if len(self.compilation_config.splitting_ops) == 0:
+                assert attn_cg_i in [
+                    AttentionCGSupport.ALWAYS_UNIFIED,
+                    AttentionCGSupport.ALWAYS_SEPARATE,
+                ], (f"Full CUDAGraph not supported for "
+                    f"{attn_backend_i.__name__} with "
+                    f"CompilationConfig.splitting_ops = []. "
+                    f"Set it to None (default values) "
+                    f"or use a different attention backend.")
+
+            # check if the attention backends compatible with
+            # CompilationConfig.cudagraph_separate_routine
+            if attn_cg_i == AttentionCGSupport.ALWAYS_UNIFIED and \
+                self.compilation_config.cudagraph_separate_routine:
+                logger.warning_once(
+                    f"Full CUDAGraph support for {attn_backend_i.__name__}"
+                    f" is {AttentionCGSupport.ALWAYS_UNIFIED}, which expect"
+                    f"CompilationConfig.cudagraph_separate_routine as "
+                    f"False. Set it to False now.")
+                self.compilation_config.cudagraph_separate_routine = \
+                                                                False
+
+            if attn_cg_i == AttentionCGSupport.PURE_DECODE_ONLY and \
+                not self.compilation_config.cudagraph_separate_routine:
+
+                logger.warning_once(
+                    f"Full CUDAGraph support for {attn_backend_i.__name__}"
+                    f" is {AttentionCGSupport.PURE_DECODE_ONLY}, which "
+                    f"expect CompilationConfig.cudagraph_separate_routine"
+                    f"as True. Set it to True now.")
+                self.compilation_config.cudagraph_separate_routine = \
+                                                                True
+
+            # when AttentionCGSupport.ALWAYS_SEPARATE, we don't change
+            # the cudagraph_separate_routine flag, but should inform
+            # the user that this flag can be turned on to obtain
+            # better performance.
+            if attn_cg_i == AttentionCGSupport.ALWAYS_SEPARATE and \
+                not self.compilation_config.cudagraph_separate_routine:
+                logger.warning_once(
+                    f"{attn_backend_i.__name__} generally performs better "
+                    f"when capturing full cudagraph for mix prefill-"
+                    f"decode batches and pure decode batches in separate. "
+                    f"To enable this behavior turn on "
+                    f"CompilationConfig.cudagraph_separate_routine.")
+
+            # for attn_cg is pure decode only, and no piecewise compilation,
+            # we skip capturing mix prefill-decode (general) batches.
+            if attn_cg_i == AttentionCGSupport.PURE_DECODE_ONLY:
+                if self.no_piecewise_compilation:
+                    logger.warning_once(
+                        f"Skipping capturing mixed prefill-decode batches, "
+                        f"since backend {attn_backend_i.__name__} "
+                        f"supports full cudagraph for pure decode only and "
+                        f"vllm piecewise compilation is disabled.")
+                    self.capture_mixed_batches = False
+                else:
+                    assert self.compilation_config.is_attention_splitting,\
+                    "Invalid splitting_ops for piecewise compilation "
+                    "with cudagraph_mode `FULL` for backend "
+                    f"{attn_backend_i.__name__}, which support "
+                    "cudagraph only for pure decode. Please include "
+                    "attention ops in compilation_config.splitting_ops."
+
+            # check if speculative decode is compatible for full cudagraph
+            if self.uniform_decode_query_len > 1:
+                assert attn_cg_i in [
+                    AttentionCGSupport.ALWAYS_UNIFIED,
+                    AttentionCGSupport.ALWAYS_SEPARATE,
+                ], (f"Speculative decode is not supported with full "
+                    f"cudagraph for attention backend "
+                    f"{attn_backend_i.__name__}, whose cudagraph support "
+                    f"is {attn_cg}. Turn off full cudagraph or try another "
+                    f"attention backend.")
+        return attn_backend_i, attn_metadata_builder_i, attn_cg_i
+
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize the attention backends and attention metadata builders.
@@ -2619,134 +2757,53 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for i, kv_cache_group_spec in enumerate(
                 kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-            if isinstance(kv_cache_spec, AttentionSpec):
-                attn_backend_i = get_attn_backend(
-                    kv_cache_spec.head_size,
-                    self.dtype,
-                    kv_cache_spec.dtype,
-                    kv_cache_spec.block_size,
-                    self.model_config.is_attention_free,
-                    use_mla=kv_cache_spec.use_mla,
-                )
-                if attn_backend_i is None:
-                    error_msg = (f"Error with get_attn_backend: "
-                                 f"{kv_cache_spec.head_size=}, "
-                                 f"{self.dtype=}, {kv_cache_spec.dtype=}, "
-                                 f"{kv_cache_spec.block_size=}, "
-                                 f"{self.model_config.is_attention_free=}, "
-                                 f"{kv_cache_spec.use_mla=}")
-                    logger.error(error_msg)
-                    raise NotImplementedError(
-                        "Non-Attention backend is not supported by V1 "
-                        "GPUModelRunner.")
-            elif isinstance(kv_cache_spec, MambaSpec):
-                attn_backend_i = Mamba2AttentionBackend
-            else:
-                raise ValueError(
-                    f"Unknown KV cache spec type: {type(kv_cache_spec)}")
 
-            attn_metadata_builder_i = attn_backend_i.get_builder_cls()(
-                kv_cache_spec,
-                self.vllm_config,
-                self.device,
-            )
-
-            if self.cudagraph_mode == CUDAGraphMode.FULL:
-                if attn_cg is None:
-                    attn_cg = attn_metadata_builder_i.attn_cudagraph_support
-                else:
-                    if attn_cg != attn_metadata_builder_i.\
-                        attn_cudagraph_support:
-                        raise ValueError(
-                            "All attention backends must have the same "
-                            "AttentionCGSupport type when using full "
-                            "CUDAGraph. Set CompilationConfig.cudagraph_mode"
-                            " to `PIECEWISE` instead.")
-
-                if attn_cg == AttentionCGSupport.NEVER:
-                    raise ValueError(
-                        f"Full CUDAGraph for {attn_backend_i.__name__} is "
-                        f"no supported. Set CompilationConfig.cudagraph_mode "
-                        f"to `NONE` or `PIECEWISE`, or use a different "
-                        f"attention backend.")
-
-                if len(self.compilation_config.splitting_ops) == 0:
-                    assert attn_cg in [
-                        AttentionCGSupport.ALWAYS_UNIFIED,
-                        AttentionCGSupport.ALWAYS_SEPARATE,
-                    ], (f"Full CUDAGraph not supported for "
-                        f"{attn_backend_i.__name__} with "
-                        f"CompilationConfig.splitting_ops = []. "
-                        f"Set it to None (default values) "
-                        f"or use a different attention backend.")
-
-                # check if the attention backends compatible with
-                # CompilationConfig.cudagraph_separate_routine
-                if attn_cg == AttentionCGSupport.ALWAYS_UNIFIED and \
-                    self.compilation_config.cudagraph_separate_routine:
-                    logger.warning_once(
-                        f"Full CUDAGraph support for {attn_backend_i.__name__}"
-                        f" is {AttentionCGSupport.ALWAYS_UNIFIED}, which expect"
-                        f"CompilationConfig.cudagraph_separate_routine as "
-                        f"False. Set it to False now.")
-                    self.compilation_config.cudagraph_separate_routine = \
-                                                                    False
-
-                if attn_cg == AttentionCGSupport.PURE_DECODE_ONLY and \
-                    not self.compilation_config.cudagraph_separate_routine:
-
-                    logger.warning_once(
-                        f"Full CUDAGraph support for {attn_backend_i.__name__}"
-                        f" is {AttentionCGSupport.PURE_DECODE_ONLY}, which "
-                        f"expect CompilationConfig.cudagraph_separate_routine"
-                        f"as True. Set it to True now.")
-                    self.compilation_config.cudagraph_separate_routine = \
-                                                                    True
-
-                # when AttentionCGSupport.ALWAYS_SEPARATE, we don't change
-                # the cudagraph_separate_routine flag, but should inform
-                # the user that this flag can be turned on to obtain
-                # better performance.
-                if attn_cg == AttentionCGSupport.ALWAYS_SEPARATE and \
-                    not self.compilation_config.cudagraph_separate_routine:
-                    logger.warning_once(
-                        f"{attn_backend_i.__name__} generally performs better "
-                        f"when capturing full cudagraph for mix prefill-"
-                        f"decode batches and pure decode batches in separate. "
-                        f"To enable this behavior turn on "
-                        f"CompilationConfig.cudagraph_separate_routine.")
-
-                # for attn_cg is pure decode only, and no piecewise compilation,
-                # we skip capturing mix prefill-decode (general) batches.
-                if attn_cg == AttentionCGSupport.PURE_DECODE_ONLY:
-                    if self.no_piecewise_compilation:
-                        logger.warning_once(
-                            f"Skipping capturing mixed prefill-decode batches, "
-                            f"since backend {attn_backend_i.__name__} "
-                            f"supports full cudagraph for pure decode only and "
-                            f"vllm piecewise compilation is disabled.")
-                        self.capture_mixed_batches = False
-                    else:
-                        assert self.compilation_config.is_attention_splitting,\
-                        "Invalid splitting_ops for piecewise compilation "
-                        "with cudagraph_mode `FULL` for backend "
-                        f"{attn_backend_i.__name__}, which support "
-                        "cudagraph only for pure decode. Please include "
-                        "attention ops in compilation_config.splitting_ops."
-
-                # check if speculative decode is compatible for full cudagraph
-                if self.uniform_decode_query_len > 1:
-                    assert attn_cg in [
-                        AttentionCGSupport.ALWAYS_UNIFIED,
-                        AttentionCGSupport.ALWAYS_SEPARATE,
-                    ], (f"Speculative decode is not supported with full "
-                        f"cudagraph for attention backend "
-                        f"{attn_backend_i.__name__}, whose cudagraph support "
-                        f"is {attn_cg}. Turn off full cudagraph or try another "
-                        f"attention backend.")
-
+            attn_backend_i, attn_metadata_builder_i, attn_cg_i = \
+                self._initialize_single_attn_backend(kv_cache_spec)
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)
+            if attn_cg is None:
+                attn_cg = attn_cg_i
+            else:
+                if attn_cg != attn_cg_i:
+                    raise ValueError(
+                        "All attention backends must have the same "
+                        "AttentionCGSupport type when using full "
+                        "CUDAGraph. Set CompilationConfig.cudagraph_mode"
+                        " to `PIECEWISE` instead.")
+            
+        if len(self.attn_backends) == 0:
+
+          # Check if model is encoder-only
+          block_size = self.vllm_config.cache_config.block_size
+          use_mla = self.vllm_config.model_config.use_mla
+          attn_specs = list[AttentionSpec]()
+          attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+          for attn_module in attn_layers.values():
+
+              if attn_module.attn_type == AttentionType.ENCODER_ONLY:
+                  assert attn_module.sliding_window is None, "Sliding "
+                  "window attention is not supported for encoder-only models"
+
+                  attn_specs.append(
+                      FullAttentionSpec(block_size=block_size,
+                                        num_kv_heads=attn_module.num_kv_heads,
+                                        head_size=attn_module.head_size,
+                                        dtype=self.kv_cache_dtype,
+                                        use_mla=use_mla))
+              else:
+                  raise ValueError("Expected only encoder-only layers")
+
+          if len(attn_specs) > 0:
+              assert len(attn_specs) == len(attn_layers), \
+                  "All or none of the layers are expected to be encoder-only"
+
+              attn_backend, attn_metadata_builder, attn_cg_i = \
+                  self._initialize_single_attn_backend(attn_specs[0])
+              self.attn_backends.append(attn_backend)
+              self.attn_metadata_builders.append(attn_metadata_builder)
+              self.is_encoder_only_model = True
+              attn_cg = attn_cg_i
 
         # Trigger cudagraph dispatching keys initialization here (after
         # initializing attn backends).
@@ -3074,3 +3131,53 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     page_size_padded=page_size_padded)
 
         return kv_cache_spec
+
+    def _build_encoder_only_attn_metadata(
+            self, scheduler_output: "SchedulerOutput") -> \
+                tuple[CommonAttentionMetadata, Any]:
+        """Prepare encoder attention metadata for encoder-only models.
+
+        Args:
+            scheduler_output: Scheduler output
+
+        Returns:
+            dict[str, Any]: Encoder attention metadata
+        """
+        num_reqs = self.input_batch.num_reqs
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+        # Get the number of scheduled tokens for each request.
+        req_ids = self.input_batch.req_ids
+        tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+        max_num_scheduled_tokens = max(tokens)
+
+        # Use the first attention metadata builder
+        # to create encoder attention metadata
+        builder = self.attn_metadata_builders[0]
+
+        dummy_block_table = torch.zeros((num_reqs, 1),
+                                        dtype=torch.int32,
+                                        device=self.device)
+        dummy_slot_mapping = torch.zeros((total_num_scheduled_tokens, ),
+                                         dtype=torch.int32,
+                                         device=self.device)
+
+        common_metadata = CommonAttentionMetadata(
+            query_start_loc=self.query_start_loc[:num_reqs + 1],
+            query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
+            seq_lens=self.seq_lens[:num_reqs],
+            seq_lens_cpu=self.seq_lens_cpu[:num_reqs],
+            num_computed_tokens_cpu=self.input_batch.
+            num_computed_tokens_cpu_tensor[:num_reqs],
+            num_reqs=num_reqs,
+            num_actual_tokens=total_num_scheduled_tokens,
+            max_query_len=max_num_scheduled_tokens,
+            block_table_tensor=dummy_block_table,
+            slot_mapping=dummy_slot_mapping,
+            causal=False,
+        )
+
+        return common_metadata, builder.build(
+            common_prefix_len=0,  # No cascade for encoder
+            common_attn_metadata=common_metadata,
+        )
