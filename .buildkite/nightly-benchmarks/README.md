@@ -74,7 +74,7 @@ Here is an example of one test inside `latency-tests.json`:
 In this example:
 
 - The `test_name` attributes is a unique identifier for the test. In `latency-tests.json`, it must start with `latency_`.
-- The `parameters` attribute control the command line arguments to be used for `benchmark_latency.py`. Note that please use underline `_` instead of the dash `-` when specifying the command line arguments, and `run-performance-benchmarks.sh` will convert the underline to dash when feeding the arguments to `benchmark_latency.py`. For example, the corresponding command line arguments for `benchmark_latency.py` will be `--model meta-llama/Meta-Llama-3-8B --tensor-parallel-size 1 --load-format dummy --num-iters-warmup 5 --num-iters 15`
+- The `parameters` attribute control the command line arguments to be used for `vllm bench latency`. Note that please use underline `_` instead of the dash `-` when specifying the command line arguments, and `run-performance-benchmarks.sh` will convert the underline to dash when feeding the arguments to `vllm bench latency`. For example, the corresponding command line arguments for `vllm bench latency` will be `--model meta-llama/Meta-Llama-3-8B --tensor-parallel-size 1 --load-format dummy --num-iters-warmup 5 --num-iters 15`
 
 Note that the performance numbers are highly sensitive to the value of the parameters. Please make sure the parameters are set correctly.
 
@@ -82,13 +82,13 @@ WARNING: The benchmarking script will save json results by itself, so please do 
 
 ### Throughput test
 
-The tests are specified in `throughput-tests.json`. The syntax is similar to `latency-tests.json`, except for that the parameters will be fed forward to `benchmark_throughput.py`.
+The tests are specified in `throughput-tests.json`. The syntax is similar to `latency-tests.json`, except for that the parameters will be fed forward to `vllm bench throughput`.
 
 The number of this test is also stable -- a slight change on the value of this number might vary the performance numbers by a lot.
 
 ### Serving test
 
-We test the throughput by using `benchmark_serving.py` with request rate = inf to cover the online serving overhead. The corresponding parameters are in `serving-tests.json`, and here is an example:
+We test the throughput by using `vllm bench serve` with request rate = inf to cover the online serving overhead. The corresponding parameters are in `serving-tests.json`, and here is an example:
 
 ```json
 [
@@ -118,8 +118,8 @@ Inside this example:
 
 - The `test_name` attribute is also a unique identifier for the test. It must start with `serving_`.
 - The `server-parameters` includes the command line arguments for vLLM server.
-- The `client-parameters` includes the command line arguments for `benchmark_serving.py`.
-- The `qps_list` controls the list of qps for test. It will be used to configure the `--request-rate` parameter in `benchmark_serving.py`
+- The `client-parameters` includes the command line arguments for `vllm bench serve`.
+- The `qps_list` controls the list of qps for test. It will be used to configure the `--request-rate` parameter in `vllm bench serve`
 
 The number of this test is less stable compared to the delay and latency benchmarks (due to randomized sharegpt dataset sampling inside `benchmark_serving.py`), but a large change on this number (e.g. 5% change) still vary the output greatly.
 
