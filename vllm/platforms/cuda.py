@@ -159,7 +159,7 @@ class CudaPlatformBase(Platform):
 
             if envs.VLLM_ATTENTION_BACKEND is None:
                 # Default case
-                if cls.has_device_capability(100):
+                if cls.is_device_capability(100):
                     # Blackwell => Force CutlassMLA.
                     use_cutlass_mla = True
                     envs.VLLM_ATTENTION_BACKEND = "CUTLASS_MLA_VLLM_V1"
