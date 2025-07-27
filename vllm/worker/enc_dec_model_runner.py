@@ -410,7 +410,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         """
 
         if len(seq_group_metadata_list) == 0:
-            return (model_input.attn_metadata, None, None)
+            return model_input.attn_metadata, None, None
 
         # Since we are not supporting chunked prefill either the entire
         # batch is prefill or it is decode

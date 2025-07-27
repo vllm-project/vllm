@@ -129,7 +129,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace1 = (M_sum, max(N, K))
         workspace2 = (M_sum, max(N // 2, K))
         output = (M, K)
-        return (workspace1, workspace2, output, a.dtype)
+        return workspace1, workspace2, output, a.dtype
 
     def apply(
         self,

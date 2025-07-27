@@ -55,7 +55,7 @@ class Llama4MoE(nn.Module):
         router_scores, router_indices = fast_topk(gating_output, topk, dim=-1)
         # pseudo-standard is that the router scores are floats
         router_scores = torch.sigmoid(router_scores.float())
-        return (router_scores, router_indices.to(torch.int32))
+        return router_scores, router_indices.to(torch.int32)
 
     def __init__(self,
                  config: Llama4TextConfig,

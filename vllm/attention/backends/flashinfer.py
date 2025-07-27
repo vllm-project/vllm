@@ -85,7 +85,7 @@ class FlashInferBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return (num_blocks, 2, block_size, num_kv_heads, head_size)
+        return num_blocks, 2, block_size, num_kv_heads, head_size
 
     @staticmethod
     def get_kv_cache_stride_order() -> Tuple[int, ...]:

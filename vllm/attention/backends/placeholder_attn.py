@@ -53,7 +53,7 @@ class PlaceholderAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return (1, 1, 1, 1, 1)
+        return 1, 1, 1, 1, 1
 
     @staticmethod
     def swap_blocks(

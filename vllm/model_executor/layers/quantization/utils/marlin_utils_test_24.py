@@ -182,7 +182,7 @@ def sparse_semi_structured_from_dense_cutlass(dense):
         m, meta_ncols, meta_dtype, device)
     meta_reordered.scatter_(0, meta_offsets, meta.view(-1))
 
-    return (sparse, meta_reordered.view(m, meta_ncols))
+    return sparse, meta_reordered.view(m, meta_ncols)
 
 
 # This function performs reverse of the function above - it
