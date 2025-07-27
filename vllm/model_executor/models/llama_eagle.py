@@ -11,12 +11,15 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import (LlamaDecoderLayer,
                                               LlamaForCausalLM)
+from vllm.transformers_utils.configs.speculators_eagle import (
+    remap_speculators_weight_name)
 
 from .utils import AutoWeightsLoader, maybe_prefix
 
@@ -70,7 +73,17 @@ class LlamaModel(nn.Module):
         ])
         self.fc = torch.nn.Linear(self.config.hidden_size * 2,
                                   self.config.hidden_size,
-                                  bias=False)
+                                  bias=getattr(self.config, "fusion_bias",
+                                               False))
+
+        # HASH variant support
+        self.has_embedding_layernorms = getattr(self.config, "add_para_norm",
+                                                False)
+        if self.has_embedding_layernorms:
+            self.embedding_layernorm = RMSNorm(self.config.hidden_size,
+                                               eps=self.config.rms_norm_eps)
+            self.hidden_states_layernorm = RMSNorm(
+                self.config.hidden_size, eps=self.config.rms_norm_eps)
 
     def forward(
         self,
@@ -79,6 +92,12 @@ class LlamaModel(nn.Module):
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_embeds = self.embed_tokens(input_ids)
+
+        # Apply HASH normalization if enabled
+        if self.has_embedding_layernorms:
+            input_embeds = self.embedding_layernorm(input_embeds)
+            hidden_states = self.hidden_states_layernorm(hidden_states)
+
         hidden_states = self.fc(
             torch.cat((input_embeds, hidden_states), dim=-1))
         residual = None
@@ -104,6 +123,7 @@ class LlamaModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            name = remap_speculators_weight_name(name)
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -117,6 +137,10 @@ class LlamaModel(nn.Module):
                 # if PP disabled then draft will share embed with target
                 if get_pp_group().world_size == 1 and \
                     "embed_tokens." in name:
+                    continue
+
+                # Skip weights that don't exist in the model
+                if name not in params_dict:
                     continue
 
                 param = params_dict[name]
@@ -159,7 +183,8 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
 
         model_weights = {}
         for name, loaded_weight in weights:
-            if "lm_head" not in name:
+            remapped_name = remap_speculators_weight_name(name)
+            if "lm_head" not in remapped_name:
                 name = "model." + name
             model_weights[name] = loaded_weight
         loader.load_weights(model_weights.items())
