@@ -17,9 +17,12 @@ from functools import lru_cache
 from typing import Callable, Optional, TypeVar, Union
 
 import torch.nn as nn
+import transformers
 
 from vllm.config import ModelConfig, ModelImpl, try_match_architecture_defaults
 from vllm.logger import init_logger
+from vllm.transformers_utils.dynamic_module import (
+    try_get_class_from_dynamic_module)
 
 from .interfaces import (has_inner_state, has_noops, is_attention_free,
                          is_hybrid, supports_cross_encoding,
@@ -501,40 +504,22 @@ class _ModelRegistry:
         if architecture in _TRANSFORMERS_BACKEND_MODELS:
             return architecture
 
-        import transformers
-        from transformers.dynamic_module_utils import (
-            get_class_from_dynamic_module)
-
         auto_map: dict[str, str] = getattr(model_config.hf_config, "auto_map",
                                            None) or dict()
-
-        # Make sure that config class is always initialized before model class,
-        # otherwise the model class won't be able to access the config class,
-        # the expected auto_map should have correct order like:
-        # "auto_map": {
-        #     "AutoConfig": "<your-repo-name>--<config-name>",
-        #     "AutoModel": "<your-repo-name>--<config-name>",
-        #     "AutoModelFor<Task>": "<your-repo-name>--<config-name>",
-        # },
-        try:
-            auto_modules = {
-                name:
-                get_class_from_dynamic_module(module,
-                                              model_config.model,
-                                              revision=model_config.revision)
-                for name, module in sorted(auto_map.items(),
-                                           key=lambda x: x[0])
-            }
-        except Exception:
-            if model_config.model_impl != ModelImpl.TRANSFORMERS:
-                return None
-
-            raise
 
         model_module = getattr(transformers, architecture, None)
 
         if model_module is None:
-            if "AutoModel" not in auto_map:
+            for name, module in auto_map.items():
+                if name.startswith("AutoModel"):
+                    model_module = try_get_class_from_dynamic_module(
+                        module,
+                        model_config.model,
+                        revision=model_config.revision,
+                    )
+                    if model_module is not None:
+                        break
+            else:
                 if model_config.model_impl != ModelImpl.TRANSFORMERS:
                     return None
 
@@ -544,8 +529,6 @@ class _ModelRegistry:
                     "relevant if the model is meant to be in Transformers) "
                     "and 'AutoModel' is not present in the model config's "
                     "'auto_map' (relevant if the model is custom).")
-
-            model_module = auto_modules["AutoModel"]
 
         if not model_module.is_backend_compatible():
             if model_config.model_impl != ModelImpl.TRANSFORMERS:

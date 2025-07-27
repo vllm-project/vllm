@@ -804,6 +804,7 @@ class ModelConfig:
 
         auto_map: dict[str, str] = getattr(self.hf_config, "auto_map",
                                            None) or dict()
+
         # Make sure that config class is always initialized before model class,
         # otherwise the model class won't be able to access the config class,
         # the expected auto_map should have correct order like:
@@ -812,12 +813,12 @@ class ModelConfig:
         #     "AutoModel": "<your-repo-name>--<config-name>",
         #     "AutoModelFor<Task>": "<your-repo-name>--<config-name>",
         # },
-        auto_modules = {
-            name: try_get_dynamic_module_file(module, model, revision=revision)
-            for name, module in sorted(auto_map.items(), key=lambda x: x[0])
-        }
-
-        return auto_map, auto_modules
+        for prefix in ("AutoConfig", "AutoModel"):
+            for name, module in auto_map.items():
+                if name.startswith(prefix):
+                    try_get_dynamic_module_file(module,
+                                                model,
+                                                revision=revision)
 
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers backend class will be used if
