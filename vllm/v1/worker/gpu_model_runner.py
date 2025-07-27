@@ -2626,7 +2626,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _initialize_single_attn_backend(
         self, kv_cache_spec: KVCacheSpec
-    ) -> tuple[AttentionBackend, AttentionMetadataBuilder]:
+    ) -> tuple[AttentionBackend, AttentionMetadataBuilder, AttentionCGSupport]:
         if isinstance(kv_cache_spec, AttentionSpec):
             attn_backend_i = get_attn_backend(
                 kv_cache_spec.head_size,
@@ -2740,7 +2740,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 ], (f"Speculative decode is not supported with full "
                     f"cudagraph for attention backend "
                     f"{attn_backend_i.__name__}, whose cudagraph support "
-                    f"is {attn_cg}. Turn off full cudagraph or try another "
+                    f"is {attn_cg_i}. Turn off full cudagraph or try another "
                     f"attention backend.")
         return attn_backend_i, attn_metadata_builder_i, attn_cg_i
 
@@ -2771,39 +2771,41 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         "AttentionCGSupport type when using full "
                         "CUDAGraph. Set CompilationConfig.cudagraph_mode"
                         " to `PIECEWISE` instead.")
-            
+
         if len(self.attn_backends) == 0:
 
-          # Check if model is encoder-only
-          block_size = self.vllm_config.cache_config.block_size
-          use_mla = self.vllm_config.model_config.use_mla
-          attn_specs = list[AttentionSpec]()
-          attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
-          for attn_module in attn_layers.values():
+            # Check if model is encoder-only
+            block_size = self.vllm_config.cache_config.block_size
+            use_mla = self.vllm_config.model_config.use_mla
+            attn_specs = list[AttentionSpec]()
+            attn_layers = get_layers_from_vllm_config(self.vllm_config,
+                                                      Attention)
+            for attn_module in attn_layers.values():
 
-              if attn_module.attn_type == AttentionType.ENCODER_ONLY:
-                  assert attn_module.sliding_window is None, "Sliding "
-                  "window attention is not supported for encoder-only models"
+                if attn_module.attn_type == AttentionType.ENCODER_ONLY:
+                    assert attn_module.sliding_window is None, "Sliding "
+                    "window attention is not supported for encoder-only models"
 
-                  attn_specs.append(
-                      FullAttentionSpec(block_size=block_size,
-                                        num_kv_heads=attn_module.num_kv_heads,
-                                        head_size=attn_module.head_size,
-                                        dtype=self.kv_cache_dtype,
-                                        use_mla=use_mla))
-              else:
-                  raise ValueError("Expected only encoder-only layers")
+                    attn_specs.append(
+                        FullAttentionSpec(
+                            block_size=block_size,
+                            num_kv_heads=attn_module.num_kv_heads,
+                            head_size=attn_module.head_size,
+                            dtype=self.kv_cache_dtype,
+                            use_mla=use_mla))
+                else:
+                    raise ValueError("Expected only encoder-only layers")
 
-          if len(attn_specs) > 0:
-              assert len(attn_specs) == len(attn_layers), \
-                  "All or none of the layers are expected to be encoder-only"
+            if len(attn_specs) > 0:
+                assert len(attn_specs) == len(attn_layers), \
+                    "All or none of the layers are expected to be encoder-only"
 
-              attn_backend, attn_metadata_builder, attn_cg_i = \
-                  self._initialize_single_attn_backend(attn_specs[0])
-              self.attn_backends.append(attn_backend)
-              self.attn_metadata_builders.append(attn_metadata_builder)
-              self.is_encoder_only_model = True
-              attn_cg = attn_cg_i
+                attn_backend, attn_metadata_builder, attn_cg_i = \
+                    self._initialize_single_attn_backend(attn_specs[0])
+                self.attn_backends.append(attn_backend)
+                self.attn_metadata_builders.append(attn_metadata_builder)
+                self.is_encoder_only_model = True
+                attn_cg = attn_cg_i
 
         # Trigger cudagraph dispatching keys initialization here (after
         # initializing attn backends).

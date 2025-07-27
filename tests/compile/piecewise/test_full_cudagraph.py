@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-from dataclasses import dataclass
 import os
 import weakref
+from dataclasses import dataclass
 from typing import Optional
 
 import pytest
@@ -32,6 +32,7 @@ def temporary_environ(env_vars):
             else:
                 os.environ[k] = v
 
+
 @dataclass
 class BackendConfig:
     name: str
@@ -43,38 +44,36 @@ class BackendConfig:
 # Define all backend configurations of full cudagraph to be tested
 backend_configs = {
     # FA3 on Hopper
-    "FA3": BackendConfig(
-        name="FA3",
-        env_vars={
-            "VLLM_FLASH_ATTN_VERSION": "3"
-        },
-        comp_config={
-            "cudagraph_mode": "FULL",
-            "cudagraph_separate_routine": False
-        },
-        specific_gpu_arch=(9, 0)),
-    # FlashMLA on Hopper
-    "FlashMLA": BackendConfig(
-        name="FlashMLA",
-        env_vars={
-            "VLLM_ATTENTION_BACKEND": "FLASHMLA",
-        },
-        comp_config={
-            "cudagraph_mode": "FULL",
-            "cudagraph_separate_routine": True
-        },
-        specific_gpu_arch=(9, 0)),
-    # FA2
-    "FA2": BackendConfig(name="FA2",
-                  env_vars={
-                      "VLLM_FLASH_ATTN_VERSION": "2"
+    "FA3":
+    BackendConfig(name="FA3",
+                  env_vars={"VLLM_FLASH_ATTN_VERSION": "3"},
+                  comp_config={
+                      "cudagraph_mode": "FULL",
+                      "cudagraph_separate_routine": False
                   },
+                  specific_gpu_arch=(9, 0)),
+    # FlashMLA on Hopper
+    "FlashMLA":
+    BackendConfig(name="FlashMLA",
+                  env_vars={
+                      "VLLM_ATTENTION_BACKEND": "FLASHMLA",
+                  },
+                  comp_config={
+                      "cudagraph_mode": "FULL",
+                      "cudagraph_separate_routine": True
+                  },
+                  specific_gpu_arch=(9, 0)),
+    # FA2
+    "FA2":
+    BackendConfig(name="FA2",
+                  env_vars={"VLLM_FLASH_ATTN_VERSION": "2"},
                   comp_config={
                       "cudagraph_mode": "FULL",
                       "cudagraph_separate_routine": True
                   }),
     # Triton Attention
-    "TritonAttn": BackendConfig(name="TritonAttn",
+    "TritonAttn":
+    BackendConfig(name="TritonAttn",
                   env_vars={"VLLM_ATTENTION_BACKEND": "TRITON_ATTN_VLLM_V1"},
                   comp_config={
                       "cudagraph_mode": "FULL",
@@ -82,19 +81,21 @@ backend_configs = {
                   }),
 }
 
-
 test_params_full_cudagraph = []
 
 # deepseek-ai/DeepSeek-V2-Lite with FlashMLA
 test_params_full_cudagraph.append(
-    pytest.param(("deepseek-ai/DeepSeek-V2-Lite", backend_configs["FlashMLA"])))
+    pytest.param(
+        ("deepseek-ai/DeepSeek-V2-Lite", backend_configs["FlashMLA"])))
 
 # Qwen/Qwen2-1.5B-Instruct with other backends
-other_backend_configs = [backend_configs[c] for c in backend_configs if
-                        c != "FlashMLA"]
+other_backend_configs = [
+    backend_configs[c] for c in backend_configs if c != "FlashMLA"
+]
 for backend_config in other_backend_configs:
     test_params_full_cudagraph.append(
         pytest.param(("Qwen/Qwen2-1.5B-Instruct", backend_config)))
+
 
 @pytest.fixture(scope="class")
 def llm_pair(request):

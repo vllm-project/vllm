@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
-from dataclasses import dataclass
 import os
 import weakref
 from contextlib import ExitStack
+from dataclasses import dataclass
 from typing import Optional
 
 import pytest
@@ -13,6 +13,7 @@ from tests.utils import wait_for_gpu_memory_to_clear
 from vllm import LLM
 from vllm.config import CompilationConfig
 from vllm.platforms import current_platform
+
 
 @contextlib.contextmanager
 def temporary_environ(env_vars):
@@ -32,6 +33,7 @@ def temporary_environ(env_vars):
             else:
                 os.environ[k] = v
 
+
 @dataclass
 class BackendConfig:
     name: str
@@ -43,45 +45,36 @@ class BackendConfig:
 # Define all backend configurations of full cudagraph to be tested
 backend_configs = {
     # FA3 on Hopper
-    "FA3": BackendConfig(
-        name="FA3",
-        env_vars={
-            "VLLM_FLASH_ATTN_VERSION": "3"
-        },
-        comp_config={
-            "cudagraph_mode": "FULL",
-            "cudagraph_separate_routine": False
-        },
-        specific_gpu_arch=(9, 0)),
+    "FA3":
+    BackendConfig(name="FA3",
+                  env_vars={"VLLM_FLASH_ATTN_VERSION": "3"},
+                  comp_config={
+                      "cudagraph_mode": "FULL",
+                      "cudagraph_separate_routine": False
+                  },
+                  specific_gpu_arch=(9, 0)),
     # FlashMLA on Hopper
-    "FlashMLA": BackendConfig(
-        name="FlashMLA",
-        env_vars={
-            "VLLM_ATTENTION_BACKEND": "FLASHMLA",
-        },
-        comp_config={
-            "cudagraph_mode": "FULL",
-            "cudagraph_separate_routine": True
-        },
-        specific_gpu_arch=(9, 0)),
-    # FA2
-    "FA2": BackendConfig(name="FA2",
+    "FlashMLA":
+    BackendConfig(name="FlashMLA",
                   env_vars={
-                      "VLLM_FLASH_ATTN_VERSION": "2"
+                      "VLLM_ATTENTION_BACKEND": "FLASHMLA",
                   },
                   comp_config={
                       "cudagraph_mode": "FULL",
                       "cudagraph_separate_routine": True
-                  }),
-    # FlashInfer (no trtllm decode)
-    "FlashInfer": BackendConfig(name="FlashInfer",
-                  env_vars={"VLLM_ATTENTION_BACKEND": "FLASHINFER"},
+                  },
+                  specific_gpu_arch=(9, 0)),
+    # FA2
+    "FA2":
+    BackendConfig(name="FA2",
+                  env_vars={"VLLM_FLASH_ATTN_VERSION": "2"},
                   comp_config={
                       "cudagraph_mode": "FULL",
                       "cudagraph_separate_routine": True
                   }),
     # Triton Attention
-    "TritonAttn": BackendConfig(name="TritonAttn",
+    "TritonAttn":
+    BackendConfig(name="TritonAttn",
                   env_vars={"VLLM_ATTENTION_BACKEND": "TRITON_ATTN_VLLM_V1"},
                   comp_config={
                       "cudagraph_mode": "FULL",
@@ -89,18 +82,18 @@ backend_configs = {
                   }),
 }
 
-# test invaild cudagraph_mode and cudagraph_separate_routine combo
+# test invalid cudagraph_mode and cudagraph_separate_routine combo
 # (backend_name, cudagraph_mode, cudagraph_separate_routine, supported)
 combo_cases_1 = [
     ("FA3", "FULL", False, True),
-    # for backend cudagraph support is ALWAYS_UNIFIED, 
+    # for backend cudagraph support is ALWAYS_UNIFIED,
     # cudagraph_separate_routine would be ignored(overwritten)
-    ("FA3", "FULL", True, True),  
+    ("FA3", "FULL", True, True),
     ("FA3", "PIECEWISE", False, True),
     ("FA2", "FULL", False, True),
     ("FA2", "FULL", True, True),
     ("FA2", "PIECEWISE", False, True),
-    # For backend cudagraph support is pure decode only, the 
+    # For backend cudagraph support is pure decode only, the
     # cudagraph_separate_routine would be ignored(overwritten)
     # ("FlashInfer", "FULL", False, True),
     # No cudagraph is compatible with vllm compilation
@@ -112,13 +105,14 @@ combo_cases_1 = [
     ("FlashInfer", "PIECEWISE", True, False),
 ]
 
+
 @pytest.mark.parametrize("combo_case", combo_cases_1)
 def test_cudagraph_mode_and_separate_routine_combo(combo_case):
     backend_name, cudagraph_mode, cudagraph_separate_routine, supported\
         = combo_case
     if backend_name == "FlashInfer":
         try:
-            import flashinfer # noqa: F401
+            import flashinfer  # noqa: F401
         except ImportError:
             pytest.skip("FlashInfer is not installed")
     backend_config = backend_configs[backend_name]
@@ -126,13 +120,13 @@ def test_cudagraph_mode_and_separate_routine_combo(combo_case):
     if backend_config.specific_gpu_arch and backend_config.specific_gpu_arch\
         != current_platform.get_device_capability():
         pytest.skip("Only Hopper GPUs support FA3 and FlashMLA")
-    
+
     env_vars = {"VLLM_USE_V1": "1", **backend_configs[backend_name].env_vars}
 
     with temporary_environ(env_vars), ExitStack() as stack:
         if not supported:
             stack.enter_context(pytest.raises(Exception))
-        
+
         llm = LLM(model="Qwen/Qwen2-1.5B-Instruct",
                   max_num_seqs=256,
                   trust_remote_code=True,
@@ -154,22 +148,25 @@ def test_cudagraph_mode_and_separate_routine_combo(combo_case):
         threshold_ratio=0.1,
     )
 
+
 # test cudagraph_mode with different compilation level.
 # (backend_name, cudagraph_mode, compilation_level, supported)
 combo_cases_2 = [
-    ("FA2", "FULL", 0, True), # no compilation + full cudagraph
-    ("FA2", "FULL", 3, True), # piecewise compilation + full cudagraph
-    ("FA2", "PIECEWISE", 0, False), # no compilation + piecewise cudagraph
-    ("FA2", "PIECEWISE", 3, True), # piecewise compilation + piecewise cudagraph
-    ("FA2", "NONE", 0, True), # no compilation + no cudagraph
-    ("FA2", "NONE", 3, True), # piecewise compilation + no cudagraph
+    ("FA2", "FULL", 0, True),  # no compilation + full cudagraph
+    ("FA2", "FULL", 3, True),  # piecewise compilation + full cudagraph
+    ("FA2", "PIECEWISE", 0, False),  # no compilation + piecewise cudagraph
+    ("FA2", "PIECEWISE", 3,
+     True),  # piecewise compilation + piecewise cudagraph
+    ("FA2", "NONE", 0, True),  # no compilation + no cudagraph
+    ("FA2", "NONE", 3, True),  # piecewise compilation + no cudagraph
 ]
+
 
 @pytest.mark.parametrize("combo_case", combo_cases_2)
 def test_cudagraph_compilation_combo(combo_case):
     backend_name, cudagraph_mode, compilation_level, supported\
         = combo_case
-    
+
     env_vars = {"VLLM_USE_V1": "1", **backend_configs[backend_name].env_vars}
 
     with temporary_environ(env_vars), ExitStack() as stack:
@@ -182,8 +179,7 @@ def test_cudagraph_compilation_combo(combo_case):
                   gpu_memory_utilization=0.45,
                   max_model_len=1024,
                   compilation_config=CompilationConfig(
-                      level=compilation_level,
-                      cudagraph_mode=cudagraph_mode))
+                      level=compilation_level, cudagraph_mode=cudagraph_mode))
         llm.generate(["Hello, my name is"] * 10)
     try:
         llm = weakref.proxy(llm)
