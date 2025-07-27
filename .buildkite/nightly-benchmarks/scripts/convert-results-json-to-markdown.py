@@ -44,6 +44,7 @@ serving_column_mapping = {
     "test_name": "Test name",
     "gpu_type": "GPU",
     "completed": "# of req.",
+    "max_concurrency": "# of max concurrency.",
     "request_throughput": "Tput (req/s)",
     "total_token_throughput": "Total Token Tput (tok/s)",
     "output_throughput": "Output Tput (tok/s)",
@@ -55,9 +56,9 @@ serving_column_mapping = {
     "mean_tpot_ms": "Mean TPOT (ms)",
     "median_tpot_ms": "Median",
     "p99_tpot_ms": "P99",
-    "mean_itl_ms": "Mean ITL (ms)",
-    "median_itl_ms": "Median ITL (ms)",
-    "p99_itl_ms": "P99 ITL (ms)",
+    # "mean_itl_ms": "Mean ITL (ms)",
+    # "median_itl_ms": "Median ITL (ms)",
+    # "p99_itl_ms": "P99 ITL (ms)",
 }
 
 

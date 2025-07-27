@@ -1,6 +1,6 @@
 [
     {
-        "test_name": "serving_llama8B_tp1_sharegpt",
+        "test_name": "serving_llama8B_pp1_sharegpt",
         "qps_list": [1, 4, 16, "inf"],
         "server_environment_variables": {
             "VLLM_RPC_TIMEOUT": 100000,
@@ -11,7 +11,7 @@
         },
         "server_parameters": {
             "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-            "tensor_parallel_size": 1,
+            "pipeline_parallel_size": 1,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
 	    "block_size": 128,
@@ -33,7 +33,40 @@
         }
     },
     {
-        "test_name": "serving_llama8B_tp2_sharegpt",
+        "test_name": "serving_llama8B_pp3_sharegpt",
+        "qps_list": [1, 4, 16, "inf"],
+        "server_environment_variables": {
+            "VLLM_RPC_TIMEOUT": 100000,
+	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
+	    "VLLM_ENGINE_ITERATION_TIMEOUT_S": 120,
+	    "VLLM_CPU_SGL_KERNEL": 1,
+	    "VLLM_CPU_KVCACHE_SPACE": 40
+        },
+        "server_parameters": {
+            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "pipeline_parallel_size": 3,
+	    "dtype": "bfloat16",
+	    "distributed_executor_backend": "mp",
+	    "block_size": 128,
+	    "trust_remote_code": "",
+            "disable_log_stats": "",
+            "disable_log_requests": "",
+	    "enforce_eager": "",
+	    "max_num_batched_tokens": 2048,
+	    "max_num_seqs": 256,
+            "load_format": "dummy"
+        },
+        "client_parameters": {
+            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "backend": "vllm",
+            "dataset_name": "sharegpt",
+            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+	    "max_concurrency": 60,
+            "num_prompts": 200
+        }
+    },
+    {
+        "test_name": "serving_llama8B_tp2pp6_sharegpt",
         "qps_list": [1, 4, 16, "inf"],
         "server_environment_variables": {
             "VLLM_RPC_TIMEOUT": 100000,
@@ -45,6 +78,7 @@
         "server_parameters": {
             "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
             "tensor_parallel_size": 2,
+            "pipeline_parallel_size": 3,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
 	    "block_size": 128,
@@ -66,7 +100,7 @@
         }
     },
     {
-        "test_name": "serving_llama8B_tp4_sharegpt",
+        "test_name": "serving_llama8B_pp1_random_128_128",
         "qps_list": [1, 4, 16, "inf"],
         "server_environment_variables": {
             "VLLM_RPC_TIMEOUT": 100000,
@@ -77,40 +111,7 @@
         },
         "server_parameters": {
             "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-            "tensor_parallel_size": 4,
-	    "dtype": "bfloat16",
-	    "distributed_executor_backend": "mp",
-	    "block_size": 128,
-	    "trust_remote_code": "",
-            "disable_log_stats": "",
-            "disable_log_requests": "",
-	    "enforce_eager": "",
-	    "max_num_batched_tokens": 2048,
-	    "max_num_seqs": 256,
-            "load_format": "dummy"
-        },
-        "client_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-            "backend": "vllm",
-            "dataset_name": "sharegpt",
-            "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
-	    "max_concurrency": 60,
-            "num_prompts": 200
-        }
-    },
-    {
-        "test_name": "serving_llama8B_tp4_random_1024_128",
-        "qps_list": [1, 4, 16, "inf"],
-        "server_environment_variables": {
-            "VLLM_RPC_TIMEOUT": 100000,
-	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
-	    "VLLM_ENGINE_ITERATION_TIMEOUT_S": 120,
-	    "VLLM_CPU_SGL_KERNEL": 1,
-	    "VLLM_CPU_KVCACHE_SPACE": 40
-        },
-        "server_parameters": {
-            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-            "tensor_parallel_size": 4,
+            "pipeline_parallel_size": 1,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
 	    "block_size": 128,
@@ -127,26 +128,26 @@
             "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
             "backend": "vllm",
             "dataset_name": "random",
-	    "random-input-len": 1024,
+	    "random-input-len": 128,
 	    "random-output-len": 128,
 	    "ignore-eos": "",
-	    "max_concurrency": 100,
-            "num_prompts": 100
+	    "max_concurrency": 1000,
+            "num_prompts": 1000
         }
     },
     {
-        "test_name": "serving_llama8B_pp6_random_1024_128",
+        "test_name": "serving_llama8B_pp3_random_128_128",
         "qps_list": [1, 4, 16, "inf"],
         "server_environment_variables": {
             "VLLM_RPC_TIMEOUT": 100000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
 	    "VLLM_ENGINE_ITERATION_TIMEOUT_S": 120,
-	    "VLLM_CPU_SGL_KERNEL": 1,
+	    "VLLM_CPU_SGL_KERNEL:": 1,
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "server_parameters": {
             "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
-            "pipeline_parallel_size": 6,
+            "pipeline_parallel_size": 3,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
 	    "block_size": 128,
@@ -163,11 +164,48 @@
             "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
             "backend": "vllm",
             "dataset_name": "random",
-	    "random-input-len": 1024,
+	    "random-input-len": 128,
 	    "random-output-len": 128,
 	    "ignore-eos": "",
-	    "max_concurrency": 100,
-            "num_prompts": 100
+	    "max_concurrency": 1000,
+            "num_prompts": 1000
+        }
+    },
+    {
+        "test_name": "serving_llama8B_tp2pp3_random_128_128",
+        "qps_list": [1, 4, 16, "inf"],
+        "server_environment_variables": {
+            "VLLM_RPC_TIMEOUT": 100000,
+	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
+	    "VLLM_ENGINE_ITERATION_TIMEOUT_S": 120,
+	    "VLLM_CPU_SGL_KERNEL": 1,
+	    "VLLM_CPU_KVCACHE_SPACE": 40
+        },
+        "server_parameters": {
+            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "tensor_parallel_size": 2,
+            "pipeline_parallel_size": 3,
+	    "dtype": "bfloat16",
+	    "distributed_executor_backend": "mp",
+	    "block_size": 128,
+	    "trust_remote_code": "",
+	    "enable_chunked_prefill": "",
+            "disable_log_stats": "",
+            "disable_log_requests": "",
+	    "enforce_eager": "",
+	    "max_num_batched_tokens": 2048,
+	    "max_num_seqs": 256,
+            "load_format": "dummy"
+        },
+        "client_parameters": {
+            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "backend": "vllm",
+            "dataset_name": "random",
+	    "random-input-len": 128,
+	    "random-output-len": 128,
+	    "ignore-eos": "",
+	    "max_concurrency": 1000,
+            "num_prompts": 1000
         }
     }
 ]
