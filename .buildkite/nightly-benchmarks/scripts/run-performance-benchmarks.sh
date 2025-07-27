@@ -165,7 +165,7 @@ upload_to_buildkite() {
 }
 
 run_latency_tests() {
-  # run latency tests using `benchmark_latency.py`
+  # run latency tests using `vllm bench latency` command
   # $1: a json file specifying latency test cases
 
   local latency_test_file
@@ -232,7 +232,7 @@ run_latency_tests() {
 }
 
 run_throughput_tests() {
-  # run throughput tests using `benchmark_throughput.py`
+  # run throughput tests using `vllm bench throughput`
   # $1: a json file specifying throughput test cases
 
   local throughput_test_file
@@ -298,7 +298,7 @@ run_throughput_tests() {
 }
 
 run_serving_tests() {
-  # run serving tests using `benchmark_serving.py`
+  # run serving tests using `vllm bench serve` command
   # $1: a json file specifying serving test cases
 
   local serving_test_file
@@ -448,7 +448,7 @@ main() {
   (which jq) || (apt-get update && apt-get -y install jq)
   (which lsof) || (apt-get update && apt-get install -y lsof)
 
-  # get the current IP address, required by benchmark_serving.py
+  # get the current IP address, required by `vllm bench serve` command
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
   # turn of the reporting of the status of each request, to clean up the terminal output
   export VLLM_LOGGING_LEVEL="WARNING"
