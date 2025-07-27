@@ -2107,6 +2107,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         skip_eplb: bool = False,
         is_profile: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Run a dummy forward pass to warm up/profile run or capture the
+        CUDA graph for the model.
+
+        Args:
+            num_tokens: Number of tokens to run the dummy forward pass.
+            cudagraph_runtime_mode: used to control the behavior.
+                - CUDAGraphMode.NONE: No cudagraph, for warm up and profile run
+                - CUDAGraphMode.PIECEWISE: Piecewise cudagraph.
+                - CUDAGraphMode.FULL: Full cudagraph, attention metadata is
+                    needed.
+            force_attention: If True, always create attention metadata. Used to 
+                warm up attention backend when mode is NONE.
+            uniform_decode: If True, the batch is a uniform decode batch.
+            skip_eplb: If True, skip EPLB state update.
+            is_profile: If True, this is a profile run.
+        """
 
         # Padding for DP
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
