@@ -1,22 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# code modified from deepseekv3_tool_parser.py
 
 import ast
 import json
 from collections.abc import Sequence
-from typing import Union
+from typing import Any, Optional, Union
 
 import regex as re
 
-from vllm.entrypoints.chat_utils import random_tool_call_id
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaFunctionCall, DeltaMessage,
-                                              DeltaToolCall,
-                                              ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall)
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+    ExtractedToolCallInformation,
+    FunctionCall,
+    ToolCall,
+)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser, ToolParserManager)
+    ToolParser,
+    ToolParserManager,
+)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
@@ -37,36 +42,9 @@ class Glm4MoeModelToolParser(ToolParser):
 
         self.tool_calls_start_token = self.tool_call_start_token
 
-        # Updated regex for the XML-based format
-        self.tool_call_regex = re.compile(
-            r"<tool_call>\s*"
-            r"(?P<function_name>[^\n<]+)\s*"  # 函数名（到换行或 <）
-            r"(?P<arguments>(?:\s*<arg_key>[^<]+</arg_key>\s*"
-            r"<arg_value>[^<]*</arg_value>\s*)*)\s*"
-            r"</tool_call>",
-            re.DOTALL,
-        )
-
-        # Regex for parsing individual arguments
-        self.arg_regex = re.compile(
-            r"<arg_key>(?P<key>[^<]+)</arg_key>\s*<arg_value>(?P<value>[^<]*)</arg_value>",
-            re.DOTALL,
-        )
-
-        # Streaming regex
-        self.stream_tool_call_portion_regex = re.compile(
-            r"(?P<function_name>[^\n<]+)\s*"
-            r"(?P<arguments>(?:\s*<arg_key>[^<]+</arg_key>\s*"
-            r"<arg_value>[^<]*</arg_value>\s*)*)",
-            re.DOTALL,
-        )
-
-        # For streaming, we also need a regex to match just the function name
-        self.stream_tool_call_name_regex = re.compile(
-            r"(?P<function_name>[^\n<]+)",
-            re.DOTALL,
-        )
-
+        self.func_call_regex = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
+        self.func_detail_regex = re.compile(r"<tool_call>([^\n]*)\n(.*)</tool_call>", re.DOTALL)
+        self.func_arg_regex = re.compile(r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL)
         if not self.model_tokenizer:
             raise ValueError(
                 "The model tokenizer must be passed to the ToolParser "
@@ -77,84 +55,62 @@ class Glm4MoeModelToolParser(ToolParser):
         self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
         self._buffer = ""
 
-    def _parse_arguments(self, args_text: str) -> str:
-        """Parse XML-based arguments into JSON format."""
-        if not args_text or not args_text.strip():
-            return "{}"
-
-        args_dict = {}
-        matches = self.arg_regex.findall(args_text)
-
-        for key, value in matches:
-            try:
-                if isinstance(value, str):
-                    value = json.loads(value)
-            except Exception:
-                pass
-
-            try:
-                if isinstance(value, str):
-                    value = ast.literal_eval(value)
-            except Exception:
-                pass
-            args_dict[key.strip()] = value
-
-        return json.dumps(args_dict, ensure_ascii=False)
-
     def extract_tool_calls(
         self,
         model_output: str,
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
+        def _is_string_type(tool_name: str, arg_name: str, tools: Optional[list[ChatCompletionToolsParam]]) -> bool:
+            if tools is None:
+                return False
+            for tool in tools:
+                if tool.function.name == tool_name:
+                    if tool.function.parameters is None:
+                        return False
+                    arg_type = tool.function.parameters.get("properties", {}).get(arg_name, {}).get("type", None)
+                    return arg_type == "string"
+            logger.warning("No tool named '%s'.", tool_name)
+            return False
 
-        # sanity check; avoid unnecessary processing
-        if self.tool_calls_start_token not in model_output:
-            return ExtractedToolCallInformation(tools_called=False,
-                                                tool_calls=[],
-                                                content=model_output)
+        def _deserialize(value: str) -> Any:
+            try:
+                return json.loads(value)
+            except Exception:
+                pass
 
+            try:
+                return ast.literal_eval(value)
+            except Exception:
+                pass
+            return value
+
+        matched_tool_calls = self.func_call_regex.findall(model_output)
+        logger.debug("model_output: %s", model_output)
         try:
-            # Find all tool calls in the output
-            function_call_matches = self.tool_call_regex.findall(model_output)
-
-            logger.debug("function_call_matches: %s", function_call_matches)
-
-            if not function_call_matches:
-                return ExtractedToolCallInformation(
-                    tools_called=False,
-                    tool_calls=[],
-                    content=model_output,
-                )
-
             tool_calls = []
-            for i, match in enumerate(function_call_matches):
-                function_name, function_args_xml = match
-                function_name = function_name.strip()
-
-                # Parse XML arguments to JSON
-                function_args_json = self._parse_arguments(function_args_xml)
-
-                tool_calls.append(
-                    ToolCall(
-                        type='function',
-                        function=FunctionCall(name=function_name,
-                                              arguments=function_args_json),
-                    ))
-
-            # Extract content before the first tool call
-            content = model_output[:model_output.find(self.
-                                                      tool_calls_start_token)]
-            return ExtractedToolCallInformation(
-                tools_called=bool(tool_calls),
-                tool_calls=tool_calls,
-                content=content.strip() if content.strip() else None,
-            )
-
+            for match in matched_tool_calls:
+                tc_detail = self.func_detail_regex.search(match)
+                tc_name = tc_detail.group(1)
+                tc_args = tc_detail.group(2)
+                pairs = self.func_arg_regex.findall(tc_args)
+                arg_dct = {}
+                for key, value in pairs:
+                    arg_key = key.strip()
+                    arg_val = value.strip()
+                    if not _is_string_type(tc_name, arg_key, request.tools):
+                        arg_val = _deserialize(arg_val)
+                    logger.debug("arg_key = %s, arg_val = %s", arg_key, arg_val)
+                    arg_dct[arg_key] = arg_val
+                tool_calls.append(ToolCall(type="function", function=FunctionCall(name=tc_name, arguments=json.dumps(arg_dct))))
         except Exception:
-            logger.exception("Error in extracting tool call from response.")
-            return ExtractedToolCallInformation(tools_called=False,
-                                                tool_calls=[],
-                                                content=model_output)
+            logger.exception("Failed to extract tool call spec")
+            return ExtractedToolCallInformation(tools_called=False, tool_calls=[], content=model_output)
+        else:
+            if len(tool_calls) > 0:
+                content = model_output[:model_output.find(self.tool_calls_start_token)]
+                return ExtractedToolCallInformation(tools_called=True, tool_calls=tool_calls, content=content)
+            return ExtractedToolCallInformation(tools_called=False, tool_calls=[], content=model_output)
+
 
     def extract_tool_calls_streaming(
         self,
@@ -174,9 +130,9 @@ class Glm4MoeModelToolParser(ToolParser):
             if self.current_tool_id > 0:
                 cur_text = ""
             return DeltaMessage(content=cur_text)
+        logger.debug("cur_text = %s", cur_text)
         end_idx = cur_text.find(self.tool_call_end_token)
         if end_idx != -1:
-            logger.debug("cur_text = %s", cur_text)
             if self.current_tool_id == -1:
                 self.current_tool_id = 0
                 self.prev_tool_call_arr = []
@@ -189,8 +145,9 @@ class Glm4MoeModelToolParser(ToolParser):
             extracted_tool_calls = self.extract_tool_calls(
                 cur_text[:end_idx + len(self.tool_call_end_token)], request)
 
-            assert len(extracted_tool_calls.tool_calls) == 1
-
+            if len(extracted_tool_calls.tool_calls) == 0:
+                logger.warning("Failed to extract any tool calls.")
+                return None
             tool_call = extracted_tool_calls.tool_calls[0]
             self.prev_tool_call_arr[self.current_tool_id] = {
                 "name": tool_call.function.name,
@@ -202,8 +159,8 @@ class Glm4MoeModelToolParser(ToolParser):
                 content=extracted_tool_calls.content,
                 tool_calls=[
                     DeltaToolCall(index=self.current_tool_id,
-                                  type="function",
-                                  id=random_tool_call_id(),
+                                  id=tool_call.id,
+                                  type=tool_call.type,
                                   function=DeltaFunctionCall(
                                       name=tool_call.function.name,
                                       arguments=tool_call.function.arguments))
