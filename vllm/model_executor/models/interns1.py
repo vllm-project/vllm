@@ -296,23 +296,55 @@ class InternS1MultiModalProcessor(
 
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
         tokenizer = hf_processor.tokenizer
-        video_token_id = tokenizer.vocab[hf_processor.video_token]
+        video_token_id = tokenizer.encode(hf_processor.video_token,
+                                          add_special_tokens=False)
+        assert len(video_token_id) == 1
+        video_token_id = video_token_id[0]
+
+        prompt = re.sub(hf_processor.image_token, "<image_placeholder>",
+                        prompt)
+        prompt = re.sub(hf_processor.video_token, "<video_placeholder>",
+                        prompt)
+
+        image_outputs = {}
+        if images:
+            image_pixel_values = []
+            for image in images:
+                processed_outputs = super()._call_hf_processor(
+                    prompt=hf_processor.image_token,
+                    mm_data={"images": image},
+                    mm_kwargs=mm_kwargs,
+                    tok_kwargs=tok_kwargs,
+                )
+                image_pixel_values.append(
+                    processed_outputs.pop("pixel_values"))
+
+                input_ids = processed_outputs.pop("input_ids")
+                image_placeholder = tokenizer.batch_decode(input_ids)[0]
+                prompt = prompt.replace("<image_placeholder>",
+                                        image_placeholder, 1)
+
+            num_patches = [len(item) for item in image_pixel_values]
+            image_outputs: dict[str, NestedTensors] = {
+                "pixel_values": torch.concat(image_pixel_values),
+                "image_num_patches": torch.tensor(num_patches),
+                "image_token_id": torch.tensor(hf_processor.image_token_id),
+            }
 
         video_outputs = {}
         if videos:
-            prompt = re.sub(hf_processor.video_token, "<video_placeholder>",
-                            prompt)
             video_pixel_values = []
             for video in videos:
-                video_outputs = super()._call_hf_processor(
+                processed_outputs = super()._call_hf_processor(
                     prompt=hf_processor.video_token,
                     mm_data={"videos": video},
                     mm_kwargs=mm_kwargs,
                     tok_kwargs=tok_kwargs,
                 )
-                video_pixel_values.append(video_outputs["pixel_values"])
+                video_pixel_values.append(
+                    processed_outputs.pop("pixel_values"))
 
-                input_ids = video_outputs.pop("input_ids")
+                input_ids = processed_outputs.pop("input_ids")
                 input_ids[input_ids ==
                           hf_processor.image_token_id] = video_token_id
 
@@ -327,31 +359,10 @@ class InternS1MultiModalProcessor(
                 "video_token_id": torch.tensor(video_token_id),
             }
 
-        image_outputs = {}
-        if images:
-            prompt = re.sub(hf_processor.image_token, "<image_placeholder>",
-                            prompt)
-            image_pixel_values = []
-            for image in images:
-                image_outputs = super()._call_hf_processor(
-                    prompt=hf_processor.image_token,
-                    mm_data={"images": image},
-                    mm_kwargs=mm_kwargs,
-                    tok_kwargs=tok_kwargs,
-                )
-                image_pixel_values.append(image_outputs["pixel_values"])
-
-                input_ids = image_outputs.pop("input_ids")
-                image_placeholder = tokenizer.batch_decode(input_ids)[0]
-                prompt = prompt.replace("<image_placeholder>",
-                                        image_placeholder, 1)
-
-            num_patches = [len(item) for item in image_pixel_values]
-            image_outputs = {
-                "pixel_values": torch.concat(image_pixel_values),
-                "image_num_patches": torch.tensor(num_patches),
-            }
-
+        prompt = re.sub("<image_placeholder>", hf_processor.image_token,
+                        prompt)
+        prompt = re.sub("<video_placeholder>", hf_processor.video_token,
+                        prompt)
         text_outputs = tokenizer(prompt, **tok_kwargs, return_tensors="pt")
 
         combined_outputs = dict(
@@ -369,6 +380,7 @@ class InternS1MultiModalProcessor(
 
         image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
         video_num_patches = hf_inputs.get("video_num_patches", torch.empty(0))
+        num_images = len(image_num_patches)
         num_videos = len(video_num_patches)
 
         return dict(
@@ -376,6 +388,7 @@ class InternS1MultiModalProcessor(
                 "image", image_num_patches),
             image_num_patches=MultiModalFieldConfig.batched("image"),
             image_embeds=MultiModalFieldConfig.batched("image"),
+            image_token_id=MultiModalFieldConfig.shared("image", num_images),
             pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_num_patches),
             video_num_patches=MultiModalFieldConfig.batched("video"),
@@ -401,6 +414,13 @@ class InternS1MultiModalProcessor(
         else:
             video_num_patches = []
 
+        if "image_num_patches" in out_mm_kwargs:
+            image_num_patches = out_mm_kwargs["image_num_patches"]
+            assert isinstance(image_num_patches, torch.Tensor)
+            image_num_patches = image_num_patches.tolist()
+        else:
+            image_num_patches = []
+
         def get_replacement_interns1_image(item_idx: int):
             images = mm_items.get_items(
                 "image", (ImageEmbeddingItems, ImageProcessorItems))
@@ -408,12 +428,8 @@ class InternS1MultiModalProcessor(
             if isinstance(images, ImageEmbeddingItems):
                 feature_size = images.get_feature_size(item_idx)
             else:
-                image_size = images.get_image_size(item_idx)
-                feature_size = self.info.get_num_image_tokens(
-                    image_width=image_size.width,
-                    image_height=image_size.height,
-                    processor=hf_processor.image_processor,
-                )
+                num_patches = image_num_patches[item_idx]
+                feature_size = num_patches * hf_processor.image_seq_length
 
             repl_features = img_context_token * feature_size
             repl_full = start_image_token + repl_features + end_image_token
@@ -426,7 +442,7 @@ class InternS1MultiModalProcessor(
             repl_features_with_sep = (start_image_token + repl_features +
                                       end_image_token)
             # num_patches is equal to num_frames
-            repl_full = ''.join([
+            repl_full = '\n'.join([
                 f'Frame{i+1}: {repl_features_with_sep}'
                 for i in range(num_patches)
             ])
