@@ -124,15 +124,10 @@ def test_flashinfer_trtllm_decode_with_baseline(
         query.contiguous(),
         key_value_cache,
         workspace_buffer,
-        num_query_heads,
-        num_kv_heads,
-        scale,
         block_tables,
         kv_lens_tensor,
-        block_size,
         max_kv_len,
-        "auto",
-        k_scale,
+        k_scale * scale,
         v_scale,
     )
 
