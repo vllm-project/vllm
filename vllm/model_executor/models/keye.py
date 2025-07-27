@@ -112,8 +112,7 @@ class KeyeImagePixelInputs(TensorSchema):
         - g: Grid dimensions (3 for t, h, w)
     """
     type: Literal["pixel_values"]
-    pixel_values: Annotated[Union[torch.Tensor, list[torch.Tensor]],
-                            TensorShape("np", "cps")]
+    pixel_values: Annotated[torch.Tensor, TensorShape("np", "cps")]
     image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
@@ -121,7 +120,8 @@ class KeyeImageEmbeddingInputs(TensorSchema):
     """
     Dimensions:
         - nf: Number of image features
-        - hs: Hidden size (must match the hidden size of language model backbone)
+        - hs: Hidden size (must match the hidden size of language model 
+          backbone)
         - ni: Number of images
         - g: Grid dimensions (3 for t, h, w)
     """
@@ -137,7 +137,8 @@ class KeyeVideoPixelInputs(TensorSchema):
     """
     Dimensions:
         - np: Number of patches
-        - ctps: Number of channels * temporal_patch_size * patch_size * patch_size
+        - ctps: Number of channels * temporal_patch_size * patch_size * 
+          patch_size
         - nv: Number of videos
         - g: Grid dimensions (3 for t, h, w)
     """
@@ -150,7 +151,8 @@ class KeyeVideoEmbeddingInputs(TensorSchema):
     """
     Dimensions:
         - nf: Number of video features
-        - hs: Hidden size (must match the hidden size of language model backbone)
+        - hs: Hidden size (must match the hidden size of language model 
+          backbone)
         - nv: Number of videos
         - g: Grid dimensions (3 for t, h, w)
     """
