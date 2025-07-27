@@ -14,6 +14,8 @@ from vllm.distributed import get_dp_group, get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    OCP_MX_Scheme)
 from vllm.utils import cdiv
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
@@ -51,14 +53,18 @@ def get_config_quant_dtype(
     use_int8_w8a8: bool,
     use_int8_w8a16: bool,
     use_int4_w4a16: bool,
-    use_mxfp4_w4a4: bool,
+    ocp_mx_scheme: Optional[str],
 ) -> Union[None, torch.dtype, str]:
     if use_fp8_w8a8:
         return torch.float8_e4m3fn
     elif use_int8_w8a8:
         return torch.int8
-    elif use_mxfp4_w4a4:
-        return "mxfp4"
+    elif ocp_mx_scheme == "w_fp4_a_fp4":
+        return "fp4"
+    elif ocp_mx_scheme in {"w_fp4_a_fp6_e3m2", "w_fp6_e3m2_a_fp6_e3m2"}:
+        return "fp6_e3m2"
+    elif ocp_mx_scheme in {"w_fp4_a_fp6_e2m3", "w_fp6_e2m3_a_fp6_e2m3"}:
+        return "fp6_e2m3"
     return None
 
 
@@ -130,7 +136,7 @@ class FusedMoEQuantConfig:
         use_int8_w8a8: bool = False,
         use_int8_w8a16: bool = False,
         use_int4_w4a16: bool = False,
-        use_mxfp4_w4a4: bool = False,
+        ocp_mx_scheme: Optional[OCP_MX_Scheme] = None,
         per_act_token_quant: bool = False,
         per_out_ch_quant: bool = False,
         block_shape: Optional[list[int]] = None,
@@ -144,12 +150,17 @@ class FusedMoEQuantConfig:
             ]
         ]) <= 1, "Quantization flags are mutually exclusive."
 
+        if ocp_mx_scheme is not None:
+            ocp_mx_scheme_str = ocp_mx_scheme.value
+        else:
+            ocp_mx_scheme_str = None
+
         quant_dtype = get_config_quant_dtype(
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a8=use_int8_w8a8,
             use_int8_w8a16=use_int8_w8a16,
             use_int4_w4a16=use_int4_w4a16,
-            use_mxfp4_w4a4=use_mxfp4_w4a4,
+            ocp_mx_scheme=ocp_mx_scheme_str,
         )
         return FusedMoEQuantConfig(
             quant_dtype,
