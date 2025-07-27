@@ -33,8 +33,8 @@ from transformers import PretrainedConfig
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
-from vllm.distributed import (get_pp_group, 
-    get_tensor_model_parallel_world_size, get_ep_group)
+from vllm.distributed import (get_ep_group, get_pp_group,
+                              get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -53,7 +53,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP, MixtureOfExperts
+from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -394,7 +394,6 @@ class Ernie4_5_MoeModel(nn.Module):
         enable_eplb = parallel_config.enable_eplb
         self.num_redundant_experts = parallel_config.num_redundant_experts
 
-
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
@@ -468,7 +467,8 @@ class Ernie4_5_MoeModel(nn.Module):
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.moe_num_experts,
-            num_redundant_experts=self.num_redundant_experts,)
+            num_redundant_experts=self.num_redundant_experts,
+        )
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -532,7 +532,8 @@ class Ernie4_5_MoeModel(nn.Module):
                         continue
 
                     # Skip loading extra bias for GPTQ models.
-                    if ((name_mapped.endswith(".bias") or name_mapped.endswith("_bias"))
+                    if ((name_mapped.endswith(".bias")
+                         or name_mapped.endswith("_bias"))
                             and name_mapped not in params_dict):
                         continue
                     param = params_dict[name_mapped]
@@ -542,11 +543,11 @@ class Ernie4_5_MoeModel(nn.Module):
                     weight_loader = typing.cast(Callable[..., bool],
                                                 param.weight_loader)
                     success = weight_loader(param,
-                                  loaded_weight,
-                                  name_mapped,
-                                  shard_id=shard_id,
-                                  expert_id=expert_id,
-                                  return_success=True)
+                                            loaded_weight,
+                                            name_mapped,
+                                            shard_id=shard_id,
+                                            expert_id=expert_id,
+                                            return_success=True)
                     if success:
                         name = name_mapped
                         break
@@ -577,7 +578,8 @@ class Ernie4_5_MoeModel(nn.Module):
         return loaded_params
 
 
-class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExperts):
+class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
+                              MixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -613,17 +615,17 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExpe
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
-        
+
         self.expert_weights = []
 
         # Set MoE hyperparameters
         moe_layers_indices = [
             i for i in range(config.num_hidden_layers)
-            if (i >= config.moe_layer_start_index and
-                i <= config.moe_layer_end_index and
-                (i + 1) % config.moe_layer_interval == 0)
+            if (i >= config.moe_layer_start_index
+                and i <= config.moe_layer_end_index and (i + 1) %
+                config.moe_layer_interval == 0)
         ]
-        self.num_moe_layers =  len(moe_layers_indices)
+        self.num_moe_layers = len(moe_layers_indices)
         self.num_expert_groups = 1
 
         self.moe_layers: list[FusedMoE] = []
@@ -637,8 +639,9 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExpe
                 self.moe_layers.append(layer.mlp.experts)
 
         if example_moe is None:
-            raise RuntimeError("No Ernie4_5_MoeMoE layer found in model.layers.")
-        
+            raise RuntimeError(
+                "No Ernie4_5_MoeMoE layer found in model.layers.")
+
         self.num_logical_experts = example_moe.n_logical_experts
         self.num_physical_experts = example_moe.n_physical_experts
         self.num_local_physical_experts = example_moe.n_local_physical_experts
