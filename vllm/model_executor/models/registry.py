@@ -18,8 +18,7 @@ from typing import Callable, Optional, TypeVar, Union
 
 import torch.nn as nn
 
-from vllm.config import (ModelConfig, ModelImpl, iter_architecture_defaults,
-                         try_match_architecture_defaults)
+from vllm.config import ModelConfig, ModelImpl, try_match_architecture_defaults
 from vllm.logger import init_logger
 
 from .interfaces import (has_inner_state, has_noops, is_attention_free,
@@ -507,6 +506,7 @@ class _ModelRegistry:
 
         auto_map: dict[str, str] = getattr(model_config.hf_config, "auto_map",
                                            None) or dict()
+
         # Make sure that config class is always initialized before model class,
         # otherwise the model class won't be able to access the config class,
         # the expected auto_map should have correct order like:
@@ -515,14 +515,20 @@ class _ModelRegistry:
         #     "AutoModel": "<your-repo-name>--<config-name>",
         #     "AutoModelFor<Task>": "<your-repo-name>--<config-name>",
         # },
-        auto_modules = {
-            name:
-            get_class_from_dynamic_module(module,
-                                          model_config.model,
-                                          revision=model_config.revision)
-            for name, module in sorted(auto_map.items(), key=lambda x: x[0])
-            if "." in module  # Ignore entries that are improperly formatted
-        }
+        try:
+            auto_modules = {
+                name:
+                get_class_from_dynamic_module(module,
+                                              model_config.model,
+                                              revision=model_config.revision)
+                for name, module in sorted(auto_map.items(),
+                                           key=lambda x: x[0])
+            }
+        except Exception:
+            if model_config.model_impl != ModelImpl.TRANSFORMERS:
+                return None
+
+            raise
 
         model_module = getattr(transformers, architecture, None)
 
@@ -569,7 +575,8 @@ class _ModelRegistry:
             suffix, _ = match
 
             # Get the name of the base model to convert
-            for repl_suffix, _ in iter_architecture_defaults():
+            # for repl_suffix, _ in iter_architecture_defaults():
+            for repl_suffix, _ in ["ForCausalLM"]:
                 base_arch = architecture.replace(suffix, repl_suffix)
                 if base_arch in self.models:
                     return base_arch
@@ -613,7 +620,7 @@ class _ModelRegistry:
                 return (model_info, arch)
 
         # Fallback to transformers impl
-        if model_config.model_impl != ModelImpl.VLLM:
+        if model_config.model_impl in (ModelImpl.AUTO, ModelImpl.TRANSFORMERS):
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
             if arch is not None:
@@ -648,7 +655,7 @@ class _ModelRegistry:
                 return (model_cls, arch)
 
         # Fallback to transformers impl
-        if model_config.model_impl != ModelImpl.VLLM:
+        if model_config.model_impl in (ModelImpl.AUTO, ModelImpl.TRANSFORMERS):
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
             if arch is not None:
