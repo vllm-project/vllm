@@ -27,8 +27,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_moe_fp8_layer_for_marlin)
-from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
-    cutlass_fp4_supported)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    cutlass_fp4_supported, swizzle_blockscale)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize)
 from vllm.model_executor.utils import set_weight_attrs
@@ -193,29 +193,6 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
         set_weight_attrs(w2_input_scale, extra_weight_attrs)
 
-    def swizzle_blockscale(self, scale: torch.tensor):
-        assert (scale.dtype == torch.float8_e4m3fn)
-        # Pad and blockwise interleave weight_scale
-        scale_ndim = scale.ndim
-        if scale.ndim == 2:
-            scale = scale.unsqueeze(0)
-        assert scale.ndim == 3
-        B, M, K = scale.shape
-        round_up_multiple = lambda x, m: (x + m - 1) // m * m
-        M_padded = round_up_multiple(M, 128)
-        K_padded = round_up_multiple(K, 4)
-        padded_scale = torch.zeros((B, M_padded, K_padded), dtype=scale.dtype)
-        padded_scale[:B, :M, :K] = scale
-        batches, rows, cols = padded_scale.shape
-        assert rows % 128 == 0
-        assert cols % 4 == 0
-        padded_scale = padded_scale.reshape(batches, rows // 128, 4, 32,
-                                            cols // 4, 4)
-        swizzled_scale = padded_scale.permute((0, 1, 4, 3, 2, 5))
-        swizzled_scale = swizzled_scale.contiguous().cuda()
-        return (swizzled_scale.reshape(M, K)
-                if scale_ndim == 2 else swizzled_scale.reshape(B, M, K))
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
 
         # From packed to weight
@@ -243,13 +220,13 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             return
 
         # swizzle weight scales
-        layer.w13_blockscale_swizzled = torch.nn.Parameter(
-            self.swizzle_blockscale(layer.w13_weight_scale),
-            requires_grad=False)
+        layer.w13_blockscale_swizzled = torch.nn.Parameter(swizzle_blockscale(
+            layer.w13_weight_scale),
+                                                           requires_grad=False)
 
-        layer.w2_blockscale_swizzled = torch.nn.Parameter(
-            self.swizzle_blockscale(layer.w2_weight_scale),
-            requires_grad=False)
+        layer.w2_blockscale_swizzled = torch.nn.Parameter(swizzle_blockscale(
+            layer.w2_weight_scale),
+                                                          requires_grad=False)
 
         # w13
         w13_input_global_scale = layer.w13_input_global_scale.max(
