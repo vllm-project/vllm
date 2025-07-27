@@ -201,6 +201,7 @@ async def test_abort(
                     f"expected {expected_tokens}")
 
         # Make sure all aborted requests were really aborted.
+        await asyncio.sleep(0.1)
         assert not engine.output_processor.has_unfinished_requests()
 
         # Confirm we can do another generation.
