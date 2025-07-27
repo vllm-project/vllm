@@ -12,6 +12,7 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.lora.fused_moe_lora import fused_moe_w2_lora, fused_moe_w13_lora
 # yapf: disable
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig, get_config_quant_dtype)
@@ -22,7 +23,7 @@ from vllm.model_executor.layers.fused_moe.cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm, deep_gemm_moe_fp8)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
-    moe_align_block_size)
+    moe_align_block_size, moe_lora_align_block_size)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -995,59 +996,79 @@ def get_config_dtype_str(
     return None
 
 
-def inplace_fused_experts(hidden_states: torch.Tensor,
-                          w1: torch.Tensor,
-                          w2: torch.Tensor,
-                          topk_weights: torch.Tensor,
-                          topk_ids: torch.Tensor,
-                          activation: str = "silu",
-                          apply_router_weight_on_input: bool = False,
-                          use_fp8_w8a8: bool = False,
-                          use_int8_w8a8: bool = False,
-                          use_int8_w8a16: bool = False,
-                          use_int4_w4a16: bool = False,
-                          use_mxfp4_w4a4: bool = False,
-                          per_channel_quant: bool = False,
-                          global_num_experts: int = -1,
-                          expert_map: Optional[torch.Tensor] = None,
-                          w1_scale: Optional[torch.Tensor] = None,
-                          w2_scale: Optional[torch.Tensor] = None,
-                          w1_zp: Optional[torch.Tensor] = None,
-                          w2_zp: Optional[torch.Tensor] = None,
-                          a1_scale: Optional[torch.Tensor] = None,
-                          a2_scale: Optional[torch.Tensor] = None,
-                          block_shape: Optional[list[int]] = None) -> None:
+def inplace_fused_experts(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    activation: str = "silu",
+    apply_router_weight_on_input: bool = False,
+    use_fp8_w8a8: bool = False,
+    use_int8_w8a8: bool = False,
+    use_int8_w8a16: bool = False,
+    use_int4_w4a16: bool = False,
+    use_mxfp4_w4a4: bool = False,
+    per_channel_quant: bool = False,
+    global_num_experts: int = -1,
+    expert_map: Optional[torch.Tensor] = None,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    w1_zp: Optional[torch.Tensor] = None,
+    w2_zp: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    block_shape: Optional[list[int]] = None,
+    w1_lora_a_stacked: Optional[torch.Tensor] = None,
+    w1_lora_b_stacked: Optional[torch.Tensor] = None,
+    w2_lora_a_stacked: Optional[torch.Tensor] = None,
+    w2_lora_b_stacked: Optional[torch.Tensor] = None,
+    w3_lora_a_stacked: Optional[torch.Tensor] = None,
+    w3_lora_b_stacked: Optional[torch.Tensor] = None,
+    token_lora_mapping: Optional[torch.Tensor] = None,
+) -> None:
     fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids, True,
                        activation, apply_router_weight_on_input, use_fp8_w8a8,
                        use_int8_w8a8, use_int8_w8a16, use_int4_w4a16,
                        use_mxfp4_w4a4, per_channel_quant, global_num_experts,
                        expert_map, w1_scale, w2_scale, w1_zp, w2_zp, a1_scale,
-                       a2_scale, block_shape)
+                       a2_scale, block_shape, w1_lora_a_stacked,
+                       w1_lora_b_stacked, w2_lora_a_stacked, w2_lora_b_stacked,
+                       w3_lora_a_stacked, w3_lora_b_stacked,
+                       token_lora_mapping)
 
 
 def inplace_fused_experts_fake(
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: str = "silu",
-        apply_router_weight_on_input: bool = False,
-        use_fp8_w8a8: bool = False,
-        use_int8_w8a8: bool = False,
-        use_int8_w8a16: bool = False,
-        use_int4_w4a16: bool = False,
-        use_mxfp4_w4a4: bool = False,
-        per_channel_quant: bool = False,
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        w1_scale: Optional[torch.Tensor] = None,
-        w2_scale: Optional[torch.Tensor] = None,
-        w1_zp: Optional[torch.Tensor] = None,
-        w2_zp: Optional[torch.Tensor] = None,
-        a1_scale: Optional[torch.Tensor] = None,
-        a2_scale: Optional[torch.Tensor] = None,
-        block_shape: Optional[list[int]] = None) -> None:
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    activation: str = "silu",
+    apply_router_weight_on_input: bool = False,
+    use_fp8_w8a8: bool = False,
+    use_int8_w8a8: bool = False,
+    use_int8_w8a16: bool = False,
+    use_int4_w4a16: bool = False,
+    use_mxfp4_w4a4: bool = False,
+    per_channel_quant: bool = False,
+    global_num_experts: int = -1,
+    expert_map: Optional[torch.Tensor] = None,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    w1_zp: Optional[torch.Tensor] = None,
+    w2_zp: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    block_shape: Optional[list[int]] = None,
+    w1_lora_a_stacked: Optional[torch.Tensor] = None,
+    w1_lora_b_stacked: Optional[torch.Tensor] = None,
+    w2_lora_a_stacked: Optional[torch.Tensor] = None,
+    w2_lora_b_stacked: Optional[torch.Tensor] = None,
+    w3_lora_a_stacked: Optional[torch.Tensor] = None,
+    w3_lora_b_stacked: Optional[torch.Tensor] = None,
+    token_lora_mapping: Optional[torch.Tensor] = None,
+) -> None:
     pass
 
 
@@ -1246,31 +1267,39 @@ def dispatch_fused_experts_func(inplace: bool) -> Callable[..., torch.Tensor]:
 # TODO (bnell): replace this with modular op.  Can get rid of inplace/outplace
 # torch ops.
 def fused_experts(
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        inplace: bool = False,
-        activation: str = "silu",
-        apply_router_weight_on_input: bool = False,
-        use_fp8_w8a8: bool = False,
-        use_int8_w8a8: bool = False,
-        use_int8_w8a16: bool = False,
-        use_int4_w4a16: bool = False,
-        use_mxfp4_w4a4: bool = False,
-        per_channel_quant: bool = False,
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        w1_scale: Optional[torch.Tensor] = None,
-        w2_scale: Optional[torch.Tensor] = None,
-        w1_zp: Optional[torch.Tensor] = None,
-        w2_zp: Optional[torch.Tensor] = None,
-        a1_scale: Optional[torch.Tensor] = None,
-        a2_scale: Optional[torch.Tensor] = None,
-        block_shape: Optional[list[int]] = None,
-        allow_deep_gemm: bool = False,
-        allow_cutlass_block_scaled_grouped_gemm: bool = False) -> torch.Tensor:
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    inplace: bool = False,
+    activation: str = "silu",
+    apply_router_weight_on_input: bool = False,
+    use_fp8_w8a8: bool = False,
+    use_int8_w8a8: bool = False,
+    use_int8_w8a16: bool = False,
+    use_int4_w4a16: bool = False,
+    use_mxfp4_w4a4: bool = False,
+    per_channel_quant: bool = False,
+    global_num_experts: int = -1,
+    expert_map: Optional[torch.Tensor] = None,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    w1_zp: Optional[torch.Tensor] = None,
+    w2_zp: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    block_shape: Optional[list[int]] = None,
+    allow_deep_gemm: bool = False,
+    allow_cutlass_block_scaled_grouped_gemm: bool = False,
+    w1_lora_a_stacked: Optional[torch.Tensor] = None,
+    w1_lora_b_stacked: Optional[torch.Tensor] = None,
+    w2_lora_a_stacked: Optional[torch.Tensor] = None,
+    w2_lora_b_stacked: Optional[torch.Tensor] = None,
+    w3_lora_a_stacked: Optional[torch.Tensor] = None,
+    w3_lora_b_stacked: Optional[torch.Tensor] = None,
+    token_lora_mapping: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     # For now, disable DeepGemm for small N (<= 512) until better
     # permute/unpermute ops are available.
     # However, on B200, we use DeepGemm for all cases because they only support
@@ -1334,7 +1363,14 @@ def fused_experts(
             w2_zp=w2_zp,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
-            block_shape=block_shape)
+            block_shape=block_shape,
+            w1_lora_a_stacked=w1_lora_a_stacked,
+            w1_lora_b_stacked=w1_lora_b_stacked,
+            w2_lora_a_stacked=w2_lora_a_stacked,
+            w2_lora_b_stacked=w2_lora_b_stacked,
+            w3_lora_a_stacked=w3_lora_a_stacked,
+            w3_lora_b_stacked=w3_lora_b_stacked,
+            token_lora_mapping=token_lora_mapping)
 
 
 def fused_experts_impl(
@@ -1361,6 +1397,13 @@ def fused_experts_impl(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[list[int]] = None,
+    w1_lora_a_stacked: Optional[torch.Tensor] = None,
+    w1_lora_b_stacked: Optional[torch.Tensor] = None,
+    w2_lora_a_stacked: Optional[torch.Tensor] = None,
+    w2_lora_b_stacked: Optional[torch.Tensor] = None,
+    w3_lora_a_stacked: Optional[torch.Tensor] = None,
+    w3_lora_b_stacked: Optional[torch.Tensor] = None,
+    token_lora_mapping: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     # Check constraints.
     if use_int4_w4a16:
@@ -1503,6 +1546,30 @@ def fused_experts_impl(
                                 per_channel_quant=per_channel_quant,
                                 block_shape=block_shape)
 
+        if token_lora_mapping is not None:  # fusedmoe with lora
+            assert w1_lora_a_stacked is not None
+            assert w1_lora_b_stacked is not None
+            assert w2_lora_a_stacked is not None
+            assert w2_lora_b_stacked is not None
+            assert w3_lora_a_stacked is not None
+            assert w3_lora_b_stacked is not None
+
+            (sorted_token_ids_lora, expert_ids_lora,
+             num_tokens_post_padded_lora) = (moe_lora_align_block_size(
+                 curr_topk_ids, token_lora_mapping, config['BLOCK_SIZE_M'],
+                 global_num_experts, curr_topk_ids.shape[-1], expert_map))
+            max_lora_rank = w1_lora_a_stacked.shape[-2]
+            w13_lora_a_stacked = (w1_lora_a_stacked, w3_lora_a_stacked)
+            w13_lora_b_stacked = (w1_lora_b_stacked, w3_lora_b_stacked)
+            expert_ids_lora = expert_ids_lora.view(curr_topk_ids.shape[-1], -1)
+            sorted_token_ids_lora = sorted_token_ids_lora.view(
+                curr_topk_ids.shape[-1], -1)
+            fused_moe_w13_lora(qcurr_hidden_states, w13_lora_a_stacked,
+                               w13_lora_b_stacked, topk_weights,
+                               sorted_token_ids_lora, expert_ids_lora,
+                               num_tokens_post_padded_lora, max_lora_rank,
+                               top_k_num, config, intermediate_cache1)
+
         if activation == "silu":
             torch.ops._C.silu_and_mul(intermediate_cache2,
                                       intermediate_cache1.view(-1, N))
@@ -1539,6 +1606,12 @@ def fused_experts_impl(
                                 use_int4_w4a16=use_int4_w4a16,
                                 per_channel_quant=per_channel_quant,
                                 block_shape=block_shape)
+
+        if token_lora_mapping is not None:  # fusedmoe with lora
+            intermediate_cache3 += fused_moe_w2_lora(
+                qintermediate_cache2, w2_lora_a_stacked, w2_lora_b_stacked,
+                topk_weights, sorted_token_ids_lora, expert_ids_lora,
+                num_tokens_post_padded_lora, max_lora_rank, top_k_num, config)
 
         ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.size()),
                     out_hidden_states[begin_chunk_idx:end_chunk_idx])

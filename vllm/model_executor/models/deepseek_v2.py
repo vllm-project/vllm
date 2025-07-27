@@ -55,7 +55,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import MixtureOfExperts, SupportsPP
+from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -725,7 +725,40 @@ class DeepseekV2Model(nn.Module):
         return hidden_states
 
 
-class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
+class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
+                            SupportsLoRA):
+
+    def get_packed_modules_mapping(self) -> dict[str, list[str]]:
+        # This method generates and returns a dictionary mapping packed module
+        # names to lists of their corresponding submodule names. It includes
+        # both static mappings and dynamic mappings for expert layers, where
+        # the expert indices are expanded based on the configured number
+        # of routed experts.
+
+        packed_modules_mapping = {
+            "gate_up_proj": [
+                "gate_proj",
+                "up_proj",
+            ]
+        }
+
+        packed_modules_mapping_replacement = {
+            "experts": [
+                "experts.{}.gate_proj",
+                "experts.{}.up_proj",
+                "experts.{}.down_proj",
+            ]
+        }
+
+        n_routed_experts = getattr(self.config, "n_routed_experts", None)
+        assert n_routed_experts is not None
+        for key, values in packed_modules_mapping_replacement.items():
+            expert_layers = []
+            for expert_id in range(0, n_routed_experts):
+                for layer_name in values:
+                    expert_layers.append(layer_name.format(expert_id))
+            packed_modules_mapping[key] = expert_layers
+        return packed_modules_mapping
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
