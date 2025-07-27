@@ -381,7 +381,7 @@ class Glm4MoeModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        enable_eplb = vllm_config.parallel_config.enable_eplb
+        enable_eplb = vllm_config.parallel_config.eplb_config.enable_eplb
         self.config = config
 
         self.vocab_size = config.vocab_size
