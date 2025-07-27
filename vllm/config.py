@@ -425,6 +425,9 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation."""
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
+    process_hidden_states: Optional[bool] = False
+    """Extract the hidden states of the model to be processed before the request
+    is completed. This is so far only supported for embedding/pooling models """
 
     def compute_hash(self) -> str:
         """
@@ -4820,7 +4823,8 @@ class VllmConfig:
             f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
             f"use_async_output_proc={self.model_config.use_async_output_proc}, "
             f"pooler_config={self.model_config.pooler_config!r}, "
-            f"compilation_config={self.compilation_config!r}")
+            f"compilation_config={self.compilation_config!r}"
+            f"process_hidden_states={self.model_config.process_hidden_states}")
 
 
 _current_vllm_config: Optional[VllmConfig] = None

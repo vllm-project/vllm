@@ -991,6 +991,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The default value is "VLLM".
     "VLLM_PROCESS_NAME_PREFIX":
     lambda: os.getenv("VLLM_PROCESS_NAME_PREFIX", "VLLM"),
+    # Controls which hidden states processor plugin to load.
+    # This is used when more than a hidden states processor is installed
+    # to decide which one to use.
+    "VLLM_USE_HIDDEN_STATES_PROCESSOR":
+    lambda: os.getenv("VLLM_USE_HIDDEN_STATES_PROCESSOR", None),
 }
 
 # --8<-- [end:env-vars-definition]

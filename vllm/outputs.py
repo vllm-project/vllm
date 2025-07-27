@@ -69,9 +69,13 @@ class PoolingOutput:
         data: The extracted hidden states.
     """
     data: torch.Tensor
+    processed_hidden_states: Optional[Any] = None
 
     def __repr__(self) -> str:
-        return (f"PoolingOutput(data={self.data})")
+        hidden_states = ("None" if not self.processed_hidden_states else type(
+            self.processed_hidden_states).__name__)
+        return (f"PoolingOutput(data={self.data}"
+                f"Processed hidden states={hidden_states})")
 
     def __eq__(self, other: object) -> bool:
         return (isinstance(other, self.__class__) and bool(

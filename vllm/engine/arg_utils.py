@@ -350,6 +350,7 @@ class EngineArgs:
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = \
         MultiModalConfig.disable_mm_preprocessor_cache
+    process_hidden_states: bool = False
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
@@ -503,6 +504,8 @@ class EngineArgs:
                                  **model_kwargs["enable_prompt_embeds"])
         model_group.add_argument("--served-model-name",
                                  **model_kwargs["served_model_name"])
+        model_group.add_argument("--process-hidden-states",
+                                 **model_kwargs["process_hidden_states"])
         # This one is a special case because it is the
         # opposite of ModelConfig.use_async_output_proc
         model_group.add_argument(
@@ -910,6 +913,7 @@ class EngineArgs:
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
+            process_hidden_states=self.process_hidden_states,
         )
 
     def validate_tensorizer_args(self):
