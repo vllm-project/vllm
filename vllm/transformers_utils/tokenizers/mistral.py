@@ -183,7 +183,8 @@ def make_mistral_chat_completion_request(
             message["content"] = content
 
     # The Mistral client, in comparison to the OpenAI client, requires the
-    # "parameters" dict to be present, even if it's empty.
+    # "parameters" dict and the "description" string to be present
+    # even if they are empty.
     if tools:
         for function in [
                 tool["function"] for tool in tools
@@ -191,6 +192,8 @@ def make_mistral_chat_completion_request(
         ]:
             if function.get("parameters") is None:
                 function["parameters"] = {}
+            if function.get("description") is None:
+                function["description"] = ""
 
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
     return ChatCompletionRequest(messages=messages,
