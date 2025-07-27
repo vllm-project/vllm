@@ -276,6 +276,8 @@ class Worker(LocalOrDistributedWorkerBase):
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
 
+        self.profile_time = result.profile_time
+
         msg = (f"Memory profiling takes {result.profile_time:.2f} seconds\n"
                "the current vLLM instance can use "
                "total_gpu_memory "
