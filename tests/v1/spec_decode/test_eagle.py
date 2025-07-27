@@ -140,9 +140,10 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
 
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
-    if attn_backend == "TRITON_ATTN_VLLM_V1" and current_platform.is_cuda():
+    if (attn_backend == "TRITON_ATTN_VLLM_V1"
+            and not current_platform.is_rocm()):
         pytest.skip("TRITON_ATTN_VLLM_V1 does not support "
-                    "multi-token eagle spec decode on CUDA")
+                    "multi-token eagle spec decode on current platform")
 
     if attn_backend == "FLASH_ATTN_VLLM_V1" and current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
@@ -224,6 +225,11 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
 def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
 
     monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
+
+    if (attn_backend == "TRITON_ATTN_VLLM_V1"
+            and not current_platform.is_rocm()):
+        pytest.skip("TRITON_ATTN_VLLM_V1 does not support "
+                    "multi-token eagle spec decode on current platform")
 
     if attn_backend == "FLASH_ATTN_VLLM_V1" and current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")

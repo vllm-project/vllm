@@ -134,8 +134,14 @@ def test_eagle_correctness(
         m.setenv("VLLM_USE_V1", "1")
         m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
+        if (attn_backend == "TRITON_ATTN_VLLM_V1"
+                and not current_platform.is_rocm()):
+            pytest.skip("TRITON_ATTN_VLLM_V1 does not support "
+                        "multi-token eagle spec decode on current platform")
+
         if attn_backend == "FLASH_ATTN_VLLM_V1" and current_platform.is_rocm():
             m.setenv("VLLM_ROCM_USE_AITER", "1")
+
         method, model_name, spec_model_name, tp_size = model_setup
 
         ref_llm = LLM(model=model_name,

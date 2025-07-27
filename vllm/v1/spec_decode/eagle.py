@@ -155,9 +155,9 @@ class EagleProposer:
         # one layer. Adapt this code to support multiple layers once
         # there's a multi-layer MTP module.
 
+        # On ROCm, both AiterFlashAttention and TritonAttention
+        # support multi-token eagle spec decode.
         if not current_platform.is_rocm():
-            # On ROCm, both AiterFlashAttention and TritonAttention
-            # support multi-token eagle spec decode.
             # Currently FlashAttention is the only backend that supports
             # multi-token eagle spec decode. This is because the code below
             # makes assumptions about attn_metadata attributes available.
