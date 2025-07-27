@@ -182,7 +182,7 @@ class OpenAIServingResponses(OpenAIServing):
                 generators.append(generator)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         assert len(generators) == 1
         result_generator, = generators
@@ -239,7 +239,7 @@ class OpenAIServingResponses(OpenAIServing):
                 request_metadata,
             )
         except Exception as e:
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     async def responses_full_generator(
         self,
@@ -262,7 +262,7 @@ class OpenAIServingResponses(OpenAIServing):
             return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         assert final_res is not None
         assert len(final_res.outputs) == 1
@@ -273,7 +273,7 @@ class OpenAIServingResponses(OpenAIServing):
                 reasoning_parser = self.reasoning_parser(tokenizer)
             except RuntimeError as e:
                 logger.exception("Error in reasoning parser creation.")
-                return self.create_error_response(str(e))
+                return self.create_error_response(e)
 
             reasoning_content, content = (
                 reasoning_parser.extract_reasoning_content(final_output.text,
@@ -386,7 +386,7 @@ class OpenAIServingResponses(OpenAIServing):
         except Exception as e:
             logger.exception("Background request failed for %s",
                              request.request_id)
-            response = self.create_error_response(str(e))
+            response = self.create_error_response(e)
 
         if isinstance(response, ErrorResponse):
             # If the request has failed, update the status to "failed".

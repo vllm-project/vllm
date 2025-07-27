@@ -90,7 +90,7 @@ class EmbeddingMixin(OpenAIServing):
             return None
         except (ValueError, TypeError) as e:
             logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     @override
     def _build_response(
@@ -202,6 +202,6 @@ class OpenAIServingEmbedding(EmbeddingMixin):
         try:
             pooling_params.verify("embed", self.model_config)
         except ValueError as e:
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         return pooling_params

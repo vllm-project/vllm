@@ -378,7 +378,7 @@ class ServingScores(OpenAIServing):
             return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     async def do_rerank(
         self,
@@ -427,7 +427,7 @@ class ServingScores(OpenAIServing):
             return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     def request_output_to_score_response(
         self,
