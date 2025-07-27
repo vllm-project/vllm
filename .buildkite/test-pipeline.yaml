@@ -98,25 +98,6 @@ steps:
   - pytest -v -s basic_correctness/test_cpu_offload.py
   - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
 
-- label: Chunked Prefill Test
-  mirror_hardwares: [amdexperimental, amdproduction]
-  source_file_dependencies:
-  - vllm/
-  - tests/basic_correctness/test_chunked_prefill
-  commands:
-  - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py
-  - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
-
-- label: Core Test # 10min
-  mirror_hardwares: [amdexperimental, amdproduction]
-  fast_check: true
-  source_file_dependencies:
-  - vllm/core
-  - vllm/distributed
-  - tests/core
-  commands:
-  - pytest -v -s core
-
 - label: Entrypoints Test (LLM) # 40min
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
@@ -155,7 +136,6 @@ steps:
   num_gpus: 4
   source_file_dependencies:
   - vllm/distributed/
-  - vllm/core/
   - tests/distributed/test_utils
   - tests/distributed/test_pynccl
   - tests/distributed/test_events
@@ -170,7 +150,6 @@ steps:
   - tests/v1/engine/test_engine_core_client.py
   commands:
   # test with tp=2 and external_dp=2
-  - VLLM_USE_V1=0 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
   - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
   # test with tp=2 and pp=2
   - PP_SIZE=2 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
@@ -305,15 +284,6 @@ steps:
     - python3 offline_inference/basic/score.py
     - VLLM_USE_V1=0 python3 offline_inference/profiling.py --model facebook/opt-125m run_num_steps --num-steps 2
 
-- label: Prefix Caching Test # 9min
-  mirror_hardwares: [amdexperimental, amdproduction]
-  source_file_dependencies:
-  - vllm/
-  - tests/prefix_caching
-  commands:
-    - pytest -v -s prefix_caching
-
-
 - label: Platform Tests (CUDA)
   mirror_hardwares: [amdexperimental, amdproduction]
   source_file_dependencies:
@@ -321,17 +291,6 @@ steps:
   - tests/cuda
   commands:
     - pytest -v -s cuda/test_cuda_context.py
-
-- label: Samplers Test # 36min
-  mirror_hardwares: [amdexperimental]
-  source_file_dependencies:
-  - vllm/model_executor/layers
-  - vllm/sampling_metadata.py
-  - tests/samplers
-  - tests/conftest.py
-  commands:
-    - pytest -v -s samplers
-    - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
 
 - label: LoRA Test %N # 15min each
   mirror_hardwares: [amdexperimental]
@@ -493,13 +452,13 @@ steps:
   commands: # LMEval+Transcription WER check
   - pytest -s entrypoints/openai/correctness/
 
-- label: Encoder Decoder tests # 5min
-  mirror_hardwares: [amdexperimental, amdproduction]
-  source_file_dependencies:
-  - vllm/
-  - tests/encoder_decoder
-  commands:
-    - pytest -v -s encoder_decoder
+# - label: Encoder Decoder tests # 5min
+#   mirror_hardwares: [amdexperimental, amdproduction]
+#   source_file_dependencies:
+#   - vllm/
+#   - tests/encoder_decoder
+#   commands:
+#     - pytest -v -s encoder_decoder
 
 - label: OpenAI-Compatible Tool Use # 20 min
   mirror_hardwares: [amdexperimental, amdproduction]
@@ -664,7 +623,6 @@ steps:
   num_nodes: 2
   source_file_dependencies:
   - vllm/distributed/
-  - vllm/engine/
   - vllm/executor/
   - vllm/model_executor/models/
   - tests/distributed/
@@ -687,14 +645,10 @@ steps:
   num_gpus: 2
   source_file_dependencies:
   - vllm/distributed/
-  - vllm/engine/
   - vllm/executor/
   - vllm/model_executor/models/
   - tests/distributed/
   - vllm/compilation
-  - vllm/worker/worker_base.py
-  - vllm/worker/worker.py
-  - vllm/worker/model_runner.py
   - entrypoints/llm/test_collective_rpc.py
   - tests/v1/test_async_llm_dp.py
   - tests/v1/test_external_lb_dp.py
@@ -743,34 +697,12 @@ steps:
   - pytest -v -s models/test_oot_registration.py # it needs a clean process
   - pytest -v -s plugins/lora_resolvers # unit tests for in-tree lora resolver plugins
 
-- label: Multi-step Tests (4 GPUs) # 36min
-  mirror_hardwares: [amdexperimental, amdproduction]
-  working_dir: "/vllm-workspace/tests"
-  num_gpus: 4
-  source_file_dependencies:
-  - vllm/model_executor/layers/sampler.py
-  - vllm/sequence.py
-  - vllm/worker/worker_base.py
-  - vllm/worker/worker.py
-  - vllm/worker/multi_step_worker.py
-  - vllm/worker/model_runner_base.py
-  - vllm/worker/model_runner.py
-  - vllm/worker/multi_step_model_runner.py
-  - vllm/engine
-  - tests/multi_step
-  commands:
-  # this test is quite flaky
-  # TODO: investigate and fix.
-  # - pytest -v -s multi_step/test_correctness_async_llm.py
-  - pytest -v -s multi_step/test_correctness_llm.py
-
 - label: Pipeline Parallelism Test # 45min
   mirror_hardwares: [amdexperimental, amdproduction]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   source_file_dependencies:
   - vllm/distributed/
-  - vllm/engine/
   - vllm/executor/
   - vllm/model_executor/models/
   - tests/distributed/
