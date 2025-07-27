@@ -20,8 +20,7 @@ from vllm.config import config
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          validate_chat_template)
-from vllm.entrypoints.openai.serving_models import (LoRAModulePath,
-                                                    PromptAdapterPath)
+from vllm.entrypoints.openai.serving_models import LoRAModulePath
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.logger import init_logger
 from vllm.utils import FlexibleArgumentParser
@@ -65,27 +64,6 @@ class LoRAParserAction(argparse.Action):
         setattr(namespace, self.dest, lora_list)
 
 
-class PromptAdapterParserAction(argparse.Action):
-
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: Optional[Union[str, Sequence[str]]],
-        option_string: Optional[str] = None,
-    ):
-        if values is None:
-            values = []
-        if isinstance(values, str):
-            raise TypeError("Expected values to be a list")
-
-        adapter_list: list[PromptAdapterPath] = []
-        for item in values:
-            name, path = item.split('=')
-            adapter_list.append(PromptAdapterPath(name, path))
-        setattr(namespace, self.dest, adapter_list)
-
-
 @config
 @dataclass
 class FrontendArgs:
@@ -115,9 +93,6 @@ class FrontendArgs:
     or JSON list format. Example (old format): `'name=path'` Example (new 
     format): `{\"name\": \"name\", \"path\": \"lora_path\", 
     \"base_model_name\": \"id\"}`"""
-    prompt_adapters: Optional[list[PromptAdapterPath]] = None
-    """Prompt adapter configurations in the format name=path. Multiple adapters 
-    can be specified."""
     chat_template: Optional[str] = None
     """The file path to the chat template, or the template in single-line form 
     for the specified model."""
@@ -158,6 +133,9 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     """If specified, API server will add X-Request-Id header to responses. 
     Caution: this hurts performance at high QPS."""
     enable_auto_tool_choice: bool = False
+    """If specified, exclude tool definitions in prompts when 
+    tool_choice='none'."""
+    exclude_tools_when_tool_choice_none: bool = False
     """Enable auto tool choice for supported models. Use `--tool-call-parser` 
     to specify which parser to use."""
     tool_call_parser: Optional[str] = None
@@ -182,13 +160,9 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     """If set to True, enable tracking server_load_metrics in the app state."""
     enable_force_include_usage: bool = False
     """If set to True, including usage on every request."""
-    expand_tools_even_if_tool_choice_none: bool = False
-    """Include tool definitions in prompts even when `tool_choice='none'`.
-
-    This is a transitional option that will be removed in v0.10.0. In
-    v0.10.0, tool definitions will always be included regardless of
-    `tool_choice` setting. Use this flag to test the upcoming behavior
-    before the breaking change."""
+    enable_tokenizer_info_endpoint: bool = False
+    """Enable the /get_tokenizer_info endpoint. May expose chat
+    templates and other tokenizer configuration."""
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -199,7 +173,6 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
         # Special case: allowed_origins, allowed_methods, allowed_headers all
         # need json.loads type
         # Should also remove nargs
-        print(frontend_kwargs["allowed_origins"])
         frontend_kwargs["allowed_origins"]["type"] = json.loads
         frontend_kwargs["allowed_methods"]["type"] = json.loads
         frontend_kwargs["allowed_headers"]["type"] = json.loads
@@ -212,23 +185,16 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
         frontend_kwargs["lora_modules"]["type"] = optional_type(str)
         frontend_kwargs["lora_modules"]["action"] = LoRAParserAction
 
-        # Special case: Prompt adapters need custom parser action and
-        # optional_type(str)
-        frontend_kwargs["prompt_adapters"]["type"] = optional_type(str)
-        frontend_kwargs["prompt_adapters"][
-            "action"] = PromptAdapterParserAction
-
         # Special case: Middleware needs append action
         frontend_kwargs["middleware"]["action"] = "append"
+        frontend_kwargs["middleware"]["type"] = str
+        if "nargs" in frontend_kwargs["middleware"]:
+            del frontend_kwargs["middleware"]["nargs"]
+        frontend_kwargs["middleware"]["default"] = []
 
         # Special case: Tool call parser shows built-in options.
         valid_tool_parsers = list(ToolParserManager.tool_parsers.keys())
         frontend_kwargs["tool_call_parser"]["choices"] = valid_tool_parsers
-
-        # Special case for expand-tools-even-if-tool-choice-none because of
-        # the deprecation field
-        frontend_kwargs["expand_tools_even_if_tool_choice_none"]\
-            ["deprecated"] = True
 
         frontend_group = parser.add_argument_group(
             title="Frontend",
@@ -248,6 +214,27 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     register all arguments instead of manually enumerating them here. This
     avoids code duplication and keeps the argument definitions in one place.
     """
+    parser.add_argument("model_tag",
+                        type=str,
+                        nargs="?",
+                        help="The model tag to serve "
+                        "(optional if specified in config)")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        default=False,
+        help="Run in headless mode. See multi-node data parallel "
+        "documentation for more details.")
+    parser.add_argument("--api-server-count",
+                        "-asc",
+                        type=int,
+                        default=1,
+                        help="How many API server processes to run.")
+    parser.add_argument(
+        "--config",
+        help="Read CLI options from a config file. "
+        "Must be a YAML with the following options: "
+        "https://docs.vllm.ai/en/latest/configuration/serve_args.html")
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
 
@@ -266,9 +253,6 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_auto_tool_choice and not args.tool_call_parser:
         raise TypeError("Error: --enable-auto-tool-choice requires "
                         "--tool-call-parser")
-    if args.enable_prompt_embeds and args.enable_prompt_adapter:
-        raise ValueError(
-            "Cannot use prompt embeds and prompt adapter at the same time.")
 
 
 def log_non_default_args(args: argparse.Namespace):
