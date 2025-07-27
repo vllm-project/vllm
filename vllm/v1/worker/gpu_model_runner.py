@@ -313,6 +313,27 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
 
+        self.is_elastic = envs.VLLM_ENABLE_KVCACHED
+        if self.is_elastic:
+            try:
+                import kvcached.integration.vllm.interfaces as kvcached_interfaces
+            except Exception as e:
+                raise ImportError(
+                    "kvcached is not found. Please install kvcached with "
+                    "`pip install kvcached --no-build-isolation` to use elastic "
+                    "KV cache.") from e
+            self.kvcached_interfaces = kvcached_interfaces
+            # Get tensor parallel rank and size from vLLM's parallel state
+            from vllm.distributed.parallel_state import (
+                get_tensor_model_parallel_rank,
+                get_tensor_model_parallel_world_size)
+            tp_rank = get_tensor_model_parallel_rank()
+            tp_size = get_tensor_model_parallel_world_size()
+            kvcached_interfaces.init_kvcached(tp_rank=tp_rank,
+                                              tp_size=tp_size,
+                                              is_worker=True,
+                                              device=str(self.device))
+
         # Layer pairings for cross-layer KV sharing.
         # If an Attention layer `layer_name` is in the keys of this dict, it
         # means this layer will perform attention using the keys and values
@@ -2942,31 +2963,40 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-        # Initialize the memory buffer for KV cache
-        kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
-        # Change the memory buffer to the desired shape
-        kv_caches = self._reshape_kv_cache_tensors(kv_cache_config,
-                                                   kv_cache_raw_tensors)
 
-        # Setup `kv_cache_config` and `kv_caches` for models
-        # with cross-layer KV sharing
-        if self.shared_kv_cache_layers:
-            initialize_kv_cache_for_kv_sharing(
-                self.shared_kv_cache_layers,
-                kv_cache_config.kv_cache_groups,
-                kv_caches,
-                self.attn_groups,
-            )
-            attn_layers = get_layers_from_vllm_config(self.vllm_config,
-                                                      Attention)
-            # Iterate in reversed order and add layers that re-use KV cache
-            # e.g. in YOCO-like KV sharing setups (e.g. Gemma3n)
-            for layer_name in reversed(attn_layers):
-                if layer_name in self.shared_kv_cache_layers:
-                    self.kv_sharing_fast_prefill_eligible_layers.add(
-                        layer_name)
-                else:
-                    break
+        if self.is_elastic:
+            if self.shared_kv_cache_layers:
+                raise NotImplementedError(
+                    "Cross layer KV sharing is not supported with kvcached yet."
+                )
+            kv_caches = self._allocate_kv_cache_from_kvcached(kv_cache_config)
+        else:
+            # Initialize the memory buffer for KV cache
+            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(
+                kv_cache_config)
+            # Change the memory buffer to the desired shape
+            kv_caches = self._reshape_kv_cache_tensors(kv_cache_config,
+                                                       kv_cache_raw_tensors)
+
+            # Setup `kv_cache_config` and `kv_caches` for models
+            # with cross-layer KV sharing
+            if self.shared_kv_cache_layers:
+                initialize_kv_cache_for_kv_sharing(
+                    self.shared_kv_cache_layers,
+                    kv_cache_config.kv_cache_groups,
+                    kv_caches,
+                    self.attn_groups,
+                )
+                attn_layers = get_layers_from_vllm_config(
+                    self.vllm_config, Attention)
+                # Iterate in reversed order and add layers that re-use KV cache
+                # e.g. in YOCO-like KV sharing setups (e.g. Gemma3n)
+                for layer_name in reversed(attn_layers):
+                    if layer_name in self.shared_kv_cache_layers:
+                        self.kv_sharing_fast_prefill_eligible_layers.add(
+                            layer_name)
+                    else:
+                        break
 
         bind_kv_cache(kv_caches,
                       self.compilation_config.static_forward_context,
@@ -3144,3 +3174,76 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 group_metadata[layer_name] = (common_metadata, metadata)
 
         return group_metadata
+
+    def _allocate_kv_cache_from_kvcached(
+            self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
+        """Allocate raw KV-cache buffers via the *kvcached* backend.
+
+        Returns a flat list whose order corresponds to
+        `kv_cache_group.layer_names`.
+        """
+
+        if len(kv_cache_config.kv_cache_groups) > 1:
+            raise NotImplementedError(
+                "Hybrid models with more than one KV cache type are not "
+                "supported yet.")
+
+        kv_cache_group = kv_cache_config.kv_cache_groups[0]
+        kv_cache_spec = kv_cache_group.kv_cache_spec
+        if not isinstance(kv_cache_spec, FullAttentionSpec):
+            raise ValueError("kvcached only supports FullAttentionSpec layers")
+
+        # Build a lookup: layer_name -> KVCacheTensor config for quick access.
+        from vllm.v1.kv_cache_interface import KVCacheTensor
+        layer_to_tensor_cfg: dict[str, KVCacheTensor] = {}
+        for tensor_cfg in kv_cache_config.kv_cache_tensors:
+            for ln in tensor_cfg.shared_by:
+                layer_to_tensor_cfg[ln] = tensor_cfg
+
+        # Validate sizes and derive representative num_blocks.
+        for layer_name in kv_cache_group.layer_names:
+            tensor_cfg = layer_to_tensor_cfg[layer_name]
+            assert (tensor_cfg.size % kv_cache_spec.page_size_bytes == 0), (
+                f"Tensor size for layer {layer_name} ({tensor_cfg.size}) "
+                "is not a multiple of page size "
+                f"{kv_cache_spec.page_size_bytes}.")
+            num_blocks = tensor_cfg.size // kv_cache_spec.page_size_bytes
+            assert num_blocks >= kv_cache_config.num_blocks, (
+                "Number of blocks derived from tensor size is smaller than "
+                "kv_cache_config.num_blocks")
+
+        # Use the first layer as representative for `num_blocks` in shape calc.
+        first_layer_name = kv_cache_group.layer_names[0]
+        rep_tensor_cfg = layer_to_tensor_cfg[first_layer_name]
+        num_blocks = rep_tensor_cfg.size // kv_cache_spec.page_size_bytes
+
+        # Attention backend for this group is the first one initialised in
+        # `initialize_attn_backend()` which must have been called already.
+        attn_backend_cls = self.attn_backends[0]
+        kv_cache_shape = attn_backend_cls.get_kv_cache_shape(
+            num_blocks,
+            kv_cache_spec.block_size,
+            kv_cache_spec.num_kv_heads,
+            kv_cache_spec.head_size,
+        )
+
+        num_layers = len(kv_cache_group.layer_names)
+        dtype = kv_cache_spec.dtype
+        kv_cache_buffers = self.kvcached_interfaces.alloc_kv_cache(
+            kv_cache_shape,
+            kv_cache_spec.block_size,
+            dtype,
+            self.device.type,
+            num_layers,
+            attention_type="MHA",
+            kv_layout="NHD",
+        )
+
+        # Create layer_name -> tensor mapping from raw buffers.
+        kv_cache_group = kv_cache_config.kv_cache_groups[0]
+
+        kv_caches: dict[str, torch.Tensor] = {}
+        for idx, layer_name in enumerate(kv_cache_group.layer_names):
+            kv_caches[layer_name] = kv_cache_buffers[idx]
+
+        return kv_caches

@@ -72,7 +72,7 @@ class BlockPool:
     def get_cached_block(
             self, block_hash: BlockHash,
             kv_cache_group_ids: list[int]) -> Optional[list[KVCacheBlock]]:
-        """Get the cached block by the block hash for each group in 
+        """Get the cached block by the block hash for each group in
         `kv_cache_group_ids`, or None if cache miss for any group.
         If there are duplicated blocks, we return the first block in the cache.
 
@@ -343,7 +343,7 @@ class BlockPool:
 
     def take_events(self) -> list[KVCacheEvent]:
         """Atomically takes all events and clears the queue.
-        
+
         Returns:
             A list of KV cache events.
         """
@@ -352,3 +352,121 @@ class BlockPool:
         events = self.kv_event_queue
         self.kv_event_queue = []
         return events
+
+
+class ElasticBlockPool(BlockPool):
+    """ElasticBlockPool that manages KVCacheBlocks.
+    It provides same interface as BlockPool, but it leverages kvcached for
+    elastic KV cachememory management.
+    """
+
+    def __init__(self,
+                 num_gpu_blocks: int,
+                 block_size: int,
+                 cell_size: int,
+                 num_layers: int,
+                 enable_caching: bool,
+                 enable_kv_cache_events: bool = False):
+        # NOTE: Do not call super().__init__() here because we just want to
+        # keep the same interface as BlockPool but not its implementation.
+        assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
+        assert not enable_caching, (
+            "Caching is not supported in ElasticBlockPool")
+        assert not enable_kv_cache_events, (
+            "KV cache events are not supported in ElasticBlockPool")
+
+        self.num_gpu_blocks = num_gpu_blocks
+        self.enable_kv_cache_events = enable_kv_cache_events
+        self.kv_event_queue: list[KVCacheEvent] = []
+
+        try:
+            from kvcached.integration.vllm.interfaces import (
+                get_kv_cache_manager)
+        except Exception as e:
+            raise ImportError(
+                "kvcached is not found. Please install kvcached with "
+                "`pip install kvcached --no-build-isolation` to use elastic "
+                "KV cache.") from e
+
+        self.kv_cache_manager = get_kv_cache_manager(num_gpu_blocks,
+                                                     block_size, cell_size,
+                                                     num_layers)
+
+        self.null_block = None  # type: ignore
+
+    def get_cached_block(
+            self, block_hash: BlockHash,
+            kv_cache_group_ids: list[int]) -> Optional[list[KVCacheBlock]]:
+        return None
+
+    def cache_full_blocks(
+        self,
+        request: Request,
+        blocks: list[KVCacheBlock],
+        block_hashes: list[BlockHash],
+        num_cached_blocks: int,
+        num_full_blocks: int,
+        block_size: int,
+        kv_cache_group_id: int,
+        hash_fn: Callable,
+    ) -> None:
+        raise NotImplementedError(
+            "Caching is not supported in ElasticBlockPool")
+
+    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
+        """Get new blocks from the free block pool.
+
+        Note that we do not check block cache in this function.
+
+        Args:
+            num_blocks: The number of blocks to allocate.
+
+        Returns:
+            A list of new block.
+        """
+        if num_blocks > self.get_num_free_blocks():
+            raise ValueError(
+                f"Cannot get {num_blocks} free blocks from the pool")
+
+        block_ids = self.kv_cache_manager.alloc(num_blocks)
+        assert block_ids is not None and len(block_ids) == num_blocks
+
+        return [KVCacheBlock(bid) for bid in block_ids]
+
+    def touch(self, blocks: tuple[list[KVCacheBlock], ...]) -> None:
+        raise NotImplementedError("Not supported in ElasticBlockPool")
+
+    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
+        """Free a list of blocks. The blocks should be ordered by their
+        eviction priority, where the first block will be evicted first.
+
+        Args:
+            ordered_blocks: A list of blocks to free ordered by their eviction
+                priority.
+        """
+        block_ids = [block.block_id for block in ordered_blocks]
+        if len(block_ids) > 0:
+            self.kv_cache_manager.free(block_ids)
+
+    def reset_prefix_cache(self) -> bool:
+        raise NotImplementedError("Not supported in ElasticBlockPool")
+
+    def get_num_free_blocks(self) -> int:
+        """Get the number of free blocks in the pool.
+
+        Returns:
+            The number of free blocks.
+        """
+        return self.kv_cache_manager.available_size()
+
+    def get_usage(self) -> float:
+        """Get the KV cache usage.
+
+        Returns:
+            The KV cache usage (between 0.0 and 1.0).
+        """
+        return 1.0 - (self.get_num_free_blocks() / self.num_gpu_blocks)
+
+    def take_events(self) -> list[KVCacheEvent]:
+        """ElasticBlockPool does not generate events; always return empty."""
+        return []

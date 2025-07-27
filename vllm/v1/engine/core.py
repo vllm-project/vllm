@@ -16,6 +16,7 @@ from typing import Any, Callable, Optional, TypeVar, Union
 import msgspec
 import zmq
 
+import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.logger import init_logger
@@ -90,6 +91,21 @@ class EngineCore:
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
         self.collective_rpc("initialize_cache",
                             args=(num_gpu_blocks, num_cpu_blocks))
+
+        is_elastic = envs.VLLM_ENABLE_KVCACHED
+        if is_elastic:
+            try:
+                from kvcached.integration.vllm.interfaces import init_kvcached
+                init_kvcached(
+                    tp_rank=0,
+                    tp_size=vllm_config.parallel_config.tensor_parallel_size,
+                    is_worker=False,
+                )
+            except Exception as e:
+                raise ImportError(
+                    "kvcached is not found. Please install kvcached with "
+                    "`pip install kvcached --no-build-isolation` to use elastic "
+                    "KV cache.") from e
 
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
