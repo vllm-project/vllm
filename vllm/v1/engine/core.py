@@ -77,6 +77,10 @@ class EngineCore:
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
+        if vllm_config.intermediate_log_config is not None:
+            self.collective_rpc("register_intermediate_hooks",
+                                args=(vllm_config.intermediate_log_config, ))
+
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(
                 executor_fail_callback)
