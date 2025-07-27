@@ -4,6 +4,7 @@
 import asyncio
 import math
 import time
+import uuid
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from typing import Optional, Union, cast
@@ -50,8 +51,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import merge_async_iterators
-
+from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
 
@@ -124,7 +124,8 @@ class OpenAIServingCompletion(OpenAIServing):
         res = await _process_prefix(request)
         if isinstance(res, ErrorResponse):
             return res
-        
+
+        candidate_id = f"cmpl-{random_uuid()}"
         input_str_len = len(res.choices[0].text)
 
         async def _should_stop(final):
@@ -140,6 +141,7 @@ class OpenAIServingCompletion(OpenAIServing):
             while num_chunks < max_chunks and not should_stop:
                 num_chunks += 1
                 beams = await self.beam_validator.get_n_valid_beams(create_completion=self.create_completion, request=request, raw_request=raw_request, chunk_num=num_chunks)
+                beams.id = candidate_id
                 if isinstance(beams, ErrorResponse):
                     yield f"data: {beams.model_dump_json()}\n\n"
                     break
