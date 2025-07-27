@@ -422,6 +422,20 @@ class MPClient(EngineCoreClient):
                     self.resources.coordinator = coordinator
                     self.resources.engine_manager = engine_manager
 
+                if isinstance(engine_manager, CoreEngineProcManager):
+                    import os
+                    import signal
+
+                    def sigchld_handler(signum, frame):
+                        pid, exitcode = os.waitpid(0, os.WNOHANG)
+                        if exitcode != 0:
+                            logger.warning(
+                                "Child process unexpectedly failed with "
+                                "exitcode=%d. pid=%d", exitcode, pid)
+                        self._finalizer()
+
+                    signal.signal(signal.SIGCHLD, sigchld_handler)
+
                 (input_address, ) = addresses.inputs
                 (output_address, ) = addresses.outputs
                 self.stats_update_address = (
@@ -747,6 +761,8 @@ class AsyncMPClient(MPClient):
 
                     if outputs.outputs or outputs.scheduler_stats:
                         outputs_queue.put_nowait(outputs)
+            except asyncio.CancelledError:
+                outputs_queue.put_nowait(EngineDeadError())
             except Exception as e:
                 outputs_queue.put_nowait(e)
 

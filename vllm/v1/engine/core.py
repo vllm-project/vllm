@@ -641,6 +641,8 @@ class EngineCoreProc(EngineCore):
 
         except SystemExit:
             logger.debug("EngineCore exiting.")
+            if engine_core is not None:
+                engine_core._send_engine_dead()
             raise
         except Exception as e:
             if engine_core is None:
