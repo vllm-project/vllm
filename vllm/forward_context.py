@@ -95,6 +95,7 @@ class ForwardContext:
     # set dynamically for each forward pass
     dp_metadata: Optional[DPMetadata] = None
     skip_cuda_graphs: bool = False
+    logits_indices_padded: Optional[torch.Tensor] = None
 
 
 _forward_context: Optional[ForwardContext] = None
@@ -116,6 +117,7 @@ def set_forward_context(
     num_tokens: Optional[int] = None,
     num_tokens_across_dp: Optional[torch.Tensor] = None,
     skip_cuda_graphs: bool = False,
+    logits_indices_padded: Optional[torch.Tensor] = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -141,6 +143,7 @@ def set_forward_context(
         attn_metadata=attn_metadata,
         dp_metadata=dp_metadata,
         skip_cuda_graphs=skip_cuda_graphs,
+        logits_indices_padded=logits_indices_padded,
     )
 
     try:
