@@ -127,7 +127,7 @@ ensure_installed() {
 }
 
 run_serving_tests() {
-  # run serving tests using `benchmark_serving.py`
+  # run serving tests using `vllm bench serve` command
   # $1: a json file specifying serving test cases
 
   local serving_test_file

@@ -9,9 +9,12 @@ We support tracing vLLM workers using the `torch.profiler` module. You can enabl
 
 The OpenAI server also needs to be started with the `VLLM_TORCH_PROFILER_DIR` environment variable set.
 
-When using `benchmarks/benchmark_serving.py`, you can enable profiling by passing the `--profile` flag.
+When using `vllm bench serve`, you can enable profiling by passing the `--profile` flag.
 
 Traces can be visualized using <https://ui.perfetto.dev/>.
+
+!!! tip
+You can directly call bench module without installing vllm using `python -m vllm.entrypoints.cli.main bench`.
 
 !!! tip
     Only send a few requests through vLLM when profiling, as the traces can get quite large. Also, no need to untar the traces, they can be viewed directly.
@@ -35,7 +38,7 @@ VLLM_TORCH_PROFILER_DIR=./vllm_profile \
     --model meta-llama/Meta-Llama-3-70B
 ```
 
-benchmark_serving.py:
+vllm bench command:
 
 ```bash
 vllm bench serve \
@@ -69,7 +72,7 @@ apt install nsight-systems-cli
 
 For basic usage, you can just append `nsys profile -o report.nsys-rep --trace-fork-before-exec=true --cuda-graph-trace=node` before any existing script you would run for offline inference.
 
-The following is an example using the `benchmarks/benchmark_latency.py` script:
+The following is an example using the `vllm bench latency` script:
 
 ```bash
 nsys profile -o report.nsys-rep \
