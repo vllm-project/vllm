@@ -83,7 +83,7 @@ if current_platform.is_rocm():
         dispatch_key=current_platform.dispatch_key,
     )
     if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
-            and current_platform.supports_fp8()):
+            and current_platform.is_fp8_fnuz()):
 
         import aiter as rocm_aiter
         from aiter import get_hip_quant
