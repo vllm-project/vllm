@@ -3217,25 +3217,34 @@ class PoolerConfig:
     [`vllm.model_executor.layers.pooler.PoolingType`][].
     """
 
+    ## for embeddings models
     normalize: Optional[bool] = None
     """
-    Whether to normalize the pooled outputs. Usually, this should be set to
-    ``True`` for embedding outputs.
+    Whether to normalize the embeddings outputs. 
+    """
+    dimensions: Optional[int] = None
+    """
+    Reduce the dimensions of embeddings if model 
+    support matryoshka representation.
     """
 
+    ## for classification models
+    activation: Optional[bool] = None
+    """
+    Whether to apply activation function to the classification outputs. 
+    """
+
+    ## for reward models
     softmax: Optional[bool] = None
     """
-    Whether to apply softmax to the pooled outputs. Usually, this should be set
-    to ``True`` for classification outputs.
+    Whether to apply softmax to the reward outputs. 
     """
-
     step_tag_id: Optional[int] = None
     """
     If set, only the score corresponding to the ``step_tag_id`` in the
     generated sentence should be returned. Otherwise, the scores for all tokens
     are returned.
     """
-
     returned_token_ids: Optional[list[int]] = None
     """
     A list of indices for the vocabulary dimensions to be extracted,

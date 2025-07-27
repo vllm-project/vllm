@@ -198,11 +198,17 @@ def get_prompt_token_ids(
     ]
 
 
-def get_tasks(pooling_metadata: PoolingMetadata) -> list[PoolingTask]:
+def get_pooling_params(
+        pooling_metadata: PoolingMetadata) -> list[PoolingParams]:
     if isinstance(pooling_metadata, V0PoolingMetadata):
         pooling_params = [p for _, p in pooling_metadata.seq_groups]
     else:
         pooling_params = pooling_metadata.pooling_params
+    return pooling_params
+
+
+def get_tasks(pooling_metadata: PoolingMetadata) -> list[PoolingTask]:
+    pooling_params = get_pooling_params(pooling_metadata)
 
     tasks: list[PoolingTask] = [
         task for pooling_param in pooling_params
@@ -490,24 +496,17 @@ class PoolerHead(nn.Module):
             raise ValueError("`normalize=True` and `softmax=True` should not "
                              "be set together")
 
-        activation: PoolerActivation
-        if pooler_config.normalize:
-            activation = PoolerNormalize()
-        elif pooler_config.softmax:
-            activation = PoolerClassify()
-        else:
-            activation = PoolerIdentity()
+        return cls(pooler_config)
 
-        return cls(activation)
-
-    def __init__(self, activation: PoolerActivation) -> None:
+    def __init__(self, pooler_config: ResolvedPoolingConfig) -> None:
         super().__init__()
 
-        self.activation = activation
+        self.pooler_config = pooler_config
+        self.normalize = PoolerNormalize()
+        self.softmax = PoolerClassify()
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
-
         # Using float32 in PoolerHead
         if isinstance(pooled_data, list):
             for i in range(len(pooled_data)):
@@ -515,18 +514,12 @@ class PoolerHead(nn.Module):
         else:
             pooled_data = pooled_data.to(torch.float32)
 
+        pooling_params = get_pooling_params(pooling_metadata)
+
         # for matryoshka representation
-        if isinstance(pooling_metadata, V0PoolingMetadata):
-            dimensions_list = [
-                pooling_param.dimensions
-                for _, pooling_param in pooling_metadata.seq_groups
-            ]
-        else:
-            assert isinstance(pooled_data, list)
-            dimensions_list = [
-                pooling_param.dimensions
-                for pooling_param in pooling_metadata.pooling_params
-            ]
+        dimensions_list = [
+            pooling_param.dimensions for pooling_param in pooling_params
+        ]
         if any(d is not None for d in dimensions_list):
             # change the output dimension
             assert len(pooled_data) == len(dimensions_list)
@@ -541,7 +534,28 @@ class PoolerHead(nn.Module):
                     for vecs, d in zip(pooled_data, dimensions_list)
                 ]
 
-        return self.activation(pooled_data)
+        # for normalize
+        flags = [p.normalize for p in pooling_params]
+        if len(set(flags)) == 1:
+            if flags[0]:
+                pooled_data = self.normalize(pooled_data)
+        else:
+            pooled_data = [
+                self.normalize(vecs) if f else vecs
+                for vecs, f in zip(pooled_data, flags)
+            ]
+
+        # for softmax
+        flags = [p.softmax for p in pooling_params]
+        if len(set(flags)) == 1:
+            if flags[0]:
+                pooled_data = self.softmax(pooled_data)
+        else:
+            pooled_data = [
+                self.softmax(vecs) if f else vecs
+                for vecs, f in zip(pooled_data, flags)
+            ]
+        return pooled_data
 
 
 class SimplePooler(Pooler):
@@ -696,7 +710,16 @@ class ClassifierPooler(Pooler):
         else:
             pooled_output = [self.classifier(data) for data in pooled_data]
 
-        scores = self.act_fn(pooled_output)
+        pooling_params = get_pooling_params(pooling_metadata)
+        flags = [p.activation for p in pooling_params]
+
+        if len(set(flags)) == 1:
+            scores = self.act_fn(pooled_output) if flags[0] else pooled_output
+        else:
+            scores = [
+                self.act_fn(vecs) if f else vecs
+                for vecs, f in zip(pooled_output, flags)
+            ]
 
         return build_output(scores)
 

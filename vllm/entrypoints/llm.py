@@ -1125,9 +1125,12 @@ class LLM:
             pooling_params = PoolingParams()
 
         if isinstance(pooling_params, PoolingParams):
+            pooling_params.merge_default_parameters(model_config.pooler_config)
             pooling_params.verify(pooling_task, model_config)
         else:
             for pooling_param in pooling_params:
+                pooling_param.merge_default_parameters(
+                    model_config.pooler_config)
                 pooling_param.verify(pooling_task, model_config)
 
         if tokenization_kwargs is None:
@@ -1203,6 +1206,8 @@ class LLM:
         /,
         *,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        pooling_params: Optional[Union[PoolingParams,
+                                       Sequence[PoolingParams]]] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
     ) -> list[ClassificationRequestOutput]:
         """
@@ -1221,7 +1226,8 @@ class LLM:
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-
+            pooling_params: The pooling parameters for pooling. If None, we
+                use the default pooling parameters.
         Returns:
             A list of `ClassificationRequestOutput` objects containing the
             embedding vectors in the same order as the input prompts.
@@ -1234,6 +1240,7 @@ class LLM:
         items = self.encode(
             prompts,
             use_tqdm=use_tqdm,
+            pooling_params=pooling_params,
             lora_request=lora_request,
             pooling_task="classify",
         )
@@ -1247,6 +1254,7 @@ class LLM:
         text_2: list[Union[str, TextPrompt, TokensPrompt]],
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        pooling_params: Optional[PoolingParams] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
     ) -> list[ScoringRequestOutput]:
 
@@ -1255,6 +1263,7 @@ class LLM:
             truncate_prompt_tokens=truncate_prompt_tokens,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            pooling_params=pooling_params,
             pooling_task="embed",
         )
 
@@ -1281,6 +1290,7 @@ class LLM:
         data_2: Union[list[str], list[ScoreContentPartParam]],
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        pooling_params: Optional[PoolingParams] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
     ) -> list[ScoringRequestOutput]:
 
@@ -1291,7 +1301,13 @@ class LLM:
         if len(data_1) == 1:
             data_1 = data_1 * len(data_2)
 
-        pooling_params = PoolingParams(task="score")
+        if pooling_params is None:
+            pooling_params = PoolingParams(task="score")
+
+        model_config = self.llm_engine.model_config
+        pooling_params.merge_default_parameters(model_config.pooler_config)
+        pooling_params.verify("score", model_config)
+
         tokenization_kwargs: dict[str, Any] = {}
         _validate_truncation_size(self.llm_engine.model_config.max_model_len,
                                   truncate_prompt_tokens, tokenization_kwargs)
@@ -1357,6 +1373,7 @@ class LLM:
         *,
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        pooling_params: Optional[PoolingParams] = None,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
     ) -> list[ScoringRequestOutput]:
         """Generate similarity scores for all pairs `<text,text_pair>` or
@@ -1371,24 +1388,25 @@ class LLM:
         of your inputs into a single list and pass it to this method.
 
         Supports both text and multi-modal data (images, etc.) when used with
-        appropriate multi-modal models. For multi-modal inputs, ensure the 
+        appropriate multi-modal models. For multi-modal inputs, ensure the
         prompt structure matches the model's expected input format.
 
         Args:
-            data_1: Can be a single prompt, a list of prompts or 
-                `ScoreMultiModalParam`, which can contain either text or 
-                multi-modal data. When a list, it must have the same length as 
+            data_1: Can be a single prompt, a list of prompts or
+                `ScoreMultiModalParam`, which can contain either text or
+                multi-modal data. When a list, it must have the same length as
                 the `data_2` list.
-            data_2: The data to pair with the query to form the input to 
+            data_2: The data to pair with the query to form the input to
                 the LLM. Can be text or multi-modal data. See [PromptType]
-                [vllm.inputs.PromptType] for more details about the format of 
+                [vllm.inputs.PromptType] for more details about the format of
                 each prompt.
             use_tqdm: If `True`, shows a tqdm progress bar.
                 If a callable (e.g., `functools.partial(tqdm, leave=False)`),
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
-
+            pooling_params: The pooling parameters for pooling. If None, we
+                use the default pooling parameters.
         Returns:
             A list of `ScoringRequestOutput` objects containing the
             generated scores in the same order as the input prompts.
@@ -1478,6 +1496,7 @@ class LLM:
                 data_2,  # type: ignore[arg-type]
                 truncate_prompt_tokens,
                 use_tqdm,
+                pooling_params,
                 lora_request)
         else:
             return self._embedding_score(
@@ -1486,6 +1505,7 @@ class LLM:
                 data_2,  # type: ignore[arg-type]
                 truncate_prompt_tokens,
                 use_tqdm,
+                pooling_params,
                 lora_request)
 
     def start_profile(self) -> None:
