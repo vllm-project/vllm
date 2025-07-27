@@ -470,8 +470,6 @@ def run_tarsier(questions: list[str], modality: str) -> ModelRequestData:
 
 # Intern-S1
 def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-
     model_name = "internlm/Intern-S1"
 
     engine_args = EngineArgs(
@@ -483,7 +481,11 @@ def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
         enforce_eager=True,
     )
 
-    placeholder = "<IMG_CONTEXT>"
+    if modality == "image":
+        placeholder = "<IMG_CONTEXT>"
+    elif modality == "video":
+        placeholder = "<video>"
+
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     messages = [
         [{"role": "user", "content": f"{placeholder}\n{question}"}]

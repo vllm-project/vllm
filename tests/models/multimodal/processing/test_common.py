@@ -278,6 +278,7 @@ def _test_processing_correctness_one(
     "THUDM/GLM-4.1V-9B-Thinking",
     "ibm-granite/granite-speech-3.3-2b",
     "h2oai/h2ovl-mississippi-800m",
+    "internlm/Intern-S1",
     "OpenGVLab/InternVL2-1B",
     "OpenGVLab/InternVL3-1B",
     "HuggingFaceM4/Idefics3-8B-Llama3",
