@@ -53,6 +53,14 @@ class CUDAGraphWrapper:
     4. Otherwise, i.e., the runtime_mode matches the mode of the wrapper,
     the wrapper will perform cudagraph capture(if key does not exist, create
     a new entry and cache it) or replay (if key exists in the cache).
+
+    Note: CUDAGraphWrapper does not store persistent buffers or copy any
+    runtime inputs into that buffers for replay. We assume implementing them
+    is done outside of the wrapper. That is because we do not make any 
+    assumption on the dynamic shape (batch size) of the runtime inputs, as a
+    trade-off for the orthogonal to compilation logic. Nevertheless, tracing
+    and checking the input addresses to be consistent during replay is
+    guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
     """
 
     def __init__(self,

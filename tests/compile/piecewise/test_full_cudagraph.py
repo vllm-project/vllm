@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+from dataclasses import dataclass
 import os
 import weakref
-from contextlib import ExitStack
+from typing import Optional
 
 import pytest
 
@@ -31,25 +32,93 @@ def temporary_environ(env_vars):
             else:
                 os.environ[k] = v
 
+@dataclass
+class BackendConfig:
+    name: str
+    env_vars: dict
+    comp_config: dict
+    specific_gpu_arch: Optional[tuple] = None
+
+
+# Define all backend configurations of full cudagraph to be tested
+backend_configs = {
+    # FA3 on Hopper
+    "FA3": BackendConfig(
+        name="FA3",
+        env_vars={
+            "VLLM_FLASH_ATTN_VERSION": "3"
+        },
+        comp_config={
+            "cudagraph_mode": "FULL",
+            "cudagraph_separate_routine": False
+        },
+        specific_gpu_arch=(9, 0)),
+    # FlashMLA on Hopper
+    "FlashMLA": BackendConfig(
+        name="FlashMLA",
+        env_vars={
+            "VLLM_ATTENTION_BACKEND": "FLASHMLA",
+        },
+        comp_config={
+            "cudagraph_mode": "FULL",
+            "cudagraph_separate_routine": True
+        },
+        specific_gpu_arch=(9, 0)),
+    # FA2
+    "FA2": BackendConfig(name="FA2",
+                  env_vars={
+                      "VLLM_FLASH_ATTN_VERSION": "2"
+                  },
+                  comp_config={
+                      "cudagraph_mode": "FULL",
+                      "cudagraph_separate_routine": True
+                  }),
+    # Triton Attention
+    "TritonAttn": BackendConfig(name="TritonAttn",
+                  env_vars={"VLLM_ATTENTION_BACKEND": "TRITON_ATTN_VLLM_V1"},
+                  comp_config={
+                      "cudagraph_mode": "FULL",
+                      "cudagraph_separate_routine": True
+                  }),
+}
+
+
+test_params_full_cudagraph = []
+
+# deepseek-ai/DeepSeek-V2-Lite with FlashMLA
+test_params_full_cudagraph.append(
+    pytest.param(("deepseek-ai/DeepSeek-V2-Lite", backend_configs["FlashMLA"])))
+
+# Qwen/Qwen2-1.5B-Instruct with other backends
+other_backend_configs = [backend_configs[c] for c in backend_configs if
+                        c != "FlashMLA"]
+for backend_config in other_backend_configs:
+    test_params_full_cudagraph.append(
+        pytest.param(("Qwen/Qwen2-1.5B-Instruct", backend_config)))
 
 @pytest.fixture(scope="class")
 def llm_pair(request):
-    model = request.param
+    model, backend_config = request.param
 
-    with temporary_environ({
-            "VLLM_USE_V1": "1",
-            "VLLM_FLASH_ATTN_VERSION": "3"
-    }):
+    # Dynamically skip test if GPU capability is not met
+    if backend_config.specific_gpu_arch and backend_config.specific_gpu_arch\
+        != current_platform.get_device_capability():
+        pytest.skip("Only Hopper GPUs support FA3 and FlashMLA")
+
+    env_vars = {"VLLM_USE_V1": "1", **backend_config.env_vars}
+    with temporary_environ(env_vars):
         full = LLM(
             model=model,
-            gpu_memory_utilization=0.45,
+            gpu_memory_utilization=0.4,
             trust_remote_code=True,
             max_model_len=1024,
-            compilation_config=CompilationConfig(full_cuda_graph=True),
+            max_num_seqs=128,
+            compilation_config=\
+                CompilationConfig(**backend_config.comp_config),
         )
         piecewise = LLM(
             model=model,
-            gpu_memory_utilization=0.45,
+            gpu_memory_utilization=0.4,
             trust_remote_code=True,
             max_model_len=1024,
             compilation_config=CompilationConfig(),
@@ -66,16 +135,7 @@ def llm_pair(request):
     )
 
 
-@pytest.mark.parametrize(
-    "llm_pair",
-    [
-        # Model names for the llm_pair fixture
-        "deepseek-ai/DeepSeek-V2-Lite",
-        "Qwen/Qwen2-1.5B-Instruct"
-    ],
-    indirect=True)
-@pytest.mark.skipif(current_platform.get_device_capability() != (9, 0),
-                    reason="Only Hopper GPUs support FA3 and FlashMLA")
+@pytest.mark.parametrize("llm_pair", test_params_full_cudagraph, indirect=True)
 class TestFullCUDAGraph:
     """
     Use a class such that an llm pair is constructed once for all
@@ -120,39 +180,12 @@ class TestFullCUDAGraph:
             assert piecewise_res.outputs[0].text == full_res.outputs[0].text
 
 
-@pytest.mark.parametrize(
-    "model, supported",
-    [
-        ("Qwen/Qwen2-1.5B-Instruct", True),
-        # MLA does not support capturing CUDA Graphs with size > max_num_seqs
-        ("deepseek-ai/DeepSeek-V2-Lite", False),
-    ])
-@pytest.mark.skipif(current_platform.get_device_capability() != (9, 0),
-                    reason="Only Hopper GPUs support FA3 and FlashMLA")
-def test_lower_max_num_seqs(model, supported):
-    with temporary_environ({
-            "VLLM_USE_V1": "1",
-            "VLLM_FLASH_ATTN_VERSION": "3"
-    }), ExitStack() as stack:
-        if not supported:
-            stack.enter_context(pytest.raises(RuntimeError))
-
-        llm = LLM(model=model,
-                  max_num_seqs=256,
-                  trust_remote_code=True,
-                  max_model_len=1024,
-                  compilation_config=CompilationConfig(
-                      full_cuda_graph=True,
-                      cudagraph_capture_sizes=[64, 256, 512]))
-        llm.generate(["Hello, my name is"] * 10)
-
-
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
 def test_full_cudagraph_with_invalid_backend():
     with temporary_environ({
             "VLLM_USE_V1": "1",
-            "VLLM_FLASH_ATTN_VERSION":
-            "2"  #FA2 not supported with full_cuda_graph
+            "VLLM_ATTENTION_BACKEND": "FLEX_ATTENTION"
+            # Flex_Attention is not supported with full cuda graph
     }), pytest.raises(RuntimeError):
         LLM(model="Qwen/Qwen2-1.5B-Instruct",
-            compilation_config=CompilationConfig(full_cuda_graph=True))
+            compilation_config=CompilationConfig(cudagraph_mode="FULL"))

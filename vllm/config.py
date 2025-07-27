@@ -4708,17 +4708,20 @@ class VllmConfig:
                 "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
-        if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL and \
-            not self.model_config.disable_cascade_attn:
-            logger.info("CUDAGraphMode.FULL is not supported with "
-                        "cascade attention currently. Disabling cascade"
-                        "attention.")
-            self.model_config.disable_cascade_attn = True
+        if envs.VLLM_USE_V1:
+            if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL \
+                and not self.model_config.disable_cascade_attn:
+                logger.info("CUDAGraphMode.FULL is not supported with "
+                            "cascade attention currently. Disabling cascade"
+                            "attention.")
+                self.model_config.disable_cascade_attn = True
 
-        if self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
-            assert self.compilation_config.level == CompilationLevel.PIECEWISE,\
-                "Compilation level should be CompilationLevel.PIECEWISE "\
-                "when cudagraph_mode is CUDAGraphMode.PIECEWISE"
+            if self.compilation_config.cudagraph_mode == \
+                CUDAGraphMode.PIECEWISE:
+                assert self.compilation_config.level == \
+                    CompilationLevel.PIECEWISE, \
+                    "Compilation level should be CompilationLevel.PIECEWISE "\
+                    "when cudagraph_mode is CUDAGraphMode.PIECEWISE"
 
         disable_chunked_prefill_reasons: list[str] = []
 
