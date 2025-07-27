@@ -1,4 +1,4 @@
-FROM us-central1-docker.pkg.dev/character-ai/vllm/vllm-forked:d0ab76f as builder
+FROM us-central1-docker.pkg.dev/character-ai/vllm/vllm-forked:latest as builder
 
 RUN sudo apt install rsync -y
 
