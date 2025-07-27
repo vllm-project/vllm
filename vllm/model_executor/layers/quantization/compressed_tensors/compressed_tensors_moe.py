@@ -11,20 +11,27 @@ from compressed_tensors.quantization import (ActivationOrdering,
                                              QuantizationStrategy)
 
 import vllm.envs as envs
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm.distributed import get_ep_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE, FusedMoEActivationFormat, FusedMoEConfig, FusedMoEMethodBase,
     FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize,
     FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa
+    FlashInferCutlassMoEPrepareAndFinalize)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS, WNA16_SUPPORTED_TYPES_MAP)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_utils import (
+    build_flashinfer_kernel, flashinfer_fp4_forward,
+    is_flashinfer_fp4_available, reorder_w1w3_to_w3w1)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer, marlin_make_workspace_new,
     marlin_moe_permute_scales)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-    prepare_moe_fp4_layer_for_marlin)
+    is_fp4_marlin_supported, prepare_moe_fp4_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_moe_fp8_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
@@ -98,8 +105,30 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
 
     def __init__(self):
-        self.use_marlin = not cutlass_fp4_supported()
+        self.cutlass_nvfp4_supported = cutlass_fp4_supported()
+        self.use_marlin: bool = False
+        self.allow_flashinfer_cutlass: bool = (self.cutlass_nvfp4_supported and
+                                               is_flashinfer_fp4_available())
+
+        if self.allow_flashinfer_cutlass:
+            logger.info_once(
+                "Using FlashInfer kernels for CompressedTensorsW4A4MoeMethod.")
+        else:
+            if envs.VLLM_USE_FLASHINFER_MOE_FP4:
+                logger.warning_once(
+                    "FlashInfer kernels unavailable for "
+                    "CompressedTensorsW4A4MoeMethod on current platform.")
+
+        if not self.cutlass_nvfp4_supported:
+            if is_fp4_marlin_supported():
+                self.use_marlin = True
+            else:
+                raise ValueError(
+                    "Current platform does not support NVFP4 quantization. "
+                    "Please use Blackwell and above.")
+
         self.group_size = 16
+        self.fused_experts = None
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -225,6 +254,14 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         layer.w2_weight = torch.nn.Parameter(layer.w2_weight_packed.data,
                                              requires_grad=False)
 
+        # reorder GEMM1 weights and block scales for FlashInfer CUTLASS kernel.
+        if self.allow_flashinfer_cutlass:
+            w, s = reorder_w1w3_to_w3w1(layer.w13_weight.data,
+                                        layer.w13_weight_scale.data,
+                                        dim=-2)
+            layer.w13_weight = torch.nn.Parameter(w, requires_grad=False)
+            layer.w13_weight_scale = torch.nn.Parameter(s, requires_grad=False)
+
         if not torch.allclose(layer.w13_weight_global_scale[:, 0],
                               layer.w13_weight_global_scale[:, 1]):
             logger.warning_once(
@@ -270,6 +307,39 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
 
         layer.w2_input_scale_quant = torch.nn.Parameter(
             (layer.w2_input_global_scale), requires_grad=False)
+
+    def maybe_swap_experts_impl(self, moe_parallel_config):
+        if not self.allow_flashinfer_cutlass:
+            return
+        self.fused_experts = build_flashinfer_kernel(moe_parallel_config)
+        logger.debug_once("FlashInferExperts (util)")
+
+    def select_gemm_impl(self, prepare_finalize, moe):
+        """Return the appropriate GEMM experts implementation."""
+        assert moe is not None and prepare_finalize is not None
+
+        all2all_manager = get_ep_group().device_communicator.all2all_manager
+        assert all2all_manager is not None
+
+        if self.allow_flashinfer_cutlass:
+            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa
+                FlashInferExperts)
+
+            experts = FlashInferExperts(
+                use_nvfp4_w4a4=True,
+                use_dp=moe.moe_parallel_config.dp_size > 1,
+                ep_rank=moe.moe_parallel_config.ep_rank,
+                ep_size=moe.moe_parallel_config.ep_size,
+                tp_rank=moe.moe_parallel_config.tp_rank,
+                tp_size=moe.moe_parallel_config.tp_size,
+            )
+            return experts
+
+        # Native CUTLASS experts currently don't support DP
+        # TP case won't call this function
+        raise ValueError(
+            "CutlassExpertsFp4 doesn't support DP. Use flashinfer CUTLASS "
+            "Fused MoE backend instead (set VLLM_USE_FLASHINFER_MOE_FP4=1)")
 
     def apply(
         self,
@@ -328,10 +398,23 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map)
 
+        # FlashInfer fused experts path
+        if self.fused_experts is not None:
+            return flashinfer_fp4_forward(
+                self.fused_experts,
+                layer,
+                x,
+                topk_weights,
+                topk_ids,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+
         assert expert_map is None, ("Expert Parallelism / expert_map "
                                     "is currently not supported for "
                                     "CompressedTensorsW4A4MoeMethod.")
-
         from vllm.model_executor.layers.fused_moe.cutlass_moe import (
             cutlass_moe_fp4)
 
@@ -739,7 +822,7 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
                 "channelwise, dynamic per token quantization.")
 
         self.topk_indices_dtype = None
-        self.fused_experts = None  # type: ignore
+        self.fused_experts: Optional[mk.FusedMoEModularKernel] = None
         self.disable_expert_map = False
         self.is_fp8_w8a8_sm100 = self.quant_config._is_fp8_w8a8_sm100(
             self.weight_quant, self.input_quant)
