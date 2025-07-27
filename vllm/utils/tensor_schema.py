@@ -86,9 +86,6 @@ class TensorSchema:
             expected_shape: tuple[Union[int, str], ...],
             dynamic_dims: set[str, ...]) -> tuple[int, ...]:
         """Validate a list/tuple of tensors and return the actual shape."""
-        if not value:
-            raise ValueError(f"{field_name} is an empty list")
-
         # Ensure all tensors in the list have the same
         # shape, besides dynamic dimensions
         first = value[0]
@@ -117,6 +114,7 @@ class TensorSchema:
                                                                          int],
                                         dynamic_dims: set[str, ...]) -> None:
         """Validate that the actual tensor shape matches the expected shape."""
+
         if len(actual_shape) != len(expected_shape):
             raise ValueError(f"{field_name} has rank {len(actual_shape)} "
                              f"but expected {len(expected_shape)}")
@@ -160,12 +158,11 @@ class TensorSchema:
                     # Skip validation when Union contains None
                     if type(None) in args:
                         continue
-                # If not optional, raise error
+                # Otherwise field is required, raise error
                 raise ValueError(f"Required field '{field_name}' is missing")
 
             # Field exists, proceed with validation
             value = getattr(self, field_name)
-
             if get_origin(field_type) is not None:
                 args = get_args(field_type)
 
@@ -173,13 +170,23 @@ class TensorSchema:
                     if isinstance(arg, TensorShape):
                         expected_shape = arg.resolve(**self._resolve_bindings)
                         if isinstance(value, (list, tuple)):
-                            actual_shape = self._validate_nested_tensors(
-                                value, field_name, expected_shape,
-                                arg.dynamic_dims)
+                            # list/tuple of Tensors → shape = (len(value), ...)
+                            if value and isinstance(value[0], torch.Tensor):
+                                actual_shape = self._validate_nested_tensors(
+                                    value, field_name, expected_shape,
+                                    arg.dynamic_dims)
+                            elif value:
+                                # list/tuple of scalars → shape = (len(value),)
+                                actual_shape = (len(value), )
+                            else:
+                                raise ValueError(
+                                    f"{field_name} is an empty list")
 
+                        # Tensor → shape = tensor.shape
                         elif isinstance(value, torch.Tensor):
                             actual_shape = value.shape
 
+                        # Otherwise, it's an unsupported type
                         else:
                             type_names = []
                             for arg in args:
