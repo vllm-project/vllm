@@ -20,7 +20,7 @@ from vllm.engine.async_llm_engine import AsyncEngineArgs, AsyncLLMEngine
 from vllm.outputs import RequestOutput as RealRequestOutput
 from vllm.sampling_params import RequestOutputKind
 
-from ..utils import wait_for_gpu_memory_to_clear
+from tests.utils import wait_for_gpu_memory_to_clear
 
 
 @dataclass
