@@ -4,6 +4,7 @@
 import os
 import sys
 from abc import abstractmethod
+from collections import defaultdict
 from contextlib import contextmanager
 from types import CodeType
 from typing import Callable, Optional
@@ -135,3 +136,91 @@ class TorchCompileWrapperWithCustomDispatcher:
         self.__class__.forward.__code__ = self.compiled_codes[index]
         yield
         self.__class__.forward.__code__ = self.original_code_object
+
+
+class CudaGraphWrapper:
+
+    def __init__(self):
+        vllm_config = get_current_vllm_config()
+        self.vllm_config = vllm_config
+        self.compilation_config = vllm_config.compilation_config
+
+        # configs
+        self.cudagraph_capture_sizes = set(
+            self.compilation_config.cudagraph_capture_sizes)
+        self.cudagraph_num_of_warmups = (
+            self.compilation_config.cudagraph_num_of_warmups)
+        assert self.compilation_config.simple_cuda_graph
+        assert self.compilation_config.full_cuda_graph
+
+        # states
+        # batch size -> graph
+        self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
+        self.pool = torch.cuda.graph_pool_handle()
+        # batch size -> hidden states
+        self.hidden_states: dict[int, torch.Tensor] = {}
+        # batch size -> number of warmups
+        self.num_warmups: dict[int, int] = defaultdict(int)
+        # Special flag to handle the first memory profiling run.
+        self.first_run_finished = False
+
+    def capture_graph(self, *args, **kwargs) -> None:
+        batch_size = self._get_batch_size(*args, **kwargs)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, self.pool):
+            hidden_states = self.forward(*args, **kwargs)
+        self.hidden_states[batch_size] = hidden_states
+        self.graphs[batch_size] = graph
+
+    def forward_graph(self, *args, **kwargs) -> torch.Tensor:
+        if not self.first_run_finished:
+            # Memory profiling run.
+            self.first_run_finished = True
+            return self.forward(*args, **kwargs)
+
+        batch_size = self._get_batch_size(*args, **kwargs)
+        if batch_size not in self.cudagraph_capture_sizes:
+            # Run in eager mode.
+            return self.forward(*args, **kwargs)
+
+        if self.num_warmups[batch_size] < self.cudagraph_num_of_warmups:
+            # Warmup mode. Run in eager mode.
+            self.num_warmups[batch_size] += 1
+            return self.forward(*args, **kwargs)
+
+        if batch_size not in self.graphs:
+            # Capture the graph.
+            self.capture_graph(*args, **kwargs)
+            return self.hidden_states[batch_size]
+
+        # Run the graph and return the hidden states.
+        graph = self.graphs[batch_size]
+        graph.replay()
+        hidden_states = self.hidden_states[batch_size]
+        return hidden_states
+
+    @abstractmethod
+    def forward(self, *args, **kwargs):
+        ...
+
+    def _get_batch_size(self, *args, **kwargs) -> int:
+        # NOTE(woosuk): Ensure that the keyword arguments here match those
+        # in the model's forward method signature.
+        input_ids = kwargs.get("input_ids")
+        if input_ids is not None:
+            return input_ids.shape[0]
+        input_embeds = kwargs.get("inputs_embeds")
+        if input_embeds is not None:
+            return input_embeds.shape[0]
+        intermediate_tensors = kwargs.get("intermediate_tensors")
+        if intermediate_tensors is not None:
+            return intermediate_tensors.shape[0]
+        # NOTE(woosuk): We don't use the `positions` tensor for batch size
+        # because its first dimension may not be the batch dimension for some
+        # models such as Qwen2.5-VL.
+        if len(args) > 0:
+            # For LoRA models, kwargs could be empty.
+            # FIXME(woosuk): This is a hack. We should find a more robust way
+            # to get the batch size.
+            return args[0].shape[0]
+        raise ValueError("No batch size found in arguments")
