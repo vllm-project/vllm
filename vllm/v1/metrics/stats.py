@@ -33,6 +33,8 @@ class SchedulerStats:
     num_running_reqs: int = 0
     num_waiting_reqs: int = 0
 
+    step_counter: int = 0
+
     kv_cache_usage: float = 0.0
 
     prefix_cache_stats: PrefixCacheStats = field(
