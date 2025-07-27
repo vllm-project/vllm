@@ -236,15 +236,15 @@ def test_no_spurious_prefix_caching():
     request_remote = create_request(
         request_id=1,
         num_tokens=NUM_TOKENS,
+        common_prefix_len=NUM_TOKENS,
         do_remote_prefill=True,
-        use_all_1s_for_prompt_tokens=True,
     )
 
     request_local = create_request(
         request_id=2,
         num_tokens=NUM_TOKENS,
+        common_prefix_len=NUM_TOKENS,
         do_remote_prefill=False,
-        use_all_1s_for_prompt_tokens=True,
     )
 
     # Schedule the remote prefill request. This should not

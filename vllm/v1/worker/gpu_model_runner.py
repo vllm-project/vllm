@@ -66,7 +66,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
-    KVConnectorModelRunnerMixin)
+    KVConnectorModelRunnerMixin, KVConnectorOutput)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from ..sample.logits_processor import LogitsProcessorManager
@@ -496,6 +496,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             resumed_from_preemption = req_data.resumed_from_preemption[i]
 
             # Update the cached states.
+            if (req_state.num_prompt_tokens > req_state.num_computed_tokens >=
+                    num_computed_tokens):
+                # The request was rescheduled after a KV load failure. Clear
+                # any cached sampled tokens
+                req_state.output_token_ids.clear()
+                req_index = self.input_batch.req_id_to_index.get(req_id)
+                if req_index is None:
+                    self.input_batch.num_tokens[req_index] = (
+                        req_state.num_tokens)
+                    self.input_batch.num_tokens_no_spec[req_index] = (
+                        req_state.num_tokens)
+
             req_state.num_computed_tokens = num_computed_tokens
 
             if not is_last_rank:
@@ -1343,14 +1355,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                 dtype=torch.int32)
         return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
 
-    def _pool(
-        self,
-        hidden_states: torch.Tensor,
-        num_scheduled_tokens: int,
-        num_scheduled_tokens_np: np.ndarray,
-        finished_sending: Optional[set[str]],
-        finished_recving: Optional[set[str]],
-    ) -> ModelRunnerOutput:
+    def _pool(self, hidden_states: torch.Tensor, num_scheduled_tokens: int,
+              num_scheduled_tokens_np: np.ndarray,
+              kv_connector_output: KVConnectorOutput) -> ModelRunnerOutput:
         assert self.input_batch.num_reqs ==\
             len(self.input_batch.pooling_params), \
         "Either all or none of the requests in" \
@@ -1384,8 +1391,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
-            finished_sending=finished_sending,
-            finished_recving=finished_recving,
+            finished_sending=kv_connector_output.finished_sending,
+            finished_recving=kv_connector_output.finished_recving,
+            invalid_block_ids=kv_connector_output.invalid_block_ids,
         )
 
     @torch.inference_mode()
@@ -1488,8 +1496,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
                 skip_cuda_graphs=skip_cuda_graphs,
-        ):
-            self.maybe_setup_kv_connector(scheduler_output)
+        ), self.create_kv_connector_output(
+                scheduler_output) as kv_connector_output:
 
             model_output = self.model(
                 input_ids=input_ids,
@@ -1501,10 +1509,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     device=self.device,
                 ),
             )
-
-            self.maybe_wait_for_kv_save()
-            finished_sending, finished_recving = (
-                self.get_finished_kv_transfers(scheduler_output))
 
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output
@@ -1522,9 +1526,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
             if not broadcast_pp_output:
-                if finished_sending or finished_recving:
-                    hidden_states.finished_sending = finished_sending
-                    hidden_states.finished_recving = finished_recving
+                hidden_states.finished_sending = (
+                    kv_connector_output.finished_sending)
+                hidden_states.finished_recving = (
+                    kv_connector_output.finished_recving)
+                hidden_states.invalid_block_ids = (
+                    kv_connector_output.invalid_block_ids)
                 return hidden_states
             assert isinstance(hidden_states, IntermediateTensors)
             get_pp_group().send_tensor_dict(hidden_states.tensors,
@@ -1533,8 +1540,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             if self.input_batch.pooling_params:
                 return self._pool(hidden_states, num_scheduled_tokens,
-                                  num_scheduled_tokens_np, finished_sending,
-                                  finished_recving)
+                                  num_scheduled_tokens_np, kv_connector_output)
 
             sample_hidden_states = hidden_states[logits_indices]
             logits = self.model.compute_logits(sample_hidden_states, None)
@@ -1684,8 +1690,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
-            finished_sending=finished_sending,
-            finished_recving=finished_recving,
+            finished_sending=kv_connector_output.finished_sending,
+            finished_recving=kv_connector_output.finished_recving,
+            invalid_block_ids=kv_connector_output.invalid_block_ids,
             num_nans_in_logits=num_nans_in_logits,
         )
 
