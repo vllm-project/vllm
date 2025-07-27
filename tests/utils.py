@@ -974,3 +974,18 @@ def get_client_text_logprob_generations(
     return [(text_generations, text,
              (None if x.logprobs is None else x.logprobs.top_logprobs))
             for completion in completions for x in completion.choices]
+
+
+def get_attn_backend_list_based_on_platform() -> list[str]:
+    if current_platform.is_cuda():
+        return ["FLASH_ATTN_VLLM_V1", "TRITON_ATTN_VLLM_V1"]
+    elif current_platform.is_rocm():
+        attn_backend_list = ["TRITON_ATTN_VLLM_V1"]
+        try:
+            attn_backend_list.append("FLASH_ATTN_VLLM_V1")
+        except Exception:
+            print("Skip FLASH_ATTN_VLLM_V1 on ROCm as aiter is not installed")
+
+        return attn_backend_list
+    else:
+        raise ValueError("Unsupported platform")

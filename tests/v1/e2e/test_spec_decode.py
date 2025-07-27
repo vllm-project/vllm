@@ -8,8 +8,10 @@ from typing import Any
 import pytest
 import torch
 
+from tests.utils import get_attn_backend_list_based_on_platform
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.platforms import current_platform
 
 
 @pytest.fixture
@@ -114,11 +116,14 @@ def test_ngram_correctness(
         marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
 ],
                          ids=["llama3_eagle", "llama3_eagle3", "llama4_eagle"])
+@pytest.mark.parametrize("attn_backend",
+                         get_attn_backend_list_based_on_platform())
 def test_eagle_correctness(
     monkeypatch: pytest.MonkeyPatch,
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
     model_setup: tuple[str, str, str, int],
+    attn_backend: str,
 ):
     '''
     Compare the outputs of a original LLM and a speculative LLM
@@ -127,6 +132,10 @@ def test_eagle_correctness(
     '''
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
+        m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
+
+        if attn_backend == "FLASH_ATTN_VLLM_V1" and current_platform.is_rocm():
+            m.setenv("VLLM_ROCM_USE_AITER", "1")
         method, model_name, spec_model_name, tp_size = model_setup
 
         ref_llm = LLM(model=model_name,
