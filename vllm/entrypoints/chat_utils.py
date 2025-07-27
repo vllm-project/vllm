@@ -1383,7 +1383,8 @@ def get_history_tool_calls_cnt(conversation: list[ConversationMessage]):
         if msg['role'] == 'assistant':
             tool_calls = msg.get('tool_calls')
             if tool_calls is not None:
-                idx += len(tool_calls)
+                for _ in tool_calls:
+                    idx += 1
     return idx
 
 def make_kimi_k2_tool_id(func_name: str, idx: int):
