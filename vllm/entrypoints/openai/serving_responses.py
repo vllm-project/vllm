@@ -182,7 +182,7 @@ class OpenAIServingResponses(OpenAIServing):
                 generators.append(generator)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         assert len(generators) == 1
         result_generator, = generators
@@ -262,7 +262,7 @@ class OpenAIServingResponses(OpenAIServing):
             return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
         assert final_res is not None
         assert len(final_res.outputs) == 1

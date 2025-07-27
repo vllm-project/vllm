@@ -2229,6 +2229,10 @@ class SchedulerConfig:
     """Maximum length of a sequence (including prompt and generated text). This
     is primarily set in `ModelConfig` and that value should be manually
     duplicated here."""
+    max_waiting_queue_length: Optional[int] = None
+    """Maximum number of sequences in the waiting queue. If None, no limit is
+    applied. If set, the scheduler will reject new requests when the queue
+    length exceeds this value."""
 
     max_num_partial_prefills: int = 1
     """For chunked prefill, the maximum number of sequences that can be
@@ -2452,7 +2456,11 @@ class SchedulerConfig:
                 "max_num_batched_tokens and makes vLLM reject longer "
                 "sequences. Please increase max_num_batched_tokens or "
                 "decrease max_model_len.")
-
+        if (self.max_waiting_queue_length is not None
+                and self.max_waiting_queue_length <= 0):
+            raise ValueError(
+                "max_waiting_queue_length must be a positive integer. "
+                "Use None for an unlimited queue.")
         if self.max_num_batched_tokens < self.max_num_seqs:
             raise ValueError(
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must "
