@@ -237,7 +237,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
     """Limits the number of tokens allowed inside a 'thinking' section."""
 
     def __init__(self, reasoning_config: ReasoningConfig, pin_memory: bool,
-                 device: torch.device):
+                 device: torch.device, max_num_reqs: int):
         """
         Args:
           reasoning_config: Configuration for reasoning, which includes
@@ -269,6 +269,13 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         self.device = device
         self._state: dict[int, dict[str, Any]] = {}
 
+        # Preallocate reusable tensors
+        self.mask = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
+        self.force_token_ids = torch.full((max_num_reqs, ),
+                                          -1,
+                                          dtype=torch.long,
+                                          device=device)
+
     @staticmethod
     def _find_last_sequence_index(target_list: list[int],
                                   token_ids: list[int]) -> int:
@@ -281,7 +288,6 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         """
         if not token_ids:
             return -1
-
         for i in range(len(target_list) - len(token_ids), -1, -1):
             if target_list[i:i + len(token_ids)] == token_ids:
                 return i
@@ -296,18 +302,16 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
           1. If explicit thinking token budget is given, use it.
           2. Otherwise, use reasoning_effort mapping.
         """
+        budget = None
         if thinking_token_budget is not None:
-            return thinking_token_budget
-
-        if reasoning_effort is not None:
+            budget = thinking_token_budget
+        elif reasoning_effort is not None:
             budget = self.reasoning_effort_to_token_budget.get(
                 reasoning_effort)
             if budget is None:
                 raise ValueError(
                     f"Unknown reasoning_effort: {reasoning_effort}")
-            return budget
-
-        return None
+        return budget
 
     def _init_state_entry(self, prompt_tok_ids: list[int],
                           thinking_token_budget: int) -> dict[str, Any]:
@@ -338,12 +342,10 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         # Check if recent output matches start or end sequences
         if output[-len(self.think_start_token_ids):] \
                 == self.think_start_token_ids:
-            state["in_think"] = True
-            state["think_count"] = 0
+            state.update({"in_think": True, "think_count": 0})
         elif output[-len(self.think_end_token_ids):] \
                 == self.think_end_token_ids:
-            state["in_think"] = False
-            state["think_count"] = 0
+            state.update({"in_think": False, "think_count": 0})
         elif state["in_think"]:
             state["think_count"] += 1
 
@@ -351,14 +353,15 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         if state["in_end"]:
             state["end_count"] += 1
             if state["end_count"] >= len(self.think_end_token_ids):
-                state["in_end"] = False
-                state["end_count"] = 0
+                state.update({"in_end": False, "end_count": 0})
         else:
             if state["in_think"] and state["think_count"] \
                     >= state["thinking_token_budget"]:
-                state["in_think"] = False
-                state["in_end"] = True
-                state["end_count"] = 0
+                state.update({
+                    "in_think": False,
+                    "in_end": True,
+                    "end_count": 0
+                })
 
     def is_argmax_invariant(self) -> bool:
         """This logits processor can change the outcome of
@@ -397,28 +400,24 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             self._update_think_state(state)
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
-        batch_size = logits.size(0)
         if not self._state:
             return logits
 
-        mask = torch.zeros(batch_size, dtype=torch.bool, device=logits.device)
-        force_token_ids = torch.full((batch_size, ),
-                                     -1,
-                                     dtype=torch.long,
-                                     device=logits.device)
+        batch_size = logits.size(0)
+        self.mask[:batch_size] = False
 
         for i in range(batch_size):
             state = self._state.get(i)
             if state and state["in_end"]:
-                mask[i] = True
-                force_token_ids[i] = \
-                    self.think_end_token_ids[state["end_count"]]
+                self.mask[i] = True
+                self.force_token_ids[i] = \
+                        self.think_end_token_ids[state["end_count"]]
 
-        if mask.any():
-            logits[mask] = -float("inf")
-            row_indices = torch.arange(batch_size, device=logits.device)[mask]
-            col_indices = force_token_ids[mask]
-            logits[row_indices, col_indices] = 0.0
+        current_mask = self.mask[:batch_size]
+        if current_mask.any():
+            logits[current_mask] = -float("inf")
+            logits[current_mask,
+                   self.force_token_ids[:batch_size][current_mask]] = 0.0
 
         return logits
 
