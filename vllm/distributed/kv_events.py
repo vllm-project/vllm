@@ -36,8 +36,10 @@ class KVCacheEvent(
         array_like=True,  # type: ignore[call-arg]
         omit_defaults=True,  # type: ignore[call-arg]
         gc=False,  # type: ignore[call-arg]
-        tag=True):
+        tag=True,
+        kw_only=True):
     """Base class for all KV cache-related events"""
+    metadata: Optional[dict[str, Any]] = None
 
 
 class BlockStored(KVCacheEvent):
