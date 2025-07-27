@@ -249,7 +249,8 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.get_supported_tasks()
 
     def add_request(self, request: EngineCoreRequest) -> None:
-        self.engine_core.add_request(request)
+        req, current_wave = self.engine_core.preprocess_add_request(request)
+        self.engine_core.add_request(req, current_wave)
 
     def abort_requests(self, request_ids: list[str]) -> None:
         if len(request_ids) > 0:
