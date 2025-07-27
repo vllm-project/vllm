@@ -219,23 +219,23 @@ class QuantAttentionQuantPattern(AttentionQuantPattern):
                 0.0,
                 dtype=self.quant_dtype,
                 device=q.device)
-            # # q in pre_quant_dtype
-            # q_quant = torch.ops.aten.empty.memory_format(
-            #     [q.shape[0], self.num_heads * self.head_size],
-            #     dtype=self.pre_quant_dtype,
-            #     device=q.device)
-            # # reshape q
-            # q_view1 = RESHAPE_OP(q, [-1, self.num_heads * self.head_size])
-            # # quant q
-            # at1 = auto_functionalized(self.PRE_QUANT_OP,
-            #                           result=q_quant,
-            #                           input=q_view1,
-            #                           scale=q_scale)
-            # # reshape q
-            # q_view2 = RESHAPE_OP(at1[1], [-1, self.num_heads, self.head_size])
+            # q in pre_quant_dtype
+            q_quant = torch.ops.aten.empty.memory_format(
+                [q.shape[0], self.num_heads * self.head_size],
+                dtype=self.pre_quant_dtype,
+                device=q.device)
+            # reshape q
+            q_view1 = RESHAPE_OP(q, [-1, self.num_heads * self.head_size])
+            # quant q
+            at1 = auto_functionalized(self.PRE_QUANT_OP,
+                                      result=q_quant,
+                                      input=q_view1.contiguous(),
+                                      scale=q_scale)
+            # reshape q
+            q_view2 = RESHAPE_OP(at1[1], [-1, self.num_heads, self.head_size])
             # attention
             at2 = auto_functionalized(ATTN_OP,
-                                      query=q,
+                                      query=q_view2,
                                       key=k,
                                       value=v,
                                       output=attn_out,

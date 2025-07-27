@@ -805,6 +805,9 @@ class FlashInferImpl(AttentionImpl):
                 out = torch.empty(out.shape,
                                   dtype=torch.bfloat16,
                                   device=out.device)
+                # dequantize q
+                prefill_query = prefill_query.to(torch.bfloat16)
+                prefill_query = prefill_query * layer._q_scale
 
             prefill_wrapper.run(
                 prefill_query,
@@ -829,13 +832,6 @@ class FlashInferImpl(AttentionImpl):
             assert decode_wrapper is not None
 
             if use_trtllm and self.use_fp8_kv_cache:
-                num_tokens, num_heads, head_size = decode_query.shape
-                decode_query, _ = self.quant_fp8(
-                    decode_query.reshape(
-                        (num_tokens, num_heads * head_size)).contiguous(),
-                    layer._q_scale)
-                decode_query = decode_query.reshape(
-                    (num_tokens, num_heads, head_size))
                 if output_scale is not None:
                     bmm2_scale = bmm2_scale / layer._o_scale_float
 
