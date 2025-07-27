@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from typing import Any
 
 import torch
+import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -45,9 +46,10 @@ class CPUModelRunner(GPUModelRunner):
             if k.endswith("_cpu_tensor") and isinstance(v, torch.Tensor):
                 replace_tensor(self.input_batch, k, k[:-11])
 
-        for k, v in vars(self.input_batch.block_table).items():
-            if k.endswith("_cpu") and isinstance(v, torch.Tensor):
-                replace_tensor(self.input_batch.block_table, k, k[:-4])
+        for block_table in self.input_batch.block_table.block_tables:
+            for k, v in vars(block_table).items():
+                if k.endswith("_cpu") and isinstance(v, torch.Tensor):
+                    replace_tensor(block_table, k, k[:-4])
 
     def load_model(self, eep_scale_up: bool = False) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
@@ -57,6 +59,9 @@ class CPUModelRunner(GPUModelRunner):
             self.model = self.load_lora_model(self.model, self.model_config,
                                               self.scheduler_config,
                                               self.lora_config, self.device)
+
+    def get_model(self) -> nn.Module:
+        return self.model
 
     def warming_up_model(self) -> None:
         logger.info("Warming up model for the compilation...")

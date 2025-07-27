@@ -57,7 +57,6 @@ class _Backend(enum.Enum):
     PALLAS = enum.auto()
     PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()
-    BLOCK_SPARSE_FLASH_ATTN = enum.auto()
     DUAL_CHUNK_FLASH_ATTN = enum.auto()
     DIFFERENTIAL_FLASH_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
@@ -543,6 +542,13 @@ class Platform:
         Init platform-specific torch distributed process group.
         """
         raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
+
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+        """
+        Returns if the kv_cache_dtype is supported by the current platform.
+        """
+        return False
 
 
 class UnspecifiedPlatform(Platform):
