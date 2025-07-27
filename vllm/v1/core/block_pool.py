@@ -7,12 +7,11 @@ from typing import Callable, Optional
 from vllm.distributed.kv_events import (AllBlocksCleared, BlockRemoved,
                                         BlockStored, KVCacheEvent)
 from vllm.logger import init_logger
-from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
-                                         FreeKVCacheBlockQueue, KVCacheBlock,
+from vllm.v1.core.kv_cache_utils import (FreeKVCacheBlockQueue, KVCacheBlock,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens)
 from vllm.v1.request import Request
-
+from vllm.v1.core.block_hash import BlockHash, BlockHashWithGroupId
 logger = init_logger(__name__)
 
 
@@ -115,8 +114,8 @@ class BlockPool:
             request: The request to cache the blocks.
             blocks: All blocks in the request.
             block_hashes: Block hashes of the blocks in the request. Note that
-            this list may be shorter than the blocks list. In this case the
-            missed block hash will be computed in this function.
+                this list may be shorter than the blocks list. In this case the
+                missed block hash will be computed in this function.
             num_cached_blocks: The number of blocks that are already cached.
             num_full_blocks: The number of blocks that are full and should
                 be cached after this function.
