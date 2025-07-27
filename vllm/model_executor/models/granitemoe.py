@@ -80,7 +80,7 @@ class GraniteMoeMoE(nn.Module):
                                      num_experts,
                                      bias=False,
                                      params_dtype=params_dtype,
-                                     quant_config=None,
+                                     quant_config=quant_config,
                                      prefix=f"{prefix}.gate")
 
         self.experts = FusedMoE(num_experts=num_experts,
