@@ -26,6 +26,7 @@ from pydantic import (ConfigDict, SkipValidation, TypeAdapter, field_validator,
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.distributed import ProcessGroup, ReduceOp
+from transformers import GenerationConfig
 from typing_extensions import Self, runtime_checkable
 
 import vllm.envs as envs
@@ -1468,24 +1469,6 @@ class ModelConfig:
 
         return self.multimodal_config
 
-    def try_get_generation_config(self) -> dict[str, Any]:
-        if self.generation_config in ("auto", "vllm"):
-            config = try_get_generation_config(
-                self.hf_config_path or self.model,
-                trust_remote_code=self.trust_remote_code,
-                revision=self.revision,
-            )
-        else:
-            config = try_get_generation_config(
-                self.generation_config,
-                trust_remote_code=self.trust_remote_code,
-            )
-
-        if config is None:
-            return {}
-
-        return config.to_diff_dict()
-
     def get_diff_sampling_param(self) -> dict[str, Any]:
         """
         This method returns a dictionary containing the parameters
@@ -1496,10 +1479,22 @@ class ModelConfig:
             dict[str, Any]: A dictionary with the differing sampling
             parameters, if `generation_config` is `"vllm"` an empty dictionary.
         """
-        if self.generation_config == "vllm":
-            config = {}
-        else:
-            config = self.try_get_generation_config()
+        config = {}
+
+        if self.generation_config == "auto":
+            config = try_get_generation_config(
+                self.hf_config_path or self.model,
+                trust_remote_code=self.trust_remote_code,
+                revision=self.revision,
+            ) or {}
+        elif self.generation_config != "vllm":
+            config = try_get_generation_config(
+                self.generation_config,
+                trust_remote_code=self.trust_remote_code,
+            ) or {}
+
+        if isinstance(config, GenerationConfig):
+            config = config.to_diff_dict()
 
         # Overriding with given generation config
         config.update(self.override_generation_config)
