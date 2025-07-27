@@ -315,7 +315,7 @@ class Gemma3nAttention(nn.Module):
             # Last sliding attention layer is 2 before sharing
             offset = 2 if self.sliding_window is not None else 1
             kv_shared_layer_index = first_kv_shared_layer_idx - offset
-            kv_sharing_target_layer_name = f"model.language_model.layers.{kv_shared_layer_index}.self_attn.attn"  # noqa: E501
+            kv_sharing_target_layer_name = f"language_model.model.layers.{kv_shared_layer_index}.self_attn.attn"  # noqa: E501
         else:
             kv_sharing_target_layer_name = None
 
@@ -375,6 +375,7 @@ class Gemma3nDecoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        assert isinstance(config, Gemma3nTextConfig)
         self.altup_active_idx = config.altup_active_idx
         assert config.altup_correct_scale
 
@@ -512,7 +513,7 @@ class Gemma3nTextModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config.text_config
+        config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
@@ -527,6 +528,7 @@ class Gemma3nTextModel(nn.Module):
             config.hidden_size**0.5,
             dtype=self.embed_tokens.weight.dtype,
         )
+        # Additional per-layer embeddings (PLE)
         self.embed_tokens_per_layer = VocabParallelEmbedding(
             config.vocab_size_per_layer_input,
             config.num_hidden_layers * config.hidden_size_per_layer_input,
@@ -606,7 +608,9 @@ class Gemma3nTextModel(nn.Module):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        per_layer_inputs: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if inputs_embeds is not None:
@@ -614,13 +618,6 @@ class Gemma3nTextModel(nn.Module):
         else:
             hidden_states_0 = self.get_input_embeddings(input_ids)
 
-        # Per layer inputs.
-        if input_ids is None:
-            raise ValueError("Passing None for input ids is not supported.")
-        per_layer_inputs = self.get_per_layer_input_embeddings(input_ids)
-        per_layer_inputs = per_layer_inputs.reshape(
-            -1, self.config.num_hidden_layers,
-            self.config.hidden_size_per_layer_input)
         per_layer_projection = self.per_layer_model_projection(hidden_states_0)
         per_layer_projection = per_layer_projection.reshape(
             *hidden_states_0.shape[:-1],
@@ -629,8 +626,13 @@ class Gemma3nTextModel(nn.Module):
         )
         per_layer_projection = self.per_layer_projection_norm(
             per_layer_projection)
-        per_layer_inputs = per_layer_projection + per_layer_inputs
-        per_layer_inputs *= self.per_layer_input_scale
+
+        if per_layer_inputs is not None:
+            # Profiling run does not compute per_layer_inputs
+            per_layer_inputs = per_layer_projection + per_layer_inputs
+            per_layer_inputs *= self.per_layer_input_scale
+        else:
+            per_layer_inputs = per_layer_projection
 
         # Altup embed.
         hidden_states = [hidden_states_0] * self.config.altup_num_inputs
@@ -730,29 +732,7 @@ class Gemma3nTextModel(nn.Module):
         return loaded_params
 
 
-class Gemma3nModel(nn.Module):
-
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        self.language_model = Gemma3nTextModel(vllm_config=vllm_config,
-                                               prefix=maybe_prefix(
-                                                   prefix, "language_model"))
-
-    def forward(
-        self,
-        input_ids: Optional[torch.Tensor],
-        positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        return self.language_model(input_ids=input_ids,
-                                   positions=positions,
-                                   inputs_embeds=inputs_embeds,
-                                   **kwargs)
-
-
-class Gemma3nForConditionalGeneration(nn.Module):
+class Gemma3nForCausalLM(nn.Module):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -771,14 +751,13 @@ class Gemma3nForConditionalGeneration(nn.Module):
         del lora_config  # Unused.
         super().__init__()
         self.config = config
-        self.model = Gemma3nModel(vllm_config=vllm_config,
-                                  prefix=maybe_prefix(prefix, "model"))
+        self.model = Gemma3nTextModel(vllm_config=vllm_config,
+                                      prefix=maybe_prefix(prefix, "model"))
         self.logits_processor = LogitsProcessor(
-            config.text_config.vocab_size,
-            soft_cap=config.text_config.final_logit_softcapping)
+            config.vocab_size, soft_cap=config.final_logit_softcapping)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.language_model.get_input_embeddings(input_ids)
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,
@@ -797,8 +776,8 @@ class Gemma3nForConditionalGeneration(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata: Optional[SamplingMetadata],
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.model.language_model.embed_tokens,
-                                       hidden_states, sampling_metadata)
+        logits = self.logits_processor(self.model.embed_tokens, hidden_states,
+                                       sampling_metadata)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,
