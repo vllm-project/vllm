@@ -4805,26 +4805,26 @@ class VllmConfig:
 
     def __str__(self):
         return (
-            f"model={self.model_config.model!r},"
-            f" speculative_config={self.speculative_config!r},"
-            f" tokenizer={self.model_config.tokenizer!r}, "
-            f"skip_tokenizer_init={self.model_config.skip_tokenizer_init},"
-            f" tokenizer_mode={self.model_config.tokenizer_mode}, "
+            f"model={self.model_config.model!r}, "
+            f"speculative_config={self.speculative_config!r}, "
+            f"tokenizer={self.model_config.tokenizer!r}, "
+            f"skip_tokenizer_init={self.model_config.skip_tokenizer_init}, "
+            f"tokenizer_mode={self.model_config.tokenizer_mode}, "
             f"revision={self.model_config.revision}, "
-            f"override_neuron_config={self.model_config.override_neuron_config},"
-            f" tokenizer_revision={self.model_config.tokenizer_revision}, "
+            f"override_neuron_config={self.model_config.override_neuron_config}, "  # noqa
+            f"tokenizer_revision={self.model_config.tokenizer_revision}, "
             f"trust_remote_code={self.model_config.trust_remote_code}, "
             f"dtype={self.model_config.dtype}, "
-            f"max_seq_len={self.model_config.max_model_len},"
-            f" download_dir={self.load_config.download_dir!r}, "
+            f"max_seq_len={self.model_config.max_model_len}, "
+            f"download_dir={self.load_config.download_dir!r}, "
             f"load_format={self.load_config.load_format}, "
-            f"tensor_parallel_size={self.parallel_config.tensor_parallel_size},"
-            f" pipeline_parallel_size={self.parallel_config.pipeline_parallel_size}, "  # noqa
+            f"tensor_parallel_size={self.parallel_config.tensor_parallel_size}, "  # noqa
+            f"pipeline_parallel_size={self.parallel_config.pipeline_parallel_size}, "  # noqa
             f"disable_custom_all_reduce={self.parallel_config.disable_custom_all_reduce}, "  # noqa
             f"quantization={self.model_config.quantization}, "
             f"enforce_eager={self.model_config.enforce_eager}, "
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
-            f" device_config={self.device_config.device}, "
+            f"device_config={self.device_config.device}, "
             f"decoding_config={self.decoding_config!r}, "
             f"observability_config={self.observability_config!r}, "
             f"seed={self.model_config.seed}, "
