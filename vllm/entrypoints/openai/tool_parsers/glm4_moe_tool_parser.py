@@ -10,19 +10,13 @@ from typing import Union
 import regex as re
 
 from vllm.entrypoints.chat_utils import random_tool_call_id
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    DeltaFunctionCall,
-    DeltaMessage,
-    DeltaToolCall,
-    ExtractedToolCallInformation,
-    FunctionCall,
-    ToolCall,
-)
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              DeltaFunctionCall, DeltaMessage,
+                                              DeltaToolCall,
+                                              ExtractedToolCallInformation,
+                                              FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser,
-    ToolParserManager,
-)
+    ToolParser, ToolParserManager)
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
@@ -192,22 +186,31 @@ class Glm4MoeModelToolParser(ToolParser):
             while len(self.streamed_args_for_tool) <= self.current_tool_id:
                 self.streamed_args_for_tool.append("")
 
-            extracted_tool_calls = self.extract_tool_calls(cur_text[:end_idx + len(self.tool_call_end_token)], request)
+            extracted_tool_calls = self.extract_tool_calls(
+                cur_text[:end_idx + len(self.tool_call_end_token)], request)
 
             assert len(extracted_tool_calls.tool_calls) == 1
 
             tool_call = extracted_tool_calls.tool_calls[0]
             self.prev_tool_call_arr[self.current_tool_id] = {
-                    "name": tool_call.function.name,
-                    "arguments": json.loads(tool_call.function.arguments)
+                "name": tool_call.function.name,
+                "arguments": json.loads(tool_call.function.arguments)
             }
-            self.streamed_args_for_tool[self.current_tool_id] = tool_call.function.arguments
-            delta = DeltaMessage(content=extracted_tool_calls.content, tool_calls=[DeltaToolCall(index=self.current_tool_id, type="function", id=random_tool_call_id(), function=DeltaFunctionCall(name=tool_call.function.name, arguments=tool_call.function.arguments))])
+            self.streamed_args_for_tool[
+                self.current_tool_id] = tool_call.function.arguments
+            delta = DeltaMessage(
+                content=extracted_tool_calls.content,
+                tool_calls=[
+                    DeltaToolCall(index=self.current_tool_id,
+                                  type="function",
+                                  id=random_tool_call_id(),
+                                  function=DeltaFunctionCall(
+                                      name=tool_call.function.name,
+                                      arguments=tool_call.function.arguments))
+                ])
             self.current_tool_id += 1
             self._buffer = cur_text[end_idx + len(self.tool_call_end_token):]
             return delta
 
         self._buffer = cur_text[start_idx:]
         return DeltaMessage(content=cur_text[:start_idx])
-
-
