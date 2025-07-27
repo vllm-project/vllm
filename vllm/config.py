@@ -2234,7 +2234,7 @@ class SchedulerConfig:
     """For chunked prefill, the maximum number of sequences that can be
     partially prefilled concurrently."""
 
-    max_long_partial_prefills: int = 1
+    max_long_partial_prefills: int = -1
     """For chunked prefill, the maximum number of prompts longer than
     long_prefill_token_threshold that will be prefilled concurrently. Setting
     this less than max_num_partial_prefills will allow shorter prompts to jump
@@ -2418,7 +2418,10 @@ class SchedulerConfig:
                 self.max_num_batched_tokens)
 
         self.chunked_prefill_enabled = self.enable_chunked_prefill
-        if self.max_num_partial_prefills > 1:
+        if self.max_long_partial_prefills == -1 and not envs.VLLM_USE_V1:
+            self.max_long_partial_prefills = 1
+        if self.max_num_partial_prefills > 1 or (
+                envs.VLLM_USE_V1 and self.max_long_partial_prefills > 0):
             if self.long_prefill_token_threshold == 0:
                 self.long_prefill_token_threshold = int(self.max_model_len *
                                                         0.04)
@@ -2493,9 +2496,9 @@ class SchedulerConfig:
                     f"({self.long_prefill_token_threshold}) cannot be greater "
                     f"than the max_model_len ({self.max_model_len}).")
 
-        if (self.max_long_partial_prefills
-                < 1) or (self.max_long_partial_prefills
-                         > self.max_num_partial_prefills):
+        if ((self.max_long_partial_prefills < 1) or
+            (self.max_long_partial_prefills
+             > self.max_num_partial_prefills)) and not envs.VLLM_USE_V1:
             raise ValueError(
                 f"max_long_partial_prefills ({self.max_long_partial_prefills}) "
                 "must be greater than or equal to 1 and less than or equal to "
