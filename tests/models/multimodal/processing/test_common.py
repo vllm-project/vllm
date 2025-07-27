@@ -41,12 +41,18 @@ def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
 
 
 def _test_processing_correctness(
-    model_id: str,
+    model_id_or_arch: str,
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
 ):
-    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
+    if model_id_or_arch in HF_EXAMPLE_MODELS.get_supported_archs():
+        # Use model architecture to get the default model id
+        model_info = HF_EXAMPLE_MODELS.get_hf_info(model_id_or_arch)
+        model_id = model_info.default
+    else:
+        model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id_or_arch)
+        model_id = model_id_or_arch
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
@@ -58,7 +64,7 @@ def _test_processing_correctness(
         trust_remote_code=model_info.trust_remote_code,
         seed=0,
         dtype="auto",
-        revision=None,
+        revision=model_info.revision,
         hf_overrides=model_info.hf_overrides,
     )
 
@@ -325,6 +331,28 @@ def test_processing_correctness(
 ):
     _test_processing_correctness(
         model_id,
+        hit_rate=hit_rate,
+        num_batches=num_batches,
+        simplify_rate=simplify_rate,
+    )
+
+
+# Phi4MultimodalForCausalLM share same model repo with original format
+# Phi4MMForCausalLM, so we add it as a separate test case
+# Remove this test after conversion PR merged:
+# https://huggingface.co/microsoft/Phi-4-multimodal-instruct/discussions/70
+@pytest.mark.parametrize("model_arch", ["Phi4MultimodalForCausalLM"])
+@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
+@pytest.mark.parametrize("num_batches", [32])
+@pytest.mark.parametrize("simplify_rate", [1.0])
+def test_processing_correctness_phi4_multimodal(
+    model_arch: str,
+    hit_rate: float,
+    num_batches: int,
+    simplify_rate: float,
+):
+    _test_processing_correctness(
+        model_arch,
         hit_rate=hit_rate,
         num_batches=num_batches,
         simplify_rate=simplify_rate,

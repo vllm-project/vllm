@@ -295,7 +295,7 @@ def cached_tokenizer_from_config(
     return cached_get_tokenizer(
         model_config.tokenizer,
         tokenizer_mode=model_config.tokenizer_mode,
-        tokenizer_revision=model_config.tokenizer_revision,
+        revision=model_config.tokenizer_revision,
         trust_remote_code=model_config.trust_remote_code,
         **kwargs,
     )
