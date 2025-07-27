@@ -105,7 +105,7 @@ After the script finishes, you will find the results in a new, timestamped direc
 
 - **Log Files**: The directory (`$BASE/auto-benchmark/YYYY_MM_DD_HH_MM/`) contains detailed logs for each run:
     - `vllm_log_...txt`: The log output from the vLLM server for each parameter combination.
-    - `bm_log_...txt`: The log output from the `benchmark_serving.py` script for each benchmark run.
+    - `bm_log_...txt`: The log output from the `vllm bench serve` command for each benchmark run.
 
 - **Final Result Summary**: A file named `result.txt` is created in the log directory. It contains a summary of each tested combination and concludes with the overall best parameters found.
 

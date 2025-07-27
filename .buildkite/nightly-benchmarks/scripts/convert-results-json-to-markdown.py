@@ -100,7 +100,7 @@ if __name__ == "__main__":
             raw_result = json.loads(f.read())
 
         if "serving" in str(test_file):
-            # this result is generated via `benchmark_serving.py`
+            # this result is generated via `vllm bench serve` command
 
             # attach the benchmarking command to raw_result
             try:
@@ -120,7 +120,7 @@ if __name__ == "__main__":
             continue
 
         elif "latency" in f.name:
-            # this result is generated via `benchmark_latency.py`
+            # this result is generated via `vllm bench latency` command
 
             # attach the benchmarking command to raw_result
             try:
@@ -148,7 +148,7 @@ if __name__ == "__main__":
             continue
 
         elif "throughput" in f.name:
-            # this result is generated via `benchmark_throughput.py`
+            # this result is generated via `vllm bench throughput` command
 
             # attach the benchmarking command to raw_result
             try:
