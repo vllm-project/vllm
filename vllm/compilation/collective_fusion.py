@@ -167,6 +167,17 @@ if flashinfer_comm is not None:
 
     ONESHOT_MAX_TOKENS = 128
 
+    def use_flashinfer(allreduce_in: torch.Tensor, max_token_num: int,
+                       world_size: int) -> bool:
+        num_tokens, hidden_size = allreduce_in.shape
+        element_size = allreduce_in.element_size()
+        current_tensor_size = num_tokens * hidden_size * element_size
+        max_fusion_size = max_token_num * hidden_size * element_size
+        return current_tensor_size <= min(
+            _FI_MAX_SIZES.get(world_size, _DEFAULT_FI_MAX_SIZE),
+            max_fusion_size,
+        )
+
     def use_oneshot(allreduce_in: torch.Tensor) -> bool:
         return allreduce_in.size(0) <= ONESHOT_MAX_TOKENS
 
@@ -184,16 +195,7 @@ if flashinfer_comm is not None:
         norm_out: Optional[torch.Tensor] = None,
     ) -> None:
 
-        num_tokens, hidden_size = allreduce_in.shape
-        element_size = allreduce_in.element_size()
-        current_tensor_size = num_tokens * hidden_size * element_size
-        max_fusion_size = max_token_num * hidden_size * element_size
-        use_flashinfer = current_tensor_size <= min(
-            _FI_MAX_SIZES.get(world_size, _DEFAULT_FI_MAX_SIZE),
-            max_fusion_size,
-        )
-
-        if use_flashinfer:
+        if use_flashinfer(allreduce_in, max_token_num, world_size):
             assert (_FI_WORKSPACE_TENSOR is not None
                     ), "Flashinfer must be enabled when using flashinfer"
             if norm_out is None:
@@ -281,14 +283,7 @@ if flashinfer_comm is not None:
                                              max_token_num: int,
                                              quant_out: torch.Tensor,
                                              scale: torch.Tensor) -> None:
-        use_flashinfer = allreduce_in.shape[0] * allreduce_in.shape[
-            1] * allreduce_in.element_size() <= min(
-                _FI_MAX_SIZES[world_size],
-                max_token_num * allreduce_in.shape[1] *
-                allreduce_in.element_size(),
-            )
-
-        if use_flashinfer:
+        if use_flashinfer(allreduce_in, max_token_num, world_size):
             assert (_FI_WORKSPACE_TENSOR is not None
                     ), "Flashinfer must be enabled when using flashinfer"
 
