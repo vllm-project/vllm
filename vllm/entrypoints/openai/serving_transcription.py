@@ -15,8 +15,9 @@ from vllm.entrypoints.openai.protocol import (
     TranslationResponseStreamChoice, TranslationStreamResponse)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.speech_to_text import OpenAISpeechToText
+from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
-from vllm.outputs import RequestOutput
+from vllm.sampling_params import SamplingParams
 
 logger = init_logger(__name__)
 
@@ -60,15 +61,17 @@ class OpenAIServingTranscription(OpenAISpeechToText):
 
     async def transcription_stream_generator(
             self, request: TranscriptionRequest,
-            result_generator: list[AsyncGenerator[RequestOutput, None]],
+            result_generator: AsyncGenerator[tuple[PromptType, float]],
             request_id: str, request_metadata: RequestResponseMetadata,
-            audio_duration_s: float) -> AsyncGenerator[str, None]:
+            sampling_params: SamplingParams,
+            previous_context: list[str]) -> AsyncGenerator[str, None]:
         generator = self._speech_to_text_stream_generator(
             request=request,
-            list_result_generator=result_generator,
+            async_result_generator=result_generator,
             request_id=request_id,
             request_metadata=request_metadata,
-            audio_duration_s=audio_duration_s,
+            sampling_params=sampling_params,
+            previous_context=previous_context,
             chunk_object_type="transcription.chunk",
             response_stream_choice_class=TranscriptionResponseStreamChoice,
             stream_response_class=TranscriptionStreamResponse,
@@ -115,15 +118,17 @@ class OpenAIServingTranslation(OpenAISpeechToText):
 
     async def translation_stream_generator(
             self, request: TranslationRequest,
-            result_generator: list[AsyncGenerator[RequestOutput, None]],
+            result_generator: AsyncGenerator[tuple[PromptType, float]],
             request_id: str, request_metadata: RequestResponseMetadata,
-            audio_duration_s: float) -> AsyncGenerator[str, None]:
+            sampling_params: SamplingParams,
+            previous_context: list[str]) -> AsyncGenerator[str, None]:
         generator = self._speech_to_text_stream_generator(
             request=request,
-            list_result_generator=result_generator,
+            async_result_generator=result_generator,
             request_id=request_id,
             request_metadata=request_metadata,
-            audio_duration_s=audio_duration_s,
+            sampling_params=sampling_params,
+            previous_context=previous_context,
             chunk_object_type="translation.chunk",
             response_stream_choice_class=TranslationResponseStreamChoice,
             stream_response_class=TranslationStreamResponse,
