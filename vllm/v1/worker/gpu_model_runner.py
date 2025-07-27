@@ -2658,9 +2658,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.vllm_config,
             self.device,
         )
-
+        attn_cg_i = attn_metadata_builder_i.attn_cudagraph_support
         if self.cudagraph_mode == CUDAGraphMode.FULL:
-            attn_cg_i = attn_metadata_builder_i.attn_cudagraph_support
             if attn_cg_i == AttentionCGSupport.NEVER:
                 raise ValueError(
                     f"Full CUDAGraph for {attn_backend_i.__name__} is "
@@ -2765,7 +2764,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if attn_cg is None:
                 attn_cg = attn_cg_i
             else:
-                if attn_cg != attn_cg_i:
+                if self.cudagraph_mode == CUDAGraphMode.FULL and \
+                    attn_cg != attn_cg_i:
                     raise ValueError(
                         "All attention backends must have the same "
                         "AttentionCGSupport type when using full "
