@@ -46,7 +46,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         is_pin_memory_available, round_up, supports_dynamo)
 from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
 from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder, CommonAttentionMetadata,
+    AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
     make_local_attention_virtual_batches)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec,
@@ -2555,12 +2555,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.device,
         )
 
-        if (self.full_cuda_graph
-                and not attn_metadata_builder_i.full_cudagraph_supported):
-            raise ValueError(
-                f"Full CUDAGraph not supported for "
-                f"{attn_backend_i.__name__}. Turn off CompilationConfig."
-                f"full_cuda_graph or use a different attention backend.")
+        if self.full_cuda_graph:
+            if attn_metadata_builder_i.attn_cudagraph_support == \
+                AttentionCGSupport.NEVER:
+                raise ValueError(f"Full CUDAGraph not supported for "
+                                 f"{attn_backend_i.__name__}. Turn off "
+                                 f"CompilationConfig.full_cuda_graph or use a "
+                                 f" different attention backend.")
+            if attn_metadata_builder_i.attn_cudagraph_support == \
+                AttentionCGSupport.PURE_DECODE_ONLY:
+                # Limit the max cudagraph size to the max number of
+                # sequences for pure decode only cudagraph backend,
+                # whose max_query_len is 1.
+                self.cudagraph_batch_sizes = [
+                    size for size in self.cudagraph_batch_sizes
+                    if size <= self.scheduler_config.max_num_seqs
+                ]
         return attn_backend_i, attn_metadata_builder_i
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
@@ -2573,7 +2583,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for i, kv_cache_group_spec in enumerate(
                 kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-
             attn_backend_i, attn_metadata_builder_i = \
                 self._initialize_single_attn_backend(kv_cache_spec)
             self.attn_backends.append(attn_backend_i)
