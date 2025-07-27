@@ -19,7 +19,8 @@ from typing import Callable, Optional, TypeVar, Union
 import torch.nn as nn
 import transformers
 
-from vllm.config import ModelConfig, ModelImpl, try_match_architecture_defaults
+from vllm.config import (ModelConfig, ModelImpl, iter_architecture_defaults,
+                         try_match_architecture_defaults)
 from vllm.logger import init_logger
 from vllm.transformers_utils.dynamic_module import (
     try_get_class_from_dynamic_module)
@@ -559,8 +560,7 @@ class _ModelRegistry:
             suffix, _ = match
 
             # Get the name of the base model to convert
-            # for repl_suffix, _ in iter_architecture_defaults():
-            for repl_suffix, _ in ["ForCausalLM"]:
+            for repl_suffix, _ in iter_architecture_defaults():
                 base_arch = architecture.replace(suffix, repl_suffix)
                 if base_arch in self.models:
                     return base_arch
