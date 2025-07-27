@@ -705,22 +705,12 @@ class ModelConfig:
         self.supported_tasks = self._get_supported_tasks(
             architectures, self.runner_type, self.convert_type)
 
-        model_info, arch = registry.inspect_model_cls(architectures, self)
-        self._architecture = arch
-        logger.info("Resolved architecture: %s", arch)
-
         # Note: Initialize these attributes early because transformers fallback
         # may fail to load dynamic modules in child processes
-        self.is_cross_encoder = (model_info.supports_cross_encoding
-                                 or self.convert_type == "classify")
-        self.is_pp_supported = model_info.supports_pp
-        self.is_multimodal_raw_input_supported = (
-            model_info.supports_multimodal_raw_input)
-        self.is_attention_free = model_info.is_attention_free
-        self.is_hybrid = model_info.is_hybrid
-        self.has_noops = model_info.has_noops
-        self.has_inner_state = model_info.has_inner_state
-        self.is_v1_compatible = not model_info.supports_v0_only
+        model_info, arch = registry.inspect_model_cls(architectures, self)
+        self._model_info = model_info
+        self._architecture = arch
+        logger.info("Resolved architecture: %s", arch)
 
         self.pooler_config = self._init_pooler_config()
 
@@ -1654,6 +1644,39 @@ class ModelConfig:
     @property
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
+
+    @property
+    def is_cross_encoder(self) -> bool:
+        return (self._model_info.supports_cross_encoding
+                or self.convert_type == "classify")
+
+    @property
+    def is_pp_supported(self) -> bool:
+        return self._model_info.supports_pp
+
+    @property
+    def is_multimodal_raw_input_supported(self) -> bool:
+        return self._model_info.supports_multimodal_raw_input
+
+    @property
+    def is_attention_free(self) -> bool:
+        return self._model_info.is_attention_free
+
+    @property
+    def is_hybrid(self) -> bool:
+        return self._model_info.is_hybrid
+
+    @property
+    def has_noops(self) -> bool:
+        return self._model_info.has_noops
+
+    @property
+    def has_inner_state(self):
+        return self._model_info.has_inner_state
+
+    @property
+    def is_v1_compatible(self) -> bool:
+        return not self._model_info.supports_v0_only
 
     @property
     def use_mla(self) -> bool:
