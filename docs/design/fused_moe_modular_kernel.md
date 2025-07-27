@@ -4,9 +4,13 @@ FusedMoEModularKernel is implemented [here](https://github.com/vllm-project/vllm
 Based on the format of the input activations, FusedMoE implementations are broadly classified into 2 types.
 * Contiguous / Standard / Non-Batched, and
 * Batched
+
+*Note that the terms Contiguous, Standard, and Non-Batched are used interchangeably throughout the document.*
+
 The input activation format completely depends on the All2All Dispatch being used.
-* In the Contiguous variant, the All2All Dispatch returns the activations as a contiguous tensor of shape (M, K) along with TopK Ids and TopK weights of shape (M, num_topk)
-* In the Batched variant, the All2All Dispatch returns the activations as a tensor of shape (num_experts, max_tokens, K). Here, the activations/tokens that subscribe to the same expert are grouped together. Note that not all entries of the tensor are valid. The activations tensor is typically accompanied by an `expert_num_tokens` tensor of size `num_experts`, where `expert_num_tokens[i]` indicates the number of valid tokens that subscribe to the ith expert.
+
+* In the Contiguous variant, the All2All Dispatch returns the activations as a contiguous tensor of shape (M, K) along with TopK Ids and TopK weights of shape (M, num_topk). Look at `DeepEPHTPrepareAndFinalize` for an example.
+* In the Batched variant, the All2All Dispatch returns the activations as a tensor of shape (num_experts, max_tokens, K). Here, the activations/tokens that subscribe to the same expert are batched together. Note that not all entries of the tensor are valid. The activations tensor is typically accompanied by an `expert_num_tokens` tensor of size `num_experts`, where `expert_num_tokens[i]` indicates the number of valid tokens that subscribe to the ith expert. Look at `PplxPrepareAndFinalize` or `DeepEPLLPrepareAndFinalize` for an example.
 
 The FusedMoE operation is generally made of multiple operations, in both the Contiguous and Batched variants, as described in the diagrams below
 
@@ -33,12 +37,11 @@ The TopK Weight Application and Reduction components happen right after the Unpe
 
 Please find the implementations of TopKWeightAndReduce [here](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/topk_weight_and_reduce.py).
 
+`FusedMoEPrepareAndFinalize::finalize()` method accepts a `TopKWeightAndReduce` argument that is invoked inside the method.
 The `FusedMoEModularKernel` acts as a bridge between the `FusedMoEPermuteExpertsUnpermute` and `FusedMoEPerpareAndFinalize` implementations to determine where the TopK Weight Application and Reduction happens.
 
-`FusedMoEPrepareAndFinalize::finalize()` method accepts a `TopKWeightAndReduce` argument that is invoked inside the method. This is queried from the `FusedMoEPermuteExpertsUnpermute` implementation.
-
-* `FusedMoEPermuteExpertsUnpermute` returns `TopKWeightAndReduceNoOp` if the `FusedMoEPermuteExpertsUnpermute` implementation does the weight application and reduction itself.
-* `FusedMoEPermuteExpertsUnpermute` returns `TopKWeightAndReduceContiguous` / `TopKWeightAndReduceNaiveBatched` / `TopKWeightAndReduceDelegate` if the `FusedMoEPermuteExpertsUnpermute` implementation needs the `FusedMoEPrepareAndFinalize::finalize()` to do the weight application and reduction.
+* `FusedMoEPermuteExpertsUnpermute::finalize_weight_and_reduce_impl` method returns `TopKWeightAndReduceNoOp` if the `FusedMoEPermuteExpertsUnpermute` implementation does the weight application and reduction itself.
+* `FusedMoEPermuteExpertsUnpermute::finalize_weight_and_reduce_impl` method returns `TopKWeightAndReduceContiguous` / `TopKWeightAndReduceNaiveBatched` / `TopKWeightAndReduceDelegate` if the `FusedMoEPermuteExpertsUnpermute` implementation needs the `FusedMoEPrepareAndFinalize::finalize()` to do the weight application and reduction.
 
 ### FusedMoEPrepareAndFinalize
 The `FusedMoEPrepareAndFinalize` abstract class exposes `prepare` and `finalize` functions.
@@ -66,7 +69,7 @@ The `apply` method is where the implementations perform
 The core FusedMoE implementation performs a series of operations. It would be inefficient to create output memory for each of these operations separately. To that effect, implementations are required to declare 2 workspace shapes, the workspace datatype and the FusedMoE output shape as outputs of the workspace_shapes() method. This information is used to allocate the workspace tensors and the output tensor in `FusedMoEModularKernel::forward()` and passed on to the `FusedMoEPermuteExpertsUnpermute::apply()` method. The workspaces could then be used as intermediate buffers in the FusedMoE implementation.
 
 #### finalize_weight_and_reduce_impl()
-It is sometimes efficient to perform TopK weight application and Reduction inside the `FusedMoEPermuteExpertsUnpermute::apply()`. An example is [here](https://github.com/vllm-project/vllm/pull/20228). We have a `TopKWeightAndReduce` abstract class to facilitate such implementations. Please refer to the TopKWeightAndReduce section.
+It is sometimes efficient to perform TopK weight application and Reduction inside the `FusedMoEPermuteExpertsUnpermute::apply()`. Find an example [here](https://github.com/vllm-project/vllm/pull/20228). We have a `TopKWeightAndReduce` abstract class to facilitate such implementations. Please refer to the TopKWeightAndReduce section.
 `FusedMoEPermuteExpertsUnpermute::finalize_weight_and_reduce_impl()` returns the `TopKWeightAndReduce` object that the implementation wants the `FusedMoEPrepareAndFinalize::finalize()` to use.
 
 ![](../assets/design/fused_moe_modular_kernel/fused_experts_blocks.png "FusedMoEPermuteExpertsUnpermute Blocks")
@@ -128,17 +131,17 @@ This section describes the significance of the various functions exposed by the 
 
 `FusedMoEPrepareAndFinalize::max_num_tokens_per_rank()`: This is the maximum number of tokens that would be submitted to the All2All Dispatch at once.
 
-`FusedMoEPrepareAndFinalize::num_dispatchers()`: Total number of dispatching units. This value determines size of the Dispatch output. The Dispatch output is    of shape (num_local_experts, max_num_tokens, K). Here max_num_tokens = num_dispatchers() * max_num_tokens_per_rank().
+`FusedMoEPrepareAndFinalize::num_dispatchers()`: Total number of dispatching units. This value determines the size of the Dispatch output. The Dispatch output is of shape (num_local_experts, max_num_tokens, K). Here max_num_tokens = num_dispatchers() * max_num_tokens_per_rank().
 
-We suggest picking an already existing `FusedMoEPrepareAndFinalize` implementation that matches your All2All implementation closely and using it as a base reference.
+We suggest picking an already existing `FusedMoEPrepareAndFinalize` implementation that matches your All2All implementation closely and using it as a reference.
 
 ### How To Add a FusedMoEPermuteExpertsUnpermute Type
 FusedMoEPermuteExpertsUnpermute performs the core of the FusedMoE operations. The various functions exposed by the abstract class and their significance is as follows,
 
-`FusedMoEPermuteExpertsUnpermute::activation_formats()`: Return the supported Input and Output activation formats.
+`FusedMoEPermuteExpertsUnpermute::activation_formats()`: Return the supported Input and Output activation formats. i.e. Contiguous / Batched format.
 
 `FusedMoEPermuteExpertsUnpermute::supports_chunking()`: Return True if the implementation supports chunking. Typically
-        implementations that input `FusedMoEActivationFormat.Standard` support chunking and `FusedMoEActivationFormat.Batched` do not.
+implementations that input `FusedMoEActivationFormat.Standard` support chunking and `FusedMoEActivationFormat.BatchedExperts` do not.
 
 `FusedMoEPermuteExpertsUnpermute::supports_expert_map()`: Return True if the implementation supports expert map.
 
@@ -147,19 +150,32 @@ FusedMoEPermuteExpertsUnpermute performs the core of the FusedMoE operations. Th
 `FusedMoEPermuteExpertsUnpermute::apply`: Refer to `FusedMoEPermuteExpertsUnpermute` section above.
 
 ### FusedMoEModularKernel Initialization
-During Engine startup,
-* The `FusedMoEPrepareAndFinalize` object is created in [vllm/model_executor/layers/fused_moe/layer.py](https://github.com/vllm-project/vllm/blob/5ac3168ee342f4cae17b0b67375e647bd5dd9151/vllm/model_executor/layers/fused_moe/layer.py#L190)
-* The `FusedMoEPermuteExpertsUnpermute` object is created in `FusedMoEMethodBase::select_gemm_impl`
+`FusedMoEMethodBase` class has 2 methods that are collectively responsible in creating the `FusedMoEModularKernel` object. They are,
+* select_gemm_impl, and
+* init_prepare_finalize
 
-The two objects are put together to form a FusedMoEModularKernel object [here](https://github.com/vllm-project/vllm/blob/5ac3168ee342f4cae17b0b67375e647bd5dd9151/vllm/model_executor/layers/fused_moe/layer.py#L198)
+#### select_gemm_impl
+The `select_gemm_impl` method is undefined in the base class. It is the responsibility of the derived class to implement a method that constructs a valid/appropriate `FusedMoEPermuteExpertsUnpermute` object.
+Please refer to the implementations in,
+* `UnquantizedFusedMoEMethod`
+* `CompressedTensorsW8A8Fp8MoEMethod`
+* `CompressedTensorsW8A8Fp8MoECutlassMethod`
+* `Fp8MoEMethod`
+* `ModelOptNvFp4FusedMoE`
+dervied classes.
+
+#### init_prepare_finalize
+Based on the input and env settings, the `init_prepare_finalize` method creates the appropriate `FusedMoEPrepareAndFinalize` object. The method then queries `select_gemm_impl` for the appropriate `FusedMoEPermuteExpertsUnpermute` object and builds the `FusedMoEModularKernel` object
+
+Please take a look at [init_prepare_finalize](https://github.com/vllm-project/vllm/blob/1cbf951ba272c230823b947631065b826409fa62/vllm/model_executor/layers/fused_moe/layer.py#L188).
 
 ### How To Unit Test
-We are have `FusedMoEModularKernel` unit tests at [test_modular_kernel_combinations.py](https://github.com/vllm-project/vllm/blob/5ac3168ee342f4cae17b0b67375e647bd5dd9151/tests/kernels/moe/test_modular_kernel_combinations.py).
+We have `FusedMoEModularKernel` unit tests at [test_modular_kernel_combinations.py](https://github.com/vllm-project/vllm/blob/5ac3168ee342f4cae17b0b67375e647bd5dd9151/tests/kernels/moe/test_modular_kernel_combinations.py).
 
 The unit test iterates through all combinations of `FusedMoEPrepareAndFinalize` and `FusedMoEPremuteExpertsUnpermute` types and if they are
 compatible, runs some correctness tests.
 If you are adding some `FusedMoEPrepareAndFinalize` / `FusedMoEPermuteExpertsUnpermute` implementations,
-1. Add the implementations to `MK_ALL_PREPARE_FINALIZE_TYPES` and `MK_FUSED_EXPERT_TYPES` in [mk_objects.py](https://github.com/vllm-project/vllm/blob/main/tests/kernels/moe/modular_kernel_tools/mk_objects.py) respectively.
+1. Add the implementation type to `MK_ALL_PREPARE_FINALIZE_TYPES` and `MK_FUSED_EXPERT_TYPES` in [mk_objects.py](https://github.com/vllm-project/vllm/blob/main/tests/kernels/moe/modular_kernel_tools/mk_objects.py) respectively.
 2. Update `Config::is_batched_prepare_finalize()`, `Config::is_batched_fused_experts()`, `Config::is_standard_fused_experts()`,
 `Config::is_fe_16bit_supported()`,  `Config::is_fe_fp8_supported()`, `Config::is_fe_block_fp8_supported()`,
 `Config::is_fe_supports_chunking()` methods in [/tests/kernels/moe/modular_kernel_tools/common.py](https://github.com/vllm-project/vllm/blob/main/tests/kernels/moe/modular_kernel_tools/common.py)
