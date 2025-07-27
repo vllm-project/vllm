@@ -1,4 +1,3 @@
-
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
@@ -8,6 +7,12 @@
 
 ARG CUDA_VERSION=12.8.1
 ARG PYTHON_VERSION=3.12
+
+# cuda arch list used by torch
+# can be useful for both `dev` and `test`
+# explicitly set the list to avoid issues with torch 2.2
+# see https://github.com/pytorch/pytorch/pull/123243
+ARG torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0 10.0 12.0'
 
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in
@@ -71,6 +76,7 @@ ARG INSTALL_KV_CONNECTORS=false
 FROM ${BUILD_BASE_IMAGE} AS base
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
+ARG torch_cuda_arch_list
 ARG TARGETPLATFORM
 ARG INSTALL_KV_CONNECTORS=false
 ENV DEBIAN_FRONTEND=noninteractive
@@ -78,6 +84,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
+
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 # Install Python and other dependencies
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
@@ -158,12 +166,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/cuda.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
-# cuda arch list used by torch
-# can be useful for both `dev` and `test`
-# explicitly set the list to avoid issues with torch 2.2
-# see https://github.com/pytorch/pytorch/pull/123243
-ARG torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0 10.0 12.0'
-ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 # Override the arch list for flash-attn to reduce the binary size
 ARG vllm_fa_cmake_gpu_arches='80-real;90-real'
 ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
@@ -290,6 +292,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM ${FINAL_BASE_IMAGE} AS vllm-base
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
+ARG torch_cuda_arch_list
 ARG INSTALL_KV_CONNECTORS=false
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
@@ -300,6 +303,8 @@ SHELL ["/bin/bash", "-c"]
 ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
+
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
     echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
@@ -428,6 +433,31 @@ COPY requirements/build.txt requirements/build.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/build.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+
+# Install DeepGEMM from source
+ARG DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
+ARG DEEPGEMM_GIT_REF="187656694f7f69e3e7975617a68bc3387680a7e1"
+RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
+  . /etc/environment
+    # Check if torch_cuda_arch_list contains 9.0 or 10.0 (with optional 'a' suffix)
+    if echo "${torch_cuda_arch_list}" | grep -E "(9\.0a?|10\.0a?)" > /dev/null; then
+        git clone --recursive --shallow-submodules \
+            ${DEEPGEMM_GIT_REPO} deepgemm
+        echo "🏗️  Building DeepGEMM"
+        pushd deepgemm
+            git checkout ${DEEPGEMM_GIT_REF}
+            # Build DeepGEMM
+            # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)
+            rm -rf build dist
+            rm -rf *.egg-info
+            python3 setup.py bdist_wheel
+            uv pip install --system dist/*.whl
+        popd
+        rm -rf deepgemm
+    else
+        echo "Skipping DeepGEMM installation (requires CUDA arch 9.0 or 10.0 but got: ${torch_cuda_arch_list})"
+    fi
+BASH
 
 #################### vLLM installation IMAGE ####################
 
