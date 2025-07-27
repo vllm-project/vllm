@@ -6,7 +6,6 @@ import warnings
 import pytest
 import torch.cuda
 
-from vllm.config import ModelConfig
 from vllm.model_executor.models import (is_pooling_model,
                                         is_text_generation_model,
                                         supports_multimodal)
@@ -25,20 +24,9 @@ from .registry import HF_EXAMPLE_MODELS
 
 @pytest.mark.parametrize("model_arch", ModelRegistry.get_supported_archs())
 def test_registry_imports(model_arch):
-    model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
-    model_info.check_transformers_version(on_fail="skip")
-
-    model_id = model_info.default
-    model_config = ModelConfig(
-        model_id,
-        tokenizer=model_info.tokenizer or model_id,
-        tokenizer_mode=model_info.tokenizer_mode,
-        revision=model_info.revision,
-        trust_remote_code=model_info.trust_remote_code,
-    )
-
     # Ensure all model classes can be imported successfully
-    model_cls, _ = ModelRegistry.resolve_model_cls(model_arch, model_config)
+    model_cls = ModelRegistry._try_load_model_cls(model_arch)
+    assert model_cls is not None
 
     if model_arch in _SPECULATIVE_DECODING_MODELS:
         return  # Ignore these models which do not have a unified format
@@ -66,25 +54,16 @@ def test_registry_imports(model_arch):
     ("XLMRobertaForSequenceClassification", False, False, True),
 ])
 def test_registry_model_property(model_arch, is_mm, init_cuda, is_ce):
-    model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
-    model_info.check_transformers_version(on_fail="skip")
+    model_info = ModelRegistry._try_inspect_model_cls(model_arch)
+    assert model_info is not None
 
-    model_id = model_info.default
-    model_config = ModelConfig(
-        model_id,
-        tokenizer=model_info.tokenizer or model_id,
-        tokenizer_mode=model_info.tokenizer_mode,
-        revision=model_info.revision,
-        trust_remote_code=model_info.trust_remote_code,
-    )
-
-    assert model_config.is_multimodal_model is is_mm
-    assert model_config.is_cross_encoder is is_ce
+    assert model_info.supports_multimodal is is_mm
+    assert model_info.supports_cross_encoding is is_ce
 
     if init_cuda and current_platform.is_cuda_alike():
         assert not torch.cuda.is_initialized()
 
-        ModelRegistry.resolve_model_cls(model_arch, model_config)
+        ModelRegistry._try_load_model_cls(model_arch)
         if not torch.cuda.is_initialized():
             warnings.warn(
                 "This model no longer initializes CUDA on import. "
@@ -103,24 +82,15 @@ def test_registry_model_property(model_arch, is_mm, init_cuda, is_ce):
         ("Qwen2VLForConditionalGeneration", True, True),
     ])
 def test_registry_is_pp(model_arch, is_pp, init_cuda):
-    model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
-    model_info.check_transformers_version(on_fail="skip")
+    model_info = ModelRegistry._try_inspect_model_cls(model_arch)
+    assert model_info is not None
 
-    model_id = model_info.default
-    model_config = ModelConfig(
-        model_id,
-        tokenizer=model_info.tokenizer or model_id,
-        tokenizer_mode=model_info.tokenizer_mode,
-        revision=model_info.revision,
-        trust_remote_code=model_info.trust_remote_code,
-    )
-
-    assert model_config.is_pp_supported is is_pp
+    assert model_info.supports_pp is is_pp
 
     if init_cuda and current_platform.is_cuda_alike():
         assert not torch.cuda.is_initialized()
 
-        ModelRegistry.resolve_model_cls(model_arch, model_config)
+        ModelRegistry._try_load_model_cls(model_arch)
         if not torch.cuda.is_initialized():
             warnings.warn(
                 "This model no longer initializes CUDA on import. "
