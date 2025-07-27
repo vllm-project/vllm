@@ -12,6 +12,7 @@ from torch.distributed import ReduceOp
 
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
+from vllm.utils import current_stream
 
 logger = init_logger(__name__)
 
@@ -45,7 +46,10 @@ class RayPPCommunicator(Communicator):
                 participant of the RayPPCommunicator group (e.g., the Ray
                 driver).
             actor_handles: A list of actor handles.
-            cuda_stream: A CUDA stream to dispatch NCCL ops to.
+            cuda_stream: A CUDA stream to dispatch communication ops to.
+                This is ignored since Ray always passes in the current stream
+                and vLLM device communicator does not allow passing in a stream
+                and uses the current stream by default.
         """
         self._world_size = world_size
         self._rank: Optional[int] = None
@@ -56,12 +60,8 @@ class RayPPCommunicator(Communicator):
         if rank is not None:
             # Rank is not None, this is Ray worker
             assert ray.get_gpu_ids(), "RayPPCommunicator has no GPUs assigned"
-            assert cuda_stream is not None, (
-                "RayPPCommunicator must specify cuda_stream")
 
             self._comm = get_pp_group().device_communicator
-            assert self._comm.pynccl_comm is not None, (
-                "RayPPCommunicator requires a PyNCCL communicator")
 
             # Since we wrap around the vLLM _PP communicator, we use
             # the rank from the vLLM communicator, and ignore the rank
@@ -75,7 +75,6 @@ class RayPPCommunicator(Communicator):
             # rank is None, this is Ray driver
             self._comm = None
 
-        self._cuda_stream: Optional[torch.cuda.Stream] = cuda_stream
         self._closed = False
 
     def _build_actor_rank_mapping(self):
@@ -160,9 +159,7 @@ class RayPPCommunicator(Communicator):
         if self._closed:
             raise RayChannelError("RayPPCommunicator has been destroyed.")
 
-        # We call _comm.pynccl_comm.send() instead of _comm.send() to be
-        # able to pass in the CUDA stream.
-        self._comm.pynccl_comm.send(buf, peer_rank, stream=self._cuda_stream)
+        self._comm.send(buf, peer_rank)
 
     def recv(
         self,
@@ -186,20 +183,15 @@ class RayPPCommunicator(Communicator):
         """
         if self._closed:
             raise RayChannelError("RayPPCommunicator has been destroyed.")
-        assert allocator is not None, (
-            "RayPPCommunicator requires a tensor allocator")
-        buf = allocator(shape, dtype)
 
-        # We call _comm.pynccl_comm.recv() instead of _comm.recv() to be
-        # able to pass in the CUDA stream.
-        self._comm.pynccl_comm.recv(buf, peer_rank, stream=self._cuda_stream)
+        size = torch.Size(shape)
+        buf = self._comm.recv(size, dtype, src=peer_rank)
 
-        assert self._cuda_stream is not None
         # Buffer values are undefined if NCCL ops are aborted. Therefore, we
         # need to synchronize here and check that the channel is still
         # open to ensure that the receive buffer is valid.
         # TODO(swang): Avoid CUDA synchronization.
-        self._cuda_stream.synchronize()
+        current_stream().synchronize()
 
         if self._closed:
             raise RayChannelError("RayPPCommunicator has been destroyed.")
@@ -230,11 +222,11 @@ class RayPPCommunicator(Communicator):
 
     @property
     def recv_stream(self):
-        return torch.cuda.StreamContext(self._cuda_stream)
+        return torch.cuda.StreamContext(current_stream())
 
     @property
     def send_stream(self):
-        return torch.cuda.StreamContext(self._cuda_stream)
+        return torch.cuda.StreamContext(current_stream())
 
     def destroy(self) -> None:
         # Just sets a flag, vLLM manages the lifecycle of the underlying
