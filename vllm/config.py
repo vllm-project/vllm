@@ -614,10 +614,6 @@ class ModelConfig:
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, hf_token=self.hf_token, revision=self.revision)
 
-        # NOTE: We need to resolve this early, otherwise the temporary
-        # transformers modules might not be available to child processes
-        self._resolve_transformers_backend()
-
         architectures = self.architectures
         registry = self.registry
         is_generative_model = registry.is_text_generation_model(
@@ -709,9 +705,22 @@ class ModelConfig:
         self.supported_tasks = self._get_supported_tasks(
             architectures, self.runner_type, self.convert_type)
 
-        _, arch = registry.inspect_model_cls(architectures, self)
+        model_info, arch = registry.inspect_model_cls(architectures, self)
         self._architecture = arch
         logger.info("Resolved architecture: %s", arch)
+
+        # Note: Initialize these attributes early because transformers fallback
+        # may fail to load dynamic modules in child processes
+        self.is_cross_encoder = (model_info.supports_cross_encoding
+                                 or self.convert_type == "classify")
+        self.is_pp_supported = model_info.supports_pp
+        self.is_multimodal_raw_input_supported = (
+            model_info.supports_multimodal_raw_input)
+        self.is_attention_free = model_info.is_attention_free
+        self.is_hybrid = model_info.is_hybrid
+        self.has_noops = model_info.has_noops
+        self.has_inner_state = model_info.has_inner_state
+        self.is_v1_compatible = not model_info.supports_v0_only
 
         self.pooler_config = self._init_pooler_config()
 
@@ -792,34 +801,6 @@ class ModelConfig:
                 "max_model_len must be an integer after __post_init__.")
         return self
 
-    def _resolve_transformers_backend(self):
-        if self.model_impl not in (ModelImpl.AUTO, ModelImpl.TRANSFORMERS):
-            return
-
-        model = self.model
-        revision = self.revision
-
-        from vllm.transformers_utils.dynamic_module import (
-            try_get_dynamic_module_file)
-
-        auto_map: dict[str, str] = getattr(self.hf_config, "auto_map",
-                                           None) or dict()
-
-        # Make sure that config class is always initialized before model class,
-        # otherwise the model class won't be able to access the config class,
-        # the expected auto_map should have correct order like:
-        # "auto_map": {
-        #     "AutoConfig": "<your-repo-name>--<config-name>",
-        #     "AutoModel": "<your-repo-name>--<config-name>",
-        #     "AutoModelFor<Task>": "<your-repo-name>--<config-name>",
-        # },
-        for prefix in ("AutoConfig", "AutoModel"):
-            for name, module in auto_map.items():
-                if name.startswith(prefix):
-                    try_get_dynamic_module_file(module,
-                                                model,
-                                                revision=revision)
-
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
@@ -838,7 +819,7 @@ class ModelConfig:
     def architectures(self) -> list[str]:
         return getattr(self.hf_config, "architectures", [])
 
-    @cached_property
+    @property
     def architecture(self) -> str:
         """The architecture vllm actually used."""
         return self._architecture
@@ -1674,43 +1655,9 @@ class ModelConfig:
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
 
-    @cached_property
-    def is_cross_encoder(self) -> bool:
-        return (self.registry.is_cross_encoder_model(self.architectures, self)
-                or self.convert_type == "classify")
-
-    @cached_property
-    def is_pp_supported(self) -> bool:
-        return self.registry.is_pp_supported_model(self.architectures, self)
-
-    @cached_property
-    def is_multimodal_raw_input_supported(self):
-        return self.registry.supports_multimodal_raw_input(
-            self.architectures, self)
-
-    @cached_property
-    def is_attention_free(self):
-        return self.registry.is_attention_free_model(self.architectures, self)
-
-    @cached_property
-    def is_hybrid(self):
-        return self.registry.is_hybrid_model(self.architectures, self)
-
-    @cached_property
-    def has_noops(self):
-        return self.registry.is_noops_model(self.architectures, self)
-
-    @cached_property
-    def has_inner_state(self):
-        return self.registry.model_has_inner_state(self.architectures, self)
-
     @property
     def use_mla(self) -> bool:
         return self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE
-
-    @cached_property
-    def is_v1_compatible(self) -> bool:
-        return self.registry.is_v1_compatible(self.architectures, self)
 
     @property
     def is_matryoshka(self) -> bool:

@@ -508,6 +508,24 @@ class _ModelRegistry:
         auto_map: dict[str, str] = getattr(model_config.hf_config, "auto_map",
                                            None) or dict()
 
+        # Make sure that config class is always initialized before model class,
+        # otherwise the model class won't be able to access the config class,
+        # the expected auto_map should have correct order like:
+        # "auto_map": {
+        #     "AutoConfig": "<your-repo-name>--<config-name>",
+        #     "AutoModel": "<your-repo-name>--<config-name>",
+        #     "AutoModelFor<Task>": "<your-repo-name>--<config-name>",
+        # },
+        for prefix in ("AutoConfig", "AutoModel"):
+            for name, module in auto_map.items():
+                if name.startswith(prefix):
+                    try_get_class_from_dynamic_module(
+                        module,
+                        model_config.model,
+                        revision=model_config.revision,
+                        warn_on_fail=False,
+                    )
+
         model_module = getattr(transformers, architecture, None)
 
         if model_module is None:
@@ -517,6 +535,7 @@ class _ModelRegistry:
                         module,
                         model_config.model,
                         revision=model_config.revision,
+                        warn_on_fail=True,
                     )
                     if model_module is not None:
                         break
