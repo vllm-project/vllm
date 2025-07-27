@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any, Optional
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -54,10 +56,12 @@ class EagleProposer:
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and
                                not self.vllm_config.model_config.enforce_eager)
+        self.use_full_cuda_graph = (
+            self.use_cuda_graph
+            and vllm_config.compilation_config.full_cuda_graph)
         self.cudagraph_batch_sizes = list(
             reversed(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
-
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int32,
@@ -69,6 +73,8 @@ class EagleProposer:
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
             device=device)
+        # attention metadata captured in full cudagraph mode
+        self.attn_metadata_cudagraph = None
         # We need +1 here because the arange is used to set query_start_loc,
         # which has one more element than batch_size.
         self.arange = torch.arange(vllm_config.scheduler_config.max_num_seqs +
@@ -112,7 +118,8 @@ class EagleProposer:
         attn_metadata = self.runner.attn_metadata_builders[0].build(
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
-            fast_build=True,
+            fast_build=not self.
+            use_full_cuda_graph,  # use fast build with eager mode attention
         )
 
         # At this moment, we assume all eagle layers belong to the same KV
@@ -128,7 +135,17 @@ class EagleProposer:
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
-
+        if (self.use_full_cuda_graph
+                and num_tokens <= self.cudagraph_batch_sizes[-1]):
+            assert self.attn_metadata_cudagraph
+            self.attn_metadata_cudagraph.seq_lens[:batch_size] = (
+                attn_metadata.seq_lens)
+            self.attn_metadata_cudagraph.slot_mapping[:num_tokens] = (
+                attn_metadata.slot_mapping)
+            self.attn_metadata_cudagraph.query_start_loc[:batch_size + 1] = (
+                attn_metadata.query_start_loc)
+            self.attn_metadata_cudagraph.block_table[:batch_size] = (
+                attn_metadata.block_table)
         with set_forward_context(per_layer_attn_metadata,
                                  self.vllm_config,
                                  num_tokens=num_input_tokens):
@@ -172,7 +189,7 @@ class EagleProposer:
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
-        for _ in range(self.num_speculative_tokens - 1):
+        for i in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
@@ -218,6 +235,22 @@ class EagleProposer:
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states
+            if (self.use_full_cuda_graph
+                    and batch_size <= self.cudagraph_batch_sizes[-1]):
+                assert self.attn_metadata_cudagraph
+                self.attn_metadata_cudagraph.seq_lens[:batch_size] = (
+                    attn_metadata.seq_lens)
+                self.attn_metadata_cudagraph.slot_mapping[:batch_size] = (
+                    attn_metadata.slot_mapping)
+                if i == 0:
+                    self.attn_metadata_cudagraph.query_start_loc[:batch_size +
+                                                                 1] = (
+                                                                     attn_metadata
+                                                                     .
+                                                                     query_start_loc
+                                                                 )
+                    self.attn_metadata_cudagraph.block_table[:batch_size] = (
+                        attn_metadata.block_table)
 
             # Run the model.
             with set_forward_context(per_layer_attn_metadata,
@@ -388,8 +421,13 @@ class EagleProposer:
     def dummy_run(
         self,
         num_tokens: int,
+        attn_metadata: Optional[dict[str, Any]] = None,
     ) -> None:
-        with set_forward_context(None, self.vllm_config,
+        if attn_metadata is not None and self.attn_metadata_cudagraph is None:
+            self.attn_metadata_cudagraph = attn_metadata[
+                self.attn_layer_names[0]]
+        with set_forward_context(attn_metadata,
+                                 self.vllm_config,
                                  num_tokens=num_tokens):
             self.model(
                 self.input_ids[:num_tokens],
