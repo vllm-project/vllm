@@ -503,6 +503,12 @@ def reorder_batch_to_split_decodes_and_prefills(
     return modified_batch
 
 
+TRUNCATED_PREFILL_METADATA_FIELDS = [
+    ('logits_indices_padded', Optional[torch.Tensor], None),
+    ('num_logits_indices', int, 0),
+]
+
+
 def subclass_attention_metadata(
     name_prefix: str,
     metadata_cls: Any,
@@ -514,3 +520,14 @@ def subclass_attention_metadata(
     name: str = name_prefix + metadata_cls.__name__  # type: ignore
     Wrapped = make_dataclass(name, fields, bases=(metadata_cls, ))
     return Wrapped
+
+
+def make_truncated_prefill_attention_metadata(metadata_cls: Any, ) -> Any:
+    """
+    Return a new subclass of `metadata_cls` for truncated prefill
+    """
+    return subclass_attention_metadata(
+        name_prefix="TruncatedPrefill",
+        metadata_cls=metadata_cls,
+        fields=TRUNCATED_PREFILL_METADATA_FIELDS,
+    )

@@ -46,7 +46,8 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
 from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionBackend
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
-    make_local_attention_virtual_batches, subclass_attention_metadata)
+    make_local_attention_virtual_batches,
+    make_truncated_prefill_attention_metadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         ChunkedLocalAttentionSpec,
@@ -840,24 +841,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_attn_metadata=common_attn_metadata,
             ))
 
+            truncated_prefill_metadata_type = type(attn_metadata_i)
+            if (self.cache_config.enable_kv_sharing_truncated_prefill
+                    and self.truncated_prefill_eligible_layers):
+                # Dynamically create a a dataclass type that inherits
+                # from attention metadata type but includes additional
+                # fields logits_indices_padded and num_logits_indices
+                # which are required for prefill truncation
+                truncated_prefill_metadata_type = (
+                    make_truncated_prefill_attention_metadata(
+                        metadata_cls=type(attn_metadata_i), ))
+
             for layer_name in kv_cache_group_spec.layer_names:
                 if (self.cache_config.enable_kv_sharing_truncated_prefill and
                         layer_name in self.truncated_prefill_eligible_layers):
-                    fields = [
-                        ('logits_indices_padded', Optional[torch.Tensor],
-                         None),
-                        ('num_logits_indices', int, 0),
-                    ]
-                    # Dynamically create a a dataclass type that inherits
-                    # from attention metadata type but includes additional
-                    # fields logits_indices_padded and num_logits_indices
-                    # which are required for prefill truncation
-                    truncated_prefill_metadata_type = (
-                        subclass_attention_metadata(
-                            name_prefix="TruncatedPrefill",
-                            metadata_cls=type(attn_metadata_i),
-                            fields=fields,
-                        ))
                     attn_metadata[
                         layer_name] = truncated_prefill_metadata_type(
                             **dataclasses.asdict(attn_metadata_i),
