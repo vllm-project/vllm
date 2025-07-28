@@ -473,7 +473,7 @@ class EngineCoreProc(EngineCore):
                     raise RuntimeError(
                         "Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
-                logger.info("Waiting for READY message from DP Coordinator")
+                logger.info("Waiting for READY message from DP Coordinator...")
 
         self.step_fn = (self.step if self.batch_queue is None else
                         self.step_with_batch_queue)

@@ -177,7 +177,7 @@ class DPCoordinatorProc:
             for _ in self.engines:
                 if publish_back.recv() != b'\x01':
                     logger.error(
-                        "DP Coordinator received unexpected message while"
+                        "DP Coordinator received unexpected message while "
                         "waiting for engines to subscribe")
                     return
             # Send ready message to engines.
