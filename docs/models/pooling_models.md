@@ -160,7 +160,6 @@ The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
 It returns the extracted hidden states directly.
 
 !!! note
-    `LLM.encode` defaults to using `pooling_task = embed`.
     Please use one of the more specific methods instead of `encode`:
     - For embeddings, use `LLM.embed(...)`.
     - For classification logits, use `LLM.classify(...)`.
