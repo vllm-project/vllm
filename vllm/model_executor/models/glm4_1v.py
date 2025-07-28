@@ -99,8 +99,7 @@ class Glm4vImagePixelInputs(TensorSchema):
     """
     type: Literal["pixel_values"] = "pixel_values"
 
-    pixel_values: Annotated[Union[torch.Tensor, list[torch.Tensor]],
-                            TensorShape("p", "c")]
+    pixel_values: Annotated[torch.Tensor, TensorShape("p", "c")]
     image_grid_thw: Annotated[torch.Tensor, TensorShape("n", 3)]
 
 
@@ -128,14 +127,14 @@ class Glm4vVideoPixelInputs(TensorSchema):
         - c: Number of channels * temporal_patch_size * patch_size * patch_size
         - n: Number of videos
         - f: Number of frames
-        - g: Grid dimensions (3 for grid_t which is usually 1 for processed video, grid_h, grid_w)
+        - g: Grid dimensions (3 for grid_t which is usually 1 for processed 
+          video, grid_h, grid_w)
     """
     type: Literal["pixel_values_videos"] = "pixel_values_videos"
 
     pixel_values_videos: Annotated[torch.Tensor, TensorShape("p", "c")]
     # video_metadata: Union[list[VideoMetadata], list[dict]]
-    video_grid_thw: Annotated[Union[list[torch.Tensor], torch.Tensor],
-                              TensorShape("n", "f", 3)]
+    video_grid_thw: Annotated[torch.Tensor, TensorShape("n", "f", 3)]
 
 
 class Glm4vVideoEmbeddingInputs(TensorSchema):
@@ -144,7 +143,8 @@ class Glm4vVideoEmbeddingInputs(TensorSchema):
         - p: Number of video patches across all frames
         - h: Hidden size (must match language model backbone)
         - n: Number of videos
-        - g: Grid dimensions (3 for grid_t which is usually 1 for processed video, grid_h, grid_w)
+        - g: Grid dimensions (3 for grid_t which is usually 1 for processed 
+          video, grid_h, grid_w)
     """
     type: Literal["video_embeds"] = "video_embeds"
 
