@@ -90,9 +90,7 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
 
     # check support
     attn_fusion_supported = [
-        layer.impl.fused_output_quant_supported(quant_key.dtype,
-                                                quant_key.static,
-                                                quant_key.group_shape)
+        layer.impl.fused_output_quant_supported(quant_key)
         for key, layer in compile_config.static_forward_context.items()
     ]
 

@@ -16,8 +16,12 @@ from flashinfer.decode import (_get_range_buf, get_seq_lens,
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
+from vllm.compilation.fusion import QuantKey
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
@@ -646,11 +650,39 @@ class FlashInferImpl(AttentionImpl):
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
+        # TODO: expected to get this from the passed args
+        self.use_trtllm_attn = True
+
+        # QuantFP8 custom op: currently used by TRT-LLM decode attn
+        if self.kv_cache_dtype.startswith("fp8"):
+            self.use_fp8_kv_cache = True
+            self.quant_fp8 = QuantFP8(static=True,
+                                      group_shape=GroupShape.PER_TENSOR)
+        else:
+            self.use_fp8_kv_cache = False
+            self.quant_fp8 = None
+
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "FlashInferImpl")
+
+    def inserted_input_quant_supported(self, quant_key: QuantKey):
+        if self.use_trtllm_attn:
+            return (quant_key.dtype == current_platform.fp8_dtype()
+                    and quant_key.static
+                    and quant_key.group_shape == GroupShape.PER_TENSOR)
+
+        return False
+
+    def fused_output_quant_supported(self, quant_key: QuantKey):
+        if self.use_trtllm_attn:
+            return (quant_key.dtype == current_platform.fp8_dtype()
+                    and quant_key.static
+                    and quant_key.group_shape == GroupShape.PER_TENSOR)
+
+        return False
 
     def forward(
         self,
@@ -680,10 +712,11 @@ class FlashInferImpl(AttentionImpl):
         """
         assert output is not None, "Output tensor must be provided."
 
-        if output_scale is not None:
+        if (output_scale is not None and not self.use_fp8_kv_cache
+                and not self.use_trtllm_attn):
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
-                " for FlashInferImpl")
+                " for non-fp8-kv-cache and non-trtllm-attn FlashInferImpl")
 
         if attn_metadata is None:
             # Profiling run.
@@ -721,7 +754,7 @@ class FlashInferImpl(AttentionImpl):
 
             # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
             # to process the cache when the kv_cache_dtype is fp8
-            if self.kv_cache_dtype.startswith("fp8"):
+            if self.use_fp8_kv_cache:
                 torch_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
                     self.kv_cache_dtype)
                 kv_cache = kv_cache.view(torch_dtype)
@@ -745,10 +778,19 @@ class FlashInferImpl(AttentionImpl):
 
         stride_order = FlashInferBackend.get_kv_cache_stride_order()
         kv_cache_permute = kv_cache.permute(*stride_order)
+
+        bmm2_scale = layer._v_scale_float
+        use_trtllm = (self.use_trtllm_attn
+                      and FlashInferBackend.use_trtllm_decode_attention(
+                          attn_metadata.num_decodes, attn_metadata.max_seq_len,
+                          self.kv_cache_dtype, attn_metadata.num_qo_heads,
+                          attn_metadata.num_kv_heads, attn_metadata.head_dim))
+
         # Regular attention (common case).
         # Decodes are at the front and prefills are at the back,
         # according to reorder_batch()
-        if prefill_wrapper := attn_metadata.prefill_wrapper:
+        if (num_prefill_tokens > 0
+                and (prefill_wrapper := attn_metadata.prefill_wrapper)):
             prefill_query = query[num_decode_tokens:]
             assert prefill_query.shape[0] == num_prefill_tokens
             assert prefill_wrapper is not None
@@ -757,21 +799,48 @@ class FlashInferImpl(AttentionImpl):
             assert prefill_wrapper._logits_soft_cap == (self.logits_soft_cap
                                                         or 0.0)
             assert prefill_wrapper._sm_scale == self.scale
+
+            out = output[num_decode_tokens:]
+            if use_trtllm and self.use_fp8_kv_cache:
+                assert out.dtype is current_platform.fp8_dtype()
+                out = torch.empty(out.shape,
+                                  dtype=torch.bfloat16,
+                                  device=out.device)
+
             prefill_wrapper.run(
                 prefill_query,
                 kv_cache_permute,
                 k_scale=layer._k_scale_float,
                 v_scale=layer._v_scale_float,
-                out=output[num_decode_tokens:],
+                out=out,
             )
-        if decode_wrapper := attn_metadata.decode_wrapper:
+
+            if use_trtllm and self.use_fp8_kv_cache:
+                num_tokens, num_heads, head_size = out.shape
+                out, _ = self.quant_fp8(
+                    out.reshape((num_tokens, num_heads * head_size)),
+                    output_scale)
+                output[num_decode_tokens:] = out.reshape(
+                    (num_tokens, num_heads, head_size))
+
+        if (num_decode_tokens > 0
+                and (decode_wrapper := attn_metadata.decode_wrapper)):
             decode_query = query[:num_decode_tokens]
             assert decode_query.shape[0] == num_decode_tokens
             assert decode_wrapper is not None
-            if not FlashInferBackend.use_trtllm_decode_attention(
-                    attn_metadata.num_decodes, attn_metadata.max_seq_len,
-                    self.kv_cache_dtype, attn_metadata.num_qo_heads,
-                    attn_metadata.num_kv_heads, attn_metadata.head_dim):
+
+            if use_trtllm and self.use_fp8_kv_cache:
+                num_tokens, num_heads, head_size = decode_query.shape
+                decode_query, _ = self.quant_fp8(
+                    decode_query.reshape(
+                        (num_tokens, num_heads * head_size)).contiguous(),
+                    layer._q_scale)
+                decode_query = decode_query.reshape(
+                    (num_tokens, num_heads, head_size))
+                if output_scale is not None:
+                    bmm2_scale = bmm2_scale / layer._prob_scale_float
+
+            if not use_trtllm:
                 assert decode_wrapper._window_left == window_left
                 assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap
                                                            or 0.0)
@@ -785,33 +854,31 @@ class FlashInferImpl(AttentionImpl):
                 )
             else:
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
-                if num_decode_tokens > 0:
-                    # decode_query may be non-contiguous
-                    decode_query = decode_query.contiguous()
-                    block_tables_decode = attn_metadata.block_table_tensor[:
-                                                                           num_decode_tokens]
-                    seq_lens_decode = attn_metadata.seq_lens[:
-                                                             num_decode_tokens]
-                    workspace_buffer = decode_wrapper._float_workspace_buffer
+                # decode_query may be non-contiguous
+                decode_query = decode_query.contiguous()
+                block_tables_decode = attn_metadata.block_table_tensor[:
+                                                                       num_decode_tokens]
+                seq_lens_decode = attn_metadata.seq_lens[:num_decode_tokens]
+                workspace_buffer = decode_wrapper._float_workspace_buffer
 
-                    assert get_kv_cache_layout() == "HND"
-                    assert decode_query.is_contiguous()
-                    assert kv_cache_permute.is_contiguous()
-                    assert block_tables_decode.is_contiguous()
-                    assert seq_lens_decode.is_contiguous()
-                    assert workspace_buffer.is_contiguous()
+                assert get_kv_cache_layout() == "HND"
+                assert kv_cache_permute.is_contiguous()
+                assert block_tables_decode.is_contiguous()
+                assert seq_lens_decode.is_contiguous()
+                assert workspace_buffer.is_contiguous()
 
-                    trtllm_batch_decode_with_kv_cache(
-                        query=decode_query,
-                        kv_cache=kv_cache_permute,
-                        workspace_buffer=workspace_buffer,
-                        block_tables=block_tables_decode,
-                        seq_lens=seq_lens_decode,
-                        max_seq_len=attn_metadata.max_seq_len,
-                        bmm1_scale=layer._k_scale_float * self.scale,
-                        bmm2_scale=layer._v_scale_float,
-                        out=output[:num_decode_tokens],
-                    )
+                trtllm_batch_decode_with_kv_cache(
+                    query=decode_query,
+                    kv_cache=kv_cache_permute,
+                    workspace_buffer=workspace_buffer,
+                    block_tables=block_tables_decode,
+                    seq_lens=seq_lens_decode,
+                    max_seq_len=attn_metadata.max_seq_len,
+                    bmm1_scale=layer._k_scale_float * self.scale,
+                    bmm2_scale=bmm2_scale,
+                    out=output[:num_decode_tokens],
+                )
+
         return output_padded
 
 
@@ -836,8 +903,8 @@ def fast_plan_decode(
     non_blocking: bool = True,
 ) -> None:
     """
-    A faster version of BatchDecodeWithPagedKVCacheWrapper::plan used for 
-    cudagraph capture/replay, while the no cudagraph version turns back 
+    A faster version of BatchDecodeWithPagedKVCacheWrapper::plan used for
+    cudagraph capture/replay, while the no cudagraph version turns back
     to the original plan.
     using original plan after passing host-side buffers:
     - only host-to-device copy of indptr and last_page_len buffers
