@@ -124,7 +124,8 @@ class Glm4vVideoPixelInputs(TensorSchema):
     """
     Dimensions:
         - np: Number of patches
-        - ctpp: Number of channels * temporal_patch_size * patch_size * patch_size
+        - ctpp: Number of channels * temporal_patch_size *
+            patch_size * patch_size
         - nv: Number of videos
         - f: Number of frames
         - g: Grid dimensions (3 for grid_t which is usually 1 for processed 
