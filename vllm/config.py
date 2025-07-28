@@ -949,9 +949,12 @@ class ModelConfig:
 
         runner_type = self._get_default_runner_type(architectures)
 
-        logger.info(
-            "Resolved `--runner auto` to `--runner %s`. "
-            "Pass the value explicitly to silence this message.", runner_type)
+        # Don't log the most common case
+        if runner_type != "generate":
+            logger.info(
+                "Resolved `--runner auto` to `--runner %s`. "
+                "Pass the value explicitly to silence this message.",
+                runner_type)
 
         return runner_type
 
@@ -998,9 +1001,12 @@ class ModelConfig:
         convert_type = self._get_default_convert_type(architectures,
                                                       runner_type)
 
-        logger.info(
-            "Resolved `--convert auto` to `--convert %s`. "
-            "Pass the value explicitly to silence this message.", convert_type)
+        # Don't log the most common case
+        if convert_type != "none":
+            logger.info(
+                "Resolved `--convert auto` to `--convert %s`. "
+                "Pass the value explicitly to silence this message.",
+                convert_type)
 
         return convert_type
 
