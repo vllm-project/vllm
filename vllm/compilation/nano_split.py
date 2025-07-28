@@ -2,6 +2,8 @@ import contextlib
 import copy
 from dataclasses import dataclass
 import torch
+from flashinfer import green_ctx
+import nvmath
 from typing import Callable, ContextManager, Dict, List, Tuple, Optional, Set
 
 @dataclass
@@ -89,6 +91,12 @@ class NanoSplitManager:
         self.cached_config: Optional[NanoBatchSplitConfig] = None
         self.comm_stream = torch.cuda.Stream()
         self.comp_stream = torch.cuda.Stream()
+        self.comp_stream, _ = green_ctx.split_device_green_ctx_by_sm_count( # type: ignore
+            dev=torch.device(f"cuda:{torch.cuda.current_device()}"),
+            sm_counts=[120]
+        )[0]
+        handle = torch.cuda.current_blas_handle()
+        nvmath.bindings.cublas.set_sm_count_target(handle, 120) # type: ignore
 
 
     def get_callable(self) -> Callable:
@@ -263,14 +271,19 @@ class NanoSplitManager:
         assert self.cached_config is not None
         batch_sizes = self.cached_config.batch_sizes
         comm_finished = [None for _ in range(len(batch_sizes))]
+        comp_finished = [None for _ in range(len(batch_sizes))]
 
         @contextlib.contextmanager
         def set_stream(op_info: NanoOpInfo):
             if op_info.tag == "vllm.all_reduce":
                 torch.cuda.set_stream(self.comm_stream) # type: ignore
                 comm_finished[op_info.idx] = torch.cuda.Event() # type: ignore
+                if comp_finished[op_info.idx] is not None:
+                    comp_finished[op_info.idx].wait() # type: ignore
+                    comp_finished[op_info.idx] = None
             else:
                 torch.cuda.set_stream(self.comp_stream) # type: ignore
+                comp_finished[op_info.idx] = torch.cuda.Event() # type: ignore
                 if comm_finished[op_info.idx] is not None:
                     comm_finished[op_info.idx].wait() # type: ignore
                     comm_finished[op_info.idx] = None
@@ -279,6 +292,8 @@ class NanoSplitManager:
             finally:
                 if op_info.tag == "vllm.all_reduce":
                     comm_finished[op_info.idx].record() # type: ignore
+                else:
+                    comp_finished[op_info.idx].record() # type: ignore
 
         @contextlib.contextmanager
         def nvtx_mark(op_info: NanoOpInfo):

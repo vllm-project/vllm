@@ -796,15 +796,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
     ) -> None:
         """
-        For each group of requests (as defined by split_indices), generate
-        separate attention metadata.
+        Split the input batch into nano batches and prepare
+        attention metadata for each nano batch.
 
         Args:
             scheduler_output: SchedulerOutput for the whole batch.
-            nano_batch_size: List of nano batch sizes.
-
-        Returns:
-            List of attention_metadata dicts, one per group.
         """
         req_ids = self.input_batch.req_ids
         num_reqs = len(req_ids)
