@@ -23,7 +23,7 @@ from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
-from vllm.config import TaskOption, _get_and_verify_dtype
+from vllm.config import ConvertOption, RunnerOption, _get_and_verify_dtype
 from vllm.connections import global_http_connection
 from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
@@ -769,7 +769,8 @@ class VllmRunner:
     def __init__(
         self,
         model_name: str,
-        task: TaskOption = "auto",
+        runner: RunnerOption = "auto",
+        convert: ConvertOption = "auto",
         tokenizer_name: Optional[str] = None,
         tokenizer_mode: str = "auto",
         trust_remote_code: bool = True,
@@ -786,7 +787,8 @@ class VllmRunner:
     ) -> None:
         self.llm = LLM(
             model=model_name,
-            task=task,
+            runner=runner,
+            convert=convert,
             tokenizer=tokenizer_name,
             tokenizer_mode=tokenizer_mode,
             trust_remote_code=trust_remote_code,
