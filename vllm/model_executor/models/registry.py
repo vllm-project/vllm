@@ -586,18 +586,6 @@ class _ModelRegistry:
 
         return architecture
 
-    def _normalize_archs(
-        self,
-        architectures: list[str],
-        model_config: ModelConfig,
-    ) -> list[str]:
-        if not architectures:
-            logger.warning("No model architectures are specified")
-
-        return [
-            self._normalize_arch(arch, model_config) for arch in architectures
-        ]
-
     def inspect_model_cls(
         self,
         architectures: Union[str, list[str]],
@@ -605,8 +593,8 @@ class _ModelRegistry:
     ) -> tuple[_ModelInfo, str]:
         if isinstance(architectures, str):
             architectures = [architectures]
-
-        normalized_archs = self._normalize_archs(architectures, model_config)
+        if not architectures:
+            logger.warning("No model architectures are specified")
 
         # Require transformers impl
         if model_config.model_impl == ModelImpl.TRANSFORMERS:
@@ -617,19 +605,21 @@ class _ModelRegistry:
                 if model_info is not None:
                     return (model_info, arch)
 
-        for arch, normalized_arch in zip(architectures, normalized_archs):
-            model_info = self._try_inspect_model_cls(normalized_arch)
-            if model_info is not None:
-                return (model_info, arch)
-
         # Fallback to transformers impl
-        if model_config.model_impl in (ModelImpl.AUTO, ModelImpl.TRANSFORMERS):
+        if (all(arch not in self.models for arch in architectures)
+                and model_config.model_impl == ModelImpl.AUTO):
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
             if arch is not None:
                 model_info = self._try_inspect_model_cls(arch)
                 if model_info is not None:
                     return (model_info, arch)
+
+        for arch in architectures:
+            normalized_arch = self._normalize_arch(arch, model_config)
+            model_info = self._try_inspect_model_cls(normalized_arch)
+            if model_info is not None:
+                return (model_info, arch)
 
         return self._raise_for_unsupported(architectures)
 
@@ -640,8 +630,8 @@ class _ModelRegistry:
     ) -> tuple[type[nn.Module], str]:
         if isinstance(architectures, str):
             architectures = [architectures]
-
-        normalized_archs = self._normalize_archs(architectures, model_config)
+        if not architectures:
+            logger.warning("No model architectures are specified")
 
         # Require transformers impl
         if model_config.model_impl == ModelImpl.TRANSFORMERS:
@@ -652,19 +642,21 @@ class _ModelRegistry:
                 if model_cls is not None:
                     return (model_cls, arch)
 
-        for arch, normalized_arch in zip(architectures, normalized_archs):
-            model_cls = self._try_load_model_cls(normalized_arch)
-            if model_cls is not None:
-                return (model_cls, arch)
-
         # Fallback to transformers impl
-        if model_config.model_impl in (ModelImpl.AUTO, ModelImpl.TRANSFORMERS):
+        if (all(arch not in self.models for arch in architectures)
+                and model_config.model_impl == ModelImpl.AUTO):
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
             if arch is not None:
                 model_cls = self._try_load_model_cls(arch)
                 if model_cls is not None:
                     return (model_cls, arch)
+
+        for arch in architectures:
+            normalized_arch = self._normalize_arch(arch, model_config)
+            model_cls = self._try_load_model_cls(normalized_arch)
+            if model_cls is not None:
+                return (model_cls, arch)
 
         return self._raise_for_unsupported(architectures)
 
