@@ -63,21 +63,19 @@ class GraniteSpeechAudioInputs(TensorSchema):
     Audio input features for Granite Speech model.
     
     Dimensions:
-        - bsz: Batch size
-        - num_features: Number of audio features (variable length)
+        - b: Batch size
+        - nf: Number of audio features (variable length)
         - 160: Fixed feature dimension for Mel spectrogram features
     """
 
-    input_features: Annotated[torch.Tensor,
-                              TensorShape("bsz", "num_features", 160)]
-    """Audio input features. Shape: `(bsz, num_features, 160)`"""
+    input_features: Annotated[torch.Tensor, TensorShape("b", "nf", 160)]
+    """Audio input features."""
 
-    input_features_mask: Annotated[torch.Tensor,
-                                   TensorShape("bsz", "num_features")]
-    """Mask for variable length audio features. Shape: `(bsz, num_features)`"""
+    input_features_mask: Annotated[torch.Tensor, TensorShape("b", "nf")]
+    """Mask for variable length audio features."""
 
-    audio_embed_sizes: Annotated[list[int], TensorShape("bsz")]
-    """List of audio embedding sizes for each item in batch. Length: `bsz`"""
+    audio_embed_sizes: Annotated[list[int], TensorShape("b")]
+    """List of audio embedding sizes for each item in batch."""
 
 
 class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
