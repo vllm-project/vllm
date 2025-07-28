@@ -1094,11 +1094,12 @@ class LLM:
         """
         if pooling_task is None:
             raise ValueError(
-                "`pooling_task` must be specified. "
-                "Get embedding prefer `LLm.embed`. "
-                "Get classification logits prefer to `LLm.classify`. "
-                "Get reward scores prefer `LLm.reward`. "
-                "Get pairs similarity scores prefer `LLm.score`.")
+                "`pooling_task` must be specified. Please use one of the more "
+                "specific methods instead of `encode`:\n"
+                "  - For embeddings, use `LLM.embed(...)`.\n"
+                "  - For classification logits, use `LLM.classify(...)`.\n"
+                "  - For reward scores, use `LLM.reward(...)`.\n"
+                "  - For similarity scores, use `LLM.score(...)`.")
 
         model_config = self.llm_engine.model_config
         runner_type = model_config.runner_type
