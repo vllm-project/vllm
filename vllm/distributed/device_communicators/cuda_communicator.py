@@ -96,7 +96,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def all_reduce(self, input_, output_=None):
         if (
             self.pynccl_comm is not None
-            and self.pynccl_comm.nccl_version >= 22703
             and hasattr(input_, "symmetric_memory")
             and input_.symmetric_memory
         ):

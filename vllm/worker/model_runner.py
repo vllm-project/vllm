@@ -2075,7 +2075,11 @@ class CUDAGraphRunner(nn.Module):
         torch.cuda.synchronize()
         # Capture the graph.
         self._graph = torch.cuda.CUDAGraph()
-        set_graph_pool_id(memory_pool)
+        if memory_pool is not None:
+            set_graph_pool_id(memory_pool)
+        else:
+            # TODO(asamani): remove this once we have a better way to handle
+            set_graph_pool_id(torch.cuda.graph_pool_handle())
         with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
             output_hidden_or_intermediate_states = self.model(
                 input_ids=input_ids,

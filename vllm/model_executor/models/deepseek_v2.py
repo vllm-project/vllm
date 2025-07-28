@@ -195,7 +195,7 @@ class DeepseekV2MoE(nn.Module):
             final_hidden_states = self.experts(hidden_states=hidden_states,
                                                router_logits=router_logits)
         if shared_output is not None:
-            with tensor_model_parallel_use_symmetric_memory():
+            with tensor_model_parallel_use_symmetric_memory() as sm:
                 final_hidden_states_out = torch.empty_like(final_hidden_states)
             if hidden_states.dtype != torch.float16:
                 torch.add(
@@ -215,7 +215,7 @@ class DeepseekV2MoE(nn.Module):
                 )
                 final_hidden_states = final_hidden_states_out
                 final_hidden_states.symmetric_memory = True
-
+            sm.tag(final_hidden_states)
         if self.tp_size > 1:
             final_hidden_states = (
                 self.experts.maybe_all_reduce_tensor_model_parallel(
@@ -615,11 +615,12 @@ class DeepseekV2DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        with tensor_model_parallel_use_symmetric_memory():
-            hidden_states = self.self_attn(
-                positions=positions,
-                hidden_states=hidden_states,
-            )
+        # TODO(asamani): add back when fixed
+        #with tensor_model_parallel_use_symmetric_memory():
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+        )
         hidden_states.symmetric_memory = True
 
         if hidden_states.dtype == torch.float16:
