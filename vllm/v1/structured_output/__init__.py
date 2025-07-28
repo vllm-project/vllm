@@ -28,6 +28,8 @@ else:
 
 logger = init_logger(__name__)
 
+USE_PARALLEL_FILLBITMASK = True
+
 
 class StructuredOutputManager:
     """Engine-level manager for structured output requests."""
@@ -39,6 +41,14 @@ class StructuredOutputManager:
 
         self._grammar_bitmask: Optional[torch.Tensor] = None
         self._full_mask = torch.tensor(-1, dtype=torch.int32)
+
+        self.bitmask_batch_size = 8
+        if USE_PARALLEL_FILLBITMASK:
+            max_workers = min(multiprocessing.cpu_count(), 8)
+            self.executor_for_fillmask = ThreadPoolExecutor(
+                max_workers=max_workers)
+
+        torch._dynamo.config.recompile_limit = 64
 
         if not self.vllm_config.model_config.skip_tokenizer_init:
             # The default max_workers if not specified is the number of
@@ -120,6 +130,17 @@ class StructuredOutputManager:
         assert self.backend is not None
         return self.backend.compile_grammar(request_type, grammar_spec)
 
+    def _async_fill_bitmasks(
+        self,
+        batch: list[tuple[StructuredOutputGrammar, int]],
+    ):
+        for grammar, index in batch:
+            if grammar.is_terminated():
+                self._grammar_bitmask[index].fill_(self._full_mask)
+            else:
+                grammar.fill_bitmask(self._grammar_bitmask, index)
+        return True
+
     def grammar_bitmask(
         self,
         requests: dict[str, Request],
@@ -158,11 +179,42 @@ class StructuredOutputManager:
         # Note that for thinking support, we will need to
         # reset the relevant part of the bitmask for consequent
         # request here.
-        bitmask_tensor[:(len(ordered_seq) * (1 + max_num_spec_tokens))].fill_(
-            self._full_mask)
+        # bitmask_tensor[:(len(ordered_seq) * (1 + max_num_spec_tokens))].fill_(
+        #     self._full_mask)
+
+        # FILL ALL BITMASKS FOR FIRST PASS
+        promises = []
+        batch = []
+        for req_id, _ in ordered_seq:
+            request = requests[req_id]
+            structured_output_request = request.structured_output_request
+
+            batch.append((structured_output_request.grammar, cumulative_index))
+            if len(batch) == self.bitmask_batch_size:
+                if USE_PARALLEL_FILLBITMASK:
+                    promises.append(
+                        self.executor_for_fillmask.submit(
+                            self._async_fill_bitmasks, batch))
+                else:
+                    self._async_fill_bitmasks(batch)
+                batch = []
+
+            cumulative_index += 1
+        if batch:
+            if USE_PARALLEL_FILLBITMASK:
+                promises.append(
+                    self.executor_for_fillmask.submit(
+                        self._async_fill_bitmasks, batch))
+            else:
+                self._async_fill_bitmasks(batch)
+
+        # Wait for all bitmask filling tasks to complete.
+        for promise in promises:
+            promise.result()
 
         # NOTE: This outer loop can likely be parallelized to improve
         # performance of bitmask generation for large batches.
+        """
         for req_id, _ in ordered_seq:
             request = requests[req_id]
             structured_output_request = request.structured_output_request
@@ -180,21 +232,22 @@ class StructuredOutputManager:
             state_advancements = 0
             req_tokens = scheduled_spec_decode_tokens.get(req_id, []) + [None]
             for i, token in enumerate(req_tokens):
-                if apply_bitmask and not \
-                    structured_output_request.grammar.is_terminated():
-                    structured_output_request.grammar.fill_bitmask(
-                        bitmask_tensor, cumulative_index)
-                    if token is not None:
-                        # In order to generate the correct bitmask for each
-                        # position in the speculative sequence, we advance
-                        # the FSM state for each speculative token and rollback
-                        # to restore the previous state when we are finished.
-                        assert structured_output_request.grammar.accept_tokens(
-                            req_id, [token])
-                        state_advancements += 1
+                # if True:
+                if i != 0:
+                    if apply_bitmask and not \
+                        structured_output_request.grammar.is_terminated():
+                        structured_output_request.grammar.fill_bitmask(
+                            bitmask_tensor, cumulative_index)
+                    else:
+                        bitmask_tensor[cumulative_index].fill_(self._full_mask)
+                if apply_bitmask and structured_output_request.grammar.is_terminated() and token is not None:
+                    assert structured_output_request.grammar.accept_tokens(
+                        req_id, [token])
+                    state_advancements += 1
                 cumulative_index += 1
             if state_advancements > 0:
                 structured_output_request.grammar.rollback(state_advancements)
+        """
 
         if cumulative_index < bitmask_tensor.shape[0]:
             bitmask_tensor = bitmask_tensor[:cumulative_index]
