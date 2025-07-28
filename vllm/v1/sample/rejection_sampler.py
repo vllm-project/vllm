@@ -232,6 +232,7 @@ def rejection_sample(
         is_greedy,
         posterior_alpha,
         thinking_states,
+        thinking_states is None,
         max_spec_len,
         vocab_size,
         NO_DRAFT_PROBS=draft_probs is None,
@@ -498,6 +499,7 @@ def rejection_random_sample_kernel(
     is_greedy_ptr,  # [batch_size]
     posterior_alpha,
     thinking_states_ptr,  # [batch_size],
+    NO_THINKING_STATES: tl.constexpr,
     max_spec_len,
     vocab_size,
     NO_DRAFT_PROBS: tl.constexpr,
@@ -516,7 +518,7 @@ def rejection_random_sample_kernel(
     num_draft_tokens = end_idx - start_idx
 
     alpha = 1.0
-    if thinking_states_ptr is not None:
+    if not NO_THINKING_STATES:
         thinking_state = tl.load(thinking_states_ptr + req_idx)
         if thinking_state:
             alpha = posterior_alpha
