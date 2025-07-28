@@ -240,6 +240,12 @@ def apply_rotary_pos_emb_vision(t: torch.Tensor,
     apply_rotary_emb = apply_rotary_emb_torch
     if current_platform.is_cuda():
         from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+        return apply_rotary_emb(t_, cos, sin).type_as(t)
+
+    if current_platform.is_rocm():
+        from flash_attn.ops.triton.rotary import apply_rotary
+        return apply_rotary(t_, cos, sin).type_as(t)
+
     output = apply_rotary_emb(t_, cos, sin).type_as(t)
     return output
 
