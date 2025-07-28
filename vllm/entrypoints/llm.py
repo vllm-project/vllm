@@ -145,6 +145,10 @@ class LLM:
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the level of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
+        enable_kv_sharing_truncated_prefill: Work in progress feature to
+            enable metadata required to skip prefill in certain KV sharing
+            setups (e.g. YOCO). See
+            [CacheConfig][vllm.config.CacheConfig].
         **kwargs: Arguments for [`EngineArgs`][vllm.EngineArgs].
 
     Note:
