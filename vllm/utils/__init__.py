@@ -3294,9 +3294,10 @@ def set_process_title(name: str,
         suffix: An optional suffix to append to the base name.
         append: Whether to append to the existing process title.
     """
-    name = f"{envs.VLLM_PROCESS_NAME_PREFIX}::{name}"
     if suffix:
         name = f"{name}_{suffix}"
     if append:
         name = f"{setproctitle.getproctitle()}_{name}"
+    else:
+        name = f"{envs.VLLM_PROCESS_NAME_PREFIX}::{name}"
     setproctitle.setproctitle(name)
