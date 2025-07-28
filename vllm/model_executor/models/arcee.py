@@ -9,7 +9,7 @@
 # activation.
 
 from collections.abc import Iterable
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, overload
 
 import torch
 from torch import nn
@@ -28,7 +28,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA
+from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
@@ -338,7 +338,7 @@ class ArceeModel(nn.Module):
         return loaded_params
 
 
-class ArceeForCausalLM(nn.Module, SupportsLoRA):
+class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     """Arcee Model for causal language modeling, integrated with vLLM
     runtime."""
     # Map fused module names to their sub-module components
@@ -391,10 +391,28 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA):
         return self.model.make_empty_intermediate_tensors(
             batch_size, dtype, device)
 
+    @overload
+    def forward(
+        self,
+        *,
+        intermediate_tensors: Optional[IntermediateTensors],
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        ...
+
+    @overload
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        ...
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        positions: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None
     ) -> Union[torch.Tensor, IntermediateTensors]:
