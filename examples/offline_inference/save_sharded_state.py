@@ -29,6 +29,7 @@ import shutil
 from pathlib import Path
 
 from vllm import LLM, EngineArgs
+from vllm.model_executor.model_loader import ShardedStateLoader
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -39,11 +40,14 @@ def parse_args():
         "--output", "-o", required=True, type=str, help="path to output checkpoint"
     )
     parser.add_argument(
-        "--file-pattern", type=str, help="string pattern of saved filenames"
+        "--file-pattern",
+        type=str,
+        default=ShardedStateLoader.DEFAULT_PATTERN,
+        help="string pattern of saved filenames",
     )
     parser.add_argument(
         "--max-file-size",
-        type=str,
+        type=int,
         default=5 * 1024**3,
         help="max size (in bytes) of each safetensors file",
     )

@@ -246,11 +246,21 @@ class Worker(WorkerBase):
         available_kv_cache_memory = self.requested_memory \
             - profile_result.non_kv_cache_memory
 
+        unrequested_memory = self.init_snapshot.free_memory \
+            - self.requested_memory
         logger.debug(
-            "Initial free memory: %.2f GiB, free memory: %.2f GiB, "
-            "requested GPU memory: %.2f GiB",
-            GiB(self.init_snapshot.free_memory), GiB(free_gpu_memory),
-            GiB(self.requested_memory))
+            "Initial free memory: %.2f GiB; "
+            "Requested memory: %.2f (util), %.2f GiB",
+            GiB(self.init_snapshot.free_memory),
+            self.cache_config.gpu_memory_utilization,
+            GiB(self.requested_memory),
+        )
+        logger.debug(
+            "Free memory after profiling: %.2f GiB (total), "
+            "%.2f GiB (within requested)",
+            GiB(free_gpu_memory),
+            GiB(free_gpu_memory - unrequested_memory),
+        )
         logger.debug(profile_result)
         logger.info("Available KV cache memory: %.2f GiB",
                     GiB(available_kv_cache_memory))
@@ -349,10 +359,12 @@ class Worker(WorkerBase):
             # In case of PP with kv transfer, we need to pass through the
             # finished_sending and finished_recving buffers.
             new_output = EMPTY_MODEL_RUNNER_OUTPUT
-            if output.finished_sending or output.finished_recving:
+            if (output.finished_sending or output.finished_recving
+                    or output.finished_loading_dict):
                 new_output = copy.copy(new_output)
                 new_output.finished_sending = output.finished_sending
                 new_output.finished_recving = output.finished_recving
+                new_output.finished_loading_dict = output.finished_loading_dict
             output = new_output
 
         assert isinstance(output, ModelRunnerOutput)
