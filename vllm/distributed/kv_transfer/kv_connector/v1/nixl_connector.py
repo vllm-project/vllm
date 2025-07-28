@@ -1027,7 +1027,7 @@ class NixlConnectorWorker:
                 break
             count = self.consumer_notification_counts_by_req.pop(req_id, 0)
             logger.warning(
-                "Releasing expired KV blocks for request %d which were "
+                "Releasing expired KV blocks for request %s which were "
                 "retrieved by %d decode worker(s) within %d seconds.", req_id,
                 count, envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT)
             del self._reqs_to_send[req_id]
@@ -1046,9 +1046,10 @@ class NixlConnectorWorker:
             for notif in notifs:
                 req_id, tp_ratio = notif.decode("utf-8").rsplit(":", 1)
                 if req_id not in self._reqs_to_send:
-                    logger.warning("Potentially invalid KV blocks for "
-                                   "unrecognized request %d were retrieved by "
-                                   "a decode worker. They may have expired.")
+                    logger.warning(
+                        "Potentially invalid KV blocks for "
+                        "unrecognized request %s were retrieved by "
+                        "a decode worker. They may have expired.", req_id)
 
                 self.consumer_notification_counts_by_req[req_id] += 1
                 # Wait all consumers (D) to be done reading before freeing.
