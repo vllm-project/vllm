@@ -143,6 +143,7 @@ if TYPE_CHECKING:
     VLLM_USE_CUDNN_PREFILL: bool = False
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
+    VLLM_DISTRIBUTED_INIT_TIMEOUT_SECONDS: Optional[int] = None
 
 
 def get_default_cache_root():
@@ -509,6 +510,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default is 5 seconds
     "VLLM_IMAGE_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_IMAGE_FETCH_TIMEOUT", "5")),
+
+    # Timeout for torch distributed calls
+    "VLLM_DISTRIBUTED_INIT_TIMEOUT_SECONDS":
+    lambda: maybe_convert_int(os.getenv("VLLM_IMAGE_FETCH_TIMEOUT", None)),
 
     # Timeout for fetching videos when serving multimodal models
     # Default is 30 seconds
