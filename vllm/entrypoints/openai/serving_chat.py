@@ -637,9 +637,11 @@ class OpenAIServingChat(OpenAIServing):
                                     current_token_ids,
                                     output.token_ids,
                                 ))
-                            # When encountering think end id in delta_token_ids,
-                            # process the `content`. Only keep 'content',
-                            # remove 'reasoning_content'
+                            # When encountering think end id in delta_token_ids
+                            # or think end id in prompt_token_ids
+                            # i.e {"enable_thinking": False},
+                            # set reasoning status to end.
+                            # Only keep 'content', remove 'reasoning_content'.
                             if reasoning_parser.is_reasoning_end(
                                     list(output.token_ids)) or \
                                     (res.prompt_token_ids and
