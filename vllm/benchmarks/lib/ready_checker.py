@@ -43,9 +43,9 @@ async def wait_for_endpoint(
         unit="s",
     ) as pbar:
 
-        while True:
-            remaining = deadline - time.perf_counter()
+        while True:            
             # update progress bar
+            remaining = deadline - time.perf_counter()
             elapsed = timeout_seconds - remaining
             update_amount = min(elapsed - pbar.n, timeout_seconds - pbar.n)
             pbar.update(update_amount)
@@ -54,6 +54,7 @@ async def wait_for_endpoint(
                 pbar.close()
                 break
 
+            # ping the endpoint using request_func
             try:
                 output = await request_func(request_func_input=test_input)
                 if output.success:
@@ -62,7 +63,7 @@ async def wait_for_endpoint(
             except aiohttp.ClientConnectorError:
                 pass
             
-            
+            # retry after a delay
             sleep_duration = min(retry_interval, remaining)
             if sleep_duration > 0:
                 await asyncio.sleep(sleep_duration)
