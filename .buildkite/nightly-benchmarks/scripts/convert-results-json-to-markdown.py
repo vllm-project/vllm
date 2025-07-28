@@ -268,7 +268,13 @@ if __name__ == "__main__":
     )
 
     # document the result
-    with open(results_folder / "benchmark_results.md", "w") as f:
+    postfix = ''
+    if filters:
+        postfix = '-' + '_'.join(filters)
+
+    md_file = "benchmark_results" + postfix +  ".md"
+    json_file = "benchmark_results" + postfix + ".json"
+    with open(results_folder / md_file, "w") as f:
         results = read_markdown(
             "../.buildkite/nightly-benchmarks/"
             + "performance-benchmarks-descriptions.md"
@@ -283,7 +289,7 @@ if __name__ == "__main__":
         f.write(results)
 
     # document benchmarking results in json
-    with open(results_folder / "benchmark_results.json", "w") as f:
+    with open(results_folder / json_file, "w") as f:
         results = (
             latency_results.to_dict(orient="records")
             + throughput_results.to_dict(orient="records")
