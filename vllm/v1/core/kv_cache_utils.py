@@ -728,8 +728,8 @@ def create_kv_cache_group_specs(
 def is_kv_cache_type_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
     """
     Whether all layers in the given KVCacheSpec have the same KV cache spec.
-    Note that we regard FullAttentionSpec with different sliding window sizes
-    and attention chunk sizes as the same type.
+    Note that we regard FullAttentionSpec with and without sliding window as
+    the same type.
 
     Args:
         kv_cache_spec: The kv cache spec of each attention layer in the model
