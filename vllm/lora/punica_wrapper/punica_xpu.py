@@ -20,7 +20,7 @@ from .punica_base import PunicaWrapperBase
 @final
 class PunicaWrapperXPU(PunicaWrapperBase):
     """
-    PunicaWrapperGPU is designed to manage and provide metadata for the punica 
+    PunicaWrapperXPU is designed to manage and provide metadata for the punica
     kernel. The main function is to maintain the state information for 
     Multi-LoRA, and to provide the interface for the punica triton kernel.
     """
