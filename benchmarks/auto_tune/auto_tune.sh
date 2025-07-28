@@ -60,26 +60,32 @@ start_server() {
 
     pkill -if vllm
 
-    local serve_cmd
-    local common_args="
-        $MODEL \
-        --disable-log-requests \
-        --port 8004 \
-        --gpu-memory-utilization $gpu_memory_utilization \
-        --max-num-seqs $max_num_seqs \
-        --max-num-batched-tokens $max_num_batched_tokens \
-        --tensor-parallel-size $TP \
-        --enable-prefix-caching \
-        --load-format dummy \
-        --download-dir \"$DOWNLOAD_DIR\" \
-        --max-model-len $MAX_MODEL_LEN"
+    # Define the common arguments as a bash array.
+    # Each argument and its value are separate elements.
+    local common_args_array=(
+        "$MODEL"
+        "--disable-log-requests"
+        "--port" "8004"
+        "--gpu-memory-utilization" "$gpu_memory_utilization"
+        "--max-num-seqs" "$max_num_seqs"
+        "--max-num-batched-tokens" "$max_num_batched_tokens"
+        "--tensor-parallel-size" "$TP"
+        "--enable-prefix-caching"
+        "--load-format" "dummy"
+        "--download-dir" "$DOWNLOAD_DIR"
+        "--max-model-len" "$MAX_MODEL_LEN"
+    )
 
+    # Use the array expansion "${common_args_array[@]}"
+    # This correctly passes each element as a separate argument.
     if [[ -n "$profile_dir" ]]; then
         # Start server with profiling enabled
-        VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 VLLM_TORCH_PROFILER_DIR=$profile_dir vllm serve $common_args > "$vllm_log" 2>&1 &
+        VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 VLLM_TORCH_PROFILER_DIR=$profile_dir \
+            vllm serve "${common_args_array[@]}" > "$vllm_log" 2>&1 &
     else
         # Start server without profiling
-        VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 vllm serve $common_args > "$vllm_log" 2>&1 &
+        VLLM_USE_V1=1 VLLM_SERVER_DEV_MODE=1 \
+            vllm serve "${common_args_array[@]}" > "$vllm_log" 2>&1 &
     fi
 
     # wait for 10 minutes...
@@ -94,6 +100,7 @@ start_server() {
             sleep 10
         fi
     done
+
     if (( ! server_started )); then
         echo "server did not start within 10 minutes. Please check server log at $vllm_log".
         return 1
