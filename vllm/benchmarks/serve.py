@@ -470,20 +470,6 @@ async def benchmark(
                                      pbar=pbar)))
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
-    if profile:
-        print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
-            api_url=base_url + "/stop_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-        )
-        profile_output = await request_func(request_func_input=profile_input)
-        if profile_output.success:
-            print("Profiler stopped")
-
     if pbar is not None:
         pbar.close()
 
@@ -576,6 +562,19 @@ async def benchmark(
 
     print("=" * 50)
 
+    if profile:
+        print("Stopping profiler...")
+        profile_input = RequestFuncInput(
+            model=model_id,
+            prompt=test_prompt,
+            api_url=base_url + "/stop_profile",
+            prompt_len=test_prompt_len,
+            output_len=test_output_len,
+            logprobs=logprobs,
+        )
+        profile_output = await request_func(request_func_input=profile_input)
+        if profile_output.success:
+            print("Profiler stopped")
     return result
 
 
