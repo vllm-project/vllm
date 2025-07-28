@@ -10,10 +10,11 @@ import torch
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
-from flashinfer.decode import get_batch_decode_module, trtllm_batch_decode_with_kv_cache
-from flashinfer.prefill import get_batch_prefill_module
+from flashinfer.decode import (get_batch_decode_module,
+                               trtllm_batch_decode_with_kv_cache)
 from flashinfer.page import get_seq_lens
-from flashinfer.utils import _get_range_buf, PosEncodingMode
+from flashinfer.prefill import get_batch_prefill_module
+from flashinfer.utils import PosEncodingMode, _get_range_buf
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -450,18 +451,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         paged_kv_indptr = torch.zeros(len(block_table_bounds) + 1,
                                       dtype=torch.int32,
                                       device=self.device)
-        paged_kv_indptr[1:] = block_table_bounds.cumsum(
-            dim=0, dtype=torch.int32)
+        paged_kv_indptr[1:] = block_table_bounds.cumsum(dim=0,
+                                                        dtype=torch.int32)
 
         paged_kv_last_page_len_cpu = seq_lens_cpu % page_size
         paged_kv_last_page_len_cpu = torch.where(
             paged_kv_last_page_len_cpu == 0, page_size,
             paged_kv_last_page_len_cpu)
-        
+
         paged_kv_last_page_len = seq_lens % page_size
-        paged_kv_last_page_len = torch.where(
-            paged_kv_last_page_len == 0, page_size,
-            paged_kv_last_page_len)
+        paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
+                                             page_size, paged_kv_last_page_len)
 
         cache_dtype = self.cache_config.cache_dtype
         if cache_dtype.startswith("fp8"):
@@ -765,10 +765,8 @@ def fast_decode_plan(
         if batch_size != self._fixed_batch_size:
             raise ValueError(
                 "The batch size should be fixed in cudagraph mode, the runtime batch size {} "
-                " mismatches the batch size set during initialization {}".format(
-                    batch_size, self._fixed_batch_size
-                )
-            )
+                " mismatches the batch size set during initialization {}".
+                format(batch_size, self._fixed_batch_size))
         if len(indices) > len(self._paged_kv_indices_buf):
             raise ValueError(
                 "The size of indices should be less than or equal to the allocated buffer"
@@ -778,9 +776,8 @@ def fast_decode_plan(
         self._paged_kv_indices_buf = indices
         self._paged_kv_last_page_len_buf = last_page_len
         if self.use_tensor_cores:
-            self._qo_indptr_buf = qo_indptr_host.to(
-                self.device, non_blocking=non_blocking
-            )
+            self._qo_indptr_buf = qo_indptr_host.to(self.device,
+                                                    non_blocking=non_blocking)
 
     with torch.cuda.device(self.device):
 
@@ -788,7 +785,8 @@ def fast_decode_plan(
         self._cached_kv_data_type = kv_data_type
         if self.use_tensor_cores:
             last_page_len_host = last_page_len.cpu()
-            kv_lens_arr_host = get_seq_lens(indptr_host, last_page_len_host, page_size)
+            kv_lens_arr_host = get_seq_lens(indptr_host, last_page_len_host,
+                                            page_size)
 
             if self._jit_module is not None:
                 self._cached_module = self._jit_module
