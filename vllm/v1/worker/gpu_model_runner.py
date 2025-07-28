@@ -127,8 +127,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.is_multimodal_model = model_config.is_multimodal_model
         self.is_pooling_model = model_config.pooler_config is not None
         self.is_encoder_only_model = False
-        self.model_supports_multimodal_raw_input = (
-            model_config.model_supports_multimodal_raw_input)
+        self.is_multimodal_raw_input_supported = (
+            model_config.is_multimodal_raw_input_supported)
         self.max_model_len = model_config.max_model_len
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
@@ -583,7 +583,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     ) -> dict[str, Any]:
 
         model_kwargs: dict[str, Any] = {}
-        if self.model_supports_multimodal_raw_input:
+        if self.is_multimodal_raw_input_supported:
             # This model requires the raw multimodal data in input.
             if scheduler_output:
                 multi_modal_kwargs_list = []

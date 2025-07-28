@@ -20,8 +20,8 @@ from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               create_sort_beams_key_function)
 from vllm.config import (CompilationConfig, ModelDType, TokenizerMode,
                          is_init_field)
-from vllm.engine.arg_utils import (EngineArgs, HfOverrides, PoolerConfig,
-                                   TaskOption)
+from vllm.engine.arg_utils import (ConvertOption, EngineArgs, HfOverrides,
+                                   PoolerConfig, RunnerOption)
 from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption,
@@ -170,7 +170,8 @@ class LLM:
         self,
         model: str,
         *,
-        task: TaskOption = "auto",
+        runner: RunnerOption = "auto",
+        convert: ConvertOption = "auto",
         tokenizer: Optional[str] = None,
         tokenizer_mode: TokenizerMode = "auto",
         skip_tokenizer_init: bool = False,
@@ -244,7 +245,8 @@ class LLM:
 
         engine_args = EngineArgs(
             model=model,
-            task=task,
+            runner=runner,
+            convert=convert,
             tokenizer=tokenizer,
             tokenizer_mode=tokenizer_mode,
             skip_tokenizer_init=skip_tokenizer_init,
@@ -459,18 +461,10 @@ class LLM:
         model_config = self.llm_engine.model_config
         runner_type = model_config.runner_type
         if runner_type != "generate":
-            messages = [
-                "LLM.generate() is only supported for generative models."
-            ]
-
-            if "generate" in model_config.supported_runner_types:
-                messages.append(
-                    "Your model supports the 'generate' runner, but is "
-                    f"currently initialized for the '{runner_type}' runner. "
-                    "Please initialize vLLM using `--task generate` or "
-                    "`--task transcription`.")
-
-            raise ValueError(" ".join(messages))
+            raise ValueError(
+                "LLM.generate() is only supported for generative models. "
+                "Try passing `--runner generate` to use the model as a "
+                "generative model.")
 
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
@@ -497,7 +491,8 @@ class LLM:
         truncate_prompt_tokens = None
         if isinstance(sampling_params, SamplingParams):
             truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
-        _validate_truncation_size(self.llm_engine.model_config.max_model_len,
+
+        _validate_truncation_size(model_config.max_model_len,
                                   truncate_prompt_tokens, tokenization_kwargs)
 
         # Add any modality specific loras to the corresponding prompts
@@ -1100,16 +1095,10 @@ class LLM:
         model_config = self.llm_engine.model_config
         runner_type = model_config.runner_type
         if runner_type != "pooling":
-            messages = ["LLM.encode() is only supported for pooling models."]
-
-            if "pooling" in model_config.supported_runner_types:
-                messages.append(
-                    "Your model supports the 'pooling' runner, but is "
-                    f"currently initialized for the '{runner_type}' runner. "
-                    "Please initialize vLLM using `--task embed`, "
-                    "`--task classify`, `--task score` etc.")
-
-            raise ValueError(" ".join(messages))
+            raise ValueError(
+                "LLM.encode() is only supported for pooling models. "
+                "Try passing `--runner pooling` to use the model as a "
+                "pooling model.")
 
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
@@ -1183,8 +1172,9 @@ class LLM:
             embedding vectors in the same order as the input prompts.
         """
         if "embed" not in self.supported_tasks:
-            raise ValueError("Embedding API is not supported by this model. "
-                             "Please set `--task embed`.")
+            raise ValueError(
+                "Embedding API is not supported by this model. "
+                "Try converting the model using `--convert embed`.")
 
         items = self.encode(
             prompts,
@@ -1229,7 +1219,7 @@ class LLM:
         if "classify" not in self.supported_tasks:
             raise ValueError(
                 "Classification API is not supported by this model. "
-                "Please set `--task classify`.")
+                "Try converting the model using `--convert classify`.")
 
         items = self.encode(
             prompts,
@@ -1283,27 +1273,26 @@ class LLM:
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
     ) -> list[ScoringRequestOutput]:
+        model_config = self.llm_engine.model_config
 
         if isinstance(tokenizer, MistralTokenizer):
             raise ValueError(
-                "Score API is only enabled for `--task embed or score`")
+                "Score API is not supported for Mistral tokenizer")
 
         if len(data_1) == 1:
             data_1 = data_1 * len(data_2)
 
         pooling_params = PoolingParams(task="score")
         tokenization_kwargs: dict[str, Any] = {}
-        _validate_truncation_size(self.llm_engine.model_config.max_model_len,
+
+        _validate_truncation_size(model_config.max_model_len,
                                   truncate_prompt_tokens, tokenization_kwargs)
 
         parsed_prompts = []
 
         input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
 
-        if self.llm_engine.model_config.is_multimodal_model:
-
-            model_config = self.llm_engine.model_config
-
+        if model_config.is_multimodal_model:
             for q, d in input_pairs:
                 _, engine_prompt = get_score_prompt(
                     model_config=model_config,
@@ -1314,11 +1303,9 @@ class LLM:
                 )
 
                 parsed_prompts.append(engine_prompt)
-
         else:
-
             for q, t in input_pairs:
-                if self.llm_engine.model_config.use_pad_token:
+                if model_config.use_pad_token:
                     # cross_encoder models defaults to using pad_token.
                     prompt_inputs = tokenizer(
                         text=q,  # type: ignore[arg-type]
@@ -1396,23 +1383,18 @@ class LLM:
         model_config = self.llm_engine.model_config
         runner_type = model_config.runner_type
         if runner_type != "pooling":
-            messages = ["LLM.score() is only supported for pooling models."]
-
-            if "pooling" in model_config.supported_runner_types:
-                messages.append(
-                    "Your model supports the 'pooling' runner, but is "
-                    f"currently initialized for the '{runner_type}' runner. "
-                    "Please initialize vLLM using `--task embed`, "
-                    "`--task classify`, `--task score` etc.")
-
-            raise ValueError(" ".join(messages))
+            raise ValueError(
+                "LLM.score() is only supported for pooling models. "
+                "Try passing `--runner pooling` to use the model as a "
+                "pooling model.")
 
         supported_tasks = self.supported_tasks
         if all(t not in supported_tasks for t in ("embed", "classify")):
             raise ValueError("Score API is not supported by this model. "
-                             "Please set `--task embed` or `--task classify`.")
+                             "Try converting the model using "
+                             "`--convert embed` or `--convert classify`.")
 
-        if (model_config.task == "classify"
+        if (model_config.is_cross_encoder
                 and getattr(model_config.hf_config, "num_labels", 0) != 1):
             raise ValueError("Score API is only enabled for num_labels == 1.")
 
@@ -1421,15 +1403,14 @@ class LLM:
         # lists of tokens to the `text` and `text_pair` kwargs
         tokenizer = self.get_tokenizer()
 
-        if not self.llm_engine.model_config.is_multimodal_model:
+        if not model_config.is_multimodal_model:
 
             def check_data_type(data: Union[SingletonPrompt,
                                             Sequence[SingletonPrompt],
                                             ScoreMultiModalParam]):
                 if isinstance(data, dict) and "content" in data:
-                    raise ValueError(
-                        f"ScoreMultiModalParam is not supported for {self.llm_engine.model_config.architecture}",  # noqa: E501
-                    )
+                    raise ValueError("ScoreMultiModalParam is not supported "
+                                     f"for {model_config.architecture}")
 
             check_data_type(data_1)
             check_data_type(data_2)
@@ -1471,7 +1452,7 @@ class LLM:
 
         _validate_score_input_lens(data_1, data_2)  # type: ignore[arg-type]
 
-        if self.llm_engine.model_config.is_cross_encoder:
+        if model_config.is_cross_encoder:
             return self._cross_encoding_score(
                 tokenizer,
                 data_1,  # type: ignore[arg-type]

@@ -24,13 +24,8 @@ eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
 
 def _create_proposer(method: str, k: int) -> EagleProposer:
     model_config = ModelConfig(model=model_dir,
-                               task="generate",
-                               max_model_len=100,
-                               tokenizer=model_dir,
-                               tokenizer_mode="auto",
-                               dtype="auto",
-                               seed=None,
-                               trust_remote_code=False)
+                               runner="generate",
+                               max_model_len=100)
 
     # Choose model directory based on method
     draft_model_dir = eagle_dir if method == "eagle" else eagle3_dir
