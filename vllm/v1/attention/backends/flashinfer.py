@@ -373,6 +373,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     fast_decode_plan(
                         attn_metadata.decode_wrapper,
                         attn_metadata.paged_kv_indptr[:num_decodes + 1],
+                        attn_metadata.paged_kv_indptr_cpu[:num_decodes + 1],
                         attn_metadata.paged_kv_indices,
                         attn_metadata.paged_kv_last_page_len[:num_decodes],
                         attn_metadata.num_qo_heads,
@@ -718,6 +719,7 @@ class FlashInferImpl(AttentionImpl):
 def fast_decode_plan(
     self,
     indptr: torch.Tensor,
+    indptr_host: torch.Tensor,
     indices: torch.Tensor,
     last_page_len: torch.Tensor,
     num_qo_heads: int,
@@ -779,8 +781,6 @@ def fast_decode_plan(
             self._qo_indptr_buf = qo_indptr_host.to(
                 self.device, non_blocking=non_blocking
             )
-
-    indptr_host = indptr.cpu()
 
     with torch.cuda.device(self.device):
 
