@@ -359,12 +359,10 @@ class Worker(WorkerBase):
             # In case of PP with kv transfer, we need to pass through the
             # finished_sending and finished_recving buffers.
             new_output = EMPTY_MODEL_RUNNER_OUTPUT
-            if (output.finished_sending or output.finished_recving
-                    or output.finished_loading_dict):
+            if output.finished_sending or output.finished_recving:
                 new_output = copy.copy(new_output)
                 new_output.finished_sending = output.finished_sending
                 new_output.finished_recving = output.finished_recving
-                new_output.finished_loading_dict = output.finished_loading_dict
             output = new_output
 
         assert isinstance(output, ModelRunnerOutput)
