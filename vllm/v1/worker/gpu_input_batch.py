@@ -427,6 +427,7 @@ class InputBatch:
             self.request_lora_mapping[req_index] = 0
 
         self.has_allowed_token_ids.discard(req_id)
+
         if self.allowed_token_ids_mask_cpu_tensor is not None:
             # False means we don't fill with -inf.
             self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)

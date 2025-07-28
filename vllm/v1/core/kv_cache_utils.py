@@ -573,14 +573,13 @@ def hash_request_tokens(hash_function: Any, block_size: int,
     req_extra_keys = None
     curr_mm_idx = 0
 
-    ret = []
+    num_full_blocks = len(token_ids) // block_size
+    ret: list[BlockHash] = [BlockHash(0, (0, 0))] * num_full_blocks
     parent_block_hash_value = None
-    for start in range(0, len(token_ids), block_size):
+    for i in range(num_full_blocks):
+        start = i * block_size
         end = start + block_size
         block_token_ids = token_ids[start:end]
-        # Do not hash the block if it is not full.
-        if len(block_token_ids) < block_size:
-            break
 
         if req_need_extra_keys:
             # MM and LoRA requests need extra keys for block-hash computation.
@@ -589,7 +588,7 @@ def hash_request_tokens(hash_function: Any, block_size: int,
 
         block_hash = hash_block_tokens(hash_function, parent_block_hash_value,
                                        block_token_ids, req_extra_keys)
-        ret.append(block_hash)
+        ret[i] = block_hash
         parent_block_hash_value = block_hash.hash_value
     return ret
 

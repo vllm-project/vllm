@@ -166,8 +166,12 @@ class KVCacheManager:
         block_hashes = self.req_to_block_hashes[request.request_id]
         if not block_hashes:
             assert self.block_size is not None
+            import time
+            start = time.perf_counter()
             block_hashes = hash_request_tokens(self.caching_hash_fn,
                                                self.block_size, request)
+            end = time.perf_counter()
+            print(f"Function runtime: {end - start:.6f} seconds")
             self.req_to_block_hashes[request.request_id] = block_hashes
 
         if self.log_stats:
