@@ -395,7 +395,7 @@ def test_none_logprobs(vllm_model, example_prompts,
 
 def test_zero_logprobs(vllm_model, example_prompts,
                        monkeypatch: pytest.MonkeyPatch):
-    """Engine should return sampled token logprobs
+    """Engine should return sampled token and prompt token logprobs
 
     Args:
       vllm_model: vLLM model fixture

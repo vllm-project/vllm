@@ -176,8 +176,7 @@ class LogprobsProcessor:
         Returns:
           dict[token id, Logprob]
         """
-        if num_logprobs == -1:
-            num_logprobs = len(logprobs)
+
         # We do not need a special case for the sampled token
         # being in the topk, since inserting duplicated data
         # into a dictionary twice is the same as doing it once.
