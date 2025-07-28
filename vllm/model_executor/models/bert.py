@@ -643,7 +643,7 @@ class BertMMTokenIdsMixin(SupportsMultiModal):
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        token_type_embeddings: Optional[MultiModalEmbeddings] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
 
         # save for forward()
@@ -651,9 +651,9 @@ class BertMMTokenIdsMixin(SupportsMultiModal):
 
         token_type_ids: Optional[torch.Tensor] = None
 
-        if token_type_embeddings is not None:
-            assert isinstance(token_type_embeddings, list)
-            token_type_embeddings = torch.cat(token_type_embeddings)
+        if multimodal_embeddings is not None:
+            assert isinstance(multimodal_embeddings, list)
+            multimodal_embeddings = torch.cat(multimodal_embeddings)
         else:
             token_type_ids = torch.zeros(input_ids.size(),
                                          dtype=torch.long,
@@ -661,7 +661,7 @@ class BertMMTokenIdsMixin(SupportsMultiModal):
 
         return self.get_language_model().embeddings(
             input_ids=input_ids,
-            inputs_embeds=token_type_embeddings,
+            inputs_embeds=multimodal_embeddings,
             token_type_ids=token_type_ids,
             apply_layer_norm=False)
 
