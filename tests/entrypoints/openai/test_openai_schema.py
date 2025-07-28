@@ -21,7 +21,7 @@ LONG_TIMEOUT_SECONDS: Final[int] = 60
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--task",
+        "--runner",
         "generate",
         "--max-model-len",
         "2048",
