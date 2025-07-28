@@ -162,7 +162,7 @@ run_benchmark() {
             curl -X POST http://0.0.0.0:8004/reset_prefix_cache
             sleep 5
             bm_log="$LOG_FOLDER/bm_log_${max_num_seqs}_${max_num_batched_tokens}_requestrate_${request_rate}.txt"
-            python3 benchmarks/benchmark_serving.py \
+            vllm bench serve \
                 --backend vllm \
                 --model $MODEL  \
                 --dataset-name random \
