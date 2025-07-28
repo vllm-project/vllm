@@ -13,6 +13,7 @@ from vllm.config import CompilationConfig, CompilationLevel
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.models.gemma3n import Gemma3nForConditionalGeneration
 from vllm.model_executor.models.registry import ModelRegistry
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.sequence import IntermediateTensors
 
 from ...utils import fork_new_process_for_each_test
@@ -32,28 +33,35 @@ class TestGemma3nForConditionalGeneration(Gemma3nForConditionalGeneration):
                                    inputs_embeds, **kwargs)
         attn_metadata = get_forward_context().attn_metadata
         # attn_metadata is None during dummy runs
-        if attn_metadata is not None:
+        if (attn_metadata is not None
+                and self.cache_config.enable_kv_sharing_truncated_prefill):
             assert isinstance(attn_metadata, dict)  # true in V1
-            # Layer 20 is a cross-decoder layer for Gemma3n
+            # Gemma3n-E2B has 30 layers, with last 20 layers being
+            # cross-decoder layers. Check attention metadata is correct
+            for layer_name, metadata in attn_metadata.items():
+                layer_idx = extract_layer_index(layer_name)
+                if layer_idx >= 20:
+                    assert hasattr(metadata, 'logits_indices_padded')
+                    assert hasattr(metadata, 'num_logits_indices')
+                else:
+                    assert not hasattr(metadata, 'logits_indices_padded')
+                    assert not hasattr(metadata, 'num_logits_indices')
+
+            # Layer 20 is the first cross-decoder layer for Gemma3n
             layer_attn_metadata = attn_metadata[
                 'model.language_model.layers.20.self_attn.attn']
-            if hasattr(layer_attn_metadata, 'logits_indices_padded'):
-                # This field is only set when
-                # enable_kv_sharing_truncated_prefill is set to True
-                assert self.cache_config.enable_kv_sharing_truncated_prefill
-                logits_indices_padded = (
-                    layer_attn_metadata.logits_indices_padded)
-                assert logits_indices_padded is not None
-                num_logits_indices = layer_attn_metadata.num_logits_indices
-                assert num_logits_indices > 0
-                # Reset hidden states to random values and
-                # only set logits at logits_indices to valid values
-                # Because logits_indices are the only positions that are used
-                # for output token sampling, this still produces same outputs
-                logits_hs = hidden_states[logits_indices_padded]
-                hidden_states = torch.randn_like(hidden_states)
-                gen_indices = logits_indices_padded[:num_logits_indices]
-                hidden_states[gen_indices] = logits_hs[:num_logits_indices]
+            logits_indices_padded = (layer_attn_metadata.logits_indices_padded)
+            assert logits_indices_padded is not None
+            num_logits_indices = layer_attn_metadata.num_logits_indices
+            assert num_logits_indices > 0
+            # Reset hidden states to random values and
+            # only set logits at logits_indices to valid values
+            # Because logits_indices are the only positions that are used
+            # for output token sampling, this still produces same outputs
+            logits_hs = hidden_states[logits_indices_padded]
+            hidden_states = torch.randn_like(hidden_states)
+            gen_indices = logits_indices_padded[:num_logits_indices]
+            hidden_states[gen_indices] = logits_hs[:num_logits_indices]
 
         return hidden_states
 
