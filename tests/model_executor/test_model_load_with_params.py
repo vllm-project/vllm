@@ -5,7 +5,8 @@ import os
 
 import pytest
 
-from vllm.model_executor.layers.pooler import CLSPool, MeanPool, PoolingType
+from vllm.model_executor.layers.pooler import (CLSPool, DispatchPooler,
+                                               MeanPool, PoolingType)
 from vllm.model_executor.models.bert import BertEmbeddingModel
 from vllm.model_executor.models.roberta import RobertaEmbeddingModel
 from vllm.platforms import current_platform
@@ -21,10 +22,12 @@ REVISION_ROBERTA = os.environ.get("REVISION", "main")
 
 @pytest.mark.skipif(current_platform.is_rocm(),
                     reason="Xformers backend is not supported on ROCm.")
-def test_model_loading_with_params(vllm_runner):
+def test_model_loading_with_params(vllm_runner, monkeypatch):
     """
     Test parameter weight loading with tp>1.
     """
+    # to use apply_model
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     with vllm_runner(model_name=MODEL_NAME,
                      revision=REVISION,
                      dtype="float16",
@@ -49,20 +52,22 @@ def test_model_loading_with_params(vllm_runner):
 
         def check_model(model):
             assert isinstance(model, BertEmbeddingModel)
-            assert isinstance(model.pooler.pooling, CLSPool)
+            assert isinstance(pooler := model.pooler, DispatchPooler)
+            assert isinstance(pooler.poolers_by_task["embed"].pooling, CLSPool)
 
         vllm_model.apply_model(check_model)
 
-        # assert output
         assert output
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),
                     reason="Xformers backend is not supported on ROCm.")
-def test_roberta_model_loading_with_params(vllm_runner):
+def test_roberta_model_loading_with_params(vllm_runner, monkeypatch):
     """
     Test parameter weight loading with tp>1.
     """
+    # to use apply_model
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     with vllm_runner(model_name=MODEL_NAME_ROBERTA,
                      revision=REVISION_ROBERTA,
                      dtype="float16",
@@ -87,20 +92,23 @@ def test_roberta_model_loading_with_params(vllm_runner):
 
         def check_model(model):
             assert isinstance(model, RobertaEmbeddingModel)
-            assert isinstance(model.pooler.pooling, MeanPool)
+            assert isinstance(pooler := model.pooler, DispatchPooler)
+            assert isinstance(pooler.poolers_by_task["embed"].pooling,
+                              MeanPool)
 
         vllm_model.apply_model(check_model)
 
-        # assert output
         assert output
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),
                     reason="Xformers backend is not supported on ROCm.")
-def test_facebook_roberta_model_loading_with_params(vllm_runner):
+def test_facebook_roberta_model_loading_with_params(vllm_runner, monkeypatch):
     """
     Test loading roberta-base model with no lm_head.
     """
+    # to use apply_model
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
     model_name = "FacebookAI/roberta-base"
     with vllm_runner(model_name=model_name,
                      dtype="float16",
@@ -114,7 +122,8 @@ def test_facebook_roberta_model_loading_with_params(vllm_runner):
         def check_model(model):
             assert isinstance(model, RobertaEmbeddingModel)
             assert not hasattr(model, "lm_head")
-            assert isinstance(model.pooler.pooling, CLSPool)
+            assert isinstance(pooler := model.pooler, DispatchPooler)
+            assert isinstance(pooler.poolers_by_task["embed"].pooling, CLSPool)
 
         vllm_model.apply_model(check_model)
 
