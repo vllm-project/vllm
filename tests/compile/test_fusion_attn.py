@@ -147,11 +147,6 @@ def test_attention_fusion_v0(example_prompts, monkeypatch, model: str,
 
     # Reset backend to make sure llm2 gets released
     backend = None
-    backend_unfused = None
-    import gc
-    gc.collect()
-    print(gc.get_referrers(backend))
-    print(gc.get_referrers(backend_unfused))
 
 
 @pytest.mark.parametrize(
