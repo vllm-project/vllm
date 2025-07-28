@@ -25,14 +25,14 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ConfigFormat, ConfigType, ConvertOption,
                          DecodingConfig, DetailedTraceModules, Device,
                          DeviceConfig, DistributedExecutorBackend,
-                         GuidedDecodingBackend, HfOverrides, KVEventsConfig,
-                         KVTransferConfig, LoadConfig, LogprobsMode,
-                         LoRAConfig, ModelConfig, ModelDType, ModelImpl,
-                         MultiModalConfig, ObservabilityConfig, ParallelConfig,
-                         PoolerConfig, PrefixCachingHashAlgo, RunnerOption,
-                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         TaskOption, TokenizerMode, VllmConfig, get_attr_docs,
-                         get_field)
+                         EPDDisaggConfig, GuidedDecodingBackend, HfOverrides,
+                         KVEventsConfig, KVTransferConfig, LoadConfig,
+                         LogprobsMode, LoRAConfig, ModelConfig, ModelDType,
+                         ModelImpl, MultiModalConfig, ObservabilityConfig,
+                         ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
+                         RunnerOption, SchedulerConfig, SchedulerPolicy,
+                         SpeculativeConfig, TaskOption, TokenizerMode,
+                         VllmConfig, get_attr_docs, get_field)
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -441,6 +441,9 @@ class EngineArgs:
     enable_multimodal_encoder_data_parallel: bool = \
         ParallelConfig.enable_multimodal_encoder_data_parallel
 
+    instance_type: str = EPDDisaggConfig.instance_type
+    connector_workers_num: int = EPDDisaggConfig.connector_workers_num
+
     async_scheduling: bool = SchedulerConfig.async_scheduling
     # DEPRECATED
     enable_prompt_adapter: bool = False
@@ -835,6 +838,18 @@ class EngineArgs:
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
         scheduler_group.add_argument("--async-scheduling",
                                      **scheduler_kwargs["async_scheduling"])
+
+        # EPD disagg. arguments
+        epd_disagg_kwargs = get_kwargs(EPDDisaggConfig)
+        epd_disagg_group = parser.add_argument_group(
+            title="EPDDisaggConfig",
+            description=EPDDisaggConfig.__doc__,
+        )
+        epd_disagg_group.add_argument("--instance-type",
+                                      **epd_disagg_kwargs["instance_type"])
+        epd_disagg_group.add_argument(
+            "--connector-workers-num",
+            **epd_disagg_kwargs["connector_workers_num"])
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1291,6 +1306,10 @@ class EngineArgs:
             collect_detailed_traces=self.collect_detailed_traces,
         )
 
+        epd_disagg_config = EPDDisaggConfig(
+            instance_type=self.instance_type,
+            connector_workers_num=self.connector_workers_num)
+
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1305,6 +1324,7 @@ class EngineArgs:
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
+            epd_disagg_config=epd_disagg_config,
             additional_config=self.additional_config,
         )
 

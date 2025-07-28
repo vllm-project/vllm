@@ -23,6 +23,8 @@ from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
+from vllm.separated_encoder.encoder_scheduler.encoder_scheduler import (
+    EncoderScheduler)
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
@@ -110,6 +112,10 @@ class EngineCore:
                 "This scheduler interface is not public and "
                 "compatibility may not be maintained.",
                 vllm_config.scheduler_config.scheduler_cls)
+        if self.vllm_config.epd_disagg_config.instance_type != "NoEPD" and \
+           self.vllm_config.epd_disagg_config.instance_type == "encode":
+            # EPD Disaggregation encoder scheduler instance.
+            Scheduler = EncoderScheduler
 
         if len(kv_cache_config.kv_cache_groups) == 0:
             # Encoder models without KV cache don't support

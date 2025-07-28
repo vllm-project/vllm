@@ -40,6 +40,8 @@ from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
+from vllm.separated_encoder.encoder_cache_transfer.ec_connector import (
+    ECConnector)
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
@@ -108,6 +110,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+        self.epd_disagg_config = vllm_config.epd_disagg_config
 
         from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
         set_cpu_offload_max_bytes(
@@ -115,6 +118,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         model_config = self.model_config
         cache_config = self.cache_config
+        epd_disagg_config = self.epd_disagg_config
         scheduler_config = self.scheduler_config
         parallel_config = self.parallel_config
         self.device = device
@@ -328,6 +332,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.cache_config.kv_sharing_fast_prefill:
             self.kv_sharing_fast_prefill_logits_indices = torch.zeros(
                 self.max_num_tokens, dtype=torch.int32, device=self.device)
+
+        # EPD (Encode-Prefill-Decode) Disaggregation setup
+        if epd_disagg_config.instance_type != "NoEPD":
+            self.separated_encode = True
+            self.instance_type = epd_disagg_config.instance_type
+            assert (self.instance_type == "prefill+decode")
+            self.connector_workers_num = epd_disagg_config.connector_workers_num
+
+            self.encoder_cache_connector = ECConnector(
+                self.connector_workers_num)
+            for _ in range(self.connector_workers_num // 2):
+                self.encoder_cache_connector.create_recv_encoder_cache_req(
+                    self.receive_encoder_cache)
+        else:
+            self.separated_encode = False
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
@@ -1142,6 +1161,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not scheduled_encoder_inputs:
             return
 
+        assert not self.separated_encode,\
+            "Encoder execution is not allowed on non-encoder instance"
         # Batch the multi-modal inputs.
         mm_inputs = list[MultiModalKwargs]()
         req_ids_pos = list[tuple[str, int, PlaceholderRange]]()
@@ -3045,4 +3066,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return common_metadata, builder.build(
             common_prefix_len=0,  # No cascade for encoder
             common_attn_metadata=common_metadata,
+        )
+
+    ########################################################################
+    # Encoder Cache Connector Related Methods
+    ########################################################################
+
+    def receive_encoder_cache(self, request_id, input_id, pos_info,
+                              encoder_cache_numpy):
+        if request_id not in self.encoder_cache:
+            self.encoder_cache[request_id] = {}
+
+        encoder_cache = torch.from_numpy(encoder_cache_numpy).to(
+            device=self.device, dtype=self.dtype)
+
+        self.encoder_cache[request_id][input_id] = scatter_mm_placeholders(
+            encoder_cache,
+            is_embed=pos_info.is_embed,
         )

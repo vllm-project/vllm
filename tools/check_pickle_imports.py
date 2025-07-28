@@ -60,6 +60,7 @@ ALLOWED_FILES = set([
     'vllm/model_executor/models/registry.py',
     'vllm/engine/multiprocessing/client.py',
     'vllm/engine/multiprocessing/engine.py',
+    'vllm/separated_encoder/encoder_cache_transfer/ec_connector.py'
 ])
 
 PICKLE_RE = re.compile(r"^\s*(import\s+(pickle|cloudpickle)(\s|$|\sas)"

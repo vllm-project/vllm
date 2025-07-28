@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import itertools
+import queue
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Iterable
@@ -17,6 +19,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.separated_encoder.encoder_cache_transfer.ec_connector import (
+    ECConnector)
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -58,6 +62,7 @@ class Scheduler(SchedulerInterface):
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
+        self.epd_disagg_config = vllm_config.epd_disagg_config
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -162,6 +167,31 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
+        if self.epd_disagg_config.instance_type != "NoEPD":
+            self.separated_encode = True
+            self.instance_type = \
+                self.epd_disagg_config.instance_type
+            self.connector_workers_num = \
+                self.epd_disagg_config.connector_workers_num
+
+            assert self.instance_type == "prefill+decode",\
+                "vLLM scheduler must be used only on non-encode instances"
+            self.encoder_cache_connector = ECConnector(
+                self.connector_workers_num)
+
+            self.alloc_candidate = None
+            self.remote_alloc_reqs: queue.Queue[Any] = queue.Queue()
+            self.recv_lock: threading.Lock = threading.Lock()
+            self.remote_alloc_lock: threading.Lock = threading.Lock()
+
+            for _ in range(self.connector_workers_num // 2):
+                self.encoder_cache_connector.\
+                    create_recv_encoder_cache_metas_req(
+                        self.receive_encoder_cache_metadata
+                    )
+        else:
+            self.separated_encode = False
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -173,6 +203,9 @@ class Scheduler(SchedulerInterface):
         # num_tokens_with_spec. This is general enough to cover
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
+
+        if self.separated_encode:
+            self._maybe_allocate_recvd_metadata()
 
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
@@ -1145,3 +1178,53 @@ class Scheduler(SchedulerInterface):
         for req_id in (model_runner_output.finished_sending or ()):
             logger.debug("Finished sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])
+
+    ########################################################################
+    # Encoder Cache Connector Related Methods
+    ########################################################################
+
+    def receive_encoder_cache_metadata(self, request_id, input_id,
+                                       encoder_cache_size):
+        with self.recv_lock:
+            self.remote_alloc_reqs.put(
+                (request_id, input_id, encoder_cache_size))
+            if self.has_unfinished_requests() != 0:
+                return
+            self._maybe_allocate_recvd_metadata()
+
+    def _maybe_allocate_recvd_metadata(self, ):
+        with self.remote_alloc_lock:
+            while not self.remote_alloc_reqs.empty():
+                if self.alloc_candidate is not None:
+                    (request_id, input_id, encoder_cache_size) = \
+                        self.alloc_candidate
+                    if not self.encoder_cache_manager.can_allocate_disag(
+                            encoder_cache_size):
+                        break
+                    self.encoder_cache_manager.allocate_disag(
+                        request_id, input_id, encoder_cache_size)
+                    self.encoder_cache_connector.create_send_alloc_notif_req(
+                        request_id, input_id)
+                    self.encoder_cache_connector.\
+                        create_recv_encoder_cache_metas_req(
+                            self.receive_encoder_cache_metadata
+                        )
+                self.alloc_candidate = self.remote_alloc_reqs.get()
+
+            if (self.alloc_candidate is not None) and \
+                (self.encoder_cache_manager.can_allocate_disag(
+                        self.alloc_candidate[2]
+                    )
+                ):
+
+                (request_id, input_id, encoder_cache_size) =\
+                    self.alloc_candidate
+                self.encoder_cache_manager.allocate_disag(
+                    request_id, input_id, encoder_cache_size)
+                self.encoder_cache_connector.create_send_alloc_notif_req(
+                    request_id, input_id)
+                self.encoder_cache_connector.\
+                    create_recv_encoder_cache_metas_req(
+                        self.receive_encoder_cache_metadata
+                    )
+                self.alloc_candidate = None
