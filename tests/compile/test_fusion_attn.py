@@ -20,6 +20,8 @@ from vllm.config import (CompilationConfig, CompilationLevel, ModelConfig,
                          set_current_vllm_config)
 from vllm.platforms import current_platform
 
+from ..utils import create_new_process_for_each_test
+
 
 def fusion_op_check(test_pass_manager: TestPassManager, quant_key: QuantKey,
                     compile_config: CompilationConfig):
@@ -63,6 +65,7 @@ backend_unfused: Optional[TestBackend] = None
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
 @pytest.mark.skipif(not current_platform.is_cuda_alike(),
                     reason="Only test CUDA and ROCm")
+@create_new_process_for_each_test
 def test_attention_fusion_v0(example_prompts, monkeypatch, model: str,
                              quant_key: QuantKey, use_triton_fa: bool):
     # Clean Dynamo cache to avoid reusing other test cases
@@ -156,6 +159,7 @@ def test_attention_fusion_v0(example_prompts, monkeypatch, model: str,
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
 @pytest.mark.skipif(not current_platform.is_cuda_alike(),
                     reason="Only test CUDA and ROCm")
+@create_new_process_for_each_test
 def test_attention_fusion_v1(example_prompts, monkeypatch, model: str,
                              quant_key: QuantKey, use_split_attention: bool):
     # Clean Dynamo cache to avoid reusing other test cases
