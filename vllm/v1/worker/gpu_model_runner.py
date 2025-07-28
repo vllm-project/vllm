@@ -809,6 +809,31 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
 
+            # Hack for now to fix chunked local attention + no hybrid kv cache
+            # manager we can remove this once
+            # https://github.com/vllm-project/vllm/pull/21588
+            # is merged (i.e. properly handle different attention backends for
+            # the same kv_cache_spec)
+            if self.attention_chunk_size is not None \
+                    and self.scheduler_config.disable_hybrid_kv_cache_manager:
+                if not hasattr(self, "local_attention_layers"):
+                    self.local_attention_layers = []
+                    attn_layers = get_layers_from_vllm_config(
+                        self.vllm_config, Attention)
+                    for layer_name, attn_module in attn_layers.items():
+                        if attn_module.use_irope:
+                            self.local_attention_layers.append(layer_name)
+
+                local_attn_metadata_i = (builder.build(
+                    common_prefix_len=0,
+                    common_attn_metadata=make_local_attention_virtual_batches(
+                        self.attention_chunk_size, common_attn_metadata,
+                        self.cache_config.block_size),
+                ))
+
+                for layer_name in self.local_attention_layers:
+                    attn_metadata[layer_name] = local_attn_metadata_i
+
         attention_cuda_graphs = all(
             b.can_run_in_cudagraph(common_attn_metadata)
             for b in self.attn_metadata_builders)
