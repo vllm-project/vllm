@@ -52,11 +52,13 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import cachetools
+import cbor2
 import cloudpickle
 import numpy as np
 import numpy.typing as npt
 import psutil
 import regex as re
+import setproctitle
 import torch
 import torch.types
 import yaml
@@ -127,10 +129,6 @@ STR_NOT_IMPL_ENC_DEC_BACKEND = ("XFormers and Flash-Attention are the only "
                                 "backends currently supported with encoder/"
                                 "decoder models.")
 
-STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER = ("Prompt adapters are not "
-                                       "currently supported with encoder/"
-                                       "decoder models.")
-
 # Efficiently import all enc/dec error strings
 # rather than having to import all of the above
 STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
@@ -144,7 +142,6 @@ STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
     "STR_NOT_IMPL_ENC_DEC_MM": STR_NOT_IMPL_ENC_DEC_MM,
     "STR_NOT_IMPL_ENC_DEC_SPEC_DEC": STR_NOT_IMPL_ENC_DEC_SPEC_DEC,
     "STR_NOT_IMPL_ENC_DEC_BACKEND": STR_NOT_IMPL_ENC_DEC_BACKEND,
-    "STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER": STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER,
 }
 
 # Constants related to forcing the attention backend selection
@@ -178,6 +175,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e4m3": torch.uint8,
     "fp8_e5m2": torch.uint8,
     "int8": torch.int8,
+    "fp8_inc": torch.float8_e4m3fn,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -812,6 +810,33 @@ def get_ip() -> str:
     return "0.0.0.0"
 
 
+def test_loopback_bind(address, family):
+    try:
+        s = socket.socket(family, socket.SOCK_DGRAM)
+        s.bind((address, 0))  # Port 0 = auto assign
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def get_loopback_ip() -> str:
+    loopback_ip = envs.VLLM_LOOPBACK_IP
+    if loopback_ip:
+        return loopback_ip
+
+    # VLLM_LOOPBACK_IP is not set, try to get it based on network interface
+
+    if test_loopback_bind("127.0.0.1", socket.AF_INET):
+        return "127.0.0.1"
+    elif test_loopback_bind("::1", socket.AF_INET6):
+        return "::1"
+    else:
+        raise RuntimeError(
+            "Neither 127.0.0.1 nor ::1 are bound to a local interface. "
+            "Set the VLLM_LOOPBACK_IP environment variable explicitly.")
+
+
 def is_valid_ipv6_address(address: str) -> bool:
     try:
         ipaddress.IPv6Address(address)
@@ -944,6 +969,13 @@ def next_power_of_2(n) -> int:
     if n < 1:
         return 1
     return 1 << (n - 1).bit_length()
+
+
+def prev_power_of_2(n: int) -> int:
+    """The previous power of 2 (inclusive)"""
+    if n <= 0:
+        return 0
+    return 1 << (n.bit_length() - 1)
 
 
 def round_up(x: int, y: int) -> int:
@@ -1347,12 +1379,11 @@ def find_nccl_library() -> str:
 
 prev_set_stream = torch.cuda.set_stream
 
-_current_stream = None
+_current_stream_tls = threading.local()
 
 
 def _patched_set_stream(stream: torch.cuda.Stream) -> None:
-    global _current_stream
-    _current_stream = stream
+    _current_stream_tls.value = stream
     prev_set_stream(stream)
 
 
@@ -1371,16 +1402,16 @@ def current_stream() -> torch.cuda.Stream:
     from C/C++ code.
     """
     from vllm.platforms import current_platform
-    global _current_stream
-    if _current_stream is None:
+    if not hasattr(_current_stream_tls,
+                   "value") or _current_stream_tls.value is None:
         # when this function is called before any stream is set,
         # we return the default stream.
         # On ROCm using the default 0 stream in combination with RCCL
         # is hurting performance. Therefore creating a dedicated stream
         # per process
-        _current_stream = torch.cuda.Stream() if current_platform.is_rocm(
-        ) else torch.cuda.current_stream()
-    return _current_stream
+        _current_stream_tls.value = torch.cuda.Stream(
+        ) if current_platform.is_rocm() else torch.cuda.current_stream()
+    return _current_stream_tls.value
 
 
 def enable_trace_function_call_for_thread(vllm_config: VllmConfig) -> None:
@@ -2852,26 +2883,27 @@ def _maybe_force_spawn():
     if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "spawn":
         return
 
-    reason = None
-    if cuda_is_initialized():
-        reason = "CUDA is initialized"
-    elif xpu_is_initialized():
-        reason = "XPU is initialized"
-    elif is_in_ray_actor():
+    reasons = []
+    if is_in_ray_actor():
         # even if we choose to spawn, we need to pass the ray address
         # to the subprocess so that it knows how to connect to the ray cluster.
         # env vars are inherited by subprocesses, even if we use spawn.
         import ray
         os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
-        reason = "In a Ray actor and can only be spawned"
+        reasons.append("In a Ray actor and can only be spawned")
 
-    if reason is not None:
+    if cuda_is_initialized():
+        reasons.append("CUDA is initialized")
+    elif xpu_is_initialized():
+        reasons.append("XPU is initialized")
+
+    if reasons:
         logger.warning(
             "We must use the `spawn` multiprocessing start method. "
             "Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
             "See https://docs.vllm.ai/en/latest/usage/"
             "troubleshooting.html#python-multiprocessing "
-            "for more information. Reason: %s", reason)
+            "for more information. Reasons: %s", "; ".join(reasons))
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
@@ -2888,8 +2920,9 @@ def get_mp_context():
 
 
 def bind_kv_cache(
-        ctx: dict[str, Any],
-        kv_cache: list[list[torch.Tensor]],  # [virtual_engine][layer_index]
+    ctx: dict[str, Any],
+    kv_cache: list[list[torch.Tensor]],  # [virtual_engine][layer_index]
+    shared_kv_cache_layers: Optional[dict[str, str]] = None
 ) -> None:
     # Bind the kv_cache tensor to Attention modules, similar to
     # ctx[layer_name].kv_cache[ve]=kv_cache[ve][extract_layer_index(layer_name)]
@@ -2901,12 +2934,17 @@ def bind_kv_cache(
     #    attention of the same layer (e.g., bart's decoder.layers.1.self_attn
     #    and decoder.layers.1.encoder_attn) is mapped to the same kv cache
     #    tensor
+    # 5. Some models have attention layers that share kv cache with previous
+    #    layers, this is specified through shared_kv_cache_layers
+    if shared_kv_cache_layers is None:
+        shared_kv_cache_layers = {}
     from vllm.attention import AttentionType
     from vllm.model_executor.models.utils import extract_layer_index
     layer_need_kv_cache = [
         layer_name for layer_name in ctx
         if (hasattr(ctx[layer_name], 'attn_type') and ctx[layer_name].attn_type
-            in (AttentionType.DECODER, AttentionType.ENCODER_DECODER))
+            in (AttentionType.DECODER, AttentionType.ENCODER_DECODER)) \
+                and ctx[layer_name].kv_sharing_target_layer_name is None
     ]
     layer_index_sorted = sorted(
         set(
@@ -2919,6 +2957,12 @@ def bind_kv_cache(
         assert len(forward_ctx.kv_cache) == len(kv_cache)
         for ve, ve_kv_cache in enumerate(kv_cache):
             forward_ctx.kv_cache[ve] = ve_kv_cache[kv_cache_idx]
+    if shared_kv_cache_layers is not None:
+        for layer_name, target_layer_name in shared_kv_cache_layers.items():
+            assert extract_layer_index(target_layer_name) < \
+               extract_layer_index(layer_name), \
+                   "v0 doesn't support interleaving kv sharing"
+            ctx[layer_name].kv_cache = ctx[target_layer_name].kv_cache
 
 
 def run_method(obj: Any, method: Union[str, bytes, Callable], args: tuple[Any],
@@ -3165,6 +3209,29 @@ def sha256(input) -> int:
                           byteorder="big")
 
 
+def sha256_cbor_64bit(input) -> int:
+    """
+    Hash objects using CBOR serialization and SHA-256, then truncate to 64bits.
+
+    This option is useful for non-Python-dependent serialization and hashing.
+
+    Args:
+        input: Object to be serialized and hashed. Supported types include
+            basic Python types and complex structures like lists, tuples, and
+            dictionaries.
+            Custom classes must implement CBOR serialization methods.
+
+    Returns:
+        An integer in the range [0, 2^64-1] representing the lower 64 bits
+        of the SHA-256 hash of the CBOR serialized input.
+    """
+    input_bytes = cbor2.dumps(input, canonical=True)
+    full_hash = int.from_bytes(hashlib.sha256(input_bytes).digest(),
+                               byteorder="big")
+
+    return full_hash & ((1 << 64) - 1)
+
+
 def is_torch_equal_or_newer(target: str) -> bool:
     """Check if the installed torch version is >= the target version.
 
@@ -3213,3 +3280,16 @@ def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available."""
 
     return _has_module("deep_gemm")
+
+
+def bind_process_name(name: str, suffix: str = "") -> None:
+    """Bind the process name to a specific name with an optional suffix.
+
+    Args:
+        name: The base name to bind the process to.
+        suffix: An optional suffix to append to the base name.
+    """
+    name = f"{envs.VLLM_PROCESS_NAME_PREFIX}::{name}"
+    if suffix:
+        name = f"{name}_{suffix}"
+    setproctitle.setproctitle(name)

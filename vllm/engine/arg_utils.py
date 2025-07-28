@@ -9,7 +9,6 @@ import functools
 import json
 import sys
 import threading
-import warnings
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
 from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, List,
@@ -19,21 +18,21 @@ from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, List,
 import regex as re
 import torch
 from pydantic import TypeAdapter, ValidationError
-from typing_extensions import TypeIs, deprecated
+from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         ConfigFormat, ConfigType, DecodingConfig,
-                         DetailedTraceModules, Device, DeviceConfig,
-                         DistributedExecutorBackend, GuidedDecodingBackend,
-                         GuidedDecodingBackendV1, HfOverrides, KVEventsConfig,
-                         KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ModelDType, ModelImpl, MultiModalConfig,
+                         ConfigFormat, ConfigType, ConvertOption,
+                         DecodingConfig, DetailedTraceModules, Device,
+                         DeviceConfig, DistributedExecutorBackend,
+                         GuidedDecodingBackend, GuidedDecodingBackendV1,
+                         HfOverrides, KVEventsConfig, KVTransferConfig,
+                         LoadConfig, LogprobsMode, LoRAConfig, ModelConfig,
+                         ModelDType, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
-                         PrefixCachingHashAlgo, PromptAdapterConfig,
-                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         TaskOption, TokenizerMode, TokenizerPoolConfig,
-                         VllmConfig, get_attr_docs, get_field)
+                         PrefixCachingHashAlgo, RunnerOption, SchedulerConfig,
+                         SchedulerPolicy, SpeculativeConfig, TaskOption,
+                         TokenizerMode, VllmConfig, get_attr_docs, get_field)
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -48,10 +47,12 @@ from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
 if TYPE_CHECKING:
     from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization import QuantizationMethods
+    from vllm.model_executor.model_loader import LoadFormats
     from vllm.usage.usage_lib import UsageContext
 else:
     ExecutorBase = Any
     QuantizationMethods = Any
+    LoadFormats = Any
     UsageContext = Any
 
 logger = init_logger(__name__)
@@ -66,9 +67,6 @@ def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
 
     def _parse_type(val: str) -> T:
         try:
-            if return_type is json.loads and not re.match(
-                    r"(?s)^\s*{.*}\s*$", val):
-                return cast(T, nullable_kvs(val))
             return return_type(val)
         except ValueError as e:
             raise argparse.ArgumentTypeError(
@@ -92,42 +90,6 @@ def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
     if not re.match(r"(?s)^\s*{.*}\s*$", val):
         return str(val)
     return optional_type(json.loads)(val)
-
-
-@deprecated(
-    "Passing a JSON argument as a string containing comma separated key=value "
-    "pairs is deprecated. This will be removed in v0.10.0. Please use a JSON "
-    "string instead.")
-def nullable_kvs(val: str) -> dict[str, int]:
-    """Parses a string containing comma separate key [str] to value [int]
-    pairs into a dictionary.
-
-    Args:
-        val: String value to be parsed.
-
-    Returns:
-        Dictionary with parsed values.
-    """
-    out_dict: dict[str, int] = {}
-    for item in val.split(","):
-        kv_parts = [part.lower().strip() for part in item.split("=")]
-        if len(kv_parts) != 2:
-            raise argparse.ArgumentTypeError(
-                "Each item should be in the form KEY=VALUE")
-        key, value = kv_parts
-
-        try:
-            parsed_value = int(value)
-        except ValueError as exc:
-            msg = f"Failed to parse value of item {key}={value}"
-            raise argparse.ArgumentTypeError(msg) from exc
-
-        if key in out_dict and out_dict[key] != parsed_value:
-            raise argparse.ArgumentTypeError(
-                f"Conflicting values specified for key: {key}")
-        out_dict[key] = parsed_value
-
-    return out_dict
 
 
 def is_type(type_hint: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
@@ -177,6 +139,10 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
         type_hints.add(type_hint)
 
     return type_hints
+
+
+def is_online_quantization(quantization: Any) -> bool:
+    return quantization in ["inc"]
 
 
 @functools.lru_cache(maxsize=30)
@@ -305,14 +271,16 @@ class EngineArgs:
         str, List[str]]] = ModelConfig.served_model_name
     tokenizer: Optional[str] = ModelConfig.tokenizer
     hf_config_path: Optional[str] = ModelConfig.hf_config_path
-    task: TaskOption = ModelConfig.task
+    runner: RunnerOption = ModelConfig.runner
+    convert: ConvertOption = ModelConfig.convert
+    task: Optional[TaskOption] = ModelConfig.task
     skip_tokenizer_init: bool = ModelConfig.skip_tokenizer_init
     enable_prompt_embeds: bool = ModelConfig.enable_prompt_embeds
     tokenizer_mode: TokenizerMode = ModelConfig.tokenizer_mode
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     download_dir: Optional[str] = LoadConfig.download_dir
-    load_format: str = LoadConfig.load_format
+    load_format: Union[str, LoadFormats] = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
@@ -331,9 +299,11 @@ class EngineArgs:
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: Optional[int] = None
+    data_parallel_start_rank: Optional[int] = None
     data_parallel_size_local: Optional[int] = None
     data_parallel_address: Optional[str] = None
     data_parallel_rpc_port: Optional[int] = None
+    data_parallel_hybrid_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_eplb: bool = ParallelConfig.enable_eplb
@@ -349,7 +319,6 @@ class EngineArgs:
         CacheConfig.prefix_caching_hash_algo
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
-    use_v2_block_manager: bool = True
     swap_space: float = CacheConfig.swap_space
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
@@ -361,6 +330,7 @@ class EngineArgs:
         SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: Optional[int] = SchedulerConfig.max_num_seqs
     max_logprobs: int = ModelConfig.max_logprobs
+    logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     disable_log_stats: bool = False
     revision: Optional[str] = ModelConfig.revision
     code_revision: Optional[str] = ModelConfig.code_revision
@@ -373,13 +343,6 @@ class EngineArgs:
     enforce_eager: bool = ModelConfig.enforce_eager
     max_seq_len_to_capture: int = ModelConfig.max_seq_len_to_capture
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
-    # The following three fields are deprecated and will be removed in a future
-    # release. Setting them will have no effect. Please remove them from your
-    # configurations.
-    tokenizer_pool_size: int = TokenizerPoolConfig.pool_size
-    tokenizer_pool_type: str = TokenizerPoolConfig.pool_type
-    tokenizer_pool_extra_config: dict = \
-        get_field(TokenizerPoolConfig, "extra_config")
     limit_mm_per_prompt: dict[str, int] = \
         get_field(MultiModalConfig, "limit_per_prompt")
     interleave_mm_strings: bool = MultiModalConfig.interleave_mm_strings
@@ -401,15 +364,7 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
     lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
     lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
-    long_lora_scaling_factors: Optional[tuple[float, ...]] = \
-        LoRAConfig.long_lora_scaling_factors
-    # PromptAdapter fields
-    enable_prompt_adapter: bool = False
-    max_prompt_adapters: int = PromptAdapterConfig.max_prompt_adapters
-    max_prompt_adapter_token: int = \
-        PromptAdapterConfig.max_prompt_adapter_token
 
-    device: Device = DeviceConfig.device
     num_scheduler_steps: int = SchedulerConfig.num_scheduler_steps
     multi_step_stream_outputs: bool = SchedulerConfig.multi_step_stream_outputs
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
@@ -441,7 +396,6 @@ class EngineArgs:
 
     speculative_config: Optional[Dict[str, Any]] = None
 
-    qlora_adapter_name_or_path: Optional[str] = None
     show_hidden_metrics_for_version: Optional[str] = \
         ObservabilityConfig.show_hidden_metrics_for_version
     otlp_traces_endpoint: Optional[str] = \
@@ -475,7 +429,6 @@ class EngineArgs:
 
     additional_config: dict[str, Any] = \
         get_field(VllmConfig, "additional_config")
-    enable_reasoning: Optional[bool] = None  # DEPRECATED
     reasoning_parser: str = DecodingConfig.reasoning_backend
 
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
@@ -484,6 +437,10 @@ class EngineArgs:
     enable_multimodal_encoder_data_parallel: bool = \
         ParallelConfig.enable_multimodal_encoder_data_parallel
 
+    async_scheduling: bool = SchedulerConfig.async_scheduling
+    # DEPRECATED
+    enable_prompt_adapter: bool = False
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -491,13 +448,6 @@ class EngineArgs:
         if isinstance(self.compilation_config, (int, dict)):
             self.compilation_config = CompilationConfig.from_cli(
                 str(self.compilation_config))
-        if self.qlora_adapter_name_or_path is not None:
-            warnings.warn(
-                "The `qlora_adapter_name_or_path` is deprecated "
-                "and will be removed in v0.10.0. ",
-                DeprecationWarning,
-                stacklevel=2,
-            )
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
@@ -514,7 +464,11 @@ class EngineArgs:
         )
         if not ('serve' in sys.argv[1:] and '--help' in sys.argv[1:]):
             model_group.add_argument("--model", **model_kwargs["model"])
-        model_group.add_argument("--task", **model_kwargs["task"])
+        model_group.add_argument("--runner", **model_kwargs["runner"])
+        model_group.add_argument("--convert", **model_kwargs["convert"])
+        model_group.add_argument("--task",
+                                 **model_kwargs["task"],
+                                 deprecated=True)
         model_group.add_argument("--tokenizer", **model_kwargs["tokenizer"])
         model_group.add_argument("--tokenizer-mode",
                                  **model_kwargs["tokenizer_mode"])
@@ -544,6 +498,8 @@ class EngineArgs:
                                  **model_kwargs["max_seq_len_to_capture"])
         model_group.add_argument("--max-logprobs",
                                  **model_kwargs["max_logprobs"])
+        model_group.add_argument("--logprobs-mode",
+                                 **model_kwargs["logprobs_mode"])
         model_group.add_argument("--disable-sliding-window",
                                  **model_kwargs["disable_sliding_window"])
         model_group.add_argument("--disable-cascade-attn",
@@ -599,9 +555,7 @@ class EngineArgs:
             title="LoadConfig",
             description=LoadConfig.__doc__,
         )
-        load_group.add_argument("--load-format",
-                                choices=[f.value for f in LoadFormat],
-                                **load_kwargs["load_format"])
+        load_group.add_argument("--load-format", **load_kwargs["load_format"])
         load_group.add_argument("--download-dir",
                                 **load_kwargs["download_dir"])
         load_group.add_argument("--model-loader-extra-config",
@@ -610,14 +564,6 @@ class EngineArgs:
                                 **load_kwargs["ignore_patterns"])
         load_group.add_argument("--use-tqdm-on-load",
                                 **load_kwargs["use_tqdm_on_load"])
-        load_group.add_argument(
-            "--qlora-adapter-name-or-path",
-            type=str,
-            default=None,
-            help="The `--qlora-adapter-name-or-path` has no effect, do not set"
-            " it, and it  will be removed in v0.10.0.",
-            deprecated=True,
-        )
         load_group.add_argument('--pt-load-map-location',
                                 **load_kwargs["pt_load_map_location"])
 
@@ -638,15 +584,6 @@ class EngineArgs:
         guided_decoding_group.add_argument(
             "--guided-decoding-disable-additional-properties",
             **guided_decoding_kwargs["disable_additional_properties"])
-        guided_decoding_group.add_argument(
-            "--enable-reasoning",
-            action=argparse.BooleanOptionalAction,
-            deprecated=True,
-            help="[DEPRECATED] The `--enable-reasoning` flag is deprecated as "
-            "of v0.9.0. Use `--reasoning-parser` to specify the reasoning "
-            "parser backend instead. This flag (`--enable-reasoning`) will be "
-            "removed in v0.10.0. When `--reasoning-parser` is specified, "
-            "reasoning mode is automatically enabled.")
         guided_decoding_group.add_argument(
             "--reasoning-parser",
             # This choices is a special case because it's not static
@@ -675,6 +612,11 @@ class EngineArgs:
             type=int,
             help='Data parallel rank of this instance. '
             'When set, enables external load balancer mode.')
+        parallel_group.add_argument('--data-parallel-start-rank',
+                                    '-dpr',
+                                    type=int,
+                                    help='Starting data parallel rank '
+                                    'for secondary nodes.')
         parallel_group.add_argument('--data-parallel-size-local',
                                     '-dpl',
                                     type=int,
@@ -696,6 +638,9 @@ class EngineArgs:
                                     default='mp',
                                     help='Backend for data parallel, either '
                                     '"mp" or "ray".')
+        parallel_group.add_argument(
+            "--data-parallel-hybrid-lb",
+            **parallel_kwargs["data_parallel_hybrid_lb"])
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
@@ -749,19 +694,6 @@ class EngineArgs:
         cache_group.add_argument("--calculate-kv-scales",
                                  **cache_kwargs["calculate_kv_scales"])
 
-        # Tokenizer arguments
-        tokenizer_kwargs = get_kwargs(TokenizerPoolConfig)
-        tokenizer_group = parser.add_argument_group(
-            title="TokenizerPoolConfig",
-            description=TokenizerPoolConfig.__doc__,
-        )
-        tokenizer_group.add_argument("--tokenizer-pool-size",
-                                     **tokenizer_kwargs["pool_size"])
-        tokenizer_group.add_argument("--tokenizer-pool-type",
-                                     **tokenizer_kwargs["pool_type"])
-        tokenizer_group.add_argument("--tokenizer-pool-extra-config",
-                                     **tokenizer_kwargs["extra_config"])
-
         # Multimodal related configs
         multimodal_kwargs = get_kwargs(MultiModalConfig)
         multimodal_group = parser.add_argument_group(
@@ -803,41 +735,12 @@ class EngineArgs:
             "--lora-dtype",
             **lora_kwargs["lora_dtype"],
         )
-        lora_group.add_argument("--long-lora-scaling-factors",
-                                **lora_kwargs["long_lora_scaling_factors"])
         lora_group.add_argument("--max-cpu-loras",
                                 **lora_kwargs["max_cpu_loras"])
         lora_group.add_argument("--fully-sharded-loras",
                                 **lora_kwargs["fully_sharded_loras"])
         lora_group.add_argument("--default-mm-loras",
                                 **lora_kwargs["default_mm_loras"])
-
-        # PromptAdapter related configs
-        prompt_adapter_kwargs = get_kwargs(PromptAdapterConfig)
-        prompt_adapter_group = parser.add_argument_group(
-            title="PromptAdapterConfig",
-            description=PromptAdapterConfig.__doc__,
-        )
-        prompt_adapter_group.add_argument(
-            "--enable-prompt-adapter",
-            action=argparse.BooleanOptionalAction,
-            help="If True, enable handling of PromptAdapters.")
-        prompt_adapter_group.add_argument(
-            "--max-prompt-adapters",
-            **prompt_adapter_kwargs["max_prompt_adapters"])
-        prompt_adapter_group.add_argument(
-            "--max-prompt-adapter-token",
-            **prompt_adapter_kwargs["max_prompt_adapter_token"])
-
-        # Device arguments
-        device_kwargs = get_kwargs(DeviceConfig)
-        device_group = parser.add_argument_group(
-            title="DeviceConfig",
-            description=DeviceConfig.__doc__,
-        )
-        device_group.add_argument("--device",
-                                  **device_kwargs["device"],
-                                  deprecated=True)
 
         # Speculative arguments
         speculative_group = parser.add_argument_group(
@@ -921,6 +824,8 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"])
+        scheduler_group.add_argument("--async-scheduling",
+                                     **scheduler_kwargs["async_scheduling"])
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -938,18 +843,15 @@ class EngineArgs:
                                 **vllm_kwargs["additional_config"])
 
         # Other arguments
-        parser.add_argument('--use-v2-block-manager',
-                            action='store_true',
-                            default=True,
-                            deprecated=True,
-                            help='[DEPRECATED] block manager v1 has been '
-                            'removed and SelfAttnBlockSpaceManager (i.e. '
-                            'block manager v2) is now the default. '
-                            'Setting this flag to True or False'
-                            ' has no effect on vLLM behavior.')
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
+        parser.add_argument('--enable-prompt-adapter',
+                            action='store_true',
+                            deprecated=True,
+                            help='[DEPRECATED] Prompt adapter has been '
+                            'removed. Setting this flag to True or False'
+                            ' has no effect on vLLM behavior.')
 
         return parser
 
@@ -968,14 +870,15 @@ class EngineArgs:
 
         # NOTE: This is to allow model loading from S3 in CI
         if (not isinstance(self, AsyncEngineArgs) and envs.VLLM_CI_USE_S3
-                and self.model in MODELS_ON_S3
-                and self.load_format == LoadFormat.AUTO):  # noqa: E501
+                and self.model in MODELS_ON_S3 and self.load_format == "auto"):
             self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
-            self.load_format = LoadFormat.RUNAI_STREAMER
+            self.load_format = "runai_streamer"
 
         return ModelConfig(
             model=self.model,
             hf_config_path=self.hf_config_path,
+            runner=self.runner,
+            convert=self.convert,
             task=self.task,
             tokenizer=self.tokenizer,
             tokenizer_mode=self.tokenizer_mode,
@@ -995,6 +898,7 @@ class EngineArgs:
             enforce_eager=self.enforce_eager,
             max_seq_len_to_capture=self.max_seq_len_to_capture,
             max_logprobs=self.max_logprobs,
+            logprobs_mode=self.logprobs_mode,
             disable_sliding_window=self.disable_sliding_window,
             disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,
@@ -1042,6 +946,8 @@ class EngineArgs:
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
+            device="cpu"
+            if is_online_quantization(self.quantization) else None,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
@@ -1083,6 +989,7 @@ class EngineArgs:
     def create_engine_config(
         self,
         usage_context: Optional[UsageContext] = None,
+        headless: bool = False,
     ) -> VllmConfig:
         """
         Create the VllmConfig.
@@ -1171,15 +1078,41 @@ class EngineArgs:
             # but we should not do this here.
             placement_group = ray.util.get_current_placement_group()
 
+        assert not headless or not self.data_parallel_hybrid_lb, (
+            "data_parallel_hybrid_lb is not applicable in "
+            "headless mode")
+
         data_parallel_external_lb = self.data_parallel_rank is not None
+        # Local DP rank = 1, use pure-external LB.
         if data_parallel_external_lb:
             assert self.data_parallel_size_local in (1, None), (
                 "data_parallel_size_local must be 1 when data_parallel_rank "
                 "is set")
             data_parallel_size_local = 1
+            # Use full external lb if we have local_size of 1.
+            self.data_parallel_hybrid_lb = False
         elif self.data_parallel_size_local is not None:
             data_parallel_size_local = self.data_parallel_size_local
+
+            if self.data_parallel_start_rank and not headless:
+                # Infer hybrid LB mode.
+                self.data_parallel_hybrid_lb = True
+
+            if self.data_parallel_hybrid_lb and data_parallel_size_local == 1:
+                # Use full external lb if we have local_size of 1.
+                data_parallel_external_lb = True
+                self.data_parallel_hybrid_lb = False
+
+            if data_parallel_size_local == self.data_parallel_size:
+                # Disable hybrid LB mode if set for a single node
+                self.data_parallel_hybrid_lb = False
+
+            self.data_parallel_rank = self.data_parallel_start_rank or 0
         else:
+            assert not self.data_parallel_hybrid_lb, (
+                "data_parallel_size_local must be set to use "
+                "data_parallel_hybrid_lb.")
+
             # Local DP size defaults to global DP size if not set.
             data_parallel_size_local = self.data_parallel_size
 
@@ -1206,6 +1139,26 @@ class EngineArgs:
             self.data_parallel_rpc_port
             is not None) else ParallelConfig.data_parallel_rpc_port
 
+        if self.async_scheduling:
+            # Async scheduling does not work with the uniprocess backend.
+            if self.distributed_executor_backend is None:
+                self.distributed_executor_backend = "mp"
+                logger.info("Using mp-based distributed executor backend "
+                            "for async scheduling.")
+            if self.distributed_executor_backend == "uni":
+                raise ValueError("Async scheduling is not supported with "
+                                 "uni-process backend.")
+            if self.pipeline_parallel_size > 1:
+                raise ValueError("Async scheduling is not supported with "
+                                 "pipeline-parallel-size > 1.")
+
+            # Currently, async scheduling does not support speculative decoding.
+            # TODO(woosuk): Support it.
+            if self.speculative_config is not None:
+                raise ValueError(
+                    "Currently, speculative decoding is not supported with "
+                    "async scheduling.")
+
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -1216,6 +1169,7 @@ class EngineArgs:
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
+            data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.num_redundant_experts,
@@ -1286,6 +1240,7 @@ class EngineArgs:
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             disable_hybrid_kv_cache_manager=self.
             disable_hybrid_kv_cache_manager,
+            async_scheduling=self.async_scheduling,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
@@ -1300,7 +1255,6 @@ class EngineArgs:
             default_mm_loras=self.default_mm_loras,
             fully_sharded_loras=self.fully_sharded_loras,
             lora_extra_vocab_size=self.lora_extra_vocab_size,
-            long_lora_scaling_factors=self.long_lora_scaling_factors,
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
@@ -1310,11 +1264,6 @@ class EngineArgs:
             self.quantization = self.load_format = "bitsandbytes"
 
         load_config = self.create_load_config()
-
-        prompt_adapter_config = PromptAdapterConfig(
-            max_prompt_adapters=self.max_prompt_adapters,
-            max_prompt_adapter_token=self.max_prompt_adapter_token) \
-                                        if self.enable_prompt_adapter else None
 
         decoding_config = DecodingConfig(
             backend=self.guided_decoding_backend,
@@ -1326,8 +1275,8 @@ class EngineArgs:
         )
 
         observability_config = ObservabilityConfig(
-            show_hidden_metrics_for_version=self.
-            show_hidden_metrics_for_version,
+            show_hidden_metrics_for_version=(
+                self.show_hidden_metrics_for_version),
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
         )
@@ -1343,7 +1292,6 @@ class EngineArgs:
             load_config=load_config,
             decoding_config=decoding_config,
             observability_config=observability_config,
-            prompt_adapter_config=prompt_adapter_config,
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
@@ -1358,7 +1306,7 @@ class EngineArgs:
         #############################################################
         # Unsupported Feature Flags on V1.
 
-        if self.load_format == LoadFormat.SHARDED_STATE.value:
+        if self.load_format == "sharded_state":
             _raise_or_fallback(
                 feature_name=f"--load_format {self.load_format}",
                 recommend_to_remove=False)
@@ -1412,30 +1360,12 @@ class EngineArgs:
 
         # No Fp8 KV cache so far.
         if self.kv_cache_dtype != "auto":
-            fp8_attention = self.kv_cache_dtype.startswith("fp8")
-            will_use_fa = (
-                current_platform.is_cuda()
-                and not envs.is_set("VLLM_ATTENTION_BACKEND")
-            ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
-            supported = False
-            if current_platform.is_rocm():
-                supported = True
-            elif fp8_attention and will_use_fa:
-                from vllm.attention.utils.fa_utils import (
-                    flash_attn_supports_fp8)
-                supported = flash_attn_supports_fp8()
-            elif envs.VLLM_USE_TRTLLM_DECODE_ATTENTION:
-                supported = True
+            supported = current_platform.is_kv_cache_dtype_supported(
+                self.kv_cache_dtype)
             if not supported:
                 _raise_or_fallback(feature_name="--kv-cache-dtype",
                                    recommend_to_remove=False)
                 return False
-
-        # No Prompt Adapter so far.
-        if self.enable_prompt_adapter:
-            _raise_or_fallback(feature_name="--enable-prompt-adapter",
-                               recommend_to_remove=False)
-            return False
 
         # No text embedding inputs so far.
         if self.enable_prompt_embeds:
@@ -1470,28 +1400,12 @@ class EngineArgs:
             return False
 
         # V1 supports N-gram, Medusa, and Eagle speculative decoding.
-        is_ngram_enabled = False
-        is_eagle_enabled = False
-        is_medusa_enabled = False
-        if self.speculative_config is not None:
-            # This is supported but experimental (handled below).
-            speculative_method = self.speculative_config.get("method")
-            if speculative_method:
-                if speculative_method in ("ngram", "[ngram]"):
-                    is_ngram_enabled = True
-                elif speculative_method == "medusa":
-                    is_medusa_enabled = True
-                elif speculative_method in ("eagle", "eagle3", "deepseek_mtp"):
-                    is_eagle_enabled = True
-            else:
-                speculative_model = self.speculative_config.get("model")
-                if speculative_model in ("ngram", "[ngram]"):
-                    is_ngram_enabled = True
-            if not (is_ngram_enabled or is_eagle_enabled or is_medusa_enabled):
-                # Other speculative decoding methods are not supported yet.
-                _raise_or_fallback(feature_name="Speculative Decoding",
-                                   recommend_to_remove=False)
-                return False
+        if (self.speculative_config is not None
+                and self.speculative_config.get("method") == "draft_model"):
+            raise NotImplementedError(
+                "Speculative decoding with draft model is not supported yet. "
+                "Please consider using other speculative decoding methods "
+                "such as ngram, medusa, eagle, or deepseek_mtp.")
 
         # No XFormers so far.
         V1_BACKENDS = [
@@ -1574,7 +1488,6 @@ class EngineArgs:
 
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
-                        and not self.enable_prompt_adapter
                         and model_config.runner_type != "pooling"):
                     self.enable_chunked_prefill = True
                     logger.warning(
@@ -1713,13 +1626,14 @@ class EngineArgs:
 
         # cpu specific default values.
         if current_platform.is_cpu():
+            world_size = self.pipeline_parallel_size * self.tensor_parallel_size
             default_max_num_batched_tokens = {
-                UsageContext.LLM_CLASS: 4096,
-                UsageContext.OPENAI_API_SERVER: 2048,
+                UsageContext.LLM_CLASS: 4096 * world_size,
+                UsageContext.OPENAI_API_SERVER: 2048 * world_size,
             }
             default_max_num_seqs = {
-                UsageContext.LLM_CLASS: 128,
-                UsageContext.OPENAI_API_SERVER: 32,
+                UsageContext.LLM_CLASS: 256 * world_size,
+                UsageContext.OPENAI_API_SERVER: 128 * world_size,
             }
 
         use_context_value = usage_context.value if usage_context else None

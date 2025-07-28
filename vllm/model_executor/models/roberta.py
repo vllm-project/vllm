@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import itertools
 from collections.abc import Iterable
 from typing import Optional, Union
 
@@ -11,19 +10,19 @@ from transformers import RobertaConfig
 
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.pooler import ClassifierPooler
+from vllm.model_executor.layers.pooler import (ClassifierPooler, CLSPool,
+                                               DispatchPooler, Pooler)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.bert import (BertEmbeddingModel,
                                              BertMMTokenIdsMixin, BertModel,
                                              TokenTypeInputBuilder,
                                              TokenTypeMultiModalProcessor,
                                              TokenTypeProcessingInfo)
-from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
-from vllm.model_executor.pooling_metadata import PoolingMetadata
+from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
+                                              maybe_prefix)
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.sequence import IntermediateTensors
 
 from .bert_with_rope import BertWithRope, JinaRobertaModel
 from .interfaces import SupportsCrossEncoding
@@ -45,8 +44,10 @@ class RobertaEmbedding(nn.Module):
                                                   config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size,
                                       eps=config.layer_norm_eps)
-        self.position_ids = nn.Parameter(
-            torch.empty((1, config.max_position_embeddings)), )
+        self.register_buffer(
+            "position_ids",
+            torch.arange(config.max_position_embeddings).unsqueeze(0),
+        )
 
         self.position_embedding_type = config.position_embedding_type
         if self.position_embedding_type != "absolute":
@@ -101,8 +102,8 @@ class RobertaClassificationHead(nn.Module):
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.out_proj = nn.Linear(config.hidden_size, config.num_labels)
 
-    def forward(self, features, **kwargs):
-        x = features[0, :]  # take <s> token (equiv. to [CLS])
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # CLSPool has already been applied in `pooling`
         x = self.dense(x)
         x = torch.tanh(x)
         x = self.out_proj(x)
@@ -158,16 +159,20 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
                              embedding_class=RobertaEmbedding)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        weights = self.hf_to_vllm_mapper.apply(weights)
-        # Separate weights in "roberta"-prefixed and all else (not in memory).
-        # For use with models like FacebookAI/roberta-base.
-        bert_weights, task_weights = roberta_task_weights_filter(weights)
-        loaded = self.model.load_weights(bert_weights)
-        if not len(loaded):
-            # Fix for models like `sentence-transformers/stsb-roberta-base-v2`
-            # which use the same architecture, but have no "roberta" prefix.
-            loaded = self.model.load_weights(task_weights)
-        assert len(loaded), "Unable to load RobertaEmbeddingModel"
+        weights_list = list(weights)
+        has_roberta_prefix = any(
+            name.startswith("roberta.") for name, _ in weights_list)
+        if has_roberta_prefix:
+            # For models with the `roberta.` prefix e.g.
+            # `FacebookAI/roberta-base`
+            mapper = WeightsMapper(orig_to_new_prefix={"roberta.": "model."})
+        else:
+            # For models without the `roberta.` prefix e.g.
+            # `sentence-transformers/stsb-roberta-base-v2`
+            mapper = WeightsMapper(orig_to_new_prefix={"": "model."})
+
+        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head."])
+        return loader.load_weights(weights_list, mapper=mapper)
 
 
 @MULTIMODAL_REGISTRY.register_processor(TokenTypeMultiModalProcessor,
@@ -185,6 +190,7 @@ class RobertaForSequenceClassification(nn.Module, BertMMTokenIdsMixin,
        _pooler: An instance of Pooler used for pooling operations.
    """
 
+    is_pooling_model = True
     jina_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             'emb_ln': "embeddings.LayerNorm",
@@ -205,12 +211,30 @@ class RobertaForSequenceClassification(nn.Module, BertMMTokenIdsMixin,
         self.num_labels = config.num_labels
         self.roberta = BertModel(vllm_config=vllm_config,
                                  prefix=maybe_prefix(prefix, "bert"),
-                                 embedding_class=RobertaEmbedding,
-                                 add_pooling_layer=False)
+                                 embedding_class=RobertaEmbedding)
         self.classifier = RobertaClassificationHead(config)
 
-        self._pooler = ClassifierPooler(vllm_config.model_config,
-                                        self.classifier)
+        pooler_config = vllm_config.model_config.pooler_config
+        assert pooler_config is not None
+
+        self.pooler = DispatchPooler({
+            "encode":
+            Pooler.for_encode(pooler_config),
+            "classify":
+            ClassifierPooler(
+                pooling=CLSPool(),
+                classifier=self.classifier,
+                act_fn=ClassifierPooler.act_fn_for_seq_cls(
+                    vllm_config.model_config),
+            ),
+            "score":
+            ClassifierPooler(
+                pooling=CLSPool(),
+                classifier=self.classifier,
+                act_fn=ClassifierPooler.act_fn_for_cross_encoder(
+                    vllm_config.model_config),
+            ),
+        })
         self.input_ids: Optional[torch.Tensor] = None
 
     def maybe_store_input_ids(self, input_ids: torch.Tensor):
@@ -220,26 +244,8 @@ class RobertaForSequenceClassification(nn.Module, BertMMTokenIdsMixin,
         return self.roberta
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        bert_weights, task_weights = roberta_task_weights_filter(weights)
-        bert_weights = self.jina_to_vllm_mapper.apply(bert_weights)
-
-        self.roberta.load_weights(bert_weights)
-
-        params_dict = dict(self.named_parameters())
-
-        for name, loaded_weight in task_weights:
-            if name.startswith("classifier"):
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.jina_to_vllm_mapper)
 
     def forward(
         self,
@@ -249,8 +255,7 @@ class RobertaForSequenceClassification(nn.Module, BertMMTokenIdsMixin,
         inputs_embeds: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        _input_ids = input_ids if input_ids is not None else self.input_ids
-        replace_roberta_positions(input_ids=_input_ids,
+        replace_roberta_positions(input_ids=input_ids,
                                   position_ids=positions,
                                   padding_idx=self.padding_idx)
         return self.roberta(input_ids=input_ids,
@@ -315,27 +320,3 @@ def replace_roberta_positions(input_ids: torch.Tensor,
             position_ids[offset:offset+length] = \
                 create_position_ids_from_input_ids(tokens, padding_idx)
             offset = offset + length
-
-
-def roberta_task_weights_filter(
-    all_weights: Iterable[tuple[str, torch.Tensor]]
-) -> tuple[Iterable[tuple[str, torch.Tensor]], Iterable[tuple[str,
-                                                              torch.Tensor]]]:
-    """
-    Separate task-specific weights that are applied on top
-    of the encoder-decoder bert base.
-    To do so, return two generators over the original iterator.
-    Also, remove the "roberta." prefix to make it loadable
-    from vanilla BertModel.
-    """
-    # Copy of a lazy iterator without in-memory overhead so both
-    # iterators can be iterated upon independently.
-    all_weights1, all_weights2 = itertools.tee(all_weights)
-
-    def encoder_decoder_weights():
-        for name, weight in all_weights1:
-            if name.startswith("roberta."):
-                yield (name[len("roberta."):], weight)
-
-    return encoder_decoder_weights(), ((n, w) for n, w in all_weights2
-                                       if not n.startswith("roberta."))

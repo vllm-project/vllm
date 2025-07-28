@@ -5,7 +5,6 @@ from typing import Any, Callable, Optional, Union
 
 import torch
 
-from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
                                                         FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
@@ -14,6 +13,7 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
 
@@ -391,12 +391,11 @@ def _apply_bnb_4bit_fake(
 
 
 try:
-    direct_register_custom_op(
-        op_name="apply_bnb_4bit",
-        op_func=_apply_bnb_4bit,
-        mutates_args=["out"],
-        fake_impl=_apply_bnb_4bit_fake,
-    )
+    direct_register_custom_op(op_name="apply_bnb_4bit",
+                              op_func=_apply_bnb_4bit,
+                              mutates_args=["out"],
+                              fake_impl=_apply_bnb_4bit_fake,
+                              dispatch_key=current_platform.dispatch_key)
     apply_bnb_4bit = torch.ops.vllm.apply_bnb_4bit
 
 except AttributeError as error:
@@ -467,6 +466,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        from vllm.model_executor.layers.fused_moe import fused_experts
 
         if enable_eplb:
             raise NotImplementedError(

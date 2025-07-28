@@ -4,7 +4,7 @@
 import itertools
 from dataclasses import dataclass
 from functools import cache
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, List, Optional, Tuple, Type
 
 import torch
 
@@ -494,21 +494,18 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         alibi_slopes: Optional[List[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
-            raise NotImplementedError("KV sharing is not supported in V0.")
+            raise NotImplementedError("KV sharing is not supported in V0 "
+                                      "ROCM_FLASH backend.")
         if use_irope:
             logger.warning_once(
                 "Using irope in ROCm Flash Attention is not supported yet, it "
                 "will fail back to global attention for long context.")
-        if blocksparse_params is not None:
-            raise ValueError(
-                "ROCmFlashAttention does not support blocksparse attention.")
         if use_irope:
             logger.warning(
                 "Using irope in V0 is not supported yet, it will fall back "

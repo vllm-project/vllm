@@ -33,7 +33,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, is_activation_quantization_format,
     should_ignore_layer)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported)
 from vllm.platforms import current_platform
 
@@ -330,6 +330,12 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _is_fp8_w8a8_sm90(self, weight_quant: BaseModel,
                           input_quant: BaseModel) -> bool:
         return (self._check_scheme_supported(90, error=False, match_exact=True)
+                and self._is_fp8_w8a8(weight_quant, input_quant))
+
+    def _is_fp8_w8a8_sm100(self, weight_quant: BaseModel,
+                           input_quant: BaseModel) -> bool:
+        return (self._check_scheme_supported(
+            100, error=False, match_exact=True)
                 and self._is_fp8_w8a8(weight_quant, input_quant))
 
     def _is_fp8_w8a16(self, weight_quant: BaseModel,

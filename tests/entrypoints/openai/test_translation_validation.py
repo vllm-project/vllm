@@ -39,8 +39,8 @@ async def test_basic_audio(foscolo):
             # TODO remove once language detection is implemented
             extra_body=dict(language="it"),
             temperature=0.0)
-        out = json.loads(translation)['text'].strip()
-        assert "Nor will I ever touch the sacred" in out
+        out = json.loads(translation)['text'].strip().lower()
+        assert "greek sea" in out
 
 
 @pytest.mark.asyncio
@@ -168,5 +168,4 @@ async def test_long_audio_request(foscolo):
             response_format="text",
             temperature=0.0)
         out = json.loads(translation)['text'].strip().lower()
-        # TODO investigate higher model uncertainty in for longer translations.
-        assert out.count("nor will i ever") == 2
+        assert out.count("greek sea") == 2

@@ -17,7 +17,6 @@ from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
                                    HFValidationError, LocalEntryNotFoundError,
                                    RepositoryNotFoundError,
                                    RevisionNotFoundError)
-from torch import nn
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import (
     get_image_processor_config)
@@ -32,11 +31,13 @@ from vllm.logger import init_logger
 # yapf: disable
 from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              DbrxConfig, DeepseekVLV2Config,
-                                             EAGLEConfig, ExaoneConfig,
-                                             JAISConfig, KimiVLConfig,
-                                             MedusaConfig, MiniMaxText01Config,
+                                             EAGLEConfig, Exaone4Config,
+                                             ExaoneConfig, JAISConfig,
+                                             KimiVLConfig, MedusaConfig,
+                                             MiniMaxText01Config,
                                              MiniMaxVL01Config, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
+                                             Nemotron_Nano_VL_Config,
                                              NemotronConfig, NVLM_D_Config,
                                              OvisConfig, RWConfig,
                                              SkyworkR1VChatConfig, SolarConfig,
@@ -44,7 +45,6 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import resolve_obj_by_qualname
 
 if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -81,6 +81,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "dbrx": DbrxConfig,
     "deepseek_vl_v2": DeepseekVLV2Config,
     "kimi_vl": KimiVLConfig,
+    "Llama_Nemotron_Nano_VL": Nemotron_Nano_VL_Config,
     "mpt": MPTConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
@@ -89,6 +90,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "medusa": MedusaConfig,
     "eagle": EAGLEConfig,
     "exaone": ExaoneConfig,
+    "exaone4": Exaone4Config,
     "minimax_text_01": MiniMaxText01Config,
     "minimax_vl_01": MiniMaxVL01Config,
     "nemotron": NemotronConfig,
@@ -305,6 +307,9 @@ def get_config(
     revision: Optional[str] = None,
     code_revision: Optional[str] = None,
     config_format: ConfigFormat = ConfigFormat.AUTO,
+    hf_overrides_kw: Optional[dict[str, Any]] = None,
+    hf_overrides_fn: Optional[Callable[[PretrainedConfig],
+                                       PretrainedConfig]] = None,
     **kwargs,
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
@@ -422,6 +427,13 @@ def get_config(
                 f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
+
+    if hf_overrides_kw:
+        logger.debug("Overriding HF config with %s", hf_overrides_kw)
+        config.update(hf_overrides_kw)
+    if hf_overrides_fn:
+        logger.debug("Overriding HF config with %s", hf_overrides_fn)
+        config = hf_overrides_fn(config)
 
     patch_rope_scaling(config)
 
@@ -562,17 +574,15 @@ def get_pooling_config_name(pooling_name: str) -> Union[str, None]:
     supported_pooling_types = ['LAST', 'ALL', 'CLS', 'STEP', 'MEAN']
     pooling_type_name = pooling_name.upper()
 
-    try:
-        if pooling_type_name in supported_pooling_types:
-            return pooling_type_name
-    except NotImplementedError as e:
-        logger.debug("Pooling type not supported", e)
-        return None
-    return None
+    if pooling_type_name in supported_pooling_types:
+        return pooling_type_name
+
+    raise NotImplementedError(
+        f"Pooling type {pooling_type_name} not supported")
 
 
 @cache
-def get_sentence_transformer_tokenizer_config(model: str,
+def get_sentence_transformer_tokenizer_config(model: Union[str, Path],
                                               revision: Optional[str] = 'main'
                                               ):
     """
@@ -580,7 +590,7 @@ def get_sentence_transformer_tokenizer_config(model: str,
     given Sentence Transformer BERT model.
 
     Parameters:
-    - model (str): The name of the Sentence Transformer
+    - model (str|Path): The name of the Sentence Transformer
     BERT model.
     - revision (str, optional): The revision of the m
     odel to use. Defaults to 'main'.
@@ -608,7 +618,7 @@ def get_sentence_transformer_tokenizer_config(model: str,
             if encoder_dict:
                 break
 
-    if not encoder_dict and not model.startswith("/"):
+    if not encoder_dict and not Path(model).is_absolute():
         try:
             # If model is on HuggingfaceHub, get the repo files
             repo_files = list_repo_files(model,
@@ -725,13 +735,6 @@ def get_hf_text_config(config: PretrainedConfig):
     """Get the "sub" config relevant to llm for multi modal models.
     No op for pure text models.
     """
-    # This block should be unnecessary after https://github.com/huggingface/transformers/pull/37517
-    if hasattr(config, "thinker_config"):
-        # TODO(suyang.fy): Refactor code.
-        #  For Qwen2.5-Omni, change hf_text_config to
-        #  thinker_config.text_config.
-        return config.thinker_config.text_config
-
     text_config = config.get_text_config()
 
     if text_config is not config:
@@ -763,28 +766,6 @@ def try_get_generation_config(
             return GenerationConfig.from_model_config(config)
         except OSError:  # Not found
             return None
-
-
-def get_classification_activation_function(config: PretrainedConfig):
-    return nn.Sigmoid() if config.num_labels == 1 else nn.Softmax()
-
-
-def get_cross_encoder_activation_function(config: PretrainedConfig):
-    function_name: Optional[str] = None
-    if (hasattr(config, "sentence_transformers")
-            and "activation_fn" in config.sentence_transformers):
-        function_name = config.sentence_transformers["activation_fn"]
-    elif (hasattr(config, "sbert_ce_default_activation_function")
-          and config.sbert_ce_default_activation_function is not None):
-        function_name = config.sbert_ce_default_activation_function
-
-    if function_name is not None:
-        assert function_name.startswith("torch.nn.modules."), (
-            "Loading of activation functions is restricted to "
-            "torch.nn.modules for security reasons")
-        return resolve_obj_by_qualname(function_name)()
-
-    return nn.Sigmoid() if config.num_labels == 1 else nn.Identity()
 
 
 def try_get_safetensors_metadata(

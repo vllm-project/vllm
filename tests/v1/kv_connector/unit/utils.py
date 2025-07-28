@@ -7,7 +7,6 @@ from typing import Any, Optional
 import torch
 
 from vllm import SamplingParams
-from vllm.attention import AttentionType
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
                          ModelConfig, SchedulerConfig, VllmConfig)
 from vllm.distributed.kv_transfer.kv_connector.factory import (
@@ -69,9 +68,6 @@ def create_vllm_config(
     )
     model_config = ModelConfig(
         model=model,
-        task="auto",
-        tokenizer=model,
-        tokenizer_mode="auto",
         trust_remote_code=True,
         dtype="float16",
         seed=42,
@@ -107,7 +103,7 @@ def create_scheduler(
         kv_cache_groups=[
             KVCacheGroupSpec(['layer'],
                              FullAttentionSpec(block_size, 1, 1, torch.float32,
-                                               False, AttentionType.DECODER))
+                                               False))
         ],
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks

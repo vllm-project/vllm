@@ -48,8 +48,7 @@ from vllm.entrypoints.chat_utils import (load_chat_template,
                                          resolve_mistral_chat_template)
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.cli_args import (log_non_default_args,
-                                              make_arg_parser,
+from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -94,15 +93,16 @@ from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription, OpenAIServingTranslation)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
-                                    with_cancellation)
+                                    log_non_default_args, with_cancellation)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (Device, FlexibleArgumentParser, get_open_zmq_ipc_path,
-                        is_valid_ipv6_address, set_ulimit)
+from vllm.utils import (Device, FlexibleArgumentParser, bind_process_name,
+                        get_open_zmq_ipc_path, is_valid_ipv6_address,
+                        set_ulimit)
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -148,6 +148,9 @@ async def lifespan(app: FastAPI):
 @asynccontextmanager
 async def build_async_engine_client(
     args: Namespace,
+    *,
+    usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
+    disable_frontend_multiprocessing: Optional[bool] = None,
     client_config: Optional[dict[str, Any]] = None,
 ) -> AsyncIterator[EngineClient]:
 
@@ -155,15 +158,24 @@ async def build_async_engine_client(
     # Ensures everything is shutdown and cleaned up on error/exit
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
+    if disable_frontend_multiprocessing is None:
+        disable_frontend_multiprocessing = bool(
+            args.disable_frontend_multiprocessing)
+
     async with build_async_engine_client_from_engine_args(
-            engine_args, args.disable_frontend_multiprocessing,
-            client_config) as engine:
+            engine_args,
+            usage_context=usage_context,
+            disable_frontend_multiprocessing=disable_frontend_multiprocessing,
+            client_config=client_config,
+    ) as engine:
         yield engine
 
 
 @asynccontextmanager
 async def build_async_engine_client_from_engine_args(
     engine_args: AsyncEngineArgs,
+    *,
+    usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
     disable_frontend_multiprocessing: bool = False,
     client_config: Optional[dict[str, Any]] = None,
 ) -> AsyncIterator[EngineClient]:
@@ -176,7 +188,6 @@ async def build_async_engine_client_from_engine_args(
     """
 
     # Create the EngineConfig (determines if we can use V1).
-    usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
     # V1 AsyncLLM.
@@ -520,6 +531,19 @@ async def detokenize(request: DetokenizeRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
+
+
+def maybe_register_tokenizer_info_endpoint(args):
+    """Conditionally register the tokenizer info endpoint if enabled."""
+    if getattr(args, 'enable_tokenizer_info_endpoint', False):
+
+        @router.get("/tokenizer_info")
+        async def get_tokenizer_info(raw_request: Request):
+            """Get comprehensive tokenizer information."""
+            result = await tokenization(raw_request).get_tokenizer_info()
+            return JSONResponse(content=result.model_dump(),
+                                status_code=result.code if isinstance(
+                                    result, ErrorResponse) else 200)
 
 
 @router.get("/v1/models")
@@ -1005,6 +1029,73 @@ if envs.VLLM_SERVER_DEV_MODE:
         return JSONResponse(content={"is_sleeping": is_sleeping})
 
 
+@router.post("/scale_elastic_ep",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.OK.value: {
+                     "model": dict
+                 },
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.REQUEST_TIMEOUT.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+             })
+async def scale_elastic_ep(raw_request: Request):
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400,
+                            detail="Invalid JSON format") from e  # noqa: B904
+
+    new_data_parallel_size = body.get("new_data_parallel_size")
+    drain_timeout = body.get("drain_timeout", 120)  # Default 2 minutes
+
+    if new_data_parallel_size is None:
+        raise HTTPException(status_code=400,
+                            detail="new_data_parallel_size is required")
+
+    if not isinstance(new_data_parallel_size,
+                      int) or new_data_parallel_size <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="new_data_parallel_size must be a positive integer")
+
+    if not isinstance(drain_timeout, int) or drain_timeout <= 0:
+        raise HTTPException(status_code=400,
+                            detail="drain_timeout must be a positive integer")
+
+    # Set scaling flag to prevent new requests
+    global _scaling_elastic_ep
+    _scaling_elastic_ep = True
+    client = engine_client(raw_request)
+    try:
+        await client.scale_elastic_ep(new_data_parallel_size, drain_timeout)
+        return JSONResponse({
+            "message":
+            f"Scaled to {new_data_parallel_size} "
+            "data parallel engines",
+        })
+    except TimeoutError as e:
+        raise HTTPException(status_code=408,
+                            detail="Scale failed due to request drain timeout "
+                            f"after {drain_timeout} seconds") from e
+    except Exception as e:
+        logger.error("Scale failed: %s", e)
+        raise HTTPException(status_code=500, detail="Scale failed") from e
+    finally:
+        _scaling_elastic_ep = False
+
+
+@router.post("/is_scaling_elastic_ep")
+async def is_scaling_elastic_ep(raw_request: Request):
+    return JSONResponse({"is_scaling_elastic_ep": _scaling_elastic_ep})
+
+
 # TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
 # (requires typing_extensions >= 4.13)
 RequestType = Any
@@ -1203,6 +1294,41 @@ class XRequestIdMiddleware:
         return self.app(scope, receive, send_with_request_id)
 
 
+# Global variable to track scaling state
+_scaling_elastic_ep = False
+
+
+class ScalingMiddleware:
+    """
+    Middleware that checks if the model is currently scaling and
+    returns a 503 Service Unavailable response if it is.
+    
+    This middleware applies to all HTTP requests and prevents
+    processing when the model is in a scaling state.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    def __call__(self, scope: Scope, receive: Receive,
+                 send: Send) -> Awaitable[None]:
+        if scope["type"] != "http":
+            return self.app(scope, receive, send)
+
+        # Check global scaling state
+        global _scaling_elastic_ep
+        if _scaling_elastic_ep:
+            # Return 503 Service Unavailable response
+            response = JSONResponse(content={
+                "error":
+                "The model is currently scaling. Please try again later."
+            },
+                                    status_code=503)
+            return response(scope, receive, send)
+
+        return self.app(scope, receive, send)
+
+
 def _extract_content_from_chunk(chunk_data: dict) -> str:
     """Extract content from a streaming response chunk."""
     try:
@@ -1391,6 +1517,9 @@ def build_app(args: Namespace) -> FastAPI:
     if args.enable_request_id_headers:
         app.add_middleware(XRequestIdMiddleware)
 
+    # Add scaling middleware to check for scaling state
+    app.add_middleware(ScalingMiddleware)
+
     if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
         logger.warning("CAUTION: Enabling log response in the API Server. "
                        "This can include sensitive information and should be "
@@ -1456,6 +1585,14 @@ async def init_app_state(
     state.vllm_config = vllm_config
     model_config = vllm_config.model_config
 
+    if envs.VLLM_USE_V1:
+        supported_tasks = await engine_client \
+            .get_supported_tasks()  # type: ignore
+    else:
+        supported_tasks = model_config.supported_tasks
+
+    logger.info("Supported_tasks: %s", supported_tasks)
+
     resolved_chat_template = load_chat_template(args.chat_template)
     if resolved_chat_template is not None:
         # Get the tokenizer to check official template
@@ -1502,7 +1639,6 @@ async def init_app_state(
         model_config=model_config,
         base_model_paths=base_model_paths,
         lora_modules=lora_modules,
-        prompt_adapters=args.prompt_adapters,
     )
     await state.openai_serving_models.init_static_loras()
     state.openai_serving_responses = OpenAIServingResponses(
@@ -1514,13 +1650,11 @@ async def init_app_state(
         chat_template_content_format=args.chat_template_content_format,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
-        expand_tools_even_if_tool_choice_none=args.
-        expand_tools_even_if_tool_choice_none,
         tool_parser=args.tool_call_parser,
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
-    ) if model_config.runner_type == "generate" else None
+    ) if "generate" in supported_tasks else None
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,
@@ -1531,21 +1665,22 @@ async def init_app_state(
         chat_template_content_format=args.chat_template_content_format,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
-        expand_tools_even_if_tool_choice_none=args.
-        expand_tools_even_if_tool_choice_none,
+        exclude_tools_when_tool_choice_none=args.
+        exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
-    ) if model_config.runner_type == "generate" else None
+    ) if "generate" in supported_tasks else None
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
-    ) if model_config.runner_type == "generate" else None
+    ) if "generate" in supported_tasks else None
     state.openai_serving_pooling = OpenAIServingPooling(
         engine_client,
         model_config,
@@ -1553,7 +1688,7 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if model_config.runner_type == "pooling" else None
+    ) if "encode" in supported_tasks else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,
@@ -1561,22 +1696,22 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if model_config.task == "embed" else None
+    ) if "embed" in supported_tasks else None
     state.openai_serving_classification = ServingClassification(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if model_config.task == "classify" else None
+    ) if "classify" in supported_tasks else None
 
-    enable_serving_reranking = (model_config.task == "classify" and getattr(
+    enable_serving_reranking = ("classify" in supported_tasks and getattr(
         model_config.hf_config, "num_labels", 0) == 1)
     state.openai_serving_scores = ServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
-        request_logger=request_logger) if (
-            model_config.task == "embed" or enable_serving_reranking) else None
+        request_logger=request_logger,
+    ) if ("embed" in supported_tasks or enable_serving_reranking) else None
 
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
@@ -1591,14 +1726,13 @@ async def init_app_state(
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if model_config.runner_type == "transcription" else None
+    ) if "transcription" in supported_tasks else None
     state.openai_serving_translation = OpenAIServingTranslation(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if model_config.runner_type == "transcription" else None
-    state.task = model_config.task
+    ) if "transcription" in supported_tasks else None
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
@@ -1686,13 +1820,17 @@ async def run_server_worker(listen_address,
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
     server_index = client_config.get("client_index", 0) if client_config else 0
-
+    bind_process_name("APIServer", str(server_index))
     # Load logging config for uvicorn if specified
     log_config = load_log_config(args.log_config_file)
     if log_config is not None:
         uvicorn_kwargs['log_config'] = log_config
 
-    async with build_async_engine_client(args, client_config) as engine_client:
+    async with build_async_engine_client(
+            args,
+            client_config=client_config,
+    ) as engine_client:
+        maybe_register_tokenizer_info_endpoint(args)
         app = build_app(args)
 
         vllm_config = await engine_client.get_vllm_config()
