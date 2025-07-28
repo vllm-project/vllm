@@ -46,15 +46,13 @@ class OAIAttention(nn.Module):
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
-            max_position=config.initial_context_length *
-            config.rope_scaling_factor,
+            max_position=config.max_position_embeddings,
             base=config.rope_theta,
             dtype=torch.float32,
             rope_scaling={
                 "rope_type": "yarn",
-                "factor": config.rope_scaling_factor,
-                "original_max_position_embeddings":
-                config.initial_context_length,
+                "factor": config.rope_scaling["factor"],
+                "original_max_position_embeddings": config.rope_scaling["original_max_position_embeddings"],
                 "beta_fast": config.rope_ntk_beta,
                 "beta_slow": config.rope_ntk_alpha,
             },
@@ -83,11 +81,11 @@ class OAIAttention(nn.Module):
             prefix=f"{prefix}.qkv_proj",
         )
 
-        self.out = RowParallelLinear(
+        self.o_proj = RowParallelLinear(
             input_size=self.num_attention_heads * self.head_dim,
             output_size=self.hidden_size,
             quant_config=quant_config,
-            prefix=f"{prefix}.out",
+            prefix=f"{prefix}.o_proj",
         )
 
         self.num_local_attention_heads = config.num_attention_heads // tp_size
@@ -118,7 +116,7 @@ class OAIAttention(nn.Module):
         q, k = self.rotary_emb(positions, q, k)
         v = v.contiguous()
         attn_output = self.attn(q, k, v)
-        output, _ = self.out(attn_output)
+        output, _ = self.o_proj(attn_output)
 
         return output + hidden_states
 
@@ -134,15 +132,15 @@ class MLPBlock(torch.nn.Module):
     ):
         super().__init__()
         self.layer_idx = layer_idx
-        self.num_experts = config.num_experts
-        self.experts_per_token = config.experts_per_token
+        self.num_experts = config.num_local_experts
+        self.experts_per_token = config.num_experts_per_tok
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
         self.norm = RMSNorm(config.hidden_size, eps=1e-5)
-        self.gate = torch.nn.Linear(config.hidden_size,
-                                    config.num_experts,
+        self.router = torch.nn.Linear(config.hidden_size,
+                                    config.num_local_experts,
                                     dtype=torch.bfloat16)
         assert config.intermediate_size % self.world_size == 0
-        self.experts = FusedMoE(num_experts=config.num_experts,
+        self.experts = FusedMoE(num_experts=config.num_local_experts,
                                 top_k=config.num_experts_per_token,
                                 hidden_size=config.hidden_size,
                                 intermediate_size=config.intermediate_size,
@@ -154,7 +152,7 @@ class MLPBlock(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         t = self.norm(x)
-        g = self.gate(t)
+        g = self.router(t)
         t = self.experts(hidden_states=t, router_logits=g)
         return x + t
 
@@ -182,6 +180,34 @@ class TransformerBlock(torch.nn.Module):
         return output
 
 
+class OpenAIModel(nn.Module):
+
+    def __init__(self, config: OpenAIMoeConfig, quant_config: QuantizationConfig, prefix: str = ""):
+        super().__init__()
+        self.config = config
+        self.quant_config = quant_config
+        self.config.hidden_size = self.config.hidden_size
+        print("quant_config", self.quant_config)
+        self.embedding = VocabParallelEmbedding(
+            self.config.vocab_size,
+            self.config.hidden_size,
+        )
+        self.layers = torch.nn.ModuleList([
+            TransformerBlock(
+                self.config,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, f"block.{layer_idx}"),
+            ) for layer_idx in range(self.config.num_hidden_layers)
+        ])
+        self.norm = RMSNorm(self.config.hidden_size, eps=1e-5)
+
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        x = self.embedding(input_ids)
+        for layer in self.layers:
+            x = layer(x, positions)
+        x = self.norm(x)
+        return x
+
 class OpenAIMoeForCausalLM(nn.Module):
 
     def __init__(
@@ -192,18 +218,7 @@ class OpenAIMoeForCausalLM(nn.Module):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
-        self.embedding = VocabParallelEmbedding(
-            self.config.vocab_size,
-            self.config.hidden_size,
-        )
-        self.block = torch.nn.ModuleList([
-            TransformerBlock(
-                self.config,
-                quant_config=self.quant_config,
-                prefix=maybe_prefix(prefix, f"block.{layer_idx}"),
-            ) for layer_idx in range(self.config.num_hidden_layers)
-        ])
-        self.norm = RMSNorm(self.config.hidden_size, eps=1e-5)
+        self.model = OpenAIModel(self.config, self.quant_config, prefix=maybe_prefix(prefix, "model"),)
         self.lm_head = ParallelLMHead(
             self.config.vocab_size,
             self.config.hidden_size,
@@ -215,11 +230,9 @@ class OpenAIMoeForCausalLM(nn.Module):
                 positions: torch.Tensor,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 inputs_embeds: Optional[torch.Tensor] = None) -> torch.Tensor:
-        x = self.embedding(input_ids)
-        for block in self.block:
-            x = block(x, positions)
-        x = self.norm(x)
-        return x
+        assert intermediate_tensors is None
+        assert inputs_embeds is None
+        return self.model(input_ids, positions)
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
@@ -230,8 +243,10 @@ class OpenAIMoeForCausalLM(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         rename_mapping = {
-            "norm.scale": "norm.weight",
-            "unembedding.weight": "lm_head.weight",
+            "self_attn": "attn",
+            "input_layernorm.weight": "attn.norm.weight",
+            "post_attention_layernorm.weight": "mlp.norm.weight",
+            "embed_tokens": "embedding",
         }
 
         def maybe_rename(name: str) -> str:
@@ -240,13 +255,14 @@ class OpenAIMoeForCausalLM(nn.Module):
                     return name.replace(remap_name, new_name)
             return name
 
+        
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         mxfp4_block = 32
 
         my_rank = dist.get_rank() if dist.is_initialized() else 0
         world_size = dist.get_world_size() if dist.is_initialized() else 1
-        num_experts = self.config.num_experts
+        num_experts = self.config.num_local_experts
         intermediate_size = self.config.intermediate_size
         intermediate_size_block = intermediate_size // mxfp4_block
         per_rank_intermediate_size_block = (
@@ -268,10 +284,10 @@ class OpenAIMoeForCausalLM(nn.Module):
         for name, weight in weights:
             weight = weight.cuda()
 
-            if "mlp1_weight.blocks" in name:
+            if "gate_up_proj_blocks" in name:
                 # Handle MLP gate and up projection weights
-                new_name = name.replace("mlp1_weight.blocks",
-                                        "experts.w13_weight")
+                new_name = name.replace("gate_up_proj_blocks",
+                                        "w13_weight")
 
                 # flat weight from (E, 2 * N, block_size, entry_per_block)
                 # to (E, 2 * N, -1), shouldn't trigger copy for contiguous
@@ -292,10 +308,10 @@ class OpenAIMoeForCausalLM(nn.Module):
                               expert_id=None)
                 loaded_params.add(new_name)
 
-            elif "mlp2_weight.blocks" in name:
+            elif "down_proj_blocks" in name:
                 # Handle MLP down projection weights
-                new_name = name.replace("mlp2_weight.blocks",
-                                        "experts.w2_weight")
+                new_name = name.replace("down_proj_blocks",
+                                        "w2_weight")
                 # same flatten here, but since 2 mx4 value are packed in 1
                 # uint8, divide by 2
                 weight = weight.view(num_experts, -1,
@@ -312,10 +328,10 @@ class OpenAIMoeForCausalLM(nn.Module):
                               expert_id=None)
                 loaded_params.add(new_name)
 
-            elif "mlp1_weight.scales" in name:
+            elif "gate_up_proj_scales" in name:
                 # Handle MLP gate and up projection weights scale
-                new_name = name.replace("mlp1_weight.scales",
-                                        "experts.w13_weight_scale")
+                new_name = name.replace("gate_up_proj_scales",
+                                        "w13_weight_scale")
                 narrow_weight = weight[:, 2 * rank_start:2 * rank_end, ...]
 
                 param = params_dict[new_name]
@@ -328,10 +344,10 @@ class OpenAIMoeForCausalLM(nn.Module):
                               expert_id=None)
                 loaded_params.add(new_name)
 
-            elif "mlp2_weight.scales" in name:
+            elif "down_proj_scales" in name:
                 # Handle MLP down projection weights
-                new_name = name.replace("mlp2_weight.scales",
-                                        "experts.w2_weight_scale")
+                new_name = name.replace("down_proj_scales",
+                                        "w2_weight_scale")
                 narrow_weight = weight[..., rank_start //
                                        mxfp4_block:rank_end // mxfp4_block]
 
@@ -344,9 +360,9 @@ class OpenAIMoeForCausalLM(nn.Module):
                               shard_id=None,
                               expert_id=None)
                 loaded_params.add(new_name)
-            elif "mlp1_bias" in name:
+            elif "gate_up_proj_bias" in name:
                 # Handle MLP gate and up projection biases
-                new_name = name.replace("mlp1_bias", "experts.w13_bias")
+                new_name = name.replace("gate_up_proj_bias", "w13_bias")
 
                 # Extract gate and up projection bias parts
                 narrow_weight = narrow_weight = weight[:, 2 * rank_start:2 *
@@ -362,13 +378,13 @@ class OpenAIMoeForCausalLM(nn.Module):
                               expert_id=None)
                 loaded_params.add(new_name)
 
-            elif "mlp2_bias" in name:
+            elif "down_proj_bias" in name:
                 # Handle MLP down projection bias
                 # (only load on rank 0 to avoid duplication)
                 if dist.get_rank() != 0:
                     weight.zero_()
 
-                new_name = name.replace("mlp2_bias", "experts.w2_bias")
+                new_name = name.replace("down_proj_bias", "w2_bias")
                 param = params_dict[new_name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
@@ -380,13 +396,25 @@ class OpenAIMoeForCausalLM(nn.Module):
                 loaded_params.add(new_name)
             elif "sinks" in name:
                 # Handle attention sinks (distributed across ranks)
+                name = name.replace("self_attn", "attn")
                 param = params_dict[name]
                 narrow_weight = weight.narrow(0, head_start, heads_per_rank)
                 param.data.copy_(narrow_weight)
                 loaded_params.add(name)
+            elif "q_proj" in name or "k_proj" in name or "v_proj" in name:
+                shard_id = "q" if "q_proj" in name else "k" if "k_proj" in name else "v"
+                name = name.replace("self_attn", "attn")
+                param_name = name.replace(f"{shard_id}_proj", "qkv")
+                param = params_dict[param_name]
+                weight_loader = getattr(param, "weight_loader")
+                weight_loader(param, weight, loaded_shard_id=shard_id)
+                loaded_params.add(param_name)
             else:
                 # Handle all other weights with potential renaming
                 renamed_name = maybe_rename(name)
+                if renamed_name not in params_dict:
+                    print(f"Warning: {renamed_name} not found in params_dict")
+                    continue
                 param = params_dict[renamed_name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
