@@ -37,6 +37,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
                                              MiniMaxText01Config,
                                              MiniMaxVL01Config, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
+                                             Nemotron_Nano_VL_Config,
                                              NemotronConfig, NVLM_D_Config,
                                              OvisConfig, RWConfig,
                                              SkyworkR1VChatConfig, SolarConfig,
@@ -80,6 +81,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "dbrx": DbrxConfig,
     "deepseek_vl_v2": DeepseekVLV2Config,
     "kimi_vl": KimiVLConfig,
+    "Llama_Nemotron_Nano_VL": Nemotron_Nano_VL_Config,
     "mpt": MPTConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
@@ -572,17 +574,15 @@ def get_pooling_config_name(pooling_name: str) -> Union[str, None]:
     supported_pooling_types = ['LAST', 'ALL', 'CLS', 'STEP', 'MEAN']
     pooling_type_name = pooling_name.upper()
 
-    try:
-        if pooling_type_name in supported_pooling_types:
-            return pooling_type_name
-    except NotImplementedError as e:
-        logger.debug("Pooling type not supported", e)
-        return None
-    return None
+    if pooling_type_name in supported_pooling_types:
+        return pooling_type_name
+
+    raise NotImplementedError(
+        f"Pooling type {pooling_type_name} not supported")
 
 
 @cache
-def get_sentence_transformer_tokenizer_config(model: str,
+def get_sentence_transformer_tokenizer_config(model: Union[str, Path],
                                               revision: Optional[str] = 'main'
                                               ):
     """
@@ -590,7 +590,7 @@ def get_sentence_transformer_tokenizer_config(model: str,
     given Sentence Transformer BERT model.
 
     Parameters:
-    - model (str): The name of the Sentence Transformer
+    - model (str|Path): The name of the Sentence Transformer
     BERT model.
     - revision (str, optional): The revision of the m
     odel to use. Defaults to 'main'.
@@ -618,7 +618,7 @@ def get_sentence_transformer_tokenizer_config(model: str,
             if encoder_dict:
                 break
 
-    if not encoder_dict and not model.startswith("/"):
+    if not encoder_dict and not Path(model).is_absolute():
         try:
             # If model is on HuggingfaceHub, get the repo files
             repo_files = list_repo_files(model,

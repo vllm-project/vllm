@@ -841,7 +841,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             return data
 
         # if "tool_choice" is specified -- validation
-        if "tool_choice" in data:
+        if "tool_choice" in data and data["tool_choice"] is not None:
 
             # ensure that if "tool choice" is specified, tools are present
             if "tools" not in data or data["tools"] is None:
@@ -853,7 +853,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             if data["tool_choice"] not in [
                     "auto", "required"
             ] and not isinstance(data["tool_choice"], dict):
-                raise NotImplementedError(
+                raise ValueError(
                     f'Invalid value for `tool_choice`: {data["tool_choice"]}! '\
                     'Only named tools, "none", "auto" or "required" '\
                     'are supported.'
@@ -1006,6 +1006,13 @@ class CompletionRequest(OpenAIBaseModel):
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."),
+    )
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."),
     )
     logits_processors: Optional[LogitsProcessors] = Field(
         default=None,
@@ -1251,6 +1258,13 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."),
     )
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."),
+    )
 
     # --8<-- [end:embedding-extra-params]
 
@@ -1301,6 +1315,13 @@ class EmbeddingChatRequest(OpenAIBaseModel):
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."),
+    )
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."),
     )
     # --8<-- [end:chat-embedding-extra-params]
 

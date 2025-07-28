@@ -27,8 +27,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_moe_fp8_layer_for_marlin)
-from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
-    cutlass_fp4_supported)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    cutlass_fp4_supported, swizzle_blockscale)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize)
 from vllm.model_executor.utils import set_weight_attrs
@@ -83,7 +83,8 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 return CompressedTensorsWNA16MarlinMoEMethod(quant_config)
         elif quant_config._is_fp4a4_nvfp4(weight_quant, input_quant):
             return CompressedTensorsW4A4MoeMethod()
-        elif quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant):
+        elif (quant_config._is_fp8_w8a8_sm90(weight_quant, input_quant)
+              or quant_config._is_fp8_w8a8_sm100(weight_quant, input_quant)):
             return CompressedTensorsW8A8Fp8MoECutlassMethod(quant_config)
         elif quant_config._is_fp8_w8a8(weight_quant, input_quant):
             return CompressedTensorsW8A8Fp8MoEMethod(quant_config)
@@ -192,29 +193,6 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value})
         set_weight_attrs(w2_input_scale, extra_weight_attrs)
 
-    def swizzle_blockscale(self, scale: torch.tensor):
-        assert (scale.dtype == torch.float8_e4m3fn)
-        # Pad and blockwise interleave weight_scale
-        scale_ndim = scale.ndim
-        if scale.ndim == 2:
-            scale = scale.unsqueeze(0)
-        assert scale.ndim == 3
-        B, M, K = scale.shape
-        round_up_multiple = lambda x, m: (x + m - 1) // m * m
-        M_padded = round_up_multiple(M, 128)
-        K_padded = round_up_multiple(K, 4)
-        padded_scale = torch.zeros((B, M_padded, K_padded), dtype=scale.dtype)
-        padded_scale[:B, :M, :K] = scale
-        batches, rows, cols = padded_scale.shape
-        assert rows % 128 == 0
-        assert cols % 4 == 0
-        padded_scale = padded_scale.reshape(batches, rows // 128, 4, 32,
-                                            cols // 4, 4)
-        swizzled_scale = padded_scale.permute((0, 1, 4, 3, 2, 5))
-        swizzled_scale = swizzled_scale.contiguous().cuda()
-        return (swizzled_scale.reshape(M, K)
-                if scale_ndim == 2 else swizzled_scale.reshape(B, M, K))
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
 
         # From packed to weight
@@ -242,13 +220,13 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             return
 
         # swizzle weight scales
-        layer.w13_blockscale_swizzled = torch.nn.Parameter(
-            self.swizzle_blockscale(layer.w13_weight_scale),
-            requires_grad=False)
+        layer.w13_blockscale_swizzled = torch.nn.Parameter(swizzle_blockscale(
+            layer.w13_weight_scale),
+                                                           requires_grad=False)
 
-        layer.w2_blockscale_swizzled = torch.nn.Parameter(
-            self.swizzle_blockscale(layer.w2_weight_scale),
-            requires_grad=False)
+        layer.w2_blockscale_swizzled = torch.nn.Parameter(swizzle_blockscale(
+            layer.w2_weight_scale),
+                                                          requires_grad=False)
 
         # w13
         w13_input_global_scale = layer.w13_input_global_scale.max(
@@ -740,6 +718,8 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
         self.topk_indices_dtype = None
         self.fused_experts = None  # type: ignore
         self.disable_expert_map = False
+        self.is_fp8_w8a8_sm100 = self.quant_config._is_fp8_w8a8_sm100(
+            self.weight_quant, self.input_quant)
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -859,21 +839,6 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                         requires_grad=False)
 
-        device = layer.w13_weight.device
-        # ab_strides1 and c_strides2 are the same
-        self.ab_strides1_c_strides2 = torch.full((layer.local_num_experts, ),
-                                                 layer.hidden_size,
-                                                 device=device,
-                                                 dtype=torch.int64)
-        self.ab_strides2 = torch.full((layer.local_num_experts, ),
-                                      layer.intermediate_size_per_partition,
-                                      device=device,
-                                      dtype=torch.int64)
-        self.c_strides1 = torch.full((layer.local_num_experts, ),
-                                     2 * layer.intermediate_size_per_partition,
-                                     device=device,
-                                     dtype=torch.int64)
-
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
@@ -896,10 +861,6 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             moe.in_dtype,
             self.input_quant.strategy == QuantizationStrategy.TOKEN,
             self.weight_quant.strategy == QuantizationStrategy.CHANNEL,
-            ab_strides1=self.ab_strides1_c_strides2,
-            ab_strides2=self.ab_strides2,
-            c_strides1=self.c_strides1,
-            c_strides2=self.ab_strides1_c_strides2,
             num_dispatchers=num_dispatchers,
             use_batched_format=use_batched_format,
         )
@@ -946,12 +907,33 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype)
+            e_score_correction_bias=e_score_correction_bias)
 
         per_act_token = (
             self.input_quant.strategy == QuantizationStrategy.TOKEN)
-
+        per_channel_quant = (
+            self.weight_quant.strategy == QuantizationStrategy.CHANNEL)
+        # Triton fused_experts is faster in small batch sizes on SM100.
+        # Fall back to fused_experts in small batch sizes.
+        if self.is_fp8_w8a8_sm100 and topk_ids.shape[0] <= 8:
+            from vllm.model_executor.layers.fused_moe import fused_experts
+            return fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                inplace=True,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                use_fp8_w8a8=True,
+                per_channel_quant=per_channel_quant,
+                global_num_experts=global_num_experts,
+                expert_map=None if self.disable_expert_map else expert_map,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale)
         if self.fused_experts is None:
             # If no modular kernel is provided, use cutlass_moe_fp8
             from vllm.model_executor.layers.fused_moe.cutlass_moe import (
@@ -968,10 +950,6 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
                 expert_map=None if self.disable_expert_map else expert_map,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
-                ab_strides1=self.ab_strides1_c_strides2,
-                ab_strides2=self.ab_strides2,
-                c_strides1=self.c_strides1,
-                c_strides2=self.ab_strides1_c_strides2,
                 a1_scale=layer.w13_input_scale,
                 a2_scale=layer.w2_input_scale,
             )

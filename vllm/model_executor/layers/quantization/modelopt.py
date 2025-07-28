@@ -9,8 +9,7 @@ from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm._custom_ops import (cutlass_scaled_fp4_mm,
-                              cutlass_scaled_mm_supports_fp4, scaled_fp4_quant)
+from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.distributed import get_ep_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
@@ -28,7 +27,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear, is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin, prepare_moe_fp4_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape, is_layer_skipped)
+    GroupShape, cutlass_fp4_supported, is_layer_skipped, swizzle_blockscale)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp, requantize_with_max_scale)
 from vllm.model_executor.parameter import (ModelWeightParameter,
@@ -76,19 +75,63 @@ class ModelOptFp8Config(QuantizationConfig):
         return ["hf_quant_config.json"]
 
     @classmethod
+    def override_quantization_method(
+            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
+        """Detect if this ModelOpt config should be used based on
+        quantization config."""
+
+        if hf_quant_cfg is None:
+            return None
+
+        # Use the community standard 'quant_method'
+        quant_method = hf_quant_cfg.get("quant_method", "").lower()
+
+        # Only proceed if the method is explicitly "modelopt"
+        if quant_method != "modelopt":
+            return None
+
+        # Look for ModelOpt-specific config structure
+        if "quantization" in hf_quant_cfg:
+            quant_config = hf_quant_cfg["quantization"]
+            if isinstance(quant_config, dict):
+                quant_algo = quant_config.get("quant_algo", "")
+                if "FP8" in quant_algo:
+                    return "modelopt"
+        else:
+            # Check for compressed-tensors style config with specific quant_algo
+            quant_algo = hf_quant_cfg.get("quant_algo", "")
+            if isinstance(quant_algo, str) and "FP8" in quant_algo:
+                return "modelopt"
+
+        return None
+
+    @classmethod
     def from_config(cls, config: dict[str, Any]) -> "ModelOptFp8Config":
-        quant_config = cls.get_from_keys(config, ["quantization"])
-        quant_method = quant_config["quant_algo"]
-        kv_cache_quant_method = cls.get_from_keys(
-            config, ["quantization"]).get("kv_cache_quant_algo")
-        exclude_modules = cls.get_from_keys(
-            config, ["quantization"]).get("exclude_modules")
+        # Handle both ModelOpt format and compressed-tensors style format
+        if "quantization" in config:
+            # ModelOpt format: {"quantization": {"quant_algo": "..."}}
+            quant_config = cls.get_from_keys(config, ["quantization"])
+            if not isinstance(quant_config, dict):
+                raise ValueError(
+                    "Expected 'quantization' to be a dictionary in config")
+            quant_method = quant_config.get("quant_algo", "")
+            if not quant_method:
+                raise ValueError("Missing 'quant_algo' in quantization config")
+            kv_cache_quant_method = quant_config.get("kv_cache_quant_algo")
+            exclude_modules = quant_config.get("exclude_modules")
+        else:
+            # Compressed-tensors style format:
+            # {"quant_algo": "...", "quant_method": "modelopt"}
+            quant_method = config.get("quant_algo", "")
+            kv_cache_quant_method = config.get("kv_cache_quant_algo")
+            exclude_modules = config.get("exclude_modules")
 
         if quant_method not in QUANT_ALGOS:
-            raise ValueError(f"ModelOpt currently only supports: {QUANT_ALGOS}"
-                             " quantizations in vLLM. Please check the "
-                             "`hf_quant_config.json` file for your model's "
-                             "quant configuration.")
+            raise ValueError(
+                f"ModelOpt currently only supports: {QUANT_ALGOS} "
+                "quantizations in vLLM. Please check the "
+                "`hf_quant_config.json` file for your model's "
+                "quant configuration.")
         is_checkpoint_fp8_serialized = ("FP8" in quant_method)
 
         return cls(is_checkpoint_fp8_serialized, kv_cache_quant_method,
@@ -434,7 +477,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
     def __init__(
         self,
         is_checkpoint_nvfp4_serialized: bool,
-        kv_cache_quant_algo: str,
+        kv_cache_quant_algo: Optional[str],
         exclude_modules: list[str],
         group_size: int = 16,
     ) -> None:
@@ -466,23 +509,137 @@ class ModelOptNvFp4Config(QuantizationConfig):
         return ["hf_quant_config.json"]
 
     @classmethod
+    def override_quantization_method(
+            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
+        """Detect if this ModelOpt FP4 config should be used based on
+        quantization config."""
+        if hf_quant_cfg is None:
+            return None
+
+        # Use the community standard 'quant_method'
+        quant_method = hf_quant_cfg.get("quant_method", "").lower()
+
+        # Only proceed if the method is explicitly "modelopt"
+        if quant_method != "modelopt":
+            return None
+
+        # Look for ModelOpt-specific config structure
+        if "quantization" in hf_quant_cfg:
+            quant_config = hf_quant_cfg["quantization"]
+            if isinstance(quant_config, dict):
+                quant_algo = quant_config.get("quant_algo", "")
+                if "NVFP4" in quant_algo:
+                    return "modelopt_fp4"
+        else:
+            # Check for compressed-tensors style config with specific
+            # quant_algo field
+            quant_algo = hf_quant_cfg.get("quant_algo", "")
+            if isinstance(quant_algo, str) and "FP4" in quant_algo.upper():
+                return "modelopt_fp4"
+
+        return None
+
+    @classmethod
     def from_config(cls, config: dict[str, Any]) -> "ModelOptNvFp4Config":
-        quant_config = cls.get_from_keys(config, ["quantization"])
-        quant_method = quant_config["quant_algo"]
+        # Handle both traditional ModelOpt format and compressed-tensors
+        # style format
+        if "quantization" in config:
+            # Traditional ModelOpt format:
+            # {"quantization": {"quant_algo": "..."}}
+            quant_config = cls.get_from_keys(config, ["quantization"])
+            if not isinstance(quant_config, dict):
+                raise ValueError(
+                    "Expected 'quantization' to be a dictionary in config")
+
+            quant_method = quant_config.get("quant_algo", "")
+            if not quant_method:
+                raise ValueError("Missing 'quant_algo' in quantization config")
+
+            # Handle kv_cache_quant_algo with proper type validation
+            kv_cache_quant_algo_raw = quant_config.get("kv_cache_quant_algo")
+            if kv_cache_quant_algo_raw is None:
+                # No KV cache quantization by default
+                kv_cache_quant_algo = None
+            elif isinstance(kv_cache_quant_algo_raw, str):
+                kv_cache_quant_algo = kv_cache_quant_algo_raw
+            else:
+                raise ValueError(f"kv_cache_quant_algo must be a string, got "
+                                 f"{type(kv_cache_quant_algo_raw)}")
+
+            # Handle group_size with proper type validation
+            group_size_raw = quant_config.get("group_size")
+            if group_size_raw is None:
+                group_size = 16  # Default value
+            elif isinstance(group_size_raw, int):
+                group_size = group_size_raw
+            else:
+                try:
+                    group_size = int(group_size_raw)
+                except (ValueError, TypeError):
+                    raise ValueError(f"group_size must be an integer, got "
+                                     f"{type(group_size_raw)}") from None
+
+            exclude_modules = quant_config.get("exclude_modules", [])
+            if not isinstance(exclude_modules, list):
+                raise ValueError(f"exclude_modules must be a list, got "
+                                 f"{type(exclude_modules)}")
+        else:
+            # Compressed-tensors style format:
+            # {"quant_algo": "...", "quant_method": "modelopt"}
+            quant_method = config.get("quant_algo", "")
+
+            # Handle kv_cache_quant_algo with proper type validation
+            kv_cache_quant_algo_raw = config.get("kv_cache_quant_algo")
+            if kv_cache_quant_algo_raw is None:
+                # No KV cache quantization by default
+                kv_cache_quant_algo = None
+            elif isinstance(kv_cache_quant_algo_raw, str):
+                kv_cache_quant_algo = kv_cache_quant_algo_raw
+            else:
+                raise ValueError(f"kv_cache_quant_algo must be a string, got "
+                                 f"{type(kv_cache_quant_algo_raw)}")
+
+            # Handle group_size with proper type validation
+            group_size_raw = config.get("group_size")
+            if group_size_raw is None:
+                group_size = 16  # Default value
+            elif isinstance(group_size_raw, int):
+                group_size = group_size_raw
+            else:
+                try:
+                    group_size = int(group_size_raw)
+                except (ValueError, TypeError):
+                    raise ValueError(f"group_size must be an integer, got "
+                                     f"{type(group_size_raw)}") from None
+
+            exclude_modules = config.get("exclude_modules", [])
+            if not isinstance(exclude_modules, list):
+                raise ValueError(f"exclude_modules must be a list, got "
+                                 f"{type(exclude_modules)}")
+
         if quant_method not in QUANT_ALGOS:
-            raise ValueError(f"ModelOpt currently only supports: {QUANT_ALGOS}"
-                             " quantizations in vLLM. Please check the "
-                             "`hf_quant_config.json` file for your model's "
-                             "quant configuration.")
+            raise ValueError(
+                f"ModelOpt currently only supports: {QUANT_ALGOS} "
+                "quantizations in vLLM. Please check the "
+                "`hf_quant_config.json` file for your model's "
+                "quant configuration.")
         is_checkpoint_nvfp4_serialized = ("NVFP4" in quant_method)
-        if ("group_size" and "kv_cache_quant_algo"
-                and "exclude_modules") not in quant_config:
-            raise ValueError("NVFP4 quantization requires group size and "
-                             "kv_cache_quant_algo specified in "
-                             "hf_quant_config.json")
-        kv_cache_quant_algo = quant_config["kv_cache_quant_algo"]
-        group_size = quant_config["group_size"]
-        exclude_modules = quant_config["exclude_modules"]
+
+        # For FP4, these fields are required
+        if is_checkpoint_nvfp4_serialized and "quantization" in config:
+            # Check if required fields are present in the quantization config
+            quant_config = config["quantization"]
+            required_fields = [
+                "group_size", "kv_cache_quant_algo", "exclude_modules"
+            ]
+            missing_fields = [
+                field for field in required_fields if field not in quant_config
+            ]
+            if missing_fields:
+                raise ValueError(
+                    f"NVFP4 quantization requires the following fields in "
+                    f"hf_quant_config.json: {missing_fields}")
+
         return cls(is_checkpoint_nvfp4_serialized, kv_cache_quant_algo,
                    exclude_modules, group_size)
 
@@ -507,14 +664,6 @@ class ModelOptNvFp4Config(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             return ModelOptNvFp4FusedMoE(self)
         return None
-
-
-def cutlass_fp4_supported() -> bool:
-    if not current_platform.is_cuda():
-        return False
-    capability_tuple = current_platform.get_device_capability()
-    capability = -1 if capability_tuple is None else capability_tuple.to_int()
-    return cutlass_scaled_mm_supports_fp4(capability)
 
 
 class ModelOptFp8KVCacheMethod(BaseKVCacheMethod):
@@ -614,29 +763,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
         layer.register_parameter("weight_scale", weight_scale)
 
-    def swizzle_blockscale(self, scale: torch.tensor):
-        assert (scale.dtype == torch.float8_e4m3fn)
-        # Pad and blockwise interleave weight_scale
-        scale_ndim = scale.ndim
-        if scale.ndim == 2:
-            scale = scale.unsqueeze(0)
-        assert scale.ndim == 3
-        B, M, K = scale.shape
-        round_up_multiple = lambda x, m: (x + m - 1) // m * m
-        M_padded = round_up_multiple(M, 128)
-        K_padded = round_up_multiple(K, 4)
-        padded_scale = torch.zeros((B, M_padded, K_padded), dtype=scale.dtype)
-        padded_scale[:B, :M, :K] = scale
-        batches, rows, cols = padded_scale.shape
-        assert rows % 128 == 0
-        assert cols % 4 == 0
-        padded_scale = padded_scale.reshape(batches, rows // 128, 4, 32,
-                                            cols // 4, 4)
-        swizzled_scale = padded_scale.permute((0, 1, 4, 3, 2, 5))
-        swizzled_scale = swizzled_scale.contiguous().cuda()
-        return (swizzled_scale.reshape(M, K)
-                if scale_ndim == 2 else swizzled_scale.reshape(B, M, K))
-
     def process_weights_after_loading(self, layer: Module) -> None:
 
         # global scales:
@@ -656,7 +782,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             "Expected weight_scale.dim(1) to be divisible by 16")
         assert (layer.weight_scale.dtype == torch.float8_e4m3fn), (
             "Weight Block scale must be represented as FP8-E4M3")
-        swizzled_weight_scale = self.swizzle_blockscale(layer.weight_scale)
+        swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
 
         layer.weight_scale_swizzled = Parameter(swizzled_weight_scale,
                                                 requires_grad=False)
@@ -902,29 +1028,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                                                  weight_loader=weight_loader)
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
-    def swizzle_blockscale(self, scale: torch.tensor):
-        assert (scale.dtype == torch.float8_e4m3fn)
-        # Pad and blockwise interleave weight_scale
-        scale_ndim = scale.ndim
-        if scale.ndim == 2:
-            scale = scale.unsqueeze(0)
-        assert scale.ndim == 3
-        B, M, K = scale.shape
-        round_up_multiple = lambda x, m: (x + m - 1) // m * m
-        M_padded = round_up_multiple(M, 128)
-        K_padded = round_up_multiple(K, 4)
-        padded_scale = torch.zeros((B, M_padded, K_padded), dtype=scale.dtype)
-        padded_scale[:B, :M, :K] = scale
-        batches, rows, cols = padded_scale.shape
-        assert rows % 128 == 0
-        assert cols % 4 == 0
-        padded_scale = padded_scale.reshape(batches, rows // 128, 4, 32,
-                                            cols // 4, 4)
-        swizzled_scale = padded_scale.permute((0, 1, 4, 3, 2, 5))
-        swizzled_scale = swizzled_scale.contiguous().cuda()
-        return (swizzled_scale.reshape(M, K)
-                if scale_ndim == 2 else swizzled_scale.reshape(B, M, K))
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # GEMM 1
         # The FlashInfer Cutlass fused MoE kernel expects the combined weights
@@ -970,8 +1073,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             "Expected weight_scale.dim(1) to be divisible by 16")
         assert (layer.w13_weight_scale.dtype == torch.float8_e4m3fn), (
             "Weight Blockscale must be represented as FP8-E4M3")
-        w13_blockscale_swizzled = self.swizzle_blockscale(
-            layer.w13_weight_scale)
+        w13_blockscale_swizzled = swizzle_blockscale(layer.w13_weight_scale)
 
         layer.w13_blockscale_swizzled = Parameter(w13_blockscale_swizzled,
                                                   requires_grad=False)
@@ -993,7 +1095,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             "Expected weight_scale.dim(1) to be divisible by 16")
         assert (layer.w2_weight_scale.dtype == torch.float8_e4m3fn), (
             "Weight Blockscale must be represented as FP8-E4M3")
-        w2_blockscale_swizzled = self.swizzle_blockscale(layer.w2_weight_scale)
+        w2_blockscale_swizzled = swizzle_blockscale(layer.w2_weight_scale)
 
         layer.w2_blockscale_swizzled = Parameter(w2_blockscale_swizzled,
                                                  requires_grad=False)
@@ -1096,8 +1198,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 x, layer.w13_weight, layer.w2_weight), (
                     "Flashinfer CUTLASS Fused MoE not applicable!")
 
-            a1_gscale = torch.min(layer.w13_input_scale_quant)
-            a2_gscale = torch.min(layer.w2_input_scale_quant)
+            a1_gscale = layer.w13_input_scale_quant
+            a2_gscale = layer.w2_input_scale_quant
             extra_expert_args = {
                 'g1_alphas': layer.g1_alphas,
                 'g2_alphas': layer.g2_alphas,

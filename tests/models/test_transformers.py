@@ -56,7 +56,7 @@ def check_implementation(
     "model,model_impl",
     [
         ("meta-llama/Llama-3.2-1B-Instruct", "transformers"),
-        ("ArthurZ/Ilama-3.2-1B", "auto"),  # CUSTOM CODE
+        ("hmellor/Ilama-3.2-1B", "auto"),  # CUSTOM CODE
     ])  # trust_remote_code=True by default
 def test_models(
     hf_runner: type[HfRunner],
@@ -144,7 +144,7 @@ def test_quantization(
     "model",
     ["jason9693/Qwen2.5-1.5B-apeach"],
 )
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["float"])
 def test_classify(
     hf_runner,
     vllm_runner,

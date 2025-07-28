@@ -69,8 +69,8 @@ flashinfer_trtllm_fp8_block_scale_moe = _lazy_import_wrapper(
 flashinfer_cutlass_fused_moe = _lazy_import_wrapper("flashinfer.fused_moe",
                                                     "cutlass_fused_moe")
 fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
-fp4_swizzle_blockscale = _lazy_import_wrapper("flashinfer",
-                                              "fp4_swizzle_blockscale")
+nvfp4_block_scale_interleave = _lazy_import_wrapper(
+    "flashinfer", "nvfp4_block_scale_interleave")
 
 # Special case for autotune since it returns a context manager
 autotune = _lazy_import_wrapper(
@@ -82,7 +82,8 @@ autotune = _lazy_import_wrapper(
 @functools.cache
 def has_flashinfer_moe() -> bool:
     """Return ``True`` if FlashInfer MoE module is available."""
-    return importlib.util.find_spec("flashinfer.fused_moe") is not None
+    return has_flashinfer() and importlib.util.find_spec(
+        "flashinfer.fused_moe") is not None
 
 
 @functools.cache
@@ -95,7 +96,7 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
     required_functions = [
         ("flashinfer.fused_moe", "cutlass_fused_moe"),
         ("flashinfer", "fp4_quantize"),
-        ("flashinfer", "fp4_swizzle_blockscale"),
+        ("flashinfer", "nvfp4_block_scale_interleave"),
     ]
 
     for module_name, attr_name in required_functions:
@@ -110,7 +111,7 @@ __all__ = [
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
     "fp4_quantize",
-    "fp4_swizzle_blockscale",
+    "nvfp4_block_scale_interleave",
     "autotune",
     "has_flashinfer_moe",
     "has_flashinfer_cutlass_fused_moe",

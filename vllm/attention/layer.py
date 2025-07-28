@@ -137,6 +137,15 @@ class Attention(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
 
+        # For v1 we have backend agnostic iRoPE (local chunked attention)
+        # we have to store the flag on the layer so gpu model runner can
+        # set KVSpec appropriately (and pop it so it doesnt get passed to
+        # the backends)
+        if envs.VLLM_USE_V1:
+            self.use_irope = extra_impl_args.pop("use_irope", False)
+        else:
+            self.use_irope = extra_impl_args.get("use_irope", False)
+
         quant_method = quant_config.get_quant_method(
             self, prefix=prefix) if quant_config else None
         if quant_method is not None and not isinstance(
@@ -170,7 +179,6 @@ class Attention(nn.Module):
                              kv_sharing_target_layer_name, **extra_impl_args)
         self.backend = backend_name_to_enum(attn_backend.get_name())
         self.dtype = dtype
-        self.use_irope = extra_impl_args.get("use_irope", False)
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
         # torch.compile works by registering the attention as one giant
