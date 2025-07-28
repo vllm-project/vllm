@@ -4,13 +4,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
-from flashinfer.decode import trtllm_batch_decode_with_kv_cache
+from flashinfer.decode import get_batch_decode_module, trtllm_batch_decode_with_kv_cache
+from flashinfer.prefill import get_batch_prefill_module
+from flashinfer.page import get_seq_lens
+from flashinfer.utils import _get_range_buf, PosEncodingMode
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -170,11 +173,16 @@ class FlashInferMetadata:
     # [0, 3, 6, 8]
     # The indptr of the paged kv cache, shape: [batch_size + 1] (CPU for plan)
     paged_kv_indptr_cpu: torch.Tensor
+    # The indptr of the paged kv cache, shape: [batch_size + 1] (on device for plan)
+    paged_kv_indptr: torch.Tensor
     # The page indices of the paged kv cache (on device for plan)
     paged_kv_indices: torch.Tensor
     # The number of entries in the last page of each request in
     # the paged kv cache, shape: [batch_size] (CPU for plan)
     paged_kv_last_page_len_cpu: torch.Tensor
+    # The number of entries in the last page of each request in
+    # the paged kv cache, shape: [batch_size] (on device for plan)
+    paged_kv_last_page_len: torch.Tensor
     # The number of query/output heads
     num_qo_heads: int
     # The number of key/value heads
@@ -362,10 +370,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         self.cache_config.cache_dtype,
                         attn_metadata.num_qo_heads, attn_metadata.num_kv_heads,
                         attn_metadata.head_dim):
-                    attn_metadata.decode_wrapper.plan(
-                        attn_metadata.paged_kv_indptr_cpu[:num_decodes + 1],
+                    fast_decode_plan(
+                        attn_metadata.decode_wrapper,
+                        attn_metadata.paged_kv_indptr[:num_decodes + 1],
                         attn_metadata.paged_kv_indices,
-                        attn_metadata.paged_kv_last_page_len_cpu[:num_decodes],
+                        attn_metadata.paged_kv_last_page_len[:num_decodes],
                         attn_metadata.num_qo_heads,
                         attn_metadata.num_kv_heads,
                         attn_metadata.head_dim,
@@ -437,10 +446,22 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         paged_kv_indptr_cpu[1:] = block_table_bounds_cpu.cumsum(
             dim=0, dtype=torch.int32)
 
+        paged_kv_indptr = torch.zeros(len(block_table_bounds) + 1,
+                                      dtype=torch.int32,
+                                      device=self.device)
+        paged_kv_indptr[1:] = block_table_bounds.cumsum(
+            dim=0, dtype=torch.int32)
+
         paged_kv_last_page_len_cpu = seq_lens_cpu % page_size
         paged_kv_last_page_len_cpu = torch.where(
             paged_kv_last_page_len_cpu == 0, page_size,
             paged_kv_last_page_len_cpu)
+        
+        paged_kv_last_page_len = seq_lens % page_size
+        paged_kv_last_page_len = torch.where(
+            paged_kv_last_page_len == 0, page_size,
+            paged_kv_last_page_len)
+
         cache_dtype = self.cache_config.cache_dtype
         if cache_dtype.startswith("fp8"):
             kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
@@ -451,8 +472,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_actual_tokens=num_actual_tokens,
             qo_indptr_cpu=common_attn_metadata.query_start_loc_cpu,
             paged_kv_indptr_cpu=paged_kv_indptr_cpu,
+            paged_kv_indptr=paged_kv_indptr,
             paged_kv_indices=paged_kv_indices,
             paged_kv_last_page_len_cpu=paged_kv_last_page_len_cpu,
+            paged_kv_last_page_len=paged_kv_last_page_len,
             num_qo_heads=self.vllm_config.model_config.get_num_attention_heads(
                 self.vllm_config.parallel_config),
             num_kv_heads=self.kv_cache_spec.num_kv_heads,
@@ -690,3 +713,155 @@ class FlashInferImpl(AttentionImpl):
                             v_scale=layer._v_scale_float,
                         ))
         return output_padded
+
+
+def fast_decode_plan(
+    self,
+    indptr: torch.Tensor,
+    indices: torch.Tensor,
+    last_page_len: torch.Tensor,
+    num_qo_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    page_size: int,
+    pos_encoding_mode: str = "NONE",
+    window_left: int = -1,
+    logits_soft_cap: Optional[float] = None,
+    q_data_type: Optional[Union[str, torch.dtype]] = None,
+    kv_data_type: Optional[Union[str, torch.dtype]] = None,
+    data_type: Optional[Union[str, torch.dtype]] = None,
+    sm_scale: Optional[float] = None,
+    rope_scale: Optional[float] = None,
+    rope_theta: Optional[float] = None,
+    non_blocking: bool = True,
+) -> None:
+    batch_size = len(last_page_len)
+    if logits_soft_cap is None:
+        logits_soft_cap = 0.0
+
+    # Handle data types consistently
+    if data_type is not None:
+        if q_data_type is None:
+            q_data_type = data_type
+        if kv_data_type is None:
+            kv_data_type = data_type
+    elif q_data_type is None:
+        q_data_type = "float16"
+
+    if kv_data_type is None:
+        kv_data_type = q_data_type
+
+    if isinstance(q_data_type, str):
+        q_data_type = getattr(torch, q_data_type, None)
+    if isinstance(kv_data_type, str):
+        kv_data_type = getattr(torch, kv_data_type, None)
+
+    if self.use_tensor_cores:
+        qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
+
+    if self.is_cuda_graph_enabled:
+        if batch_size != self._fixed_batch_size:
+            raise ValueError(
+                "The batch size should be fixed in cudagraph mode, the runtime batch size {} "
+                " mismatches the batch size set during initialization {}".format(
+                    batch_size, self._fixed_batch_size
+                )
+            )
+        if len(indices) > len(self._paged_kv_indices_buf):
+            raise ValueError(
+                "The size of indices should be less than or equal to the allocated buffer"
+            )
+    else:
+        self._paged_kv_indptr_buf = indptr
+        self._paged_kv_indices_buf = indices
+        self._paged_kv_last_page_len_buf = last_page_len
+        if self.use_tensor_cores:
+            self._qo_indptr_buf = qo_indptr_host.to(
+                self.device, non_blocking=non_blocking
+            )
+
+    indptr_host = indptr.cpu()
+
+    with torch.cuda.device(self.device):
+
+        self._cached_q_data_type = q_data_type
+        self._cached_kv_data_type = kv_data_type
+        if self.use_tensor_cores:
+            last_page_len_host = last_page_len.cpu()
+            kv_lens_arr_host = get_seq_lens(indptr_host, last_page_len_host, page_size)
+
+            if self._jit_module is not None:
+                self._cached_module = self._jit_module
+            else:
+                self._cached_module = get_batch_prefill_module(
+                    "fa2",
+                    q_data_type,
+                    kv_data_type,
+                    q_data_type,
+                    indptr.dtype,
+                    head_dim,  # head_dim_qk
+                    head_dim,  # head_dim_vo
+                    PosEncodingMode[pos_encoding_mode].value,
+                    window_left != -1,  # use_sliding_window
+                    logits_soft_cap > 0,  # use_logits_soft_cap
+                    False,  # use_fp16_qk_reduction
+                )
+
+            self._plan_info = self._cached_module.plan(
+                self._float_workspace_buffer,
+                self._int_workspace_buffer,
+                self._pin_memory_int_workspace_buffer,
+                qo_indptr_host,
+                indptr_host,
+                kv_lens_arr_host,
+                batch_size,  # total_num_rows
+                batch_size,
+                num_qo_heads,
+                num_kv_heads,
+                page_size,
+                self.is_cuda_graph_enabled,
+                head_dim,
+                head_dim,
+                False,  # causal
+            )
+
+        else:
+            if self._jit_module is not None:
+                self._cached_module = self._jit_module
+            else:
+                self._cached_module = get_batch_decode_module(
+                    q_data_type,
+                    kv_data_type,
+                    q_data_type,
+                    indptr.dtype,
+                    head_dim,  # head_dim_qk
+                    head_dim,  # head_dim_vo
+                    PosEncodingMode[pos_encoding_mode].value,
+                    window_left != -1,  # use_sliding_window
+                    logits_soft_cap > 0,  # use_logits_soft_cap
+                )
+
+            self._plan_info = self._cached_module.plan(
+                self._float_workspace_buffer,
+                self._int_workspace_buffer,
+                self._pin_memory_int_workspace_buffer,
+                indptr_host,
+                batch_size,
+                num_qo_heads,
+                num_kv_heads,
+                page_size,
+                self.is_cuda_graph_enabled,
+                window_left,
+                logits_soft_cap,
+                head_dim,
+                head_dim,
+                torch.empty(0, dtype=q_data_type),
+                torch.empty(0, dtype=kv_data_type),
+            )
+
+    self._pos_encoding_mode = pos_encoding_mode
+    self._window_left = window_left
+    self._logits_soft_cap = logits_soft_cap
+    self._sm_scale = sm_scale
+    self._rope_scale = rope_scale
+    self._rope_theta = rope_theta
