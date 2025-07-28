@@ -222,6 +222,7 @@ VLM_TEST_SETTINGS = {
         },
         marks=[large_gpu_mark(min_gb=32)],
     ),
+    # Check "auto" with fallback to transformers
     "internvl-transformers": VLMTestInfo(
         models=["OpenGVLab/InternVL3-1B-hf"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -231,7 +232,7 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         image_size_factors=[(0.25, 0.5, 1.0)],
         vllm_runner_kwargs={
-            "model_impl": "transformers",
+            "model_impl": "auto",
         },
         auto_cls=AutoModelForImageTextToText,
         marks=[pytest.mark.core_model],
