@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Union
+
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
@@ -40,10 +42,17 @@ async def client(server):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("stream", [True, False])
-@pytest.mark.parametrize("tool_choice", ["auto", "required"])
+@pytest.mark.parametrize("tool_choice", [
+    "auto", "required", {
+        "type": "function",
+        "function": {
+            "name": "get_current_weather"
+        }
+    }
+])
 @pytest.mark.parametrize("enable_thinking", [True, False])
 async def test_function_tool_use(client: openai.AsyncOpenAI, model_name: str,
-                                 stream: bool, tool_choice: str,
+                                 stream: bool, tool_choice: Union[str, dict],
                                  enable_thinking: bool):
     tools = [
         {
