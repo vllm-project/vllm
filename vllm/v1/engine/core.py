@@ -104,8 +104,8 @@ class EngineCore:
             except Exception as e:
                 raise ImportError(
                     "kvcached is not found. Please install kvcached with "
-                    "`pip install kvcached --no-build-isolation` to use elastic "
-                    "KV cache.") from e
+                    "`pip install kvcached --no-build-isolation` to use elastic"
+                    " KV cache.") from e
 
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 

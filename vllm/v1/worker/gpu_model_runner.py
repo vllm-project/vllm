@@ -316,23 +316,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.is_elastic = envs.VLLM_ENABLE_KVCACHED
         if self.is_elastic:
             try:
-                import kvcached.integration.vllm.interfaces as kvcached_interfaces
+                import kvcached.integration.vllm.interfaces as kvcached_ifaces
             except Exception as e:
                 raise ImportError(
                     "kvcached is not found. Please install kvcached with "
-                    "`pip install kvcached --no-build-isolation` to use elastic "
+                    "`pip install kvcached --no-build-isolation` to use elastic"
                     "KV cache.") from e
-            self.kvcached_interfaces = kvcached_interfaces
+            self.kvcached_interfaces = kvcached_ifaces
             # Get tensor parallel rank and size from vLLM's parallel state
             from vllm.distributed.parallel_state import (
                 get_tensor_model_parallel_rank,
                 get_tensor_model_parallel_world_size)
             tp_rank = get_tensor_model_parallel_rank()
             tp_size = get_tensor_model_parallel_world_size()
-            kvcached_interfaces.init_kvcached(tp_rank=tp_rank,
-                                              tp_size=tp_size,
-                                              is_worker=True,
-                                              device=str(self.device))
+            kvcached_ifaces.init_kvcached(tp_rank=tp_rank,
+                                          tp_size=tp_size,
+                                          is_worker=True,
+                                          device=str(self.device))
 
         # Layer pairings for cross-layer KV sharing.
         # If an Attention layer `layer_name` is in the keys of this dict, it
