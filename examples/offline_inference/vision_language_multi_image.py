@@ -253,6 +253,33 @@ def load_smolvlm(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_interns1(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "internlm/Intern-S1"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = "\n".join(
+        f"Image-{i}: <IMG_CONTEXT>\n" for i, _ in enumerate(image_urls, start=1)
+    )
+    messages = [{"role": "user", "content": f"{placeholders}\n{question}"}]
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    prompt = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "OpenGVLab/InternVL2-2B"
 
@@ -733,6 +760,40 @@ def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_phi4_multimodal(question: str, image_urls: list[str]) -> ModelRequestData:
+    """
+    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
+    show how to process multi images inputs.
+    """
+
+    model_path = snapshot_download(
+        "microsoft/Phi-4-multimodal-instruct", revision="refs/pr/70"
+    )
+    # Since the vision-lora and speech-lora co-exist with the base model,
+    # we have to manually specify the path of the lora weights.
+    vision_lora_path = os.path.join(model_path, "vision-lora")
+    engine_args = EngineArgs(
+        model=model_path,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        enable_lora=True,
+        max_lora_rank=320,
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
+        mm_processor_kwargs={"dynamic_hd": 4},
+    )
+
+    placeholders = "<|image|>" * len(image_urls)
+    prompt = f"<|user|>{placeholders}{question}<|end|><|assistant|>"
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+        lora_requests=[LoRARequest("vision", 1, vision_lora_path)],
+    )
+
+
 def load_qwen_vl_chat(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "Qwen/Qwen-VL-Chat"
     engine_args = EngineArgs(
@@ -946,6 +1007,7 @@ model_example_map = {
     "gemma3": load_gemma3,
     "h2ovl_chat": load_h2ovl,
     "idefics3": load_idefics3,
+    "interns1": load_interns1,
     "internvl_chat": load_internvl,
     "hyperclovax_seed_vision": load_hyperclovax_seed_vision,
     "keye_vl": load_keye_vl,
@@ -960,6 +1022,7 @@ model_example_map = {
     "ovis": load_ovis,
     "phi3_v": load_phi3v,
     "phi4_mm": load_phi4mm,
+    "phi4_multimodal": load_phi4_multimodal,
     "pixtral_hf": load_pixtral_hf,
     "qwen_vl_chat": load_qwen_vl_chat,
     "qwen2_vl": load_qwen2_vl,
