@@ -92,15 +92,15 @@ _MAX_FRAMES_PER_VIDEO = 600
 class Glm4vImagePixelInputs(TensorSchema):
     """
     Dimensions:
-        - p: Number of patches
-        - c: Number of channels * patch_size * patch_size
-        - n: Number of images
+        - np: Number of patches
+        - cpp: Number of channels * patch_size * patch_size
+        - ni: Number of images
         - g: Grid dimensions (3 for grid_t, grid_h, grid_w)
     """
     type: Literal["pixel_values"] = "pixel_values"
 
-    pixel_values: Annotated[torch.Tensor, TensorShape("p", "c")]
-    image_grid_thw: Annotated[torch.Tensor, TensorShape("n", 3)]
+    pixel_values: Annotated[torch.Tensor, TensorShape("np", "cpp")]
+    image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
 class Glm4vImageEmbeddingInputs(TensorSchema):
