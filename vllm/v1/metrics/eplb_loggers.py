@@ -1,6 +1,6 @@
 import time
 import threading
-from typing import Callable, Optional, Union
+from typing import Optional
 
 import torch
 import prometheus_client
