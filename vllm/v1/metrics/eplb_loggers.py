@@ -15,14 +15,14 @@ class EplbStatLogger:
     _gauge_cls = prometheus_client.Gauge
     _counter_cls = prometheus_client.Counter
 
-    def __init__(self, model: MixtureOfExperts, device: torch.device, phy2log: Optional[torch.Tensor]):
+    def __init__(self, model: MixtureOfExperts, device: torch.device, phy2log_map: Optional[torch.Tensor]):
         self.rank = get_ep_group().rank
         self.layers_num = model.num_moe_layers
         self.local_expert_num = model.num_local_physical_experts
         self.global_expert_num = model.num_physical_experts
-        self.phy2log = phy2log
-        if phy2log is None:
-            self.phy2log = torch.arange(self.global_expert_num, device=device).repeat(self.layers_num, 1)
+        self.phy2log_map = phy2log_map
+        if phy2log_map is None:
+            self.phy2log_map = torch.arange(self.global_expert_num, device=device).repeat(self.layers_num, 1)
 
         labelnames_phy_load = ["rank", "layer", "phy_expert_id"]
         labelnames_phy2log = ["rank", "layer", "phy_expert_id", "log_expert_id"]
@@ -47,9 +47,10 @@ class EplbStatLogger:
                                            layer=layer_id,
                                            phy_expert_id=phy_expert_id % self.local_expert_num)
 
-            if self.phy2log is not None:
-                for layer_id in range(len(phy2log)):
-                    for phy_expert_id, log_expert_id in enumerate(phy2log[layer_id]):
+            if self.phy2log_map is not None:
+                cpu_phy2log = self.phy2log_map.cpu().tolist()
+                for layer_id in range(len(cpu_phy2log)):
+                    for phy_expert_id, log_expert_id in enumerate(cpu_phy2log[layer_id]):
                         self.phy2log.labels(rank=phy_expert_id // self.local_expert_num,
                                             layer=layer_id,
                                             phy_expert_id=phy_expert_id % self.local_expert_num,
@@ -87,7 +88,7 @@ class EplbStatLogger:
                         rank=phy_expert_id // self.local_expert_num,
                         layer=layer_id,
                         phy_expert_id=phy_expert_id % self.local_expert_num,
-                        log_expert_id=self.local_phy2log[layer_id][phy_expert_id]
+                        log_expert_id=self.phy2log_map[layer_id][phy_expert_id]
                     ).set(0)
 
                     self.phy2log.labels(
@@ -96,7 +97,7 @@ class EplbStatLogger:
                         phy_expert_id=phy_expert_id % self.local_expert_num,
                         log_expert_id=log_expert_id
                     ).set(1)
-                    self.local_phy2log[layer_id][phy_expert_id] = log_expert_id
+                    self.phy2log_map[layer_id][phy_expert_id] = log_expert_id
 
     def record_expert_load(self, moe_load):
         if self.rank == 0:
