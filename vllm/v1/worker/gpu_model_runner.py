@@ -1977,20 +1977,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         model_supports_token_type_ids = 'token_type_ids' in \
                 inspect.getfullargspec(self.model.forward).args
 
-        tokenizer = self._get_tokenizer()
-        if not isinstance(tokenizer, MistralTokenizer):
-            tok_output = tokenizer(text="foo")
-            if "token_type_ids" in tok_output:
-                if not model_supports_token_type_ids:
-                    logger.warning("Tokenizer returns token_type_ids but "
-                                   "but model forward() doesn't support that "
-                                   "argument")
-                else:
-                    self.supports_token_type_ids = True
+        if not self.model_config.skip_tokenizer_init:
+            tokenizer = self._get_tokenizer()
+            if not isinstance(tokenizer, MistralTokenizer):
+                tok_output = tokenizer(text="foo")
+                if "token_type_ids" in tok_output:
+                    if not model_supports_token_type_ids:
+                        logger.warning(
+                            "Tokenizer returns token_type_ids but "
+                            "but model forward() doesn't support that "
+                            "argument")
+                    else:
+                        self.supports_token_type_ids = True
 
-        if self.supports_token_type_ids:
-            # pre-allocate tensor
-            self.get_token_type_ids()
+            if self.supports_token_type_ids:
+                # pre-allocate tensor
+                self.get_token_type_ids()
 
     def reload_weights(self) -> None:
         assert getattr(self, "model", None) is not None, \
