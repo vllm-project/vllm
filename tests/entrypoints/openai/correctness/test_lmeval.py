@@ -27,7 +27,7 @@ MORE_ARGS_LIST = [
     [],  # Default
     ["--enable-chunked-prefill"],  # Chunked
     ["--num-scheduler-steps", "8"],  # MS
-    ["--num-scheduler-steps", "8", "--multi-step-stream-outputs"]  # MS+Stream
+    ["--num-scheduler-steps", "8", "--multi-step-stream-outputs"],  # MS+Stream
 ]
 MAX_WAIT_SECONDS = None
 
@@ -47,14 +47,15 @@ def run_test(more_args):
     print(f"Running with: {args}")
 
     with RemoteOpenAIServer(
-            MODEL_NAME, args,
-            max_wait_seconds=MAX_WAIT_SECONDS) as remote_server:
+        MODEL_NAME, args, max_wait_seconds=MAX_WAIT_SECONDS
+    ) as remote_server:
         url = f"{remote_server.url_for('v1')}/completions"
 
         model_args = (
             f"model={MODEL_NAME},"
             f"base_url={url},"
-            f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False")
+            f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False"
+        )
 
         results = lm_eval.simple_evaluate(
             model="local-completions",
@@ -63,14 +64,16 @@ def run_test(more_args):
         )
 
         measured_value = results["results"][TASK][FILTER]
-        assert (measured_value - RTOL < EXPECTED_VALUE
-                and measured_value + RTOL > EXPECTED_VALUE
-                ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+        assert (
+            measured_value - RTOL < EXPECTED_VALUE
+            and measured_value + RTOL > EXPECTED_VALUE
+        ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
 
-@pytest.mark.skipif(not current_platform.is_cuda()
-                    and not current_platform.is_tpu(),
-                    reason="V1 currently only supported on CUDA and TPU")
+@pytest.mark.skipif(
+    not current_platform.is_cuda() and not current_platform.is_tpu(),
+    reason="V1 currently only supported on CUDA and TPU",
+)
 def test_lm_eval_accuracy_v1_engine(monkeypatch: pytest.MonkeyPatch):
     """Run with the V1 Engine."""
 
@@ -86,8 +89,7 @@ def test_lm_eval_accuracy_v1_engine(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.parametrize("more_args", MORE_ARGS_LIST)
-def test_lm_eval_accuracy_v0_engine(monkeypatch: pytest.MonkeyPatch,
-                                    more_args):
+def test_lm_eval_accuracy_v0_engine(monkeypatch: pytest.MonkeyPatch, more_args):
     """Run with the V0 Engine."""
 
     with monkeypatch.context() as m:

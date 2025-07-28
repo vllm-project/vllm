@@ -16,12 +16,12 @@ async def test_empty_prompt():
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
 
-        with pytest.raises(openai.BadRequestError,
-                           match="decoder prompt cannot be empty"):
-            await client.completions.create(model=model_name,
-                                            prompt="",
-                                            max_tokens=5,
-                                            temperature=0.0)
+        with pytest.raises(
+            openai.BadRequestError, match="decoder prompt cannot be empty"
+        ):
+            await client.completions.create(
+                model=model_name, prompt="", max_tokens=5, temperature=0.0
+            )
 
 
 @pytest.mark.asyncio
@@ -31,12 +31,12 @@ async def test_out_of_vocab_token_ids():
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
 
-        with pytest.raises(openai.BadRequestError,
-                           match=re.compile('.*out of vocabulary.*').pattern):
-            await client.completions.create(model=model_name,
-                                            prompt=[999999],
-                                            max_tokens=5,
-                                            temperature=0.0)
+        with pytest.raises(
+            openai.BadRequestError, match=re.compile(".*out of vocabulary.*").pattern
+        ):
+            await client.completions.create(
+                model=model_name, prompt=[999999], max_tokens=5, temperature=0.0
+            )
 
 
 @pytest.mark.asyncio
@@ -47,14 +47,13 @@ async def test_reject_multistep_with_guided_decoding():
         client = remote_server.get_async_client()
 
         with pytest.raises(
-                openai.BadRequestError,
-                match=re.compile(
-                    '.*Guided decoding .* multi-step decoding.*').pattern):
+            openai.BadRequestError,
+            match=re.compile(".*Guided decoding .* multi-step decoding.*").pattern,
+        ):
             await client.completions.create(
                 model=model_name,
                 prompt="Hello",
                 max_tokens=5,
                 temperature=0.0,
-                extra_body={"response_format": {
-                    "type": "json_object"
-                }})
+                extra_body={"response_format": {"type": "json_object"}},
+            )

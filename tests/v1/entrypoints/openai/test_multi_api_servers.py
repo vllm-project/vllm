@@ -8,7 +8,6 @@ import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 import requests
-
 from tests.utils import RemoteOpenAIServer
 
 MODEL_NAME = "ibm-research/PowerMoE-3b"
@@ -16,10 +15,9 @@ MODEL_NAME = "ibm-research/PowerMoE-3b"
 DP_SIZE = os.getenv("DP_SIZE", "1")
 
 
-def get_prometheus_metrics(
-        server: RemoteOpenAIServer) -> dict[str, dict[str, float]]:
+def get_prometheus_metrics(server: RemoteOpenAIServer) -> dict[str, dict[str, float]]:
     """Fetch and parse Prometheus metrics from the /metrics endpoint.
-    
+
     Returns:
         Dict mapping metric names to their values grouped by labels.
         For example: {"vllm:request_success": {
@@ -34,14 +32,14 @@ def get_prometheus_metrics(
 
         # Regex patterns for Prometheus metrics
         metric_with_labels = re.compile(
-            r'^([a-zA-Z_:][a-zA-Z0-9_:]*)\{([^}]*)\}\s+([\d\.\-\+e]+)$')
-        metric_simple = re.compile(
-            r'^([a-zA-Z_:][a-zA-Z0-9_:]*)\s+([\d\.\-\+e]+)$')
+            r"^([a-zA-Z_:][a-zA-Z0-9_:]*)\{([^}]*)\}\s+([\d\.\-\+e]+)$"
+        )
+        metric_simple = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)\s+([\d\.\-\+e]+)$")
 
-        for line in response.text.split('\n'):
+        for line in response.text.split("\n"):
             line = line.strip()
             # Skip comments and empty lines
-            if not line or line.startswith('#'):
+            if not line or line.startswith("#"):
                 continue
 
             # Try to match metric with labels first
@@ -52,7 +50,7 @@ def get_prometheus_metrics(
                     value = float(value_str)
                     if metric_name not in metrics:
                         metrics[metric_name] = {}
-                    metrics[metric_name][f'{{{labels_part}}}'] = value
+                    metrics[metric_name][f"{{{labels_part}}}"] = value
                 except ValueError:
                     continue
             else:
@@ -64,7 +62,7 @@ def get_prometheus_metrics(
                         value = float(value_str)
                         if metric_name not in metrics:
                             metrics[metric_name] = {}
-                        metrics[metric_name][''] = value
+                        metrics[metric_name][""] = value
                     except ValueError:
                         continue
 
@@ -74,10 +72,9 @@ def get_prometheus_metrics(
         return {}
 
 
-def get_engine_request_counts(
-        metrics: dict[str, dict[str, float]]) -> dict[str, float]:
+def get_engine_request_counts(metrics: dict[str, dict[str, float]]) -> dict[str, float]:
     """Extract request counts per engine from Prometheus metrics.
-    
+
     Returns:
         Dict mapping engine indices to request counts.
         For example: {"0": 15.0, "1": 12.0}
@@ -102,7 +99,7 @@ def get_engine_request_counts(
 
 def check_request_balancing(server: RemoteOpenAIServer):
     """Check request balancing via Prometheus metrics if DP_SIZE > 1.
-    
+
     Args:
         server: The RemoteOpenAIServer instance
     """
@@ -121,7 +118,8 @@ def check_request_balancing(server: RemoteOpenAIServer):
     assert len(engines_with_requests) == dp_size, (
         f"Expected requests to be distributed across multiple engines,"
         f" but only engine(s) {engines_with_requests} received "
-        f"requests. Engine counts: {engine_counts}")
+        f"requests. Engine counts: {engine_counts}"
+    )
 
     # Verify that the load is reasonably balanced
     # (no engine should handle all requests)
@@ -129,7 +127,8 @@ def check_request_balancing(server: RemoteOpenAIServer):
 
     for count in engine_counts.values():
         assert count > total_requests // (dp_size + 1), (
-            f"requests are imbalanced: {engine_counts}")
+            f"requests are imbalanced: {engine_counts}"
+        )
 
 
 @pytest.fixture(scope="module")
@@ -167,16 +166,13 @@ async def client(server):
     "model_name",
     [MODEL_NAME],
 )
-async def test_single_completion(client: openai.AsyncOpenAI,
-                                 server: RemoteOpenAIServer,
-                                 model_name: str) -> None:
-
+async def test_single_completion(
+    client: openai.AsyncOpenAI, server: RemoteOpenAIServer, model_name: str
+) -> None:
     async def make_request():
         completion = await client.completions.create(
-            model=model_name,
-            prompt="Hello, my name is",
-            max_tokens=10,
-            temperature=1.0)
+            model=model_name, prompt="Hello, my name is", max_tokens=10, temperature=1.0
+        )
 
         assert completion.id is not None
         assert completion.choices is not None and len(completion.choices) == 1
@@ -225,9 +221,9 @@ async def test_single_completion(client: openai.AsyncOpenAI,
     "model_name",
     [MODEL_NAME],
 )
-async def test_completion_streaming(client: openai.AsyncOpenAI,
-                                    server: RemoteOpenAIServer,
-                                    model_name: str) -> None:
+async def test_completion_streaming(
+    client: openai.AsyncOpenAI, server: RemoteOpenAIServer, model_name: str
+) -> None:
     prompt = "What is an LLM?"
 
     async def make_streaming_request():
@@ -241,11 +237,9 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
         single_output = single_completion.choices[0].text
 
         # Perform the streaming request
-        stream = await client.completions.create(model=model_name,
-                                                 prompt=prompt,
-                                                 max_tokens=5,
-                                                 temperature=0.0,
-                                                 stream=True)
+        stream = await client.completions.create(
+            model=model_name, prompt=prompt, max_tokens=5, temperature=0.0, stream=True
+        )
         chunks: list[str] = []
         finish_reason_count = 0
         last_chunk = None
@@ -256,16 +250,15 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
             last_chunk = chunk  # Keep track of the last chunk
 
         # finish reason should only return in the last block for OpenAI API
-        assert finish_reason_count == 1, (
-            "Finish reason should appear exactly once.")
-        assert last_chunk is not None, (
-            "Stream should have yielded at least one chunk.")
-        assert last_chunk.choices[
-            0].finish_reason == "length", "Finish reason should be 'length'."
+        assert finish_reason_count == 1, "Finish reason should appear exactly once."
+        assert last_chunk is not None, "Stream should have yielded at least one chunk."
+        assert last_chunk.choices[0].finish_reason == "length", (
+            "Finish reason should be 'length'."
+        )
         # Check that the combined text matches the non-streamed version.
-        assert "".join(
-            chunks
-        ) == single_output, "Streamed output should match non-streamed output."
+        assert "".join(chunks) == single_output, (
+            "Streamed output should match non-streamed output."
+        )
         return True  # Indicate success for this request
 
     # Test single request
@@ -279,9 +272,9 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
     tasks = [make_streaming_request() for _ in range(num_requests)]
     results = await asyncio.gather(*tasks)
 
-    assert len(
-        results
-    ) == num_requests, f"Expected {num_requests} results, got {len(results)}"
+    assert len(results) == num_requests, (
+        f"Expected {num_requests} results, got {len(results)}"
+    )
     assert all(results), "Not all streaming requests completed successfully."
 
     await asyncio.sleep(0.5)
@@ -289,9 +282,9 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
     tasks = [make_streaming_request() for _ in range(num_requests)]
     results = await asyncio.gather(*tasks)
 
-    assert len(
-        results
-    ) == num_requests, f"Expected {num_requests} results, got {len(results)}"
+    assert len(results) == num_requests, (
+        f"Expected {num_requests} results, got {len(results)}"
+    )
     assert all(results), "Not all streaming requests completed successfully."
 
     # Check request balancing via Prometheus metrics if DP_SIZE > 1

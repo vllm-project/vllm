@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for InternVL's multimodal preprocessing kwargs."""
+
 from collections.abc import Mapping
 from typing import Optional
 
@@ -24,7 +25,9 @@ def _get_expected_num_patches(
     max_num: int,
 ):
     from vllm.model_executor.models.internvl import (
-        calculate_internvl_targets, get_internvl_target_ratios)
+        calculate_internvl_targets,
+        get_internvl_target_ratios,
+    )
 
     width, height = image.size
 
@@ -61,7 +64,8 @@ def _run_check(
 
     total_expected_num_patches = sum(
         _get_expected_num_patches(config, image, len(images), min_num, max_num)
-        for image in images)
+        for image in images
+    )
 
     processed_inputs = processor.apply(prompt, mm_data, mm_processor_kwargs)
 
@@ -121,10 +125,7 @@ def test_processor_override(
 
     _run_check(
         processor,
-        [
-            rescale_image_size(image_assets[0].pil_image, f)
-            for f in size_factors
-        ],
+        [rescale_image_size(image_assets[0].pil_image, f) for f in size_factors],
         min_num,
         max_num,
         hf_processor_mm_kwargs,

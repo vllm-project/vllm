@@ -5,6 +5,7 @@
 """Tests fp8 models against ground truth generation
 Note: these tests will only pass on L4 GPU.
 """
+
 import pytest
 
 from tests.quantization.utils import is_quant_method_supported
@@ -14,21 +15,33 @@ from vllm.utils import STR_BACKEND_ENV_VAR
 from ..utils import check_logprobs_close
 
 
-@pytest.mark.skipif(not is_quant_method_supported("fp8"),
-                    reason="fp8 is not supported on this GPU type.")
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="fp8 is not supported on this GPU type.",
+)
 @pytest.mark.parametrize(
     "kv_cache_dtype,base_model,test_model",
     [
         # Test FP8 checkpoint w. fp8_e4m3 kv-cache scaling factors.
-        ("fp8_e4m3", "meta-llama/Llama-3.2-1B-Instruct",
-         "nm-testing/Llama-3.2-1B-Instruct-FP8-KV"),
+        (
+            "fp8_e4m3",
+            "meta-llama/Llama-3.2-1B-Instruct",
+            "nm-testing/Llama-3.2-1B-Instruct-FP8-KV",
+        ),
         # Test BF16 checkpoint w. fp8_e5m2 kv-cache.
-        ("fp8_e5m2", "meta-llama/Llama-3.2-1B-Instruct",
-         "meta-llama/Llama-3.2-1B-Instruct"),
+        (
+            "fp8_e5m2",
+            "meta-llama/Llama-3.2-1B-Instruct",
+            "meta-llama/Llama-3.2-1B-Instruct",
+        ),
         # Test BF16 checkpoint w. fp8_e4m3 kv-cache scaling factors in json.
-        ("fp8_e4m3", "meta-llama/Llama-3.2-1B-Instruct",
-         "meta-llama/Llama-3.2-1B-Instruct")
-    ])
+        (
+            "fp8_e4m3",
+            "meta-llama/Llama-3.2-1B-Instruct",
+            "meta-llama/Llama-3.2-1B-Instruct",
+        ),
+    ],
+)
 # Due to low-precision numerical divergence, we only test logprob of 4 tokens
 @pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("enforce_eager", [True])
@@ -61,37 +74,38 @@ def test_models(
         pytest.skip("Flashinfer does not support ROCm/HIP.")
 
     if kv_cache_dtype == "fp8_e5m2" and current_platform.is_rocm():
-        pytest.skip(
-            f"{kv_cache_dtype} is currently not supported on ROCm/HIP.")
+        pytest.skip(f"{kv_cache_dtype} is currently not supported on ROCm/HIP.")
 
     with monkeypatch.context() as m:
-        m.setenv("TOKENIZERS_PARALLELISM", 'true')
+        m.setenv("TOKENIZERS_PARALLELISM", "true")
         m.setenv(STR_BACKEND_ENV_VAR, backend)
 
         MAX_MODEL_LEN = 1024
         NUM_LOG_PROBS = 8
 
         with vllm_runner(
-                base_model,
-                max_model_len=MAX_MODEL_LEN,
-                tensor_parallel_size=tensor_parallel_size,
-                enforce_eager=enforce_eager,
-                kv_cache_dtype="auto",
-                disable_async_output_proc=disable_async_output_proc,
+            base_model,
+            max_model_len=MAX_MODEL_LEN,
+            tensor_parallel_size=tensor_parallel_size,
+            enforce_eager=enforce_eager,
+            kv_cache_dtype="auto",
+            disable_async_output_proc=disable_async_output_proc,
         ) as vllm_model:
             baseline_outputs = vllm_model.generate_greedy_logprobs(
-                example_prompts, max_tokens, NUM_LOG_PROBS)
+                example_prompts, max_tokens, NUM_LOG_PROBS
+            )
 
         with vllm_runner(
-                test_model,
-                max_model_len=MAX_MODEL_LEN,
-                tensor_parallel_size=tensor_parallel_size,
-                enforce_eager=enforce_eager,
-                kv_cache_dtype=kv_cache_dtype,
-                disable_async_output_proc=disable_async_output_proc,
+            test_model,
+            max_model_len=MAX_MODEL_LEN,
+            tensor_parallel_size=tensor_parallel_size,
+            enforce_eager=enforce_eager,
+            kv_cache_dtype=kv_cache_dtype,
+            disable_async_output_proc=disable_async_output_proc,
         ) as vllm_model:
             test_outputs = vllm_model.generate_greedy_logprobs(
-                example_prompts, max_tokens, NUM_LOG_PROBS)
+                example_prompts, max_tokens, NUM_LOG_PROBS
+            )
 
         check_logprobs_close(
             outputs_0_lst=baseline_outputs,
@@ -102,15 +116,18 @@ def test_models(
 
 
 @pytest.mark.cpu_model
-@pytest.mark.skipif(not current_platform.is_cpu(),
-                    reason="test for the CPU backend.")
+@pytest.mark.skipif(not current_platform.is_cpu(), reason="test for the CPU backend.")
 @pytest.mark.parametrize(
     "kv_cache_dtype,base_model,test_model",
     [
         # Test BF16 checkpoint w. fp8_e5m2 kv-cache.
-        ("fp8_e5m2", "meta-llama/Llama-3.2-1B-Instruct",
-         "meta-llama/Llama-3.2-1B-Instruct"),
-    ])
+        (
+            "fp8_e5m2",
+            "meta-llama/Llama-3.2-1B-Instruct",
+            "meta-llama/Llama-3.2-1B-Instruct",
+        ),
+    ],
+)
 # Due to low-precision numerical divergence, we only test logprob of 4 tokens
 @pytest.mark.parametrize("max_tokens", [4])
 # Due to low-precision numerical divergence, this test is too sensitive for
@@ -131,30 +148,32 @@ def test_cpu_models(
     numerical sensitive kernels.
     """
     with monkeypatch.context() as m:
-        m.setenv("TOKENIZERS_PARALLELISM", 'true')
+        m.setenv("TOKENIZERS_PARALLELISM", "true")
 
         MAX_MODEL_LEN = 1024
         NUM_LOG_PROBS = 8
 
         with vllm_runner(
-                base_model,
-                max_model_len=MAX_MODEL_LEN,
-                dtype="bfloat16",
-                kv_cache_dtype="auto",
-                disable_async_output_proc=disable_async_output_proc,
+            base_model,
+            max_model_len=MAX_MODEL_LEN,
+            dtype="bfloat16",
+            kv_cache_dtype="auto",
+            disable_async_output_proc=disable_async_output_proc,
         ) as vllm_model:
             baseline_outputs = vllm_model.generate_greedy_logprobs(
-                example_prompts, max_tokens, NUM_LOG_PROBS)
+                example_prompts, max_tokens, NUM_LOG_PROBS
+            )
 
         with vllm_runner(
-                test_model,
-                max_model_len=MAX_MODEL_LEN,
-                dtype="bfloat16",
-                kv_cache_dtype=kv_cache_dtype,
-                disable_async_output_proc=disable_async_output_proc,
+            test_model,
+            max_model_len=MAX_MODEL_LEN,
+            dtype="bfloat16",
+            kv_cache_dtype=kv_cache_dtype,
+            disable_async_output_proc=disable_async_output_proc,
         ) as vllm_model:
             test_outputs = vllm_model.generate_greedy_logprobs(
-                example_prompts, max_tokens, NUM_LOG_PROBS)
+                example_prompts, max_tokens, NUM_LOG_PROBS
+            )
 
         check_logprobs_close(
             outputs_0_lst=baseline_outputs,

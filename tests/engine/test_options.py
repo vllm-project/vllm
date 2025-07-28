@@ -23,8 +23,9 @@ def test_skip_tokenizer_initialization(model: str):
     with pytest.raises(ValueError, match="cannot pass text prompts when"):
         llm.generate("abc", sampling_params)
 
-    outputs = llm.generate({"prompt_token_ids": [1, 2, 3]},
-                           sampling_params=sampling_params)
+    outputs = llm.generate(
+        {"prompt_token_ids": [1, 2, 3]}, sampling_params=sampling_params
+    )
     assert len(outputs) > 0
     completions = outputs[0].outputs
     assert len(completions) > 0
@@ -34,8 +35,7 @@ def test_skip_tokenizer_initialization(model: str):
 
 @pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
 @pytest.mark.parametrize("enable_prompt_embeds", [True, False])
-def test_enable_prompt_embeds(hf_runner, model: str,
-                              enable_prompt_embeds: bool):
+def test_enable_prompt_embeds(hf_runner, model: str, enable_prompt_embeds: bool):
     prompt = "abc"
 
     with hf_runner(model) as hf_model:
@@ -45,8 +45,11 @@ def test_enable_prompt_embeds(hf_runner, model: str,
         embed_layer = hf_model.model.get_input_embeddings()
         prompt_embeds = embed_layer(token_ids).squeeze(0)
 
-    ctx = (nullcontext() if enable_prompt_embeds else pytest.raises(
-        ValueError, match="set `--enable-prompt-embeds`"))
+    ctx = (
+        nullcontext()
+        if enable_prompt_embeds
+        else pytest.raises(ValueError, match="set `--enable-prompt-embeds`")
+    )
 
     llm = LLM(
         model=model,

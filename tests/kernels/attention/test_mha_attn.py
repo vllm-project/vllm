@@ -5,6 +5,7 @@ Test:
 
 * Tests for MultiHeadAttention layer
 """
+
 from unittest.mock import patch
 
 import pytest
@@ -20,8 +21,7 @@ from vllm.platforms.rocm import RocmPlatform
 
 @pytest.fixture(autouse=True)
 def clear_cache():
-    """Clear lru cache to ensure each test case runs without caching.
-    """
+    """Clear lru cache to ensure each test case runs without caching."""
     _cached_get_attn_backend.cache_clear()
 
 
@@ -74,9 +74,11 @@ NUM_HEADS = [1, 16]
 NUM_KV_HEADS = [1]
 HEAD_SIZES = [64, 80]
 # flshattF and tritonflashattF supported: {torch.float16, torch.bfloat16}
-DTYPES = [
-    torch.half, torch.bfloat16, torch.float
-] if not current_platform.is_rocm() else [torch.half, torch.bfloat16]
+DTYPES = (
+    [torch.half, torch.bfloat16, torch.float]
+    if not current_platform.is_rocm()
+    else [torch.half, torch.bfloat16]
+)
 CUDA_DEVICES = ["cuda"]
 
 
@@ -104,10 +106,9 @@ def test_mha_attn_forward(
     k = torch.randn(batch_size, seq_len, num_kv_heads * head_size)
     v = torch.randn(batch_size, seq_len, num_kv_heads * head_size)
     scale = 1.0 / head_size**0.5
-    attn = MultiHeadAttention(num_heads,
-                              head_size,
-                              scale=scale,
-                              num_kv_heads=num_kv_heads)
+    attn = MultiHeadAttention(
+        num_heads, head_size, scale=scale, num_kv_heads=num_kv_heads
+    )
     output = attn(q, k, v)
 
     assert num_heads % num_kv_heads == 0

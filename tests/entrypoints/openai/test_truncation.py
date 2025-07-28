@@ -54,12 +54,10 @@ async def test_smaller_truncation_size(client: openai.AsyncOpenAI):
     kwargs: dict[str, Any] = {
         "model": MODEL_NAME,
         "input": input,
-        "truncate_prompt_tokens": truncation_size
+        "truncate_prompt_tokens": truncation_size,
     }
 
-    response = await client.post(path="embeddings",
-                                 cast_to=object,
-                                 body={**kwargs})
+    response = await client.post(path="embeddings", cast_to=object, body={**kwargs})
 
     assert response["usage"]["prompt_tokens"] == truncation_size
 
@@ -70,15 +68,15 @@ async def test_bigger_truncation_size(client: openai.AsyncOpenAI):
     kwargs: dict[str, Any] = {
         "model": MODEL_NAME,
         "input": input,
-        "truncate_prompt_tokens": truncation_size
+        "truncate_prompt_tokens": truncation_size,
     }
 
     with pytest.raises(openai.BadRequestError) as err:
-        err = await client.post(path="embeddings",
-                                cast_to=object,
-                                body={**kwargs})
+        err = await client.post(path="embeddings", cast_to=object, body={**kwargs})
 
-        assert str(err) == f"""openai.BadRequestError: 
+        assert (
+            str(err)
+            == f"""openai.BadRequestError: 
                     Error code: 400 - {{'object': 'error', 
                     'message': 'truncate_prompt_tokens value 
                     ({truncation_size}) 
@@ -86,6 +84,7 @@ async def test_bigger_truncation_size(client: openai.AsyncOpenAI):
                     Please, select a smaller truncation size.', 
                     'type': 'BadRequestError', 
                     'param': None, 'code': 400}}"""
+        )
 
 
 @pytest.mark.asyncio
@@ -94,11 +93,9 @@ async def test_max_truncation_size(client: openai.AsyncOpenAI):
     kwargs: dict[str, Any] = {
         "model": MODEL_NAME,
         "input": input,
-        "truncate_prompt_tokens": truncation_size
+        "truncate_prompt_tokens": truncation_size,
     }
 
-    response = await client.post(path="embeddings",
-                                 cast_to=object,
-                                 body={**kwargs})
+    response = await client.post(path="embeddings", cast_to=object, body={**kwargs})
 
     assert response["usage"]["prompt_tokens"] == max_model_len

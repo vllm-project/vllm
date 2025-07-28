@@ -25,20 +25,18 @@ class TestBackend:
     Inductor config is default-initialized from VllmConfig.CompilationConfig.
     """
 
-    def __init__(self, *passes: Union[InductorPass, Callable[[fx.Graph],
-                                                             None]]):
+    def __init__(self, *passes: Union[InductorPass, Callable[[fx.Graph], None]]):
         self.custom_passes = list(passes)
         compile_config = get_current_vllm_config().compilation_config
         self.inductor_config = compile_config.inductor_compile_config
-        self.inductor_config['force_disable_caches'] = True
-        self.inductor_config['post_grad_custom_post_pass'] = self.post_pass
+        self.inductor_config["force_disable_caches"] = True
+        self.inductor_config["post_grad_custom_post_pass"] = self.post_pass
 
     def __call__(self, graph: fx.GraphModule, example_inputs):
         self.graph_pre_compile = deepcopy(graph)
         from torch._inductor.compile_fx import compile_fx
-        return compile_fx(graph,
-                          example_inputs,
-                          config_patches=self.inductor_config)
+
+        return compile_fx(graph, example_inputs, config_patches=self.inductor_config)
 
     def post_pass(self, graph: fx.Graph):
         self.graph_pre_pass = deepcopy(graph)
@@ -56,8 +54,7 @@ class TestBackend:
             assert num_pre > 0, f"Op {op.name()} not found in pre-pass graph"
             assert num_pre > num_post, f"All nodes remain for op {op.name()}"
             if fully_replaced:
-                assert num_post == 0, \
-                    f"Unexpected op {op.name()} in post-pass graph"
+                assert num_post == 0, f"Unexpected op {op.name()} in post-pass graph"
 
     def check_after_ops(self, ops: Sequence[OpOverload]):
         for op in ops:

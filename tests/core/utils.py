@@ -12,8 +12,7 @@ from vllm import SamplingParams
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.inputs import EncoderDecoderInputs, embeds_inputs, token_inputs
 from vllm.lora.request import LoRARequest
-from vllm.sequence import (Logprob, Sequence, SequenceGroup,
-                           SequenceGroupMetadata)
+from vllm.sequence import Logprob, Sequence, SequenceGroup, SequenceGroupMetadata
 
 
 def create_dummy_prompt(
@@ -35,10 +34,11 @@ def create_dummy_prompt(
         prompt_tokens = list(range(prompt_length))
 
     prompt_str = " ".join([str(t) for t in prompt_tokens])
-    inputs = token_inputs(
-        prompt_token_ids=prompt_tokens,
-        prompt=prompt_str) if prompt_embeds is None else embeds_inputs(
-            prompt_embeds=prompt_embeds)
+    inputs = (
+        token_inputs(prompt_token_ids=prompt_tokens, prompt=prompt_str)
+        if prompt_embeds is None
+        else embeds_inputs(prompt_embeds=prompt_embeds)
+    )
     prompt = Sequence(
         int(request_id),
         inputs=inputs,
@@ -48,26 +48,29 @@ def create_dummy_prompt(
         request_id=request_id,
         seqs=[prompt],
         arrival_time=time.time(),
-        sampling_params=SamplingParams(max_tokens=max_tokens,
-                                       min_tokens=min_tokens),
+        sampling_params=SamplingParams(max_tokens=max_tokens, min_tokens=min_tokens),
         lora_request=lora_request,
     )
 
     return prompt, seq_group
 
 
-def create_dummy_lora_sequence(request_id: int, token_ids: list[int],
-                               block_size: int, lora_int_id: int) -> Sequence:
-    return Sequence(seq_id=request_id,
-                    inputs=token_inputs(token_ids),
-                    block_size=block_size,
-                    lora_request=LoRARequest(lora_name="dummy",
-                                             lora_path="/dummy",
-                                             lora_int_id=lora_int_id))
+def create_dummy_lora_sequence(
+    request_id: int, token_ids: list[int], block_size: int, lora_int_id: int
+) -> Sequence:
+    return Sequence(
+        seq_id=request_id,
+        inputs=token_inputs(token_ids),
+        block_size=block_size,
+        lora_request=LoRARequest(
+            lora_name="dummy", lora_path="/dummy", lora_int_id=lora_int_id
+        ),
+    )
 
 
-def create_dummy_sequence(request_id: int, token_ids: list[int],
-                          block_size: int) -> Sequence:
+def create_dummy_sequence(
+    request_id: int, token_ids: list[int], block_size: int
+) -> Sequence:
     return Sequence(
         seq_id=request_id,
         inputs=token_inputs(token_ids),
@@ -94,36 +97,36 @@ def create_dummy_prompt_encoder_decoder(
     encoder_prompt_str = " ".join([str(t) for t in encoder_prompt_tokens])
 
     inputs: EncoderDecoderInputs = {
-        "decoder": token_inputs(decoder_prompt_tokens,
-                                prompt=decoder_prompt_str),
-        "encoder": token_inputs(encoder_prompt_tokens,
-                                prompt=encoder_prompt_str),
+        "decoder": token_inputs(decoder_prompt_tokens, prompt=decoder_prompt_str),
+        "encoder": token_inputs(encoder_prompt_tokens, prompt=encoder_prompt_str),
     }
 
-    decoder_prompt = Sequence(int(request_id),
-                              inputs=inputs["decoder"],
-                              block_size=block_size)
+    decoder_prompt = Sequence(
+        int(request_id), inputs=inputs["decoder"], block_size=block_size
+    )
 
-    encoder_prompt = Sequence(int(request_id),
-                              inputs=inputs["encoder"],
-                              block_size=block_size)
+    encoder_prompt = Sequence(
+        int(request_id), inputs=inputs["encoder"], block_size=block_size
+    )
 
-    seq_group = SequenceGroup(request_id=request_id,
-                              seqs=[decoder_prompt],
-                              arrival_time=time.time(),
-                              lora_request=lora_request,
-                              encoder_seq=encoder_prompt)
+    seq_group = SequenceGroup(
+        request_id=request_id,
+        seqs=[decoder_prompt],
+        arrival_time=time.time(),
+        lora_request=lora_request,
+        encoder_seq=encoder_prompt,
+    )
 
     return decoder_prompt, encoder_prompt, seq_group
 
 
 def create_seq_group(
-        seq_prompt_len: int = 1024,
-        seq_output_lens: GenericSequence[int] = (128, ),
-        request_id: str = '0',
-        seq_id_start: int = 0,
-        sampling_params: Optional[SamplingParams] = None) -> SequenceGroup:
-
+    seq_prompt_len: int = 1024,
+    seq_output_lens: GenericSequence[int] = (128,),
+    request_id: str = "0",
+    seq_id_start: int = 0,
+    sampling_params: Optional[SamplingParams] = None,
+) -> SequenceGroup:
     assert len(seq_output_lens) > 0
 
     if sampling_params is None:
@@ -157,12 +160,12 @@ def create_seq_group(
 
 
 def create_seq_group_encoder_decoder(
-        seq_prompt_len: int = 1024,
-        seq_output_lens: GenericSequence[int] = (128, ),
-        request_id: str = '0',
-        seq_id_start: int = 0,
-        sampling_params: Optional[SamplingParams] = None) -> SequenceGroup:
-
+    seq_prompt_len: int = 1024,
+    seq_output_lens: GenericSequence[int] = (128,),
+    request_id: str = "0",
+    seq_id_start: int = 0,
+    sampling_params: Optional[SamplingParams] = None,
+) -> SequenceGroup:
     assert len(seq_output_lens) > 0
 
     if sampling_params is None:
@@ -198,11 +201,13 @@ def create_seq_group_encoder_decoder(
         block_size=16,
     )
 
-    return SequenceGroup(request_id=request_id,
-                         seqs=seqs,
-                         sampling_params=sampling_params,
-                         arrival_time=time.time(),
-                         encoder_seq=encoder_seq)
+    return SequenceGroup(
+        request_id=request_id,
+        seqs=seqs,
+        sampling_params=sampling_params,
+        arrival_time=time.time(),
+        encoder_seq=encoder_seq,
+    )
 
 
 def round_up_to_next_block(seq_len: int, block_size: int) -> int:
@@ -250,7 +255,6 @@ class SchedulerProxy:
         self.call_history: dict[str, list[Any]] = defaultdict(list)
 
     def __getattr__(self, name: str) -> Any:
-
         def wrapper(*args, **kwargs):
             result = getattr(self.scheduler_, name)(*args, **kwargs)
             self.call_history[name].append((args, kwargs, result))
@@ -259,6 +263,7 @@ class SchedulerProxy:
         return wrapper
 
     def last_schedule_ret(
-        self, ) -> tuple[list[SequenceGroupMetadata], SchedulerOutputs, Any]:
+        self,
+    ) -> tuple[list[SequenceGroupMetadata], SchedulerOutputs, Any]:
         _, _, ret = self.call_history["schedule"][-1]
         return ret

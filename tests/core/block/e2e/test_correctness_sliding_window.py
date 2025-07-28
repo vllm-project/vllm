@@ -18,23 +18,26 @@ BLOCK_SIZE = 16
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
-    [{
-        "model": MODEL,
-
-        # skip cuda graph creation for fast test.
-        "enforce_eager": True,
-        "block_size": BLOCK_SIZE,
-        # needed due to https://github.com/vllm-project/vllm/issues/1908#issuecomment-2101122008
-        "num_gpu_blocks_override": 100000 // BLOCK_SIZE,
-    }])
+    [
+        {
+            "model": MODEL,
+            # skip cuda graph creation for fast test.
+            "enforce_eager": True,
+            "block_size": BLOCK_SIZE,
+            # needed due to https://github.com/vllm-project/vllm/issues/1908#issuecomment-2101122008
+            "num_gpu_blocks_override": 100000 // BLOCK_SIZE,
+        }
+    ],
+)
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("batch_size", [5])
 @pytest.mark.parametrize("seed", [1])
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER", "XFORMERS"])
-def test_sliding_window_retrieval(baseline_llm_generator, test_llm_generator,
-                                  batch_size, seed, backend, monkeypatch):
+def test_sliding_window_retrieval(
+    baseline_llm_generator, test_llm_generator, batch_size, seed, backend, monkeypatch
+):
     """
     The test does a bunch of assignments "x1 = 10\nx2 = 33\n..." and then
     asks for value of one of them (which is outside the sliding window).
@@ -58,16 +61,16 @@ def test_sliding_window_retrieval(baseline_llm_generator, test_llm_generator,
 
     prompts, answer, indices = prep_prompts(batch_size)
 
-    baseline_texts = get_text_from_llm_generator(baseline_llm_generator,
-                                                 prompts,
-                                                 sampling_params,
-                                                 llm_cb=check_window(prompts))
+    baseline_texts = get_text_from_llm_generator(
+        baseline_llm_generator, prompts, sampling_params, llm_cb=check_window(prompts)
+    )
 
     check_answers(indices, answer, baseline_texts)
 
-    print('Getting token ids from block manager v2')
-    test_texts = get_text_from_llm_generator(test_llm_generator, prompts,
-                                             sampling_params)
+    print("Getting token ids from block manager v2")
+    test_texts = get_text_from_llm_generator(
+        test_llm_generator, prompts, sampling_params
+    )
     check_answers(indices, answer, test_texts)
 
     cmp = [
@@ -84,21 +87,24 @@ def test_sliding_window_retrieval(baseline_llm_generator, test_llm_generator,
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
-    [{
-        "model": MODEL,
-
-        # skip cuda graph creation for fast test.
-        "enforce_eager": True,
-        "block_size": BLOCK_SIZE,
-        "num_gpu_blocks_override": 100000 // BLOCK_SIZE,
-    }])
+    [
+        {
+            "model": MODEL,
+            # skip cuda graph creation for fast test.
+            "enforce_eager": True,
+            "block_size": BLOCK_SIZE,
+            "num_gpu_blocks_override": 100000 // BLOCK_SIZE,
+        }
+    ],
+)
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [{"enable_chunked_prefill": True}])
 @pytest.mark.parametrize("batch_size", [5])
 @pytest.mark.parametrize("seed", [1])
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER", "XFORMERS"])
-def test_sliding_window_chunked_prefill(test_llm_generator, batch_size, seed,
-                                        backend, monkeypatch):
+def test_sliding_window_chunked_prefill(
+    test_llm_generator, batch_size, seed, backend, monkeypatch
+):
     """
     This is similar to test_sliding_window_retrieval, however, it doesn't
     compare against the v1 block manager since v1 doesn't support
@@ -123,10 +129,9 @@ def test_sliding_window_chunked_prefill(test_llm_generator, batch_size, seed,
 
     # We don't compare with the baseline model here, since the results
     # slightly different due to different tailing in attention.
-    test_texts = get_text_from_llm_generator(test_llm_generator,
-                                             prompts,
-                                             sampling_params,
-                                             llm_cb=check_window(prompts))
+    test_texts = get_text_from_llm_generator(
+        test_llm_generator, prompts, sampling_params, llm_cb=check_window(prompts)
+    )
     check_answers(indices, answer, test_texts)
 
 
@@ -148,8 +153,10 @@ def prep_prompts(batch_size: int, ln_range: tuple[int, int] = (800, 1100)):
     for _ in range(batch_size):
         idx = random.randint(30, 90)
         indices.append(idx)
-        prompt = "```python\n# We set a number of variables, " + \
-                 f"x{idx} will be important later\n"
+        prompt = (
+            "```python\n# We set a number of variables, "
+            + f"x{idx} will be important later\n"
+        )
         ln = random.randint(*ln_range)
         for k in range(30, ln):
             v = random.randint(10, 99)
@@ -162,10 +169,9 @@ def prep_prompts(batch_size: int, ln_range: tuple[int, int] = (800, 1100)):
     return prompts, answer, indices
 
 
-def check_answers(indices: list[int],
-                  answer: list[int],
-                  outputs: list[str],
-                  accept_rate: float = 0.7):
+def check_answers(
+    indices: list[int], answer: list[int], outputs: list[str], accept_rate: float = 0.7
+):
     answer2 = [int(text[0:2].strip()) for text in outputs]
     print(list(zip(indices, zip(answer, answer2))))
     numok = 0
@@ -178,12 +184,12 @@ def check_answers(indices: list[int],
 
 
 def check_window(prompts: list[str]):
-
     def inner(llm: LLM):
         sliding_window = llm.llm_engine.model_config.get_sliding_window()
         assert sliding_window and sliding_window > 0
         assert any(
             len(llm.get_tokenizer().tokenize(prompt)) > sliding_window
-            for prompt in prompts)
+            for prompt in prompts
+        )
 
     return inner

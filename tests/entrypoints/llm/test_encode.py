@@ -41,12 +41,14 @@ def v1(run_with_both_engines):
 def llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
-    llm = LLM(model=MODEL_NAME,
-              max_num_batched_tokens=32768,
-              tensor_parallel_size=1,
-              gpu_memory_utilization=0.75,
-              enforce_eager=True,
-              seed=0)
+    llm = LLM(
+        model=MODEL_NAME,
+        max_num_batched_tokens=32768,
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.75,
+        enforce_eager=True,
+        seed=0,
+    )
 
     with llm.deprecate_legacy_api():
         yield weakref.proxy(llm)
@@ -56,8 +58,9 @@ def llm():
     cleanup_dist_env_and_memory()
 
 
-def assert_outputs_match(o1: list[PoolingRequestOutput],
-                         o2: list[PoolingRequestOutput]):
+def assert_outputs_match(
+    o1: list[PoolingRequestOutput], o2: list[PoolingRequestOutput]
+):
     check_embeddings_close(
         embeddings_0_lst=[o.outputs.data for o in o1],
         embeddings_1_lst=[o.outputs.data for o in o2],
@@ -68,17 +71,18 @@ def assert_outputs_match(o1: list[PoolingRequestOutput],
 
 
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize('prompt_token_ids', TOKEN_IDS)
-def test_v1_v2_api_consistency_single_prompt_tokens(llm: LLM,
-                                                    prompt_token_ids):
+@pytest.mark.parametrize("prompt_token_ids", TOKEN_IDS)
+def test_v1_v2_api_consistency_single_prompt_tokens(llm: LLM, prompt_token_ids):
     pooling_params = PoolingParams()
 
     with pytest.warns(DeprecationWarning, match="'prompt_token_ids'"):
-        v1_output = llm.encode(prompt_token_ids=prompt_token_ids,
-                               pooling_params=pooling_params)
+        v1_output = llm.encode(
+            prompt_token_ids=prompt_token_ids, pooling_params=pooling_params
+        )
 
-    v2_output = llm.encode({"prompt_token_ids": prompt_token_ids},
-                           pooling_params=pooling_params)
+    v2_output = llm.encode(
+        {"prompt_token_ids": prompt_token_ids}, pooling_params=pooling_params
+    )
     assert_outputs_match(v1_output, v2_output)
 
 
@@ -87,13 +91,12 @@ def test_v1_v2_api_consistency_multi_prompt_tokens(llm: LLM):
     pooling_params = PoolingParams()
 
     with pytest.warns(DeprecationWarning, match="'prompt_token_ids'"):
-        v1_output = llm.encode(prompt_token_ids=TOKEN_IDS,
-                               pooling_params=pooling_params)
+        v1_output = llm.encode(
+            prompt_token_ids=TOKEN_IDS, pooling_params=pooling_params
+        )
 
     v2_output = llm.encode(
-        [{
-            "prompt_token_ids": p
-        } for p in TOKEN_IDS],
+        [{"prompt_token_ids": p} for p in TOKEN_IDS],
         pooling_params=pooling_params,
     )
     assert_outputs_match(v1_output, v2_output)

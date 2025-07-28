@@ -6,8 +6,7 @@ from typing import Optional, Union
 
 import numpy as np
 import pytest
-from mistral_common.protocol.instruct.messages import (ImageChunk, TextChunk,
-                                                       UserMessage)
+from mistral_common.protocol.instruct.messages import ImageChunk, TextChunk, UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from PIL import Image
 
@@ -16,9 +15,12 @@ from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.inputs import MultiModalInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor, ProcessingCache
-from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
-                                               cached_tokenizer_from_config,
-                                               encode_tokens)
+from vllm.transformers_utils.tokenizer import (
+    AnyTokenizer,
+    MistralTokenizer,
+    cached_tokenizer_from_config,
+    encode_tokens,
+)
 
 from ....multimodal.utils import random_audio, random_image, random_video
 from ...registry import HF_EXAMPLE_MODELS
@@ -31,12 +33,15 @@ def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     # Ensure video metadata is included
     if "video" in mm_data:
         video = mm_data["video"]
-        mm_data["video"] = (video, {
-            "total_num_frames": len(video),
-            "fps": len(video),
-            "duration": 1,
-            "video_backend": "opencv"
-        })
+        mm_data["video"] = (
+            video,
+            {
+                "total_num_frames": len(video),
+                "fps": len(video),
+                "duration": 1,
+                "video_backend": "opencv",
+            },
+        )
     return mm_data
 
 
@@ -90,27 +95,22 @@ def _test_processing_correctness(
     input_to_hit = {
         "image": Image.new("RGB", size=(128, 128)),
         "video": np.zeros((4, 128, 128, 3), dtype=np.uint8),
-        "audio": (np.zeros((512, )), 16000),
+        "audio": (np.zeros((512,)), 16000),
     }
     input_factory = {
-        "image":
-        partial(random_image, rng, min_wh=128, max_wh=256),
-        "video":
-        partial(random_video,
-                rng,
-                min_frames=2,
-                max_frames=8,
-                min_wh=128,
-                max_wh=256),
-        "audio":
-        partial(random_audio, rng, min_len=512, max_len=1024, sr=16000),
+        "image": partial(random_image, rng, min_wh=128, max_wh=256),
+        "video": partial(
+            random_video, rng, min_frames=2, max_frames=8, min_wh=128, max_wh=256
+        ),
+        "audio": partial(random_audio, rng, min_len=512, max_len=1024, sr=16000),
     }
 
     for batch_idx in range(num_batches):
         mm_data = {
-            k:
-            [(input_to_hit[k] if rng.rand() < hit_rate else input_factory[k]())
-             for _ in range(rng.randint(limit + 1))]
+            k: [
+                (input_to_hit[k] if rng.rand() < hit_rate else input_factory[k]())
+                for _ in range(rng.randint(limit + 1))
+            ]
             for k, limit in limit_mm_per_prompt.items()
         }
 
@@ -119,12 +119,16 @@ def _test_processing_correctness(
         # Mistral chat outputs tokens directly, rather than text prompts
         if isinstance(tokenizer, MistralTokenizer):
             images = mm_data.get("image", [])
-            request = ChatCompletionRequest(messages=[
-                UserMessage(content=[
-                    TextChunk(text=""),
-                    *(ImageChunk(image=image) for image in images),
-                ]),
-            ])
+            request = ChatCompletionRequest(
+                messages=[
+                    UserMessage(
+                        content=[
+                            TextChunk(text=""),
+                            *(ImageChunk(image=image) for image in images),
+                        ]
+                    ),
+                ]
+            )
             res = tokenizer.mistral.encode_chat_completion(request)
             prompt = res.tokens
         else:
@@ -245,16 +249,14 @@ def _test_processing_correctness_one(
             baseline_text_result,
             baseline_tokenized_result,
             ignore_mm_keys=ignore_mm_keys,
-            msg=f"Failed ({batch_idx=}, {text_prompt=}, "
-            f"{token_prompt=}, {mm_data=})",
+            msg=f"Failed ({batch_idx=}, {text_prompt=}, {token_prompt=}, {mm_data=})",
         )
 
         _assert_inputs_equal(
             cached_text_result,
             cached_tokenized_result,
             ignore_mm_keys=ignore_mm_keys,
-            msg=f"Failed ({batch_idx=}, {text_prompt=}, "
-            f"{token_prompt=}, {mm_data=})",
+            msg=f"Failed ({batch_idx=}, {text_prompt=}, {token_prompt=}, {mm_data=})",
         )
 
 

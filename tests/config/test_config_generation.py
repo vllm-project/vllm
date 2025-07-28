@@ -14,8 +14,9 @@ def test_cuda_empty_vs_unset_configs(monkeypatch: pytest.MonkeyPatch):
     """
 
     def create_config():
-        engine_args = EngineArgs(model="deepseek-ai/DeepSeek-V2-Lite",
-                                 trust_remote_code=True)
+        engine_args = EngineArgs(
+            model="deepseek-ai/DeepSeek-V2-Lite", trust_remote_code=True
+        )
         return engine_args.create_engine_config()
 
     # Create config with CUDA_VISIBLE_DEVICES set normally
@@ -34,5 +35,6 @@ def test_cuda_empty_vs_unset_configs(monkeypatch: pytest.MonkeyPatch):
     empty_config_dict.pop("instance_id", None)
 
     assert deep_compare(normal_config_dict, empty_config_dict), (
-        "Configs with normal CUDA_VISIBLE_DEVICES and CUDA_VISIBLE_DEVICES=\"\""
-        " should be equivalent")
+        'Configs with normal CUDA_VISIBLE_DEVICES and CUDA_VISIBLE_DEVICES=""'
+        " should be equivalent"
+    )

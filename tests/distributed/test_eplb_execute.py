@@ -9,11 +9,12 @@ import pytest
 import torch
 import torch.distributed
 
-from vllm.distributed.eplb.rebalance_execute import (
-    rearrange_expert_weights_inplace)
-from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
-                                             get_tp_group,
-                                             init_distributed_environment)
+from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
+from vllm.distributed.parallel_state import (
+    ensure_model_parallel_initialized,
+    get_tp_group,
+    init_distributed_environment,
+)
 from vllm.utils import update_environment_variables
 
 
@@ -22,13 +23,13 @@ def distributed_run(fn, world_size):
     processes: list[multiprocessing.Process] = []
     for i in range(number_of_processes):
         env: dict[str, str] = {}
-        env['RANK'] = str(i)
-        env['LOCAL_RANK'] = str(i)
-        env['WORLD_SIZE'] = str(number_of_processes)
-        env['LOCAL_WORLD_SIZE'] = str(number_of_processes)
-        env['MASTER_ADDR'] = 'localhost'
-        env['MASTER_PORT'] = '12345'
-        p = multiprocessing.Process(target=fn, args=(env, ))
+        env["RANK"] = str(i)
+        env["LOCAL_RANK"] = str(i)
+        env["WORLD_SIZE"] = str(number_of_processes)
+        env["LOCAL_WORLD_SIZE"] = str(number_of_processes)
+        env["MASTER_ADDR"] = "localhost"
+        env["MASTER_PORT"] = "12345"
+        p = multiprocessing.Process(target=fn, args=(env,))
         processes.append(p)
         p.start()
 
@@ -45,7 +46,7 @@ def worker_fn_wrapper(fn):
     # and update the environment variables in the function
     def wrapped_fn(env):
         update_environment_variables(env)
-        local_rank = os.environ['LOCAL_RANK']
+        local_rank = os.environ["LOCAL_RANK"]
         device = torch.device(f"cuda:{local_rank}")
         torch.cuda.set_device(device)
         init_distributed_environment()
@@ -60,20 +61,20 @@ def worker_fn_wrapper(fn):
 
 
 def create_expert_indices_with_redundancy(
-        num_layers: int,
-        num_logical_experts: int,
-        total_physical_experts: int,
-        redundancy_config: list[int],  # redundancy for each logical expert
+    num_layers: int,
+    num_logical_experts: int,
+    total_physical_experts: int,
+    redundancy_config: list[int],  # redundancy for each logical expert
 ) -> torch.Tensor:
     """
     Create expert indices with redundancy.
-    
+
     Args:
         num_layers: number of layers
         num_logical_experts: number of logical experts
         total_physical_experts: total number of physical experts
         redundancy_config: redundancy for each logical expert
-    
+
     Returns:
         indices: Shape (num_layers, total_physical_experts)
     """
@@ -106,11 +107,11 @@ def create_expert_weights(
 ) -> list[list[torch.Tensor]]:
     """
     Create fake expert weights tensor for testing.
-    
+
     Use `arange` to generate predictable weights values, based on logical
     expert ID.
     All replicas of the same logical expert should have the same weights.
-    
+
     Args:
         physical_to_logical_mapping: Shape (num_layers, num_local_experts)
             mapping[layer, physical_pos] = logical_expert_id
@@ -120,27 +121,27 @@ def create_expert_weights(
     for layer in range(num_layers):
         layer_weights = []
         for weight_idx, hidden_size in enumerate(hidden_sizes):
-            weight_tensor = torch.zeros(num_local_experts,
-                                        hidden_size,
-                                        device=device,
-                                        dtype=torch.float32)
+            weight_tensor = torch.zeros(
+                num_local_experts, hidden_size, device=device, dtype=torch.float32
+            )
 
             for local_expert in range(num_local_experts):
                 # Get the logical expert ID for this physical expert
                 global_pos = rank * num_local_experts + local_expert
                 logical_expert_id = physical_to_logical_mapping[
-                    layer, global_pos].item()
+                    layer, global_pos
+                ].item()
 
                 # Generate weights based on logical expert ID
                 # (so that all replicas of the same logical expert have the
                 # same weights)
-                base_value = (logical_expert_id * 1000 + layer * 100 +
-                              weight_idx * 10)
-                weight_tensor[local_expert] = torch.arange(base_value,
-                                                           base_value +
-                                                           hidden_size,
-                                                           device=device,
-                                                           dtype=torch.float32)
+                base_value = logical_expert_id * 1000 + layer * 100 + weight_idx * 10
+                weight_tensor[local_expert] = torch.arange(
+                    base_value,
+                    base_value + hidden_size,
+                    device=device,
+                    dtype=torch.float32,
+                )
 
             layer_weights.append(weight_tensor)
         expert_weights.append(layer_weights)
@@ -182,12 +183,15 @@ def verify_expert_weights_after_shuffle(
 
                 # Check if the weights are correct
                 actual_weights = weight_tensor[local_expert]
-                expected_base = (expected_logical_expert * 1000 + layer * 100 +
-                                 weight_idx * 10)
-                expected_weights = torch.arange(expected_base,
-                                                expected_base + hidden_size,
-                                                device=actual_weights.device,
-                                                dtype=actual_weights.dtype)
+                expected_base = (
+                    expected_logical_expert * 1000 + layer * 100 + weight_idx * 10
+                )
+                expected_weights = torch.arange(
+                    expected_base,
+                    expected_base + hidden_size,
+                    device=actual_weights.device,
+                    dtype=actual_weights.dtype,
+                )
 
                 torch.testing.assert_close(
                     actual_weights,
@@ -195,7 +199,8 @@ def verify_expert_weights_after_shuffle(
                     msg=f"Layer {layer}, weight {weight_idx},"
                     f"local expert {local_expert}: "
                     f"weights do not match. "
-                    f"Expected logical expert {expected_logical_expert}")
+                    f"Expected logical expert {expected_logical_expert}",
+                )
 
 
 def verify_redundant_experts_have_same_weights(
@@ -222,23 +227,23 @@ def verify_redundant_experts_have_same_weights(
                 total_physical_experts,
                 hidden_size,
                 device=expert_weights[layer][weight_idx].device,
-                dtype=expert_weights[layer][weight_idx].dtype)
+                dtype=expert_weights[layer][weight_idx].dtype,
+            )
 
             # Use all_gather to collect expert weights from current node
             # expert_weights[layer][weight_idx] shape:
             # [num_local_experts, hidden_size]
             local_weights = expert_weights[layer][
-                weight_idx]  # [num_local_experts, hidden_size]
+                weight_idx
+            ]  # [num_local_experts, hidden_size]
 
             # Split tensor along dim 0 into a list for all_gather
-            gathered_weights_list = torch.chunk(gathered_weights,
-                                                world_size,
-                                                dim=0)
+            gathered_weights_list = torch.chunk(gathered_weights, world_size, dim=0)
 
             torch.distributed.all_gather(
                 # Output list: each element corresponds to one rank's weights
                 list(gathered_weights_list),
-                local_weights  # Input: current rank's local weights
+                local_weights,  # Input: current rank's local weights
             )
 
             all_weights.append(gathered_weights)
@@ -266,7 +271,8 @@ def verify_redundant_experts_have_same_weights(
                         msg=f"Layer {layer}, weight {weight_idx},"
                         f"logical expert {logical_expert_id}: "
                         f"Physical expert {physical_pos} has different weights"
-                        f"than expected")
+                        f"than expected",
+                    )
 
 
 @pytest.mark.parametrize(
@@ -290,10 +296,11 @@ def verify_redundant_experts_have_same_weights(
         # 4 GPU, 8 experts per GPU
         # 16 logical experts, 32 physical experts, 16 redundant experts
         (4, 8, 8, 16),
-    ])
-def test_rearrange_expert_weights_with_redundancy(world_size, num_layers,
-                                                  num_local_experts,
-                                                  num_logical_experts):
+    ],
+)
+def test_rearrange_expert_weights_with_redundancy(
+    world_size, num_layers, num_local_experts, num_logical_experts
+):
     """Test the functionality of rearranging expert weights with redundancy."""
 
     if torch.cuda.device_count() < world_size:
@@ -304,8 +311,8 @@ def test_rearrange_expert_weights_with_redundancy(world_size, num_layers,
         # Initialize model parallel (using tensor parallel as an entrypoint
         # to expert parallel)
         ensure_model_parallel_initialized(
-            tensor_model_parallel_size=world_size,
-            pipeline_model_parallel_size=1)
+            tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
+        )
 
         ep_group = get_tp_group().cpu_group
         ep_rank = torch.distributed.get_rank()
@@ -316,8 +323,9 @@ def test_rearrange_expert_weights_with_redundancy(world_size, num_layers,
         hidden_sizes = [32, 64]  # Two different weight matrices
 
         # Create old expert indices (with redundancy)
-        redundancy_config = create_redundancy_config(num_logical_experts,
-                                                     total_physical_experts)
+        redundancy_config = create_redundancy_config(
+            num_logical_experts, total_physical_experts
+        )
 
         old_indices = create_expert_indices_with_redundancy(
             num_layers,
@@ -328,7 +336,8 @@ def test_rearrange_expert_weights_with_redundancy(world_size, num_layers,
 
         # Create new expert indices (with redundancy)
         new_redundancy_config = create_redundancy_config(
-            num_logical_experts, total_physical_experts)
+            num_logical_experts, total_physical_experts
+        )
         new_indices = create_expert_indices_with_redundancy(
             num_layers,
             num_logical_experts,
@@ -337,9 +346,9 @@ def test_rearrange_expert_weights_with_redundancy(world_size, num_layers,
         )
 
         # Create expert weights
-        expert_weights = create_expert_weights(num_layers, num_local_experts,
-                                               hidden_sizes, ep_rank, device,
-                                               old_indices)
+        expert_weights = create_expert_weights(
+            num_layers, num_local_experts, hidden_sizes, ep_rank, device, old_indices
+        )
 
         # Execute weight rearrangement
         rearrange_expert_weights_inplace(
@@ -383,8 +392,8 @@ def test_rearrange_expert_weights_no_change(world_size):
     @worker_fn_wrapper
     def worker_fn():
         ensure_model_parallel_initialized(
-            tensor_model_parallel_size=world_size,
-            pipeline_model_parallel_size=1)
+            tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
+        )
 
         ep_group = get_tp_group().cpu_group
         ep_rank = torch.distributed.get_rank()
@@ -401,12 +410,12 @@ def test_rearrange_expert_weights_no_change(world_size):
 
         # Same indices - no change
         indices = create_expert_indices_with_redundancy(
-            num_layers, num_logical_experts, total_physical_experts,
-            redundancy_config)
+            num_layers, num_logical_experts, total_physical_experts, redundancy_config
+        )
 
-        expert_weights = create_expert_weights(num_layers, num_local_experts,
-                                               hidden_sizes, ep_rank, device,
-                                               indices)
+        expert_weights = create_expert_weights(
+            num_layers, num_local_experts, hidden_sizes, ep_rank, device, indices
+        )
 
         # Save original weights
         original_weights = []
@@ -422,7 +431,8 @@ def test_rearrange_expert_weights_no_change(world_size):
             indices,  # Same indices
             expert_weights,
             ep_group,
-            is_profile=False)
+            is_profile=False,
+        )
 
         # Verify that the weights have not changed
         for layer in range(num_layers):
@@ -430,8 +440,8 @@ def test_rearrange_expert_weights_no_change(world_size):
                 torch.testing.assert_close(
                     expert_weights[layer][weight_idx],
                     original_weights[layer][weight_idx],
-                    msg=f"Layer {layer}, weight {weight_idx} should remain "
-                    f"unchanged")
+                    msg=f"Layer {layer}, weight {weight_idx} should remain unchanged",
+                )
 
     distributed_run(worker_fn, world_size)
 
@@ -446,8 +456,8 @@ def test_rearrange_expert_weights_profile_mode(world_size):
     @worker_fn_wrapper
     def worker_fn():
         ensure_model_parallel_initialized(
-            tensor_model_parallel_size=world_size,
-            pipeline_model_parallel_size=1)
+            tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
+        )
 
         ep_group = get_tp_group().cpu_group
         ep_rank = torch.distributed.get_rank()
@@ -460,21 +470,23 @@ def test_rearrange_expert_weights_profile_mode(world_size):
         hidden_sizes = [32]
 
         # Create different index distributions
-        old_redundancy = create_redundancy_config(num_logical_experts,
-                                                  total_physical_experts)
-        new_redundancy = create_redundancy_config(num_logical_experts,
-                                                  total_physical_experts)
+        old_redundancy = create_redundancy_config(
+            num_logical_experts, total_physical_experts
+        )
+        new_redundancy = create_redundancy_config(
+            num_logical_experts, total_physical_experts
+        )
 
         old_indices = create_expert_indices_with_redundancy(
-            num_layers, num_logical_experts, total_physical_experts,
-            old_redundancy)
+            num_layers, num_logical_experts, total_physical_experts, old_redundancy
+        )
         new_indices = create_expert_indices_with_redundancy(
-            num_layers, num_logical_experts, total_physical_experts,
-            new_redundancy)
+            num_layers, num_logical_experts, total_physical_experts, new_redundancy
+        )
 
-        expert_weights = create_expert_weights(num_layers, num_local_experts,
-                                               hidden_sizes, ep_rank, device,
-                                               old_indices)
+        expert_weights = create_expert_weights(
+            num_layers, num_local_experts, hidden_sizes, ep_rank, device, old_indices
+        )
 
         # Save original weights
         original_weights = []
@@ -490,7 +502,7 @@ def test_rearrange_expert_weights_profile_mode(world_size):
             new_indices,
             expert_weights,
             ep_group,
-            is_profile=True  # Profile mode
+            is_profile=True,  # Profile mode
         )
 
         # In profile mode, the weights should remain unchanged
@@ -499,6 +511,7 @@ def test_rearrange_expert_weights_profile_mode(world_size):
                 torch.testing.assert_close(
                     expert_weights[layer][weight_idx],
                     original_weights[layer][weight_idx],
-                    msg="In profile mode, the weights should remain unchanged")
+                    msg="In profile mode, the weights should remain unchanged",
+                )
 
     distributed_run(worker_fn, world_size)

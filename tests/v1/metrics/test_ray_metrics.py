@@ -13,7 +13,7 @@ def use_v1_only(monkeypatch):
     """
     The change relies on V1 APIs, so set VLLM_USE_V1=1.
     """
-    monkeypatch.setenv('VLLM_USE_V1', '1')
+    monkeypatch.setenv("VLLM_USE_V1", "1")
 
 
 MODELS = [
@@ -30,12 +30,11 @@ def test_engine_log_metrics_ray(
     dtype: str,
     max_tokens: int,
 ) -> None:
-    """ Simple smoke test, verifying this can be used without exceptions.
+    """Simple smoke test, verifying this can be used without exceptions.
     Need to start a Ray cluster in order to verify outputs."""
 
     @ray.remote(num_gpus=1)
     class EngineTestActor:
-
         async def run(self):
             engine_args = AsyncEngineArgs(
                 model=model,
@@ -44,7 +43,8 @@ def test_engine_log_metrics_ray(
             )
 
             engine = AsyncLLM.from_engine_args(
-                engine_args, stat_loggers=[RayPrometheusStatLogger])
+                engine_args, stat_loggers=[RayPrometheusStatLogger]
+            )
 
             for i, prompt in enumerate(example_prompts):
                 results = engine.generate(

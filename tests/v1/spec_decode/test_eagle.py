@@ -5,14 +5,24 @@ from unittest import mock
 
 import pytest
 import torch
+from tests.v1.attention.utils import (
+    BatchSpec,
+    _Backend,
+    create_common_attn_metadata,
+    create_standard_kv_cache_spec,
+    get_attention_backend,
+)
 
-from tests.v1.attention.utils import (BatchSpec, _Backend,
-                                      create_common_attn_metadata,
-                                      create_standard_kv_cache_spec,
-                                      get_attention_backend)
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         VllmConfig)
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    LoadConfig,
+    ModelConfig,
+    ParallelConfig,
+    SchedulerConfig,
+    SpeculativeConfig,
+    VllmConfig,
+)
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.spec_decode.eagle import EagleProposer
@@ -23,14 +33,16 @@ eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
 
 
 def _create_proposer(method: str, k: int) -> EagleProposer:
-    model_config = ModelConfig(model=model_dir,
-                               task="generate",
-                               max_model_len=100,
-                               tokenizer=model_dir,
-                               tokenizer_mode="auto",
-                               dtype="auto",
-                               seed=None,
-                               trust_remote_code=False)
+    model_config = ModelConfig(
+        model=model_dir,
+        task="generate",
+        max_model_len=100,
+        tokenizer=model_dir,
+        tokenizer_mode="auto",
+        dtype="auto",
+        seed=None,
+        trust_remote_code=False,
+    )
 
     # Choose model directory based on method
     draft_model_dir = eagle_dir if method == "eagle" else eagle3_dir
@@ -50,10 +62,10 @@ def _create_proposer(method: str, k: int) -> EagleProposer:
         device_config=DeviceConfig(device=current_platform.device_type),
         parallel_config=ParallelConfig(),
         load_config=LoadConfig(),
-        scheduler_config=SchedulerConfig())
+        scheduler_config=SchedulerConfig(),
+    )
 
-    return EagleProposer(vllm_config=vllm_config,
-                         device=current_platform.device_type)
+    return EagleProposer(vllm_config=vllm_config, device=current_platform.device_type)
 
 
 def test_prepare_inputs():
@@ -83,17 +95,15 @@ def test_prepare_inputs():
     )
 
     # Rejected tokens per request: [1, 3, 2]
-    num_rejected_tokens = torch.tensor([1, 3, 2],
-                                       dtype=torch.int32,
-                                       device=device)
+    num_rejected_tokens = torch.tensor([1, 3, 2], dtype=torch.int32, device=device)
 
     # Expected calculations:
     # query_len_per_req = [4, 7, 5]
     # num_tokens_per_req = [3, 4, 3]  (after subtracting rejected tokens)
     # Expected cumulative counts: [0, 3, 7, 10]
-    expected_cu_num_tokens = torch.tensor([0, 3, 7, 10],
-                                          dtype=torch.int32,
-                                          device=device)
+    expected_cu_num_tokens = torch.tensor(
+        [0, 3, 7, 10], dtype=torch.int32, device=device
+    )
 
     # Expected token indices (mapped from original positions):
     # First request: indices 0, 1, 2      (keeping first 3 from positions 0-3)
@@ -110,32 +120,43 @@ def test_prepare_inputs():
             7,  # Second request: 4 tokens (7-3)
             11,
             12,
-            13  # Third request: 3 tokens (5-2)
+            13,  # Third request: 3 tokens (5-2)
         ],
         dtype=torch.int32,
-        device=device)
+        device=device,
+    )
     proposer = _create_proposer("eagle", 1)
 
     updated_metadata, token_indices = proposer.prepare_inputs(
-        common_attn_metadata, num_rejected_tokens.cpu())
+        common_attn_metadata, num_rejected_tokens.cpu()
+    )
 
-    assert torch.equal(updated_metadata.query_start_loc,
-                       expected_cu_num_tokens)
+    assert torch.equal(updated_metadata.query_start_loc, expected_cu_num_tokens)
     assert token_indices.shape[0] == expected_cu_num_tokens[-1].item()
     assert torch.equal(token_indices, expected_token_indices)
 
 
-@pytest.mark.parametrize("method,proposer_helper", [
-    ("eagle", lambda k: _create_proposer("eagle", k)),
-    ("eagle3", lambda k: _create_proposer("eagle3", k)),
-])
+@pytest.mark.parametrize(
+    "method,proposer_helper",
+    [
+        ("eagle", lambda k: _create_proposer("eagle", k)),
+        ("eagle3", lambda k: _create_proposer("eagle3", k)),
+    ],
+)
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("use_distinct_embed_tokens", [True, False])
-@mock.patch('vllm.v1.spec_decode.eagle.get_pp_group')
-@mock.patch('vllm.v1.spec_decode.eagle.get_layers_from_vllm_config')
-@mock.patch('vllm.v1.spec_decode.eagle.get_model')
-def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
-                    proposer_helper, pp_size, use_distinct_embed_tokens):
+@mock.patch("vllm.v1.spec_decode.eagle.get_pp_group")
+@mock.patch("vllm.v1.spec_decode.eagle.get_layers_from_vllm_config")
+@mock.patch("vllm.v1.spec_decode.eagle.get_model")
+def test_load_model(
+    mock_get_model,
+    mock_get_layers,
+    mock_get_pp_group,
+    method,
+    proposer_helper,
+    pp_size,
+    use_distinct_embed_tokens,
+):
     # Setup draft model mock
     mock_model = mock.MagicMock()
     if use_distinct_embed_tokens:
@@ -150,12 +171,10 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
     # Setup mocks for attention layers
     target_attn_layers = {
         "target_attn_1": mock.MagicMock(),
-        "target_attn_2": mock.MagicMock()
+        "target_attn_2": mock.MagicMock(),
     }
     # Draft model has one extra attention layer compared to target model
-    all_attn_layers = {
-        **target_attn_layers, "draft_extra_attn": mock.MagicMock()
-    }
+    all_attn_layers = {**target_attn_layers, "draft_extra_attn": mock.MagicMock()}
 
     # Make mock_get_layers return different values for each call
     mock_get_layers.side_effect = [target_attn_layers, all_attn_layers]
@@ -176,6 +195,7 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
     target_model.model.embed_tokens.weight.shape = (131072, 4096)
 
     from vllm.model_executor.models import SupportsMultiModal
+
     assert not isinstance(target_model, SupportsMultiModal)
 
     if method == "eagle":
@@ -197,13 +217,11 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
     # Verify that the embed tokens are set correctly
     # If pp_size is > 1, the embed tokens should be distinct
     if pp_size > 1 or use_distinct_embed_tokens:
-        assert proposer.model.model.embed_tokens != \
-            target_model.model.embed_tokens
+        assert proposer.model.model.embed_tokens != target_model.model.embed_tokens
     else:
         # When pp_size is 1 and the draft and target models have
         # embed_tokens of the same shape, they should be shared.
-        assert proposer.model.model.embed_tokens == \
-            target_model.model.embed_tokens
+        assert proposer.model.model.embed_tokens == target_model.model.embed_tokens
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 8])
@@ -290,24 +308,17 @@ def test_propose(num_speculative_tokens):
         device=device,
     )
 
-    target_token_ids = torch.randint(0,
-                                     vocab_size, (total_tokens, ),
-                                     device=device)
-    target_positions = torch.cat([
-        torch.arange(seq_len_1, device=device),
-        torch.arange(seq_len_2, device=device)
-    ])
-    target_hidden_states = torch.randn(total_tokens,
-                                       hidden_size,
-                                       device=device)
-    next_token_ids = torch.randint(0,
-                                   vocab_size, (batch_size, ),
-                                   dtype=torch.int32,
-                                   device=device)
+    target_token_ids = torch.randint(0, vocab_size, (total_tokens,), device=device)
+    target_positions = torch.cat(
+        [torch.arange(seq_len_1, device=device), torch.arange(seq_len_2, device=device)]
+    )
+    target_hidden_states = torch.randn(total_tokens, hidden_size, device=device)
+    next_token_ids = torch.randint(
+        0, vocab_size, (batch_size,), dtype=torch.int32, device=device
+    )
     sampling_metadata = mock.MagicMock()
 
-    attn_metadata_builder_cls, _ = get_attention_backend(
-        _Backend.FLASH_ATTN_VLLM_V1)
+    attn_metadata_builder_cls, _ = get_attention_backend(_Backend.FLASH_ATTN_VLLM_V1)
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
         vllm_config=proposer.vllm_config,
@@ -318,12 +329,14 @@ def test_propose(num_speculative_tokens):
     proposer.runner = mock.MagicMock()
     proposer.runner.attn_metadata_builders = [attn_metadata_builder]
 
-    result = proposer.propose(target_token_ids=target_token_ids,
-                              target_positions=target_positions,
-                              target_hidden_states=target_hidden_states,
-                              next_token_ids=next_token_ids,
-                              common_attn_metadata=common_attn_metadata,
-                              sampling_metadata=sampling_metadata)
+    result = proposer.propose(
+        target_token_ids=target_token_ids,
+        target_positions=target_positions,
+        target_hidden_states=target_hidden_states,
+        next_token_ids=next_token_ids,
+        common_attn_metadata=common_attn_metadata,
+        sampling_metadata=sampling_metadata,
+    )
 
     assert result.shape == (batch_size, num_speculative_tokens)
 
@@ -332,13 +345,14 @@ def test_propose(num_speculative_tokens):
         # Example for num_speculative_tokens=1:
         # [[42], [60]]
         expected_tokens = torch.tensor(
-            [[base_token_ids[0]], [base_token_ids[1]]], device=device)
+            [[base_token_ids[0]], [base_token_ids[1]]], device=device
+        )
     else:
         # Example for num_speculative_tokens=3:
         # [[42, 43, 44], [60, 61, 62]]
-        expected_tokens = torch.zeros((batch_size, num_speculative_tokens),
-                                      dtype=torch.int64,
-                                      device=device)
+        expected_tokens = torch.zeros(
+            (batch_size, num_speculative_tokens), dtype=torch.int64, device=device
+        )
         for i in range(batch_size):
             for j in range(num_speculative_tokens):
                 expected_tokens[i, j] = base_token_ids[i] + j

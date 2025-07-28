@@ -4,6 +4,7 @@
 import weakref
 
 import pytest
+
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
 
@@ -26,6 +27,7 @@ LORA_NAME = "typeof/zephyr-7b-beta-lora"
 @pytest.fixture(scope="module")
 def monkeypatch_module():
     from _pytest.monkeypatch import MonkeyPatch
+
     mpatch = MonkeyPatch()
     yield mpatch
     mpatch.undo()
@@ -33,20 +35,21 @@ def monkeypatch_module():
 
 @pytest.fixture(scope="module", params=[False, True])
 def llm(request, monkeypatch_module):
-
     use_v1 = request.param
-    monkeypatch_module.setenv('VLLM_USE_V1', '1' if use_v1 else '0')
+    monkeypatch_module.setenv("VLLM_USE_V1", "1" if use_v1 else "0")
 
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
-    llm = LLM(model=MODEL_NAME,
-              tensor_parallel_size=1,
-              max_model_len=8192,
-              enable_lora=True,
-              max_loras=4,
-              max_lora_rank=64,
-              max_num_seqs=128,
-              enforce_eager=True)
+    llm = LLM(
+        model=MODEL_NAME,
+        tensor_parallel_size=1,
+        max_model_len=8192,
+        enable_lora=True,
+        max_loras=4,
+        max_lora_rank=64,
+        max_num_seqs=128,
+        enforce_eager=True,
+    )
 
     with llm.deprecate_legacy_api():
         yield weakref.proxy(llm)

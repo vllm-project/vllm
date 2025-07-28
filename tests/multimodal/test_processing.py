@@ -13,20 +13,30 @@ from transformers import ProcessorMixin
 
 from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldElem, MultiModalKwargs,
-                                    MultiModalKwargsItem,
-                                    MultiModalSharedField)
+from vllm.multimodal.inputs import (
+    MultiModalFieldElem,
+    MultiModalKwargs,
+    MultiModalKwargsItem,
+    MultiModalSharedField,
+)
+
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.multimodal.processing import (PlaceholderFeaturesInfo,
-                                        ProcessingCache, PromptIndexTargets,
-                                        PromptInsertion, PromptReplacement,
-                                        apply_text_matches,
-                                        apply_token_matches,
-                                        find_mm_placeholders,
-                                        find_text_matches, find_token_matches,
-                                        iter_token_matches,
-                                        replace_token_matches)
+from vllm.multimodal.processing import (
+    PlaceholderFeaturesInfo,
+    ProcessingCache,
+    PromptIndexTargets,
+    PromptInsertion,
+    PromptReplacement,
+    apply_text_matches,
+    apply_token_matches,
+    find_mm_placeholders,
+    find_text_matches,
+    find_token_matches,
+    iter_token_matches,
+    replace_token_matches,
+)
+
 # yapf: enable
 from vllm.multimodal.profiling import MultiModalProfiler
 from vllm.transformers_utils.tokenizer import AnyTokenizer

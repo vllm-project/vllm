@@ -706,13 +706,13 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             "random":
             lambda: RandomDataset(random_seed=args.seed,
                                   dataset_path=args.dataset_path).sample(
-                tokenizer=tokenizer,
-                num_requests=args.num_prompts,
-                prefix_len=args.random_prefix_len,
-                input_len=args.random_input_len,
-                output_len=args.random_output_len,
-                range_ratio=args.random_range_ratio,
-            ),
+                                      tokenizer=tokenizer,
+                                      num_requests=args.num_prompts,
+                                      prefix_len=args.random_prefix_len,
+                                      input_len=args.random_input_len,
+                                      output_len=args.random_output_len,
+                                      range_ratio=args.random_range_ratio,
+                                  ),
         }
 
         try:
@@ -1501,18 +1501,23 @@ class MLPerfDataset(HuggingFaceDataset):
 
             # Build chat-style prompt using tokenizer template, if available.
             messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": question},
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": question
+                },
             ]
             prompt_formatted = tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=False
-            )
+                messages, add_generation_prompt=True, tokenize=False)
             prompt_len = len(tokenizer(prompt_formatted).input_ids)
 
             # Determine output length from reference answer tokens.
             ref_out_len = len(
-                tokenizer(reference_answer, add_special_tokens=False).input_ids
-            )
+                tokenizer(reference_answer,
+                          add_special_tokens=False).input_ids)
             expected_output_len = ref_out_len if dynamic_output else output_len
 
             # Validate sequence lengths.
@@ -1524,8 +1529,7 @@ class MLPerfDataset(HuggingFaceDataset):
                     prompt=prompt_formatted,
                     prompt_len=prompt_len,
                     expected_output_len=expected_output_len,
-                )
-            )
+                ))
 
         self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests

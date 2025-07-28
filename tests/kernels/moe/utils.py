@@ -5,15 +5,15 @@ from typing import Optional
 import torch
 
 import vllm._custom_ops as ops
-from tests.kernels.quant_utils import (per_block_cast_to_fp8,
-                                       per_block_cast_to_int8)
+from tests.kernels.quant_utils import per_block_cast_to_fp8, per_block_cast_to_int8
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-    BatchedPrepareAndFinalize, BatchedTritonExperts, NaiveBatchedExperts)
-from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEModularKernel)
-from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
+    BatchedPrepareAndFinalize,
+    BatchedTritonExperts,
+    NaiveBatchedExperts,
+)
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
+from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils import round_up
 
 
@@ -31,18 +31,20 @@ def triton_moe(
     per_act_token_quant=False,
     block_shape: Optional[list[int]] = None,
 ) -> torch.Tensor:
-    return fused_experts(a,
-                         w1,
-                         w2,
-                         topk_weight,
-                         topk_ids,
-                         w1_scale=w1_scale,
-                         w2_scale=w2_scale,
-                         a1_scale=a1_scale,
-                         a2_scale=a2_scale,
-                         per_channel_quant=per_act_token_quant,
-                         use_fp8_w8a8=quant_dtype == torch.float8_e4m3fn,
-                         block_shape=block_shape)
+    return fused_experts(
+        a,
+        w1,
+        w2,
+        topk_weight,
+        topk_ids,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+        per_channel_quant=per_act_token_quant,
+        use_fp8_w8a8=quant_dtype == torch.float8_e4m3fn,
+        block_shape=block_shape,
+    )
 
 
 def batched_moe(
@@ -62,10 +64,9 @@ def batched_moe(
     max_num_tokens = round_up(a.shape[0], 64)
 
     fused_experts = FusedMoEModularKernel(
-        BatchedPrepareAndFinalize(max_num_tokens,
-                                  num_dispatchers=1,
-                                  num_local_experts=w1.shape[0],
-                                  rank=0),
+        BatchedPrepareAndFinalize(
+            max_num_tokens, num_dispatchers=1, num_local_experts=w1.shape[0], rank=0
+        ),
         BatchedTritonExperts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=1,
@@ -75,15 +76,17 @@ def batched_moe(
         ),
     )
 
-    return fused_experts(a,
-                         w1,
-                         w2,
-                         topk_weight,
-                         topk_ids,
-                         w1_scale=w1_scale,
-                         w2_scale=w2_scale,
-                         a1_scale=a1_scale,
-                         a2_scale=a2_scale)
+    return fused_experts(
+        a,
+        w1,
+        w2,
+        topk_weight,
+        topk_ids,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+    )
 
 
 def naive_batched_moe(
@@ -103,10 +106,9 @@ def naive_batched_moe(
     max_num_tokens = round_up(a.shape[0], 64)
 
     fused_experts = FusedMoEModularKernel(
-        BatchedPrepareAndFinalize(max_num_tokens,
-                                  num_dispatchers=1,
-                                  num_local_experts=w1.shape[0],
-                                  rank=0),
+        BatchedPrepareAndFinalize(
+            max_num_tokens, num_dispatchers=1, num_local_experts=w1.shape[0], rank=0
+        ),
         NaiveBatchedExperts(
             max_num_tokens=max_num_tokens,
             num_dispatchers=1,
@@ -116,19 +118,22 @@ def naive_batched_moe(
         ),
     )
 
-    return fused_experts(a,
-                         w1,
-                         w2,
-                         topk_weight,
-                         topk_ids,
-                         w1_scale=w1_scale,
-                         w2_scale=w2_scale,
-                         a1_scale=a1_scale,
-                         a2_scale=a2_scale)
+    return fused_experts(
+        a,
+        w1,
+        w2,
+        topk_weight,
+        topk_ids,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        a1_scale=a1_scale,
+        a2_scale=a2_scale,
+    )
 
 
-def chunk_scales(scales: Optional[torch.Tensor], start: int,
-                 end: int) -> Optional[torch.Tensor]:
+def chunk_scales(
+    scales: Optional[torch.Tensor], start: int, end: int
+) -> Optional[torch.Tensor]:
     if scales is not None:
         if scales.numel() == 1:
             return scales
@@ -151,13 +156,15 @@ def make_quantized_test_activations(
     a_scale = None
 
     if quant_dtype is not None:
-        assert (quant_dtype == torch.float8_e4m3fn
-                or quant_dtype == torch.int8), "only fp8/int8 supported"
+        assert quant_dtype == torch.float8_e4m3fn or quant_dtype == torch.int8, (
+            "only fp8/int8 supported"
+        )
         a_q = torch.zeros_like(a, dtype=quant_dtype)
         a_scale_l = [None] * E
         for e in range(E):
             a_q[e], a_scale_l[e] = moe_kernel_quantize_input(
-                a[e], None, quant_dtype, per_act_token_quant, block_shape)
+                a[e], None, quant_dtype, per_act_token_quant, block_shape
+            )
         a_scale = torch.stack(a_scale_l)
 
         if not per_act_token_quant and block_shape is None:
@@ -173,8 +180,9 @@ def moe_quantize_weights(
     per_token_quant: bool,
     block_shape: Optional[list[int]],
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-    assert (quant_dtype == torch.float8_e4m3fn
-            or quant_dtype == torch.int8), "only fp8/int8 supported"
+    assert quant_dtype == torch.float8_e4m3fn or quant_dtype == torch.int8, (
+        "only fp8/int8 supported"
+    )
 
     if block_shape is not None:
         assert not per_token_quant
@@ -185,10 +193,12 @@ def moe_quantize_weights(
     else:
         if quant_dtype == torch.int8:
             w, w_s = ops.scaled_int8_quant(
-                w, w_s, use_per_token_if_dynamic=per_token_quant)
+                w, w_s, use_per_token_if_dynamic=per_token_quant
+            )
         else:
             w, w_s = ops.scaled_fp8_quant(
-                w, w_s, use_per_token_if_dynamic=per_token_quant)
+                w, w_s, use_per_token_if_dynamic=per_token_quant
+            )
 
     return w, w_s
 
@@ -209,7 +219,8 @@ def make_test_weight(
         w_s_l = [None] * e
         for idx in range(e):
             w_l[idx], w_s_l[idx] = moe_quantize_weights(
-                w_16[idx], None, quant_dtype, per_act_token_quant, block_shape)
+                w_16[idx], None, quant_dtype, per_act_token_quant, block_shape
+            )
 
         w = torch.stack(w_l)
         w_s = torch.stack(w_s_l)
@@ -237,11 +248,19 @@ def make_test_weights(
     quant_dtype: Optional[torch.dtype] = None,
     block_shape: Optional[list[int]] = None,
     per_act_token_quant: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor,
-           torch.Tensor, Optional[torch.Tensor]]:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    Optional[torch.Tensor],
+    torch.Tensor,
+    torch.Tensor,
+    Optional[torch.Tensor],
+]:
     return (
-        *make_test_weight(e, 2 * n, k, in_dtype, quant_dtype, block_shape,
-                          per_act_token_quant),
-        *make_test_weight(e, k, n, in_dtype, quant_dtype, block_shape,
-                          per_act_token_quant),
+        *make_test_weight(
+            e, 2 * n, k, in_dtype, quant_dtype, block_shape, per_act_token_quant
+        ),
+        *make_test_weight(
+            e, k, n, in_dtype, quant_dtype, block_shape, per_act_token_quant
+        ),
     )

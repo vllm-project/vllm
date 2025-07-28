@@ -21,15 +21,18 @@ backend_unfused: Optional[TestBackend] = None
 
 
 @pytest.mark.parametrize(
-    "model, quant_key",
-    [("amd/Llama-3.1-8B-Instruct-FP8-KV", kFp8StaticTensorSym)])
+    "model, quant_key", [("amd/Llama-3.1-8B-Instruct-FP8-KV", kFp8StaticTensorSym)]
+)
 @pytest.mark.parametrize(
-    "use_triton_fa", [True, False] if current_platform.is_rocm() else [False])
+    "use_triton_fa", [True, False] if current_platform.is_rocm() else [False]
+)
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
-@pytest.mark.skipif(not current_platform.is_cuda_alike(),
-                    reason="Only test CUDA and ROCm")
-def test_attention_fusion(example_prompts, monkeypatch, model: str,
-                          quant_key: QuantKey, use_triton_fa: bool):
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Only test CUDA and ROCm"
+)
+def test_attention_fusion(
+    example_prompts, monkeypatch, model: str, quant_key: QuantKey, use_triton_fa: bool
+):
     # Clean Dynamo cache to avoid reusing other test cases
     # (for some reason the reset at the end is not enough)
     torch._dynamo.reset()
@@ -55,15 +58,15 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
     vllm_config = VllmConfig(compilation_config=compile_config)
     backend_unfused = TestBackend(NoOpEliminationPass(vllm_config))
 
-    llm = LLM(model,
-              enforce_eager=True,
-              compilation_config=compile_config,
-              gpu_memory_utilization=0.9,
-              max_model_len=2048)
+    llm = LLM(
+        model,
+        enforce_eager=True,
+        compilation_config=compile_config,
+        gpu_memory_utilization=0.9,
+        max_model_len=2048,
+    )
 
-    sampling_params = SamplingParams(temperature=0.0,
-                                     max_tokens=10,
-                                     top_p=0.95)
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=10, top_p=0.95)
 
     unfused_output = llm.generate(prompts, sampling_params)
     backend_unfused = None  # Reset backend to make sure llm gets released
@@ -82,17 +85,19 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
     # so we initialize it during compilation.
     attn_pass = lambda *args, **kw: AttnFusionPass(vllm_config)(*args, **kw)
     backend = TestBackend(NoOpEliminationPass(vllm_config), attn_pass)
-    llm2 = LLM(model,
-               enforce_eager=True,
-               compilation_config=compile_config,
-               gpu_memory_utilization=0.9,
-               max_model_len=2048)
+    llm2 = LLM(
+        model,
+        enforce_eager=True,
+        compilation_config=compile_config,
+        gpu_memory_utilization=0.9,
+        max_model_len=2048,
+    )
 
     # check support
     attn_fusion_supported = [
-        layer.impl.fused_output_quant_supported(quant_key.dtype,
-                                                quant_key.static,
-                                                quant_key.group_shape)
+        layer.impl.fused_output_quant_supported(
+            quant_key.dtype, quant_key.static, quant_key.group_shape
+        )
         for key, layer in compile_config.static_forward_context.items()
     ]
 
@@ -109,9 +114,9 @@ def test_attention_fusion(example_prompts, monkeypatch, model: str,
     for i in range(len(attn_nodes_pre)):
         assert attn_nodes_pre[i].kwargs["output_scale"] is None
         fused = attn_nodes_post[i].kwargs["output_scale"] is not None
-        assert fused == attn_fusion_supported[i], \
-            f"Node {i} {'' if fused else 'not '} expected " \
-            f"to have fused output quant"
+        assert fused == attn_fusion_supported[i], (
+            f"Node {i} {'' if fused else 'not '} expected to have fused output quant"
+        )
 
     # check outputs
     fused_output = llm2.generate(prompts, sampling_params)

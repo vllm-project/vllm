@@ -17,11 +17,12 @@ async def test_tokenizer_group():
         max_input_length=None,
     )
     assert reference_tokenizer.encode("prompt") == tokenizer_group.encode(
-        prompt="prompt", lora_request=None)
-    assert reference_tokenizer.encode(
-        "prompt") == await tokenizer_group.encode_async(prompt="prompt",
-                                                        lora_request=None)
-    assert isinstance(tokenizer_group.get_lora_tokenizer(None),
-                      PreTrainedTokenizerBase)
+        prompt="prompt", lora_request=None
+    )
+    assert reference_tokenizer.encode("prompt") == await tokenizer_group.encode_async(
+        prompt="prompt", lora_request=None
+    )
+    assert isinstance(tokenizer_group.get_lora_tokenizer(None), PreTrainedTokenizerBase)
     assert tokenizer_group.get_lora_tokenizer(
-        None) == await tokenizer_group.get_lora_tokenizer_async(None)
+        None
+    ) == await tokenizer_group.get_lora_tokenizer_async(None)

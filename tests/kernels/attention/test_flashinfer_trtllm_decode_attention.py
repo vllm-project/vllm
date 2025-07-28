@@ -9,8 +9,9 @@ import torch
 from vllm.platforms import current_platform
 
 if not current_platform.is_device_capability(100):
-    pytest.skip("This TRTLLM kernel requires NVIDIA Blackwell.",
-                allow_module_level=True)
+    pytest.skip(
+        "This TRTLLM kernel requires NVIDIA Blackwell.", allow_module_level=True
+    )
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 
@@ -72,10 +73,9 @@ def test_flashinfer_trtllm_decode_with_baseline(
     key_value_cache = torch.randn(kv_cache_shape, dtype=dtype)
 
     max_num_blocks_per_seq = (max_kv_len + block_size - 1) // block_size
-    block_tables = torch.randint(0,
-                                 NUM_BLOCKS,
-                                 (num_seqs, max_num_blocks_per_seq),
-                                 dtype=torch.int32)
+    block_tables = torch.randint(
+        0, NUM_BLOCKS, (num_seqs, max_num_blocks_per_seq), dtype=torch.int32
+    )
     k_scale = v_scale = 1.0
     kv_indptr = [0]
     kv_indices = []
@@ -96,30 +96,30 @@ def test_flashinfer_trtllm_decode_with_baseline(
     kv_last_page_lens = torch.tensor(kv_last_page_lens, dtype=torch.int32)
 
     workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
-    wrapper = flashinfer.\
-        BatchDecodeWithPagedKVCacheWrapper(workspace_buffer, kv_layout,
-                use_tensor_cores=(
-                    (num_query_heads//num_kv_heads) > 4)
-                )
-    wrapper.plan(kv_indptr,
-                 kv_indices,
-                 kv_last_page_lens,
-                 num_query_heads,
-                 num_kv_heads,
-                 head_size,
-                 block_size,
-                 "NONE",
-                 q_data_type=dtype,
-                 kv_data_type=dtype,
-                 logits_soft_cap=soft_cap)
+    wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+        workspace_buffer,
+        kv_layout,
+        use_tensor_cores=((num_query_heads // num_kv_heads) > 4),
+    )
+    wrapper.plan(
+        kv_indptr,
+        kv_indices,
+        kv_last_page_lens,
+        num_query_heads,
+        num_kv_heads,
+        head_size,
+        block_size,
+        "NONE",
+        q_data_type=dtype,
+        kv_data_type=dtype,
+        logits_soft_cap=soft_cap,
+    )
 
     output = wrapper.run(query, key_value_cache, scale)
 
     # TRTLLM Decode
     max_kv_len = max(kv_lens)
-    kv_lens_tensor = torch.tensor(kv_lens,
-                                  dtype=torch.int,
-                                  device=query.device)
+    kv_lens_tensor = torch.tensor(kv_lens, dtype=torch.int, device=query.device)
     output_trtllm = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
         query.contiguous(),
         key_value_cache,
@@ -136,5 +136,7 @@ def test_flashinfer_trtllm_decode_with_baseline(
         v_scale,
     )
 
-    torch.testing.assert_close(output, output_trtllm, atol=1e-2, rtol=1e-2), \
-        f"{torch.max(torch.abs(output - output_trtllm))}"
+    (
+        torch.testing.assert_close(output, output_trtllm, atol=1e-2, rtol=1e-2),
+        f"{torch.max(torch.abs(output - output_trtllm))}",
+    )

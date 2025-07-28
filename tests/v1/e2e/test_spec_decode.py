@@ -61,10 +61,10 @@ def test_ngram_correctness(
     sampling_config: SamplingParams,
     model_name: str,
 ):
-    '''
+    """
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using ngram speculative decoding.
-    '''
+    """
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
@@ -103,35 +103,51 @@ def test_ngram_correctness(
         cleanup_dist_env_and_memory()
 
 
-@pytest.mark.parametrize("model_setup", [
-    ("eagle", "meta-llama/Llama-3.1-8B-Instruct",
-     "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1),
-    ("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
-     "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", 1),
-    pytest.param(
-        ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-         "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
-        marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
-],
-                         ids=["llama3_eagle", "llama3_eagle3", "llama4_eagle"])
+@pytest.mark.parametrize(
+    "model_setup",
+    [
+        (
+            "eagle",
+            "meta-llama/Llama-3.1-8B-Instruct",
+            "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+            1,
+        ),
+        (
+            "eagle3",
+            "meta-llama/Llama-3.1-8B-Instruct",
+            "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+            1,
+        ),
+        pytest.param(
+            (
+                "eagle",
+                "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+                "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
+                4,
+            ),
+            marks=pytest.mark.skip(reason="Skipping due to CI OOM issues"),
+        ),
+    ],
+    ids=["llama3_eagle", "llama3_eagle3", "llama4_eagle"],
+)
 def test_eagle_correctness(
     monkeypatch: pytest.MonkeyPatch,
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
     model_setup: tuple[str, str, str, int],
 ):
-    '''
+    """
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using eagle speculative decoding.
     model_setup: (method, model_name, eagle_model_name, tp_size)
-    '''
+    """
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
         method, model_name, spec_model_name, tp_size = model_setup
 
-        ref_llm = LLM(model=model_name,
-                      max_model_len=2048,
-                      tensor_parallel_size=tp_size)
+        ref_llm = LLM(
+            model=model_name, max_model_len=2048, tensor_parallel_size=tp_size
+        )
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
         torch.cuda.empty_cache()

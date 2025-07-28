@@ -25,12 +25,14 @@ class ExternalLBServerManager:
     """Manages data parallel vLLM server instances for external
     load balancer testing."""
 
-    def __init__(self,
-                 model_name: str,
-                 dp_size: int,
-                 api_server_count: int,
-                 base_server_args: list,
-                 tp_size: int = TP_SIZE):
+    def __init__(
+        self,
+        model_name: str,
+        dp_size: int,
+        api_server_count: int,
+        base_server_args: list,
+        tp_size: int = TP_SIZE,
+    ):
         self.model_name = model_name
         self.dp_size = dp_size
         self.tp_size = tp_size
@@ -46,20 +48,22 @@ class ExternalLBServerManager:
             server_args = self.base_server_args.copy()
 
             # Add external LB specific arguments
-            server_args.extend([
-                "--data-parallel-size",
-                str(self.dp_size),
-                "--data-parallel-rank",
-                str(rank),
-                "--data-parallel-size-local",
-                "1",
-                "--tensor-parallel-size",
-                str(self.tp_size),
-                "--port",
-                str(8000 + rank),  # Different port for each rank
-                "--api-server-count",
-                str(self.api_server_count),
-            ])
+            server_args.extend(
+                [
+                    "--data-parallel-size",
+                    str(self.dp_size),
+                    "--data-parallel-rank",
+                    str(rank),
+                    "--data-parallel-size-local",
+                    "1",
+                    "--tensor-parallel-size",
+                    str(self.tp_size),
+                    "--port",
+                    str(8000 + rank),  # Different port for each rank
+                    "--api-server-count",
+                    str(self.api_server_count),
+                ]
+            )
 
             # Use a thread to start each server to allow parallel initialization
             def start_server(r: int, sargs: list[str]):
@@ -70,22 +74,23 @@ class ExternalLBServerManager:
                         sargs,
                         auto_port=False,
                         env_dict={
-                            "CUDA_VISIBLE_DEVICES":
-                            ",".join(
-                                str(Platform.device_id_to_physical_device_id(
-                                    i))
-                                for i in range(r * TP_SIZE, (r + 1) * TP_SIZE))
-                        })
+                            "CUDA_VISIBLE_DEVICES": ",".join(
+                                str(Platform.device_id_to_physical_device_id(i))
+                                for i in range(r * TP_SIZE, (r + 1) * TP_SIZE)
+                            )
+                        },
+                    )
                     server.__enter__()
-                    print(f"Server rank {r} started successfully with "
-                          f"{self.api_server_count} API servers")
+                    print(
+                        f"Server rank {r} started successfully with "
+                        f"{self.api_server_count} API servers"
+                    )
                     self.servers.append((server, sargs))
                 except Exception as e:
                     print(f"Failed to start server rank {r}: {e}")
                     raise
 
-            thread = threading.Thread(target=start_server,
-                                      args=(rank, server_args))
+            thread = threading.Thread(target=start_server, args=(rank, server_args))
             thread.start()
 
             self.server_threads.append(thread)
@@ -128,8 +133,9 @@ def default_server_args():
 @pytest.fixture(scope="module", params=[1, 4])
 def servers(request, default_server_args):
     api_server_count = request.param
-    with ExternalLBServerManager(MODEL_NAME, DP_SIZE, api_server_count,
-                                 default_server_args) as server_list:
+    with ExternalLBServerManager(
+        MODEL_NAME, DP_SIZE, api_server_count, default_server_args
+    ) as server_list:
         yield server_list
 
 
@@ -148,16 +154,15 @@ async def clients(servers: list[tuple[RemoteOpenAIServer, list[str]]]):
     "model_name",
     [MODEL_NAME],
 )
-async def test_external_lb_single_completion(clients: list[
-    openai.AsyncOpenAI], servers: list[tuple[RemoteOpenAIServer, list[str]]],
-                                             model_name: str) -> None:
-
+async def test_external_lb_single_completion(
+    clients: list[openai.AsyncOpenAI],
+    servers: list[tuple[RemoteOpenAIServer, list[str]]],
+    model_name: str,
+) -> None:
     async def make_request(client: openai.AsyncOpenAI):
         completion = await client.completions.create(
-            model=model_name,
-            prompt="Hello, my name is",
-            max_tokens=10,
-            temperature=1.0)
+            model=model_name, prompt="Hello, my name is", max_tokens=10, temperature=1.0
+        )
 
         assert completion.id is not None
         assert completion.choices is not None and len(completion.choices) == 1
@@ -211,11 +216,14 @@ async def test_external_lb_single_completion(clients: list[
 
     _, server_args = servers[0]
     api_server_count = (
-        server_args.count('--api-server-count')
-        and server_args[server_args.index('--api-server-count') + 1] or 1)
+        server_args.count("--api-server-count")
+        and server_args[server_args.index("--api-server-count") + 1]
+        or 1
+    )
     print(
         f"Successfully completed external LB test with {len(clients)} servers "
-        f"(API server count: {api_server_count})")
+        f"(API server count: {api_server_count})"
+    )
 
 
 @pytest.mark.asyncio
@@ -223,9 +231,11 @@ async def test_external_lb_single_completion(clients: list[
     "model_name",
     [MODEL_NAME],
 )
-async def test_external_lb_completion_streaming(clients: list[
-    openai.AsyncOpenAI], servers: list[tuple[RemoteOpenAIServer, list[str]]],
-                                                model_name: str) -> None:
+async def test_external_lb_completion_streaming(
+    clients: list[openai.AsyncOpenAI],
+    servers: list[tuple[RemoteOpenAIServer, list[str]]],
+    model_name: str,
+) -> None:
     prompt = "What is an LLM?"
 
     async def make_streaming_request(client: openai.AsyncOpenAI):
@@ -239,11 +249,9 @@ async def test_external_lb_completion_streaming(clients: list[
         single_output = single_completion.choices[0].text
 
         # Perform the streaming request
-        stream = await client.completions.create(model=model_name,
-                                                 prompt=prompt,
-                                                 max_tokens=5,
-                                                 temperature=0.0,
-                                                 stream=True)
+        stream = await client.completions.create(
+            model=model_name, prompt=prompt, max_tokens=5, temperature=0.0, stream=True
+        )
         chunks: list[str] = []
         finish_reason_count = 0
         last_chunk = None
@@ -254,16 +262,15 @@ async def test_external_lb_completion_streaming(clients: list[
             last_chunk = chunk  # Keep track of the last chunk
 
         # finish reason should only return in the last block for OpenAI API
-        assert finish_reason_count == 1, (
-            "Finish reason should appear exactly once.")
-        assert last_chunk is not None, (
-            "Stream should have yielded at least one chunk.")
-        assert last_chunk.choices[
-            0].finish_reason == "length", "Finish reason should be 'length'."
+        assert finish_reason_count == 1, "Finish reason should appear exactly once."
+        assert last_chunk is not None, "Stream should have yielded at least one chunk."
+        assert last_chunk.choices[0].finish_reason == "length", (
+            "Finish reason should be 'length'."
+        )
         # Check that the combined text matches the non-streamed version.
-        assert "".join(
-            chunks
-        ) == single_output, "Streamed output should match non-streamed output."
+        assert "".join(chunks) == single_output, (
+            "Streamed output should match non-streamed output."
+        )
         return True  # Indicate success for this request
 
     # Test single request to each server
@@ -279,10 +286,7 @@ async def test_external_lb_completion_streaming(clients: list[
     all_tasks = []
 
     for i, client in enumerate(clients):
-        tasks = [
-            make_streaming_request(client)
-            for _ in range(num_requests_per_server)
-        ]
+        tasks = [make_streaming_request(client) for _ in range(num_requests_per_server)]
         all_tasks.extend(tasks)
 
     results = await asyncio.gather(*all_tasks)
@@ -294,10 +298,7 @@ async def test_external_lb_completion_streaming(clients: list[
     # Second burst of streaming requests
     all_tasks = []
     for i, client in enumerate(clients):
-        tasks = [
-            make_streaming_request(client)
-            for _ in range(num_requests_per_server)
-        ]
+        tasks = [make_streaming_request(client) for _ in range(num_requests_per_server)]
         all_tasks.extend(tasks)
 
     results = await asyncio.gather(*all_tasks)
@@ -306,7 +307,11 @@ async def test_external_lb_completion_streaming(clients: list[
 
     _, server_args = servers[0]
     api_server_count = (
-        server_args.count('--api-server-count')
-        and server_args[server_args.index('--api-server-count') + 1] or 1)
-    print(f"Successfully completed external LB streaming test with "
-          f"{len(clients)} servers (API server count: {api_server_count})")
+        server_args.count("--api-server-count")
+        and server_args[server_args.index("--api-server-count") + 1]
+        or 1
+    )
+    print(
+        f"Successfully completed external LB streaming test with "
+        f"{len(clients)} servers (API server count: {api_server_count})"
+    )

@@ -45,20 +45,23 @@ def run_test(model_name, more_args=None):
 
     measured_value = results["results"][TASK][FILTER]
     assert model_name in EXPECTED_VALUES, (
-        f"Cannot find the expected value for the model {model_name=}")
+        f"Cannot find the expected value for the model {model_name=}"
+    )
     expected_value = EXPECTED_VALUES[model_name]
-    assert (measured_value - RTOL < expected_value
-            and measured_value + RTOL > expected_value
-            ), f"Expected: {expected_value} |  Measured: {measured_value}"
+    assert (
+        measured_value - RTOL < expected_value
+        and measured_value + RTOL > expected_value
+    ), f"Expected: {expected_value} |  Measured: {measured_value}"
 
 
 # TODO: [AlexM] Fix it with new CI/CD tests
-TPU_TP_TEST_STR = ""  #"tensor_parallel_size=4"
+TPU_TP_TEST_STR = ""  # "tensor_parallel_size=4"
 
 
-@pytest.mark.skipif(not current_platform.is_cuda()
-                    and not current_platform.is_tpu(),
-                    reason="V1 is currently only supported on CUDA and TPU")
+@pytest.mark.skipif(
+    not current_platform.is_cuda() and not current_platform.is_tpu(),
+    reason="V1 is currently only supported on CUDA and TPU",
+)
 @pytest.mark.parametrize("model", MODEL_NAMES)
 def test_lm_eval_accuracy_v1_engine(model, monkeypatch: pytest.MonkeyPatch):
     """Run with the V1 Engine."""

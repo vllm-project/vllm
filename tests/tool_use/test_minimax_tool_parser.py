@@ -24,12 +24,14 @@ def minimax_tool_parser(minimax_tokenizer):
     return MinimaxToolParser(minimax_tokenizer)
 
 
-def assert_tool_calls(actual_tool_calls: list[ToolCall],
-                      expected_tool_calls: list[ToolCall]):
+def assert_tool_calls(
+    actual_tool_calls: list[ToolCall], expected_tool_calls: list[ToolCall]
+):
     assert len(actual_tool_calls) == len(expected_tool_calls)
 
-    for actual_tool_call, expected_tool_call in zip(actual_tool_calls,
-                                                    expected_tool_calls):
+    for actual_tool_call, expected_tool_call in zip(
+        actual_tool_calls, expected_tool_calls
+    ):
         assert isinstance(actual_tool_call.id, str)
         assert len(actual_tool_call.id) > 16
 
@@ -40,7 +42,8 @@ def assert_tool_calls(actual_tool_calls: list[ToolCall],
 def test_extract_tool_calls_no_tools(minimax_tool_parser):
     model_output = "This is a test"
     extracted_tool_calls = minimax_tool_parser.extract_tool_calls(
-        model_output, request=None)  # type: ignore[arg-type]
+        model_output, request=None
+    )  # type: ignore[arg-type]
     assert not extracted_tool_calls.tools_called
     assert extracted_tool_calls.tool_calls == []
     assert extracted_tool_calls.content == model_output
@@ -61,14 +64,18 @@ def test_extract_tool_calls_no_tools(minimax_tool_parser):
 {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}
 </tool_calls>""",
             [
-                ToolCall(function=FunctionCall(
-                    name="get_current_weather",
-                    arguments=json.dumps({
-                        "city": "Dallas",
-                        "state": "TX",
-                        "unit": "fahrenheit",
-                    }),
-                ))
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_current_weather",
+                        arguments=json.dumps(
+                            {
+                                "city": "Dallas",
+                                "state": "TX",
+                                "unit": "fahrenheit",
+                            }
+                        ),
+                    )
+                )
             ],
             None,
         ),
@@ -78,22 +85,30 @@ def test_extract_tool_calls_no_tools(minimax_tool_parser):
 {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}
 </tool_calls>""",
             [
-                ToolCall(function=FunctionCall(
-                    name="get_current_weather",
-                    arguments=json.dumps({
-                        "city": "Dallas",
-                        "state": "TX",
-                        "unit": "fahrenheit",
-                    }),
-                )),
-                ToolCall(function=FunctionCall(
-                    name="get_current_weather",
-                    arguments=json.dumps({
-                        "city": "Orlando",
-                        "state": "FL",
-                        "unit": "fahrenheit",
-                    }),
-                )),
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_current_weather",
+                        arguments=json.dumps(
+                            {
+                                "city": "Dallas",
+                                "state": "TX",
+                                "unit": "fahrenheit",
+                            }
+                        ),
+                    )
+                ),
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_current_weather",
+                        arguments=json.dumps(
+                            {
+                                "city": "Orlando",
+                                "state": "FL",
+                                "unit": "fahrenheit",
+                            }
+                        ),
+                    )
+                ),
             ],
             None,
         ),
@@ -102,14 +117,18 @@ def test_extract_tool_calls_no_tools(minimax_tool_parser):
 {"name": "get_current_weather", "arguments": {"city": "Seattle", "state": "WA", "unit": "celsius"}}
 </tool_calls>""",
             [
-                ToolCall(function=FunctionCall(
-                    name="get_current_weather",
-                    arguments=json.dumps({
-                        "city": "Seattle",
-                        "state": "WA",
-                        "unit": "celsius",
-                    }),
-                ))
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_current_weather",
+                        arguments=json.dumps(
+                            {
+                                "city": "Seattle",
+                                "state": "WA",
+                                "unit": "celsius",
+                            }
+                        ),
+                    )
+                )
             ],
             "I'll help you check the weather.",
         ),
@@ -118,14 +137,18 @@ def test_extract_tool_calls_no_tools(minimax_tool_parser):
 {"name": "get_current_weather", "arguments": {"city": "New York", "state": "NY", "unit": "celsius"}}
 </tool_calls>""",
             [
-                ToolCall(function=FunctionCall(
-                    name="get_current_weather",
-                    arguments=json.dumps({
-                        "city": "New York",
-                        "state": "NY",
-                        "unit": "celsius",
-                    }),
-                ))
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_current_weather",
+                        arguments=json.dumps(
+                            {
+                                "city": "New York",
+                                "state": "NY",
+                                "unit": "celsius",
+                            }
+                        ),
+                    )
+                )
             ],
             None,
         ),
@@ -133,22 +156,28 @@ def test_extract_tool_calls_no_tools(minimax_tool_parser):
             """<tool_calls>
 {"name": "get_current_weather", "arguments": {"city": "Boston", "state": "MA"}}""",
             [
-                ToolCall(function=FunctionCall(
-                    name="get_current_weather",
-                    arguments=json.dumps({
-                        "city": "Boston",
-                        "state": "MA",
-                    }),
-                ))
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_current_weather",
+                        arguments=json.dumps(
+                            {
+                                "city": "Boston",
+                                "state": "MA",
+                            }
+                        ),
+                    )
+                )
             ],
             None,
         ),
     ],
 )
-def test_extract_tool_calls(minimax_tool_parser, model_output,
-                            expected_tool_calls, expected_content):
+def test_extract_tool_calls(
+    minimax_tool_parser, model_output, expected_tool_calls, expected_content
+):
     extracted_tool_calls = minimax_tool_parser.extract_tool_calls(
-        model_output, request=None)  # type: ignore[arg-type]
+        model_output, request=None
+    )  # type: ignore[arg-type]
     assert extracted_tool_calls.tools_called
 
     assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
@@ -166,8 +195,7 @@ I'll help you with that. <tool_calls>
 {"name": "get_current_weather", "arguments": {"city": "Seattle", "state": "WA"}}
 </tool_calls>"""
 
-    processed_output = minimax_tool_parser.preprocess_model_output(
-        model_output)
+    processed_output = minimax_tool_parser.preprocess_model_output(model_output)
 
     # The tool call within thinking tags should be removed
     assert "fake_tool" not in processed_output
@@ -189,12 +217,12 @@ Let me help you with the weather. <tool_calls>
 </tool_calls>"""
 
     extracted_tool_calls = minimax_tool_parser.extract_tool_calls(
-        model_output, request=None)  # type: ignore[arg-type]
+        model_output, request=None
+    )  # type: ignore[arg-type]
 
     assert extracted_tool_calls.tools_called
     assert len(extracted_tool_calls.tool_calls) == 1
-    assert extracted_tool_calls.tool_calls[
-        0].function.name == "get_current_weather"
+    assert extracted_tool_calls.tool_calls[0].function.name == "get_current_weather"
 
     # Content extraction is based on the position of the first <tool_calls> in the original model_output
     # Since preprocessing removes tool calls within thinking tags, the actual first <tool_calls> is the external one
@@ -215,14 +243,14 @@ def test_extract_tool_calls_invalid_json(minimax_tool_parser):
 </tool_calls>"""
 
     extracted_tool_calls = minimax_tool_parser.extract_tool_calls(
-        model_output, request=None)  # type: ignore[arg-type]
+        model_output, request=None
+    )  # type: ignore[arg-type]
 
     assert extracted_tool_calls.tools_called
     # Should extract only the valid JSON tool calls
     assert len(extracted_tool_calls.tool_calls) == 2
     assert extracted_tool_calls.tool_calls[0].function.name == "valid_tool"
-    assert extracted_tool_calls.tool_calls[
-        1].function.name == "another_valid_tool"
+    assert extracted_tool_calls.tool_calls[1].function.name == "another_valid_tool"
 
 
 def test_extract_tool_calls_missing_name_or_arguments(minimax_tool_parser):
@@ -235,14 +263,14 @@ def test_extract_tool_calls_missing_name_or_arguments(minimax_tool_parser):
 </tool_calls>"""
 
     extracted_tool_calls = minimax_tool_parser.extract_tool_calls(
-        model_output, request=None)  # type: ignore[arg-type]
+        model_output, request=None
+    )  # type: ignore[arg-type]
 
     assert extracted_tool_calls.tools_called
     # Should extract only the valid tool calls with both name and arguments
     assert len(extracted_tool_calls.tool_calls) == 2
     assert extracted_tool_calls.tool_calls[0].function.name == "valid_tool"
-    assert extracted_tool_calls.tool_calls[
-        1].function.name == "another_valid_tool"
+    assert extracted_tool_calls.tool_calls[1].function.name == "another_valid_tool"
 
 
 def test_streaming_basic_functionality(minimax_tool_parser):
@@ -271,8 +299,7 @@ def test_streaming_basic_functionality(minimax_tool_parser):
 
     # The result might be None or contain tool call information
     # This depends on the internal state management
-    if result is not None and hasattr(result,
-                                      'tool_calls') and result.tool_calls:
+    if result is not None and hasattr(result, "tool_calls") and result.tool_calls:
         assert len(result.tool_calls) >= 0
 
 
@@ -297,7 +324,7 @@ def test_streaming_with_content_before_tool_calls(minimax_tool_parser):
         request=None,
     )
 
-    if result is not None and hasattr(result, 'content'):
+    if result is not None and hasattr(result, "content"):
         # Should contain some content
         assert result.content is not None
 
@@ -318,7 +345,7 @@ def test_streaming_no_tool_calls(minimax_tool_parser):
 
     # Should return the delta text as content
     assert result is not None
-    assert hasattr(result, 'content')
+    assert hasattr(result, "content")
     assert result.content == " without any tool calls."
 
 
@@ -344,8 +371,7 @@ def test_streaming_with_thinking_tags(minimax_tool_parser):
 
     # The preprocessing should remove tool calls from thinking tags
     # and only process the real tool call
-    if result is not None and hasattr(result,
-                                      'tool_calls') and result.tool_calls:
+    if result is not None and hasattr(result, "tool_calls") and result.tool_calls:
         for tool_call in result.tool_calls:
             assert tool_call.function.name != "ignored"
 
@@ -364,7 +390,8 @@ def test_extract_tool_calls_multiline_json_not_supported(minimax_tool_parser):
 </tool_calls>"""
 
     extracted_tool_calls = minimax_tool_parser.extract_tool_calls(
-        model_output, request=None)  # type: ignore[arg-type]
+        model_output, request=None
+    )  # type: ignore[arg-type]
 
     # Multiline JSON is currently not supported, should return no tools called
     assert not extracted_tool_calls.tools_called

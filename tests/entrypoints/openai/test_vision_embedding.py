@@ -58,9 +58,9 @@ def base64_encoded_image() -> dict[str, str]:
 
 
 def get_hf_prompt_tokens(model_name, content, image_url):
-    processor = AutoProcessor.from_pretrained(model_name,
-                                              trust_remote_code=True,
-                                              num_crops=4)
+    processor = AutoProcessor.from_pretrained(
+        model_name, trust_remote_code=True, num_crops=4
+    )
 
     placeholder = "<|image_1|> "
     prompt = f"{placeholder}{content}"
@@ -72,39 +72,28 @@ def get_hf_prompt_tokens(model_name, content, image_url):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
-async def test_image_embedding(server: RemoteOpenAIServer, model_name: str,
-                               image_url: str):
+async def test_image_embedding(
+    server: RemoteOpenAIServer, model_name: str, image_url: str
+):
     content_text = "Represent the given image."
-    messages = [{
-        "role":
-        "user",
-        "content": [
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": image_url
-                }
-            },
-            {
-                "type": "text",
-                "text": content_text
-            },
-        ],
-    }]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": content_text},
+            ],
+        }
+    ]
 
     response = requests.post(
         server.url_for("v1/embeddings"),
-        json={
-            "model": model_name,
-            "messages": messages,
-            "encoding_format": "float"
-        },
+        json={"model": model_name, "messages": messages, "encoding_format": "float"},
     )
     response.raise_for_status()
     embeddings = EmbeddingResponse.model_validate(response.json())
 
-    hf_prompt_tokens = get_hf_prompt_tokens(model_name, content_text,
-                                            image_url)
+    hf_prompt_tokens = get_hf_prompt_tokens(model_name, content_text, image_url)
 
     assert embeddings.id is not None
     assert len(embeddings.data) == 1

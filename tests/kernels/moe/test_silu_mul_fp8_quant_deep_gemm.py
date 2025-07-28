@@ -5,7 +5,8 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-    silu_mul_fp8_quant_deep_gemm)
+    silu_mul_fp8_quant_deep_gemm,
+)
 from vllm.platforms import current_platform
 
 # (E, T, H, group_size, seed)
@@ -28,16 +29,15 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, group_size, seed):
     tokens_per_expert = torch.randint(
         low=0,
         high=T,
-        size=(E, ),
+        size=(E,),
         dtype=torch.int32,
         device="cuda",
     )
 
     # Run the Triton kernel
-    y_q, y_s = silu_mul_fp8_quant_deep_gemm(y,
-                                            tokens_per_expert,
-                                            group_size=group_size,
-                                            eps=1e-10)
+    y_q, y_s = silu_mul_fp8_quant_deep_gemm(
+        y, tokens_per_expert, group_size=group_size, eps=1e-10
+    )
 
     # Reference implementation
     fp8_info = torch.finfo(torch.float8_e4m3fn)
@@ -54,9 +54,7 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, group_size, seed):
     # Compute reference scales and quantized output, skipping padded tokens
     for e in range(E):
         nt = tokens_per_expert[e].item()
-        ref_s = torch.empty((T, H // group_size),
-                            dtype=torch.float32,
-                            device="cuda")
+        ref_s = torch.empty((T, H // group_size), dtype=torch.float32, device="cuda")
         ref_q = torch.empty((T, H), dtype=torch.float8_e4m3fn, device="cuda")
         for t in range(nt):
             data = merged[e, t]

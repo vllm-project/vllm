@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for mllama's multimodal preprocessing and profiling."""
+
 import pytest
 from transformers import MllamaConfig
 
@@ -10,8 +11,7 @@ from vllm.multimodal.profiling import MultiModalProfiler
 from ...utils import build_model_context
 
 
-@pytest.mark.parametrize("model_id",
-                         ["meta-llama/Llama-3.2-11B-Vision-Instruct"])
+@pytest.mark.parametrize("model_id", ["meta-llama/Llama-3.2-11B-Vision-Instruct"])
 @pytest.mark.parametrize("max_model_len", [4096, 8192, 25600, 131072])
 @pytest.mark.parametrize("max_num_seqs", [1, 2, 8])
 def test_profiling(
@@ -46,8 +46,7 @@ def test_profiling(
 
     hf_config = ctx.get_hf_config(MllamaConfig)
     image_size = hf_config.vision_config.image_size
-    encoder_seq_lens = [len(dummy_encoder_data.prompt_token_ids)
-                        ] * max_num_seqs
+    encoder_seq_lens = [len(dummy_encoder_data.prompt_token_ids)] * max_num_seqs
 
     mm_kwargs = processor.apply(
         prompt=dummy_mm_data.prompt,
@@ -67,6 +66,5 @@ def test_profiling(
     ]
 
     # simulate mllama image-present prefill.
-    for actual_len, last_group_len in zip(actual_encoder_seq_lens,
-                                          encoder_seq_lens):
+    for actual_len, last_group_len in zip(actual_encoder_seq_lens, encoder_seq_lens):
         assert actual_len >= last_group_len

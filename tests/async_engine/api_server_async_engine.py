@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """vllm.entrypoints.api_server with some extra logging for testing."""
+
 from collections.abc import Iterable
 from typing import Any
 
@@ -17,7 +18,6 @@ app = vllm.entrypoints.api_server.app
 
 
 class AsyncLLMEngineWithStats(AsyncLLMEngine):
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._num_aborts = 0
@@ -47,8 +47,10 @@ if __name__ == "__main__":
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngineWithStats.from_engine_args(engine_args)
     vllm.entrypoints.api_server.engine = engine
-    uvicorn.run(app,
-                host=args.host,
-                port=args.port,
-                log_level="debug",
-                timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE)
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level="debug",
+        timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
+    )

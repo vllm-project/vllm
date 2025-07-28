@@ -3,13 +3,11 @@
 
 from typing import Optional, Union
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaMessage)
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.reasoning import ReasoningParser
 
 
 class StreamingReasoningReconstructor:
-
     def __init__(self):
         self.reasoning_content = None
         self.other_content = None
@@ -18,8 +16,8 @@ class StreamingReasoningReconstructor:
         # content and the reasoning content should not be present
         # at the same time
         assert delta.content is None or delta.reasoning_content is None, (
-            "Both content and reasoning content are present in the "
-            "delta message")
+            "Both content and reasoning content are present in the delta message"
+        )
         if delta.content is not None:
             if self.other_content is None:
                 self.other_content = delta.content
@@ -50,7 +48,8 @@ def run_reasoning_extraction(
         )
     else:
         reasoning, content = run_reasoning_extraction_nonstreaming(
-            reasoning_parser, model_output, request)
+            reasoning_parser, model_output, request
+        )
         return reasoning, content
 
 
@@ -61,7 +60,8 @@ def run_reasoning_extraction_nonstreaming(
 ) -> tuple[Optional[str], Optional[str]]:
     request = request or ChatCompletionRequest(messages=[], model="test-model")
     return reasoning_parser.extract_reasoning_content(
-        model_output=''.join(model_output), request=request)
+        model_output="".join(model_output), request=request
+    )
 
 
 def run_reasoning_extraction_streaming(

@@ -66,9 +66,9 @@ def test_stop(model):
     # Output should not contain the stop word.
     assert len(new_split_text) == STOP_IDX
 
-    params = SamplingParams(temperature=0,
-                            stop=split_text[STOP_IDX],
-                            include_stop_str_in_output=True)
+    params = SamplingParams(
+        temperature=0, stop=split_text[STOP_IDX], include_stop_str_in_output=True
+    )
     output = model.generate(PROMPT, params)
     new_split_text = output[0].outputs[0].text.split()
 
@@ -103,8 +103,8 @@ def test_detokenize_false(model):
     assert len(output[0].outputs[0].text) == 0
 
     output = model.generate(
-        PROMPT, SamplingParams(detokenize=False, logprobs=3,
-                               prompt_logprobs=3))
+        PROMPT, SamplingParams(detokenize=False, logprobs=3, prompt_logprobs=3)
+    )
     assert len(output[0].outputs[0].token_ids) > 0
     assert len(output[0].outputs[0].text) == 0
 
@@ -131,8 +131,7 @@ def test_bad_words(model):
     assert bad_words_1 not in new_text
 
     bad_words_2 = new_text.split()[-1]
-    params = SamplingParams(temperature=0,
-                            bad_words=[bad_words_1, bad_words_2])
+    params = SamplingParams(temperature=0, bad_words=[bad_words_1, bad_words_2])
     output = model.generate(PROMPT, params)
     new_text = output[0].outputs[0].text
     assert bad_words_1 not in new_text
@@ -150,8 +149,7 @@ def test_logits_processor(model):
         return logits
 
     with pytest.raises(ValueError):
-        _ = model.generate(PROMPT,
-                           SamplingParams(logits_processors=[pick_ith]))
+        _ = model.generate(PROMPT, SamplingParams(logits_processors=[pick_ith]))
 
 
 def test_allowed_token_ids(model):
@@ -159,8 +157,7 @@ def test_allowed_token_ids(model):
 
     TOKEN_ID = 10
     allowed_token_ids = [TOKEN_ID]
-    output = model.generate(
-        PROMPT, SamplingParams(allowed_token_ids=allowed_token_ids))
+    output = model.generate(PROMPT, SamplingParams(allowed_token_ids=allowed_token_ids))
     assert output[0].outputs[0].token_ids[-1] == TOKEN_ID
 
     # Reject empty allowed_token_ids.
@@ -173,8 +170,7 @@ def test_allowed_token_ids(model):
 
     # Reject out of vocabulary.
     with pytest.raises(ValueError):
-        _ = model.generate(PROMPT,
-                           SamplingParams(allowed_token_ids=[10000000]))
+        _ = model.generate(PROMPT, SamplingParams(allowed_token_ids=[10000000]))
 
 
 def test_priority(model):

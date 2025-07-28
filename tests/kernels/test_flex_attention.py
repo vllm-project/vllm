@@ -43,10 +43,9 @@ def test_flex_attention_vs_default_backend(monkeypatch):
         "The capital of France is",
     ]
 
-    sampling_params = SamplingParams(temperature=0.0,
-                                     top_p=1.0,
-                                     seed=seed,
-                                     max_tokens=max_tokens)
+    sampling_params = SamplingParams(
+        temperature=0.0, top_p=1.0, seed=seed, max_tokens=max_tokens
+    )
 
     # Run with flex attention
     with monkeypatch.context() as m:
@@ -76,8 +75,7 @@ def test_flex_attention_vs_default_backend(monkeypatch):
         output_default = llm_default.generate(prompts, sampling_params)
 
     # Compare outputs from both backends
-    for i, (flex_result,
-            default_result) in enumerate(zip(output_flex, output_default)):
+    for i, (flex_result, default_result) in enumerate(zip(output_flex, output_default)):
         prompt = prompts[i]
         flex_text = flex_result.outputs[0].text
         default_text = default_result.outputs[0].text
@@ -85,7 +83,8 @@ def test_flex_attention_vs_default_backend(monkeypatch):
         assert flex_text == default_text, (
             f"FlexAttention output doesn't match default for: {prompt!r}\n"
             f"FlexAttention: {flex_text!r}\n"
-            f"Default: {default_text!r}")
+            f"Default: {default_text!r}"
+        )
 
 
 if __name__ == "__main__":

@@ -32,15 +32,18 @@ def server():
 def test_rerank_texts(server: RemoteOpenAIServer, model_name: str):
     query = "What is the capital of France?"
     documents = [
-        "The capital of Brazil is Brasilia.", "The capital of France is Paris."
+        "The capital of Brazil is Brasilia.",
+        "The capital of France is Paris.",
     ]
 
-    rerank_response = requests.post(server.url_for("rerank"),
-                                    json={
-                                        "model": model_name,
-                                        "query": query,
-                                        "documents": documents,
-                                    })
+    rerank_response = requests.post(
+        server.url_for("rerank"),
+        json={
+            "model": model_name,
+            "query": query,
+            "documents": documents,
+        },
+    )
     rerank_response.raise_for_status()
     rerank = RerankResponse.model_validate(rerank_response.json())
 
@@ -56,16 +59,14 @@ def test_top_n(server: RemoteOpenAIServer, model_name: str):
     query = "What is the capital of France?"
     documents = [
         "The capital of Brazil is Brasilia.",
-        "The capital of France is Paris.", "Cross-encoder models are neat"
+        "The capital of France is Paris.",
+        "Cross-encoder models are neat",
     ]
 
-    rerank_response = requests.post(server.url_for("rerank"),
-                                    json={
-                                        "model": model_name,
-                                        "query": query,
-                                        "documents": documents,
-                                        "top_n": 2
-                                    })
+    rerank_response = requests.post(
+        server.url_for("rerank"),
+        json={"model": model_name, "query": query, "documents": documents, "top_n": 2},
+    )
     rerank_response.raise_for_status()
     rerank = RerankResponse.model_validate(rerank_response.json())
 
@@ -78,28 +79,26 @@ def test_top_n(server: RemoteOpenAIServer, model_name: str):
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 def test_rerank_max_model_len(server: RemoteOpenAIServer, model_name: str):
-
     query = "What is the capital of France?" * 100
     documents = [
-        "The capital of Brazil is Brasilia.", "The capital of France is Paris."
+        "The capital of Brazil is Brasilia.",
+        "The capital of France is Paris.",
     ]
 
-    rerank_response = requests.post(server.url_for("rerank"),
-                                    json={
-                                        "model": model_name,
-                                        "query": query,
-                                        "documents": documents
-                                    })
+    rerank_response = requests.post(
+        server.url_for("rerank"),
+        json={"model": model_name, "query": query, "documents": documents},
+    )
     assert rerank_response.status_code == 400
     # Assert just a small fragments of the response
-    assert "Please reduce the length of the input." in \
-        rerank_response.text
+    assert "Please reduce the length of the input." in rerank_response.text
 
 
 def test_invocations(server: RemoteOpenAIServer):
     query = "What is the capital of France?"
     documents = [
-        "The capital of Brazil is Brasilia.", "The capital of France is Paris."
+        "The capital of Brazil is Brasilia.",
+        "The capital of France is Paris.",
     ]
 
     request_args = {
@@ -108,20 +107,22 @@ def test_invocations(server: RemoteOpenAIServer):
         "documents": documents,
     }
 
-    rerank_response = requests.post(server.url_for("rerank"),
-                                    json=request_args)
+    rerank_response = requests.post(server.url_for("rerank"), json=request_args)
     rerank_response.raise_for_status()
 
-    invocation_response = requests.post(server.url_for("invocations"),
-                                        json=request_args)
+    invocation_response = requests.post(
+        server.url_for("invocations"), json=request_args
+    )
     invocation_response.raise_for_status()
 
     rerank_output = rerank_response.json()
     invocation_output = invocation_response.json()
 
     assert rerank_output.keys() == invocation_output.keys()
-    for rerank_result, invocations_result in zip(rerank_output["results"],
-                                                 invocation_output["results"]):
+    for rerank_result, invocations_result in zip(
+        rerank_output["results"], invocation_output["results"]
+    ):
         assert rerank_result.keys() == invocations_result.keys()
         assert rerank_result["relevance_score"] == pytest.approx(
-            invocations_result["relevance_score"], rel=0.01)
+            invocations_result["relevance_score"], rel=0.01
+        )

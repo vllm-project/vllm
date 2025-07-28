@@ -133,23 +133,20 @@ async def get_request(
     assert burstiness > 0, (
         f"A positive burstiness factor is expected, but given {burstiness}.")
     # Convert to list to get length for ramp-up calculations
-    if isinstance(input_requests, Iterable) and not isinstance(
-            input_requests, list):
+    if isinstance(input_requests,
+                  Iterable) and not isinstance(input_requests, list):
         input_requests = list(input_requests)
 
     total_requests = len(input_requests)
     request_index = 0
 
     for request in input_requests:
-        current_request_rate = _get_current_request_rate(ramp_up_strategy,
-                                                      ramp_up_start_rps,
-                                                      ramp_up_end_rps,
-                                                      request_index,
-                                                      total_requests,
-                                                      request_rate)
+        current_request_rate = _get_current_request_rate(
+            ramp_up_strategy, ramp_up_start_rps, ramp_up_end_rps,
+            request_index, total_requests, request_rate)
 
         yield request, current_request_rate
-        
+
         request_index += 1
 
         if current_request_rate == float("inf"):
@@ -365,8 +362,8 @@ async def benchmark(
         if profile_output.success:
             print("Profiler started")
 
-    distribution = ("Poisson process" if burstiness == 1.0 
-                   else "Gamma distribution")
+    distribution = ("Poisson process"
+                    if burstiness == 1.0 else "Gamma distribution")
 
     if ramp_up_strategy is not None:
         print(f"Traffic ramp-up strategy: {ramp_up_strategy}.")
@@ -863,8 +860,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="The ramp-up strategy. This would be used to "
         "ramp up the request rate from initial RPS to final "
         "RPS rate (specified by --ramp-up-start-rps and "
-        "--ramp-up-end-rps.) over the duration of the benchmark."
-    )
+        "--ramp-up-end-rps.) over the duration of the benchmark.")
     parser.add_argument(
         "--ramp-up-start-rps",
         type=int,
@@ -892,13 +888,11 @@ def main(args: argparse.Namespace):
             raise ValueError(
                 "When using ramp-up, do not specify --request-rate. "
                 "The request rate will be controlled by ramp-up parameters. "
-                "Please remove the --request-rate argument."
-            )
+                "Please remove the --request-rate argument.")
         if args.ramp_up_start_rps is None or args.ramp_up_end_rps is None:
             raise ValueError(
                 "When using --ramp-up-strategy, both --ramp-up-start-rps and "
-                "--ramp-up-end-rps must be specified"
-            )
+                "--ramp-up-end-rps must be specified")
         if args.ramp_up_start_rps < 0 or args.ramp_up_end_rps < 0:
             raise ValueError("Ramp-up start and end RPS must be non-negative")
         if args.ramp_up_start_rps > args.ramp_up_end_rps:
@@ -1045,7 +1039,7 @@ def main(args: argparse.Namespace):
                                if args.max_concurrency is not None else "")
         label = label or endpoint_type
         if args.ramp_up_strategy is not None:
-            file_name = f"{label}-ramp-up-{args.ramp_up_strategy}-{args.ramp_up_start_rps}qps-{args.ramp_up_end_rps}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json" # noqa
+            file_name = f"{label}-ramp-up-{args.ramp_up_strategy}-{args.ramp_up_start_rps}qps-{args.ramp_up_end_rps}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
         else:
             file_name = f"{label}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
         if args.result_filename:

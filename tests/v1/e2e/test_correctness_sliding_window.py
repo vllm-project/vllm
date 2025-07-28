@@ -6,8 +6,10 @@ import pytest
 
 from vllm import LLM, SamplingParams
 
-from ...core.block.e2e.test_correctness_sliding_window import (check_answers,
-                                                               prep_prompts)
+from ...core.block.e2e.test_correctness_sliding_window import (
+    check_answers,
+    prep_prompts,
+)
 
 
 @dataclass
@@ -27,7 +29,8 @@ model_config = {
     [
         "bigcode/starcoder2-3b",  # sliding window only
         "google/gemma-3-1b-it",  # sliding window + full attention
-    ])
+    ],
+)
 @pytest.mark.parametrize("batch_size", [5])
 @pytest.mark.parametrize("seed", [1])
 def test_sliding_window_retrieval(monkeypatch, model, batch_size, seed):
@@ -45,29 +48,34 @@ def test_sliding_window_retrieval(monkeypatch, model, batch_size, seed):
         llm = LLM(model=model)
         sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
 
-        prompts, answer, indices = prep_prompts(batch_size,
-                                                ln_range=test_config.ln_range)
+        prompts, answer, indices = prep_prompts(
+            batch_size, ln_range=test_config.ln_range
+        )
 
         check_length(prompts, llm, test_config.sliding_window)
 
         # Fresh generation
         responses = llm.generate(prompts, sampling_params)
-        check_answers(indices,
-                      answer,
-                      [response.outputs[0].text for response in responses],
-                      accept_rate=1.0)
+        check_answers(
+            indices,
+            answer,
+            [response.outputs[0].text for response in responses],
+            accept_rate=1.0,
+        )
 
         # Re-generate with the same prompts to test prefix caching
         responses = llm.generate(prompts, sampling_params)
-        check_answers(indices,
-                      answer,
-                      [response.outputs[0].text for response in responses],
-                      accept_rate=1.0)
+        check_answers(
+            indices,
+            answer,
+            [response.outputs[0].text for response in responses],
+            accept_rate=1.0,
+        )
 
 
 def check_length(prompts: list[str], llm: LLM, sliding_window: int):
     """
-    Check if the prompt length is valid, i.e., longer than the sliding window 
+    Check if the prompt length is valid, i.e., longer than the sliding window
     size and shorter than the model's max length.
 
     Args:
@@ -77,9 +85,9 @@ def check_length(prompts: list[str], llm: LLM, sliding_window: int):
     """
     tokenizer = llm.get_tokenizer()
     max_model_len = llm.llm_engine.model_config.max_model_len
-    assert any(
-        len(tokenizer.encode(prompt)) > sliding_window
-        for prompt in prompts), "Prompt is too short for test"
-    assert all(
-        len(tokenizer.encode(prompt)) <= max_model_len
-        for prompt in prompts), "Prompt is too long for test"
+    assert any(len(tokenizer.encode(prompt)) > sliding_window for prompt in prompts), (
+        "Prompt is too short for test"
+    )
+    assert all(len(tokenizer.encode(prompt)) <= max_model_len for prompt in prompts), (
+        "Prompt is too long for test"
+    )

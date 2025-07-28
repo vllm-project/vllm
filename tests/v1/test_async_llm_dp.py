@@ -31,39 +31,42 @@ engine_args = AsyncEngineArgs(
 )
 
 if not current_platform.supports_v1(engine_args.create_model_config()):
-    pytest.skip(reason="Requires V1-supporting platform.",
-                allow_module_level=True)
+    pytest.skip(reason="Requires V1-supporting platform.", allow_module_level=True)
 
 
 async def generate(
-        engine: AsyncLLM,
-        request_id: str,
-        prompt: PromptType,
-        output_kind: RequestOutputKind,
-        max_tokens: int,
-        prompt_logprobs: Optional[int] = None,
-        data_parallel_rank: Optional[int] = None) -> tuple[int, str]:
+    engine: AsyncLLM,
+    request_id: str,
+    prompt: PromptType,
+    output_kind: RequestOutputKind,
+    max_tokens: int,
+    prompt_logprobs: Optional[int] = None,
+    data_parallel_rank: Optional[int] = None,
+) -> tuple[int, str]:
     # Ensure generate doesn't complete too fast for cancellation test.
     await asyncio.sleep(0.2)
 
     count = 0
-    sampling_params = SamplingParams(max_tokens=max_tokens,
-                                     ignore_eos=True,
-                                     output_kind=output_kind,
-                                     temperature=0,
-                                     prompt_logprobs=prompt_logprobs)
-    async for out in engine.generate(request_id=request_id,
-                                     prompt=prompt,
-                                     sampling_params=sampling_params,
-                                     data_parallel_rank=data_parallel_rank):
-
+    sampling_params = SamplingParams(
+        max_tokens=max_tokens,
+        ignore_eos=True,
+        output_kind=output_kind,
+        temperature=0,
+        prompt_logprobs=prompt_logprobs,
+    )
+    async for out in engine.generate(
+        request_id=request_id,
+        prompt=prompt,
+        sampling_params=sampling_params,
+        data_parallel_rank=data_parallel_rank,
+    ):
         num_tokens = len(out.outputs[0].token_ids)
         if output_kind == RequestOutputKind.DELTA:
             count += num_tokens
         else:
             count = num_tokens
 
-        await asyncio.sleep(0.)
+        await asyncio.sleep(0.0)
 
     return count, request_id
 
@@ -77,9 +80,7 @@ async def generate(
 )
 @pytest.mark.parametrize("data_parallel_backend", ["mp", "ray"])
 @pytest.mark.asyncio
-async def test_load(output_kind: RequestOutputKind,
-                    data_parallel_backend: str):
-
+async def test_load(output_kind: RequestOutputKind, data_parallel_backend: str):
     stats_loggers = {}
 
     @dataclass
@@ -90,22 +91,24 @@ async def test_load(output_kind: RequestOutputKind,
         def __init__(self, vllm_config: VllmConfig, engine_index: int = 0):
             stats_loggers[engine_index] = self
 
-        def record(self, scheduler_stats: Optional[SchedulerStats],
-                   iteration_stats: Optional[IterationStats]):
+        def record(
+            self,
+            scheduler_stats: Optional[SchedulerStats],
+            iteration_stats: Optional[IterationStats],
+        ):
             if iteration_stats:
-                self.finished_req_count += len(
-                    iteration_stats.finished_requests)
+                self.finished_req_count += len(iteration_stats.finished_requests)
 
         def log_engine_initialized(self):
             self.init_count += 1
 
     with ExitStack() as after:
-
         prompt = "This is a test of data parallel"
 
         engine_args.data_parallel_backend = data_parallel_backend
-        engine = AsyncLLM.from_engine_args(engine_args,
-                                           stat_loggers=[SimpleStatsLogger])
+        engine = AsyncLLM.from_engine_args(
+            engine_args, stat_loggers=[SimpleStatsLogger]
+        )
         after.callback(engine.shutdown)
 
         NUM_REQUESTS = 100
@@ -118,20 +121,23 @@ async def test_load(output_kind: RequestOutputKind,
         for request_id in request_ids:
             tasks.append(
                 asyncio.create_task(
-                    generate(engine, request_id, prompt, output_kind,
-                             NUM_EXPECTED_TOKENS)))
+                    generate(
+                        engine, request_id, prompt, output_kind, NUM_EXPECTED_TOKENS
+                    )
+                )
+            )
             # Short sleep to ensure that requests are distributed.
             await asyncio.sleep(0.01)
         # Confirm that we got all the EXPECTED tokens from the requests.
-        done, pending = await asyncio.wait(tasks,
-                                           return_when=asyncio.FIRST_EXCEPTION)
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
         for task in pending:
             task.cancel()
         for task in done:
             num_generated_tokens, request_id = await task
             assert num_generated_tokens == NUM_EXPECTED_TOKENS, (
                 f"{request_id} generated {num_generated_tokens} but "
-                f"expected {NUM_EXPECTED_TOKENS}")
+                f"expected {NUM_EXPECTED_TOKENS}"
+            )
 
         assert not engine.output_processor.has_unfinished_requests()
 
@@ -155,5 +161,6 @@ async def test_load(output_kind: RequestOutputKind,
         for sl in stats_loggers.values():
             slogger: SimpleStatsLogger = sl
 
-            assert slogger.finished_req_count > NUM_REQUESTS // (
-                DP_SIZE + 1), f"requests are imbalanced: {stats_loggers}"
+            assert slogger.finished_req_count > NUM_REQUESTS // (DP_SIZE + 1), (
+                f"requests are imbalanced: {stats_loggers}"
+            )

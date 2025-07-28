@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 import pytest_asyncio
-
 from tests.utils import RemoteOpenAIServer
 
 # Use a small reasoning model to test the responses API.

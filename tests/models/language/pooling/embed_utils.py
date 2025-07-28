@@ -6,8 +6,7 @@ from typing import Optional
 import pytest
 
 from tests.conftest import HfRunner
-from tests.models.utils import (EmbedModelInfo, check_embeddings_close,
-                                matryoshka_fy)
+from tests.models.utils import EmbedModelInfo, check_embeddings_close, matryoshka_fy
 
 
 def run_embedding_correctness_test(
@@ -29,12 +28,14 @@ def run_embedding_correctness_test(
     )
 
 
-def correctness_test_embed_models(hf_runner,
-                                  vllm_runner,
-                                  model_info: EmbedModelInfo,
-                                  example_prompts,
-                                  vllm_extra_kwargs=None,
-                                  hf_model_callback=None):
+def correctness_test_embed_models(
+    hf_runner,
+    vllm_runner,
+    model_info: EmbedModelInfo,
+    example_prompts,
+    vllm_extra_kwargs=None,
+    hf_model_callback=None,
+):
     if not model_info.enable_test:
         # A model family has many models with the same architecture,
         # and we don't need to test each one.
@@ -51,18 +52,16 @@ def correctness_test_embed_models(hf_runner,
     vllm_extra_kwargs = vllm_extra_kwargs or {}
     vllm_extra_kwargs["dtype"] = model_info.dtype
 
-    with vllm_runner(model_info.name,
-                     task="embed",
-                     max_model_len=None,
-                     **vllm_extra_kwargs) as vllm_model:
+    with vllm_runner(
+        model_info.name, task="embed", max_model_len=None, **vllm_extra_kwargs
+    ) as vllm_model:
         vllm_outputs = vllm_model.embed(example_prompts)
 
     with hf_runner(
-            model_info.name,
-            dtype="float32",
-            is_sentence_transformer=True,
+        model_info.name,
+        dtype="float32",
+        is_sentence_transformer=True,
     ) as hf_model:
-
         if hf_model_callback is not None:
             hf_model_callback(hf_model)
 

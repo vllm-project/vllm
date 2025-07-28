@@ -28,12 +28,13 @@ infiles += [
     "vllm/utils/__init__.py",
 ]
 
-setup(ext_modules=cythonize(infiles,
-                            annotate=False,
-                            force=True,
-                            compiler_directives={
-                                'language_level': "3",
-                                'infer_types': True
-                            }))
+setup(
+    ext_modules=cythonize(
+        infiles,
+        annotate=False,
+        force=True,
+        compiler_directives={"language_level": "3", "infer_types": True},
+    )
+)
 
 # example usage: python3 build_cython.py build_ext --inplace

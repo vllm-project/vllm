@@ -14,7 +14,7 @@ def use_v0_only(monkeypatch):
     """
     This file tests V0 internals, so set VLLM_USE_V1=0.
     """
-    monkeypatch.setenv('VLLM_USE_V1', '0')
+    monkeypatch.setenv("VLLM_USE_V1", "0")
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -29,8 +29,7 @@ def test_logits_processor_force_generate(
         tokenizer = vllm_model.model.get_tokenizer()
         repeat_times = 2
         enforced_answers = " vLLM"
-        vllm_token_ids = tokenizer.encode(enforced_answers,
-                                          add_special_tokens=False)
+        vllm_token_ids = tokenizer.encode(enforced_answers, add_special_tokens=False)
         max_tokens = len(vllm_token_ids) * repeat_times
 
         def pick_vllm(token_ids, logits):

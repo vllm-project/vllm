@@ -6,8 +6,7 @@ import pytest
 
 from vllm import envs
 from vllm.multimodal.image import ImageMediaIO
-from vllm.multimodal.video import (VIDEO_LOADER_REGISTRY, VideoLoader,
-                                   VideoMediaIO)
+from vllm.multimodal.video import VIDEO_LOADER_REGISTRY, VideoLoader, VideoMediaIO
 
 NUM_FRAMES = 10
 FAKE_OUTPUT_1 = np.random.rand(NUM_FRAMES, 1280, 720, 3)
@@ -16,7 +15,6 @@ FAKE_OUTPUT_2 = np.random.rand(NUM_FRAMES, 1280, 720, 3)
 
 @VIDEO_LOADER_REGISTRY.register("test_video_loader_1")
 class TestVideoLoader1(VideoLoader):
-
     @classmethod
     def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
         return FAKE_OUTPUT_1
@@ -24,7 +22,6 @@ class TestVideoLoader1(VideoLoader):
 
 @VIDEO_LOADER_REGISTRY.register("test_video_loader_2")
 class TestVideoLoader2(VideoLoader):
-
     @classmethod
     def load_bytes(cls, data: bytes, num_frames: int = -1) -> npt.NDArray:
         return FAKE_OUTPUT_2
@@ -47,13 +44,10 @@ def test_video_loader_type_doesnt_exist():
 
 @VIDEO_LOADER_REGISTRY.register("assert_10_frames_1_fps")
 class Assert10Frames1FPSVideoLoader(VideoLoader):
-
     @classmethod
-    def load_bytes(cls,
-                   data: bytes,
-                   num_frames: int = -1,
-                   fps: float = -1.0,
-                   **kwargs) -> npt.NDArray:
+    def load_bytes(
+        cls, data: bytes, num_frames: int = -1, fps: float = -1.0, **kwargs
+    ) -> npt.NDArray:
         assert num_frames == 10, "bad num_frames"
         assert fps == 1.0, "bad fps"
         return FAKE_OUTPUT_2
@@ -68,11 +62,8 @@ def test_video_media_io_kwargs():
     _ = videoio.load_bytes(b"test")
 
     videoio = VideoMediaIO(
-        imageio, **{
-            "num_frames": 10,
-            "fps": 1.0,
-            "not_used": "not_used"
-        })
+        imageio, **{"num_frames": 10, "fps": 1.0, "not_used": "not_used"}
+    )
     _ = videoio.load_bytes(b"test")
 
     with pytest.raises(AssertionError, match="bad num_frames"):

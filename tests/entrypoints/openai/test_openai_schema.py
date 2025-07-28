@@ -70,11 +70,15 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
             -d '{"messages": [{"content": [{"file": {}, "type": "file"}], "role": "user"}]}' \
             http://localhost:8000/tokenize
         """  # noqa: E501
-        if (op.method.lower() == "post" and op.path == "/tokenize"
-                and hasattr(case, "body") and isinstance(case.body, dict)
-                and "messages" in case.body
-                and isinstance(case.body["messages"], list)
-                and len(case.body["messages"]) > 0):
+        if (
+            op.method.lower() == "post"
+            and op.path == "/tokenize"
+            and hasattr(case, "body")
+            and isinstance(case.body, dict)
+            and "messages" in case.body
+            and isinstance(case.body["messages"], list)
+            and len(case.body["messages"]) > 0
+        ):
             for message in case.body["messages"]:
                 if not isinstance(message, dict):
                     continue
@@ -102,9 +106,8 @@ def test_openapi_stateless(case: schemathesis.Case):
 
     timeout = {
         # requires a longer timeout
-        ("POST", "/v1/chat/completions"):
-        LONG_TIMEOUT_SECONDS,
+        ("POST", "/v1/chat/completions"): LONG_TIMEOUT_SECONDS,
     }.get(key, DEFAULT_TIMEOUT_SECONDS)
 
-    #No need to verify SSL certificate for localhost
+    # No need to verify SSL certificate for localhost
     case.call_and_validate(verify=False, timeout=timeout)

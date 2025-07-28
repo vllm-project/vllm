@@ -10,6 +10,7 @@ import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 import torch
+
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
 from openai import BadRequestError
@@ -37,8 +38,7 @@ def zephyr_lora_added_tokens_files(zephyr_lora_files):
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     # Copy tokenizer to adapter and add some unique tokens
     # 32000, 32001, 32002
-    added = tokenizer.add_tokens(["vllm1", "vllm2", "vllm3"],
-                                 special_tokens=True)
+    added = tokenizer.add_tokens(["vllm1", "vllm2", "vllm3"], special_tokens=True)
     assert added == 3
     tokenizer.save_pretrained(tmp_model_dir)
     yield tmp_model_dir
@@ -65,8 +65,7 @@ def default_server_args(
     ]
 
 
-@pytest.fixture(scope="module",
-                params=["", "--disable-frontend-multiprocessing"])
+@pytest.fixture(scope="module", params=["", "--disable-frontend-multiprocessing"])
 def server_with_prompt_embeds(default_server_args, request):
     if request.param:
         default_server_args.append(request.param)
@@ -86,13 +85,14 @@ def create_dummy_embeds(num_tokens: int = 5) -> str:
     dummy_embeds = torch.randn(num_tokens, CONFIG.hidden_size)
     buffer = io.BytesIO()
     torch.save(dummy_embeds, buffer)
-    return base64.b64encode(buffer.getvalue()).decode('utf-8')
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_completions_with_prompt_embeds(
-        client_with_prompt_embeds: openai.AsyncOpenAI, model_name: str):
+    client_with_prompt_embeds: openai.AsyncOpenAI, model_name: str
+):
     # Test case: Single prompt embeds input
     encoded_embeds = create_dummy_embeds()
     completion = await client_with_prompt_embeds.completions.create(
@@ -100,7 +100,8 @@ async def test_completions_with_prompt_embeds(
         prompt="",  # Add empty prompt as required parameter
         max_tokens=5,
         temperature=0.0,
-        extra_body={"prompt_embeds": encoded_embeds})
+        extra_body={"prompt_embeds": encoded_embeds},
+    )
     assert len(completion.choices[0].text) >= 1
     assert completion.choices[0].prompt_logprobs is None
 
@@ -111,7 +112,8 @@ async def test_completions_with_prompt_embeds(
         prompt="",  # Add empty prompt as required parameter
         max_tokens=5,
         temperature=0.0,
-        extra_body={"prompt_embeds": [encoded_embeds, encoded_embeds2]})
+        extra_body={"prompt_embeds": [encoded_embeds, encoded_embeds2]},
+    )
     assert len(completion.choices) == 2
     assert len(completion.choices[0].text) >= 1
     assert len(completion.choices[1].text) >= 1
@@ -123,7 +125,8 @@ async def test_completions_with_prompt_embeds(
         prompt="",  # Add empty prompt as required parameter
         max_tokens=5,
         temperature=0.0,
-        extra_body={"prompt_embeds": encoded_embeds})
+        extra_body={"prompt_embeds": encoded_embeds},
+    )
     single_output = single_completion.choices[0].text
 
     stream = await client_with_prompt_embeds.completions.create(
@@ -132,7 +135,8 @@ async def test_completions_with_prompt_embeds(
         max_tokens=5,
         temperature=0.0,
         stream=True,
-        extra_body={"prompt_embeds": encoded_embeds})
+        extra_body={"prompt_embeds": encoded_embeds},
+    )
     chunks = []
     finish_reason_count = 0
     async for chunk in stream:
@@ -152,12 +156,12 @@ async def test_completions_with_prompt_embeds(
         max_tokens=5,
         temperature=0.0,
         stream=True,
-        extra_body={"prompt_embeds": [encoded_embeds, encoded_embeds2]})
+        extra_body={"prompt_embeds": [encoded_embeds, encoded_embeds2]},
+    )
     chunks_stream_embeds: list[list[str]] = [[], []]
     finish_reason_count = 0
     async for chunk in stream:
-        chunks_stream_embeds[chunk.choices[0].index].append(
-            chunk.choices[0].text)
+        chunks_stream_embeds[chunk.choices[0].index].append(chunk.choices[0].text)
         if chunk.choices[0].finish_reason is not None:
             finish_reason_count += 1
     assert finish_reason_count == 2
@@ -173,7 +177,8 @@ async def test_completions_with_prompt_embeds(
         prompt="This is a prompt",
         max_tokens=5,
         temperature=0.0,
-        extra_body={"prompt_embeds": encoded_embeds})
+        extra_body={"prompt_embeds": encoded_embeds},
+    )
     assert len(completion.choices) == 2
     completion_text_only = await client_with_prompt_embeds.completions.create(
         model=model_name,
@@ -186,18 +191,18 @@ async def test_completions_with_prompt_embeds(
         prompt="",
         max_tokens=5,
         temperature=0.0,
-        extra_body={"prompt_embeds": encoded_embeds})
+        extra_body={"prompt_embeds": encoded_embeds},
+    )
     # Embeddings responses should be handled first
-    assert completion_mixed.choices[0].text == completion_embeds_only.choices[
-        0].text
-    assert completion_mixed.choices[1].text == completion_text_only.choices[
-        0].text
+    assert completion_mixed.choices[0].text == completion_embeds_only.choices[0].text
+    assert completion_mixed.choices[1].text == completion_text_only.choices[0].text
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_completions_errors_with_prompt_embeds(
-        client_with_prompt_embeds: openai.AsyncOpenAI, model_name: str):
+    client_with_prompt_embeds: openai.AsyncOpenAI, model_name: str
+):
     # Test error case: invalid prompt_embeds
     with pytest.raises(BadRequestError):
         await client_with_prompt_embeds.completions.create(
@@ -205,15 +210,16 @@ async def test_completions_errors_with_prompt_embeds(
             model=model_name,
             max_tokens=5,
             temperature=0.0,
-            extra_body={"prompt_embeds": "invalid_base64"})
+            extra_body={"prompt_embeds": "invalid_base64"},
+        )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("logprobs_arg", [1, 0])
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_completions_with_logprobs_and_prompt_embeds(
-        client_with_prompt_embeds: openai.AsyncOpenAI, logprobs_arg: int,
-        model_name: str):
+    client_with_prompt_embeds: openai.AsyncOpenAI, logprobs_arg: int, model_name: str
+):
     # Test case: Logprobs using prompt_embeds
     encoded_embeds = create_dummy_embeds()
     completion = await client_with_prompt_embeds.completions.create(
@@ -223,7 +229,8 @@ async def test_completions_with_logprobs_and_prompt_embeds(
         temperature=0.0,
         echo=False,
         logprobs=logprobs_arg,
-        extra_body={"prompt_embeds": encoded_embeds})
+        extra_body={"prompt_embeds": encoded_embeds},
+    )
 
     logprobs = completion.choices[0].logprobs
     assert logprobs is not None
@@ -243,7 +250,8 @@ async def test_completions_with_logprobs_and_prompt_embeds(
         temperature=0.0,
         echo=False,
         logprobs=logprobs_arg,
-        extra_body={"prompt_embeds": [encoded_embeds, encoded_embeds2]})
+        extra_body={"prompt_embeds": [encoded_embeds, encoded_embeds2]},
+    )
 
     assert len(completion.choices) == 2
     for choice in completion.choices:
@@ -253,6 +261,5 @@ async def test_completions_with_logprobs_and_prompt_embeds(
         assert len(logprobs.token_logprobs) == 5
         assert len(logprobs.top_logprobs) == 5
         for top_logprobs in logprobs.top_logprobs[1:]:
-            assert max(logprobs_arg,
-                       1) <= len(top_logprobs) <= logprobs_arg + 1
+            assert max(logprobs_arg, 1) <= len(top_logprobs) <= logprobs_arg + 1
         assert len(logprobs.tokens) == 5

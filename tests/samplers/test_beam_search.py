@@ -43,19 +43,21 @@ def test_beam_search_single_input(
 ) -> None:
     example_prompts = example_prompts[:1]
     with hf_runner(model, dtype=dtype) as hf_model:
-        hf_outputs = hf_model.generate_beam_search(example_prompts, beam_width,
-                                                   max_tokens)
+        hf_outputs = hf_model.generate_beam_search(
+            example_prompts, beam_width, max_tokens
+        )
 
     with vllm_runner(model, dtype=dtype) as vllm_model:
-        vllm_outputs = vllm_model.generate_beam_search(example_prompts,
-                                                       beam_width, max_tokens)
+        vllm_outputs = vllm_model.generate_beam_search(
+            example_prompts, beam_width, max_tokens
+        )
 
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_texts = hf_outputs[i]
         vllm_output_ids, vllm_output_texts = vllm_outputs[i]
-        for j, (hf_text,
-                vllm_text) in enumerate(zip(hf_output_texts,
-                                            vllm_output_texts)):
+        for j, (hf_text, vllm_text) in enumerate(
+            zip(hf_output_texts, vllm_output_texts)
+        ):
             print(f">>>{j}-th hf output:")
             print(hf_text)
             print(f">>>{j}-th vllm output:")
@@ -63,8 +65,8 @@ def test_beam_search_single_input(
         assert len(hf_output_ids) == len(vllm_output_ids)
         for j in range(len(hf_output_ids)):
             assert hf_output_ids[j] == vllm_output_ids[j], (
-                f"Test{i} output{j}:\nHF: {hf_output_ids}\n"
-                f"vLLM: {vllm_output_ids}")
+                f"Test{i} output{j}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}"
+            )
 
 
 @pytest.mark.parametrize("dtype", ["half"])
@@ -85,11 +87,10 @@ def test_beam_search_passes_multimodal_data(
     model = "Qwen/Qwen2-Audio-7B-Instruct"
     audio_seq = "<|audio_bos|><|AUDIO|><|audio_eos|>"
     prompts = [
-        f"<|im_start|>user\n{audio_seq}Can you transcribe this?<|im_end|>\n<|im_start|>assistant\n"  #noqa: E501
+        f"<|im_start|>user\n{audio_seq}Can you transcribe this?<|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
     ]
 
-    with hf_runner(model, dtype=dtype,
-                   auto_cls=AutoModelForSeq2SeqLM) as hf_model:
+    with hf_runner(model, dtype=dtype, auto_cls=AutoModelForSeq2SeqLM) as hf_model:
         audio_token_id = hf_model.config.audio_token_index
         eos_token_id = hf_model.tokenizer.eos_token_id  # <|im_end|>
         hf_outputs = hf_model.generate_beam_search(
@@ -107,17 +108,15 @@ def test_beam_search_passes_multimodal_data(
             audios=audios,
         )
 
-    seq_with_no_audio_toks = lambda seq: [
-        tok for tok in seq if tok != audio_token_id
-    ]
+    seq_with_no_audio_toks = lambda seq: [tok for tok in seq if tok != audio_token_id]
 
     for i in range(len(prompts)):
         hf_output_ids, hf_output_texts = hf_outputs[i]
         vllm_output_ids, vllm_output_texts = vllm_outputs[i]
 
-        for j, (hf_text,
-                vllm_text) in enumerate(zip(hf_output_texts,
-                                            vllm_output_texts)):
+        for j, (hf_text, vllm_text) in enumerate(
+            zip(hf_output_texts, vllm_output_texts)
+        ):
             print(f">>>{j}-th hf output [NOTE: special tokens are filtered]:")
             print(hf_text)
             print(f">>>{j}-th vllm output:")
@@ -130,12 +129,10 @@ def test_beam_search_passes_multimodal_data(
             # token to match features, while the vLLM helper maintains the
             # single audio token in the input text
             filtered_hf_output_ids = seq_with_no_audio_toks(hf_output_ids[j])
-            filtered_vllm_output_ids = seq_with_no_audio_toks(
-                vllm_output_ids[j])
+            filtered_vllm_output_ids = seq_with_no_audio_toks(vllm_output_ids[j])
 
             # HF output IDs may contain the end of sequence
-            if len(filtered_hf_output_ids
-                   ) == len(filtered_vllm_output_ids) + 1:
+            if len(filtered_hf_output_ids) == len(filtered_vllm_output_ids) + 1:
                 assert filtered_hf_output_ids[-1] == eos_token_id
                 filtered_hf_output_ids = filtered_hf_output_ids[:-1]
 
