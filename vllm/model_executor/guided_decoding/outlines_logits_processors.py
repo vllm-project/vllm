@@ -8,7 +8,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
-from typing import Optional, Union
+from typing import Union
 
 import regex as re
 import torch
@@ -36,11 +36,11 @@ CACHE = None
 class BaseLogitsProcessor:
 
     def __init__(self, guide: Guide, eos_token_id: int,
-                 reasoner: Optional[ReasoningParser]) -> None:
+                 reasoner: ReasoningParser | None) -> None:
         self._guide: Guide = guide
         self._eos_token_id: int = eos_token_id
-        self._reasoner: Optional[ReasoningParser] = reasoner
-        self._mask: Optional[torch.Tensor] = None
+        self._reasoner: ReasoningParser | None = reasoner
+        self._mask: torch.Tensor | None = None
 
     def __call__(self, input_ids: list[int],
                  scores: torch.Tensor) -> torch.Tensor:
@@ -114,7 +114,7 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
         return Guide(index)
 
     def __init__(self, regex_string: str, tokenizer: PreTrainedTokenizerBase,
-                 reasoner: Optional[ReasoningParser]) -> None:
+                 reasoner: ReasoningParser | None) -> None:
         super().__init__(
             guide=RegexLogitsProcessor._get_guide(regex_string, tokenizer),
             eos_token_id=tokenizer.eos_token_id,  # type: ignore
@@ -126,7 +126,7 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
     def __init__(self, schema: Union[str, dict, BaseModel],
                  tokenizer: PreTrainedTokenizerBase,
                  whitespace_pattern: Union[str, None],
-                 reasoner: Optional[ReasoningParser]) -> None:
+                 reasoner: ReasoningParser | None) -> None:
 
         if isinstance(schema, type(BaseModel)):
             schema_str = json.dumps(schema.model_json_schema())

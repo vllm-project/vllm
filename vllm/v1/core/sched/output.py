@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import numpy as np
@@ -27,11 +27,11 @@ class NewRequestData:
     mm_inputs: list[MultiModalKwargs]
     mm_hashes: list[str]
     mm_positions: list[PlaceholderRange]
-    sampling_params: Optional[SamplingParams]
-    pooling_params: Optional[PoolingParams]
+    sampling_params: SamplingParams | None
+    pooling_params: PoolingParams | None
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
-    lora_request: Optional[LoRARequest]
+    lora_request: LoRARequest | None
 
     @classmethod
     def from_request(
@@ -151,7 +151,7 @@ class SchedulerOutput:
     # for filling the next token bitmask
     structured_output_request_ids: dict[str, int]
     # the bitmask for the whole batch
-    grammar_bitmask: Optional[npt.NDArray[np.int32]]
+    grammar_bitmask: npt.NDArray[np.int32] | None
 
     # KV Cache Connector metadata.
-    kv_connector_metadata: Optional[KVConnectorMetadata] = None
+    kv_connector_metadata: KVConnectorMetadata | None = None

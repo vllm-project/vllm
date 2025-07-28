@@ -33,11 +33,11 @@ class StructuredOutputManager:
     """Engine-level manager for structured output requests."""
 
     def __init__(self, vllm_config: VllmConfig):
-        self.backend: Optional[StructuredOutputBackend] = None
-        self.reasoner: Optional[ReasoningParser] = None
+        self.backend: StructuredOutputBackend | None = None
+        self.reasoner: ReasoningParser | None = None
         self.vllm_config = vllm_config
 
-        self._grammar_bitmask: Optional[torch.Tensor] = None
+        self._grammar_bitmask: torch.Tensor | None = None
         self._full_mask = torch.tensor(-1, dtype=torch.int32)
 
         if not self.vllm_config.model_config.skip_tokenizer_init:
@@ -125,7 +125,7 @@ class StructuredOutputManager:
         requests: dict[str, Request],
         structured_output_request_ids: dict[str, int],
         scheduled_spec_decode_tokens: dict[str, list[int]],
-    ) -> Optional[npt.NDArray[np.int32]]:
+    ) -> npt.NDArray[np.int32] | None:
         # Prepare the structured output bitmask for this batch.
         if not structured_output_request_ids:
             return None

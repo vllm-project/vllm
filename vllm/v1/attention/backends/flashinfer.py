@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
@@ -38,7 +38,7 @@ logger = init_logger(__name__)
 class FlashInferBackend(AttentionBackend):
 
     accept_output_buffer: bool = True
-    cached_sm100a_supported: Optional[bool] = None
+    cached_sm100a_supported: bool | None = None
 
     @classmethod
     def get_supported_dtypes(cls) -> list[torch.dtype]:
@@ -203,14 +203,14 @@ class FlashInferMetadata:
 
     # For cascade attention.
     use_cascade: bool
-    shared_qo_indptr: Optional[torch.Tensor] = None
-    shared_kv_page_indptr: Optional[torch.Tensor] = None
-    shared_kv_page_indices: Optional[torch.Tensor] = None
-    shared_kv_last_page_len: Optional[torch.Tensor] = None
+    shared_qo_indptr: torch.Tensor | None = None
+    shared_kv_page_indptr: torch.Tensor | None = None
+    shared_kv_page_indices: torch.Tensor | None = None
+    shared_kv_last_page_len: torch.Tensor | None = None
 
-    prefill_wrapper: Optional[BatchPrefillWithPagedKVCacheWrapper] = None
-    decode_wrapper: Optional[BatchDecodeWithPagedKVCacheWrapper] = None
-    cascade_wrapper: Optional[MultiLevelCascadeAttentionWrapper] = None
+    prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper | None = None
+    decode_wrapper: BatchDecodeWithPagedKVCacheWrapper | None = None
+    cascade_wrapper: MultiLevelCascadeAttentionWrapper | None = None
 
     @property
     def query_start_loc(self):
@@ -233,7 +233,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
         # Global hyperparameters shared by all attention layers
-        self.global_hyperparameters: Optional[PerLayerParameters] = None
+        self.global_hyperparameters: PerLayerParameters | None = None
 
         self.vllm_config = vllm_config
         self.cache_config = vllm_config.cache_config
@@ -486,13 +486,13 @@ class FlashInferImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        blocksparse_params: Optional[dict[str, Any]] = None,
-        logits_soft_cap: Optional[float] = None,
+        blocksparse_params: dict[str, Any] | None = None,
+        logits_soft_cap: float | None = None,
         attn_type: AttentionType = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[int] = None,
+        kv_sharing_target_layer_name: int | None = None,
         use_irope: bool = False,
     ) -> None:
         if use_irope:
@@ -530,8 +530,8 @@ class FlashInferImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashInferMetadata,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass with FlashInfer.
 

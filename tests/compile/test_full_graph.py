@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import tempfile
-from typing import Any, Optional, Union
+from typing import Any, Union
 
 import pytest
 import torch
@@ -17,7 +17,7 @@ from vllm.platforms import current_platform
 from ..utils import create_new_process_for_each_test
 
 
-def models_list(*, all: bool = True, keywords: Optional[list[str]] = None):
+def models_list(*, all: bool = True, keywords: list[str] | None = None):
     TEST_MODELS: list[tuple[str, dict[str, Any]]] = [
         ("facebook/opt-125m", {}),
         (

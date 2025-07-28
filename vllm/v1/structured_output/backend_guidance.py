@@ -7,7 +7,7 @@ import copy
 import json
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Union
 
 import torch
 
@@ -237,7 +237,7 @@ def serialize_guidance_grammar(
 
 def validate_guidance_grammar(
         sampling_params: SamplingParams,
-        tokenizer: Optional[llguidance.LLTokenizer] = None) -> None:
+        tokenizer: llguidance.LLTokenizer | None = None) -> None:
     tp, grm = get_structured_output_key(sampling_params)
     guidance_grm = serialize_guidance_grammar(tp, grm)
     err = llguidance.LLMatcher.validate_grammar(guidance_grm, tokenizer)

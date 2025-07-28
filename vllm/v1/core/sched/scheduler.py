@@ -7,7 +7,7 @@ import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Any, Optional, Union
+from typing import Any, Union
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
@@ -63,7 +63,7 @@ class Scheduler(SchedulerInterface):
         # request ids should be included in the EngineCoreOutputs returned
         # by update_from_outputs(). This is currently used in the multi-engine
         # case to track request lifetimes efficiently.
-        self.finished_req_ids_dict: Optional[dict[int, set[str]]] = (
+        self.finished_req_ids_dict: dict[int, set[str]] | None = (
             defaultdict(set) if include_finished_set else None)
 
         # Scheduling constraints.
@@ -759,7 +759,7 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
-        spec_decoding_stats: Optional[SpecDecodingStats] = None
+        spec_decoding_stats: SpecDecodingStats | None = None
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
@@ -1006,7 +1006,7 @@ class Scheduler(SchedulerInterface):
             request.status = finished_status
             self._free_request(request)
 
-    def _free_request(self, request: Request) -> Optional[dict[str, Any]]:
+    def _free_request(self, request: Request) -> dict[str, Any] | None:
         assert request.is_finished()
 
         delay_free_blocks, kv_xfer_params = self._connector_finished(request)
@@ -1038,8 +1038,8 @@ class Scheduler(SchedulerInterface):
 
     def make_stats(
         self,
-        spec_decoding_stats: Optional[SpecDecodingStats] = None,
-    ) -> Optional[SchedulerStats]:
+        spec_decoding_stats: SpecDecodingStats | None = None,
+    ) -> SchedulerStats | None:
         if not self.log_stats:
             return None
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
@@ -1056,10 +1056,10 @@ class Scheduler(SchedulerInterface):
 
     def make_spec_decoding_stats(
         self,
-        spec_decoding_stats: Optional[SpecDecodingStats],
+        spec_decoding_stats: SpecDecodingStats | None,
         num_draft_tokens: int,
         num_accepted_tokens: int,
-    ) -> Optional[SpecDecodingStats]:
+    ) -> SpecDecodingStats | None:
         if not self.log_stats:
             return None
         if spec_decoding_stats is None:
@@ -1077,11 +1077,11 @@ class Scheduler(SchedulerInterface):
     # KV Connector Related Methods
     ########################################################################
 
-    def get_kv_connector(self) -> Optional[KVConnectorBase_V1]:
+    def get_kv_connector(self) -> KVConnectorBase_V1 | None:
         return self.connector
 
     def _connector_finished(
-            self, request: Request) -> tuple[bool, Optional[dict[str, Any]]]:
+            self, request: Request) -> tuple[bool, dict[str, Any] | None]:
         """
         Invoke the KV connector request_finished() method if applicable.
 

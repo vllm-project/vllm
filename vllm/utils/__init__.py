@@ -276,7 +276,7 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
 
     def __init__(self,
                  capacity: float,
-                 getsizeof: Optional[Callable[[_V], float]] = None):
+                 getsizeof: Callable[[_V], float] | None = None):
         super().__init__(capacity, getsizeof)
 
         self.pinned_items = set[_K]()
@@ -351,7 +351,7 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
             self._LRUCache__order[key] = None  # type: ignore
 
     @overload
-    def get(self, key: _K, /) -> Optional[_V]:
+    def get(self, key: _K, /) -> _V | None:
         ...
 
     @overload
@@ -361,9 +361,8 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
     def get(self,
             key: _K,
             /,
-            default: Optional[Union[_V,
-                                    _T]] = None) -> Optional[Union[_V, _T]]:
-        value: Optional[Union[_V, _T]]
+            default: Union[_V, _T] | None = None) -> Union[_V, _T] | None:
+        value: Union[_V, _T] | None
         if key in self:
             value = self.__getitem__(
                 key, update_info=False)  # type: ignore[call-arg]
@@ -385,9 +384,8 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
 
     def pop(self,
             key: _K,
-            default: Optional[Union[_V,
-                                    _T]] = None) -> Optional[Union[_V, _T]]:
-        value: Optional[Union[_V, _T]]
+            default: Union[_V, _T] | None = None) -> Union[_V, _T] | None:
+        value: Union[_V, _T] | None
         if key not in self:
             return default
 
@@ -415,7 +413,7 @@ class LRUCache(cachetools.LRUCache[_K, _V], Generic[_K, _V]):
         """
         self.pinned_items.remove(key)
 
-    def _on_remove(self, key: _K, value: Optional[_V]) -> None:
+    def _on_remove(self, key: _K, value: _V | None) -> None:
         pass
 
     def remove_oldest(self, *, remove_pinned: bool = False) -> None:
@@ -703,7 +701,7 @@ class AsyncMicrobatchTokenizer:
 
 def make_async(
     func: Callable[P, T],
-    executor: Optional[concurrent.futures.Executor] = None
+    executor: concurrent.futures.Executor | None = None
 ) -> Callable[P, Awaitable[T]]:
     """Take a blocking function, and run it on in an executor thread.
 
@@ -931,7 +929,7 @@ def _get_open_port() -> int:
             return s.getsockname()[1]
 
 
-def find_process_using_port(port: int) -> Optional[psutil.Process]:
+def find_process_using_port(port: int) -> psutil.Process | None:
     # TODO: We can not check for running processes with network
     # port on macOS. Therefore, we can not have a full graceful shutdown
     # of vLLM. For now, let's not look for processes in this case.
@@ -1011,8 +1009,8 @@ def _generate_random_fp8(
 
 
 def get_kv_cache_torch_dtype(
-        cache_dtype: Optional[Union[str, torch.dtype]],
-        model_dtype: Optional[Union[str, torch.dtype]] = None) -> torch.dtype:
+        cache_dtype: Union[str, torch.dtype] | None,
+        model_dtype: Union[str, torch.dtype] | None = None) -> torch.dtype:
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
             if isinstance(model_dtype,
@@ -1039,11 +1037,11 @@ def create_kv_caches_with_random_flash(
     num_layers: int,
     num_heads: int,
     head_size: int,
-    cache_dtype: Optional[Union[str, torch.dtype]],
-    model_dtype: Optional[Union[str, torch.dtype]] = None,
-    seed: Optional[int] = None,
-    device: Optional[str] = "cuda",
-    cache_layout: Optional[str] = "NHD",
+    cache_dtype: Union[str, torch.dtype] | None,
+    model_dtype: Union[str, torch.dtype] | None = None,
+    seed: int | None = None,
+    device: str | None = "cuda",
+    cache_layout: str | None = "NHD",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     from vllm.platforms import current_platform
     current_platform.seed_everything(seed)
@@ -1083,10 +1081,10 @@ def create_kv_caches_with_random(
     num_layers: int,
     num_heads: int,
     head_size: int,
-    cache_dtype: Optional[Union[str, torch.dtype]],
-    model_dtype: Optional[Union[str, torch.dtype]] = None,
-    seed: Optional[int] = None,
-    device: Optional[str] = "cuda",
+    cache_dtype: Union[str, torch.dtype] | None,
+    model_dtype: Union[str, torch.dtype] | None = None,
+    seed: int | None = None,
+    device: str | None = "cuda",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     if cache_dtype == "fp8" and head_size % 16:
         raise ValueError(
@@ -1147,7 +1145,7 @@ def is_uva_available() -> bool:
 
 class DeviceMemoryProfiler:
 
-    def __init__(self, device: Optional[torch.types.Device] = None):
+    def __init__(self, device: torch.types.Device | None = None):
         self.device = device
 
     def current_memory_usage(self) -> float:
@@ -1174,7 +1172,7 @@ def make_ndarray_with_pad(
     pad: T,
     dtype: npt.DTypeLike,
     *,
-    max_len: Optional[int] = None,
+    max_len: int | None = None,
 ) -> npt.NDArray:
     """
     Make a padded array from 2D inputs.
@@ -1199,8 +1197,8 @@ def make_tensor_with_pad(
     pad: T,
     dtype: torch.dtype,
     *,
-    max_len: Optional[int] = None,
-    device: Optional[Union[str, torch.device]] = None,
+    max_len: int | None = None,
+    device: Union[str, torch.device] | None = None,
     pin_memory: bool = False,
 ) -> torch.Tensor:
     """
@@ -1450,7 +1448,7 @@ F = TypeVar('F', bound=Callable[..., Any])
 def deprecate_args(
     start_index: int,
     is_deprecated: Union[bool, Callable[[], bool]] = True,
-    additional_message: Optional[str] = None,
+    additional_message: str | None = None,
 ) -> Callable[[F], F]:
     if not callable(is_deprecated):
         is_deprecated = partial(identity, is_deprecated)
@@ -1492,7 +1490,7 @@ def deprecate_args(
 def deprecate_kwargs(
     *kws: str,
     is_deprecated: Union[bool, Callable[[], bool]] = True,
-    additional_message: Optional[str] = None,
+    additional_message: str | None = None,
 ) -> Callable[[F], F]:
     deprecated_kws = set(kws)
 
@@ -1526,7 +1524,7 @@ def deprecate_kwargs(
 
 @lru_cache(maxsize=8)
 def _cuda_device_count_stateless(
-        cuda_visible_devices: Optional[str] = None) -> int:
+        cuda_visible_devices: str | None = None) -> int:
     # Note: cuda_visible_devices is not used, but we keep it as an argument for
     # LRU Cache purposes.
 
@@ -2016,8 +2014,8 @@ def supports_kw(
 
 
 def resolve_mm_processor_kwargs(
-    init_kwargs: Optional[Mapping[str, object]],
-    inference_kwargs: Optional[Mapping[str, object]],
+    init_kwargs: Mapping[str, object] | None,
+    inference_kwargs: Mapping[str, object] | None,
     callable: Callable[..., object],
     *,
     requires_kw_only: bool = True,
@@ -2060,7 +2058,7 @@ def resolve_mm_processor_kwargs(
 
 def get_allowed_kwarg_only_overrides(
     callable: Callable[..., object],
-    overrides: Optional[Mapping[str, object]],
+    overrides: Mapping[str, object] | None,
     *,
     requires_kw_only: bool = True,
     allow_var_kwargs: bool = False,
@@ -2492,8 +2490,8 @@ def direct_register_custom_op(
         op_name: str,
         op_func: Callable,
         mutates_args: list[str],
-        fake_impl: Optional[Callable] = None,
-        target_lib: Optional[Library] = None,
+        fake_impl: Callable | None = None,
+        target_lib: Library | None = None,
         dispatch_key: str = "CUDA",
         tags: tuple[torch.Tag, ...] = (),
 ):
@@ -2771,7 +2769,7 @@ def split_zmq_path(path: str) -> tuple[str, str, str]:
     return scheme, host, port
 
 
-def make_zmq_path(scheme: str, host: str, port: Optional[int] = None) -> str:
+def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
     """Make a ZMQ path from its parts.
 
     Args:
@@ -2794,9 +2792,9 @@ def make_zmq_socket(
     ctx: Union[zmq.asyncio.Context, zmq.Context],  # type: ignore[name-defined]
     path: str,
     socket_type: Any,
-    bind: Optional[bool] = None,
-    identity: Optional[bytes] = None,
-    linger: Optional[int] = None,
+    bind: bool | None = None,
+    identity: bytes | None = None,
+    linger: int | None = None,
 ) -> Union[zmq.Socket, zmq.asyncio.Socket]:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics."""
 
@@ -2850,9 +2848,9 @@ def make_zmq_socket(
 def zmq_socket_ctx(
     path: str,
     socket_type: Any,
-    bind: Optional[bool] = None,
+    bind: bool | None = None,
     linger: int = 0,
-    identity: Optional[bytes] = None,
+    identity: bytes | None = None,
 ) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
 
@@ -2926,7 +2924,7 @@ def get_mp_context():
 def bind_kv_cache(
     ctx: dict[str, Any],
     kv_cache: list[list[torch.Tensor]],  # [virtual_engine][layer_index]
-    shared_kv_cache_layers: Optional[dict[str, str]] = None
+    shared_kv_cache_layers: dict[str, str] | None = None
 ) -> None:
     # Bind the kv_cache tensor to Attention modules, similar to
     # ctx[layer_name].kv_cache[ve]=kv_cache[ve][extract_layer_index(layer_name)]
@@ -3133,7 +3131,7 @@ def swap_dict_values(obj: dict[_K, _V], key1: _K, key2: _K) -> None:
 
 
 @contextlib.contextmanager
-def cprofile_context(save_file: Optional[str] = None):
+def cprofile_context(save_file: str | None = None):
     """Run a cprofile
 
     Args:
@@ -3155,7 +3153,7 @@ def cprofile_context(save_file: Optional[str] = None):
             prof.print_stats(sort="cumtime")
 
 
-def cprofile(save_file: Optional[str] = None, enabled: bool = True):
+def cprofile(save_file: str | None = None, enabled: bool = True):
     """Decorator to profile a Python method using cProfile.
 
     Args:
