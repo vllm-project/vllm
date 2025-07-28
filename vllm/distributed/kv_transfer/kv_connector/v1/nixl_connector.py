@@ -1046,10 +1046,11 @@ class NixlConnectorWorker:
             for notif in notifs:
                 req_id, tp_ratio = notif.decode("utf-8").rsplit(":", 1)
                 if req_id not in self._reqs_to_send:
-                    logger.warning(
+                    logger.error(
                         "Potentially invalid KV blocks for "
                         "unrecognized request %s were retrieved by "
                         "a decode worker. They may have expired.", req_id)
+                    continue
 
                 self.consumer_notification_counts_by_req[req_id] += 1
                 # Wait all consumers (D) to be done reading before freeing.
