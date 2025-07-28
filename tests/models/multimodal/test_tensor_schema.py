@@ -12,7 +12,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from ...conftest import VllmRunner
-from ..registry import HF_EXAMPLE_MODELS
+from ..registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
 
 
 # Avoid OOM and reduce initialization time by only using 1 layer
@@ -52,12 +52,11 @@ def hf_overrides(hf_config: PretrainedConfig) -> PretrainedConfig:
 
 
 @pytest.mark.core_model
-@pytest.mark.parametrize("model_arch", ["LlavaForConditionalGeneration"])
-def test_model_tensor_schema(model_arch: str, vllm_runner: VllmRunner,
+@pytest.mark.parametrize("model_arch", list(_MULTIMODAL_EXAMPLE_MODELS.keys()))
+def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
                              monkeypatch):
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
-    model_info.check_transformers_version(on_fail="skip")
 
     model_id = model_info.default
 
@@ -98,9 +97,7 @@ def test_model_tensor_schema(model_arch: str, vllm_runner: VllmRunner,
         mm_data=processor_inputs.mm_data,
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         tokenization_kwargs=processor_inputs.tokenization_kwargs,
-    )
-
-    monkeypatch.setenv("VLLM_USE_V1", "0")
+    )["mm_kwargs"]
 
     # Avoid calling model.forward()
     def _initialize_kv_caches_v0(self) -> None:
@@ -109,6 +106,7 @@ def test_model_tensor_schema(model_arch: str, vllm_runner: VllmRunner,
 
     with patch.object(V0LLMEngine, "_initialize_kv_caches",
                       _initialize_kv_caches_v0):
+        monkeypatch.setenv("VLLM_USE_V1", "0")
         with vllm_runner(
                 model_id,
                 tokenizer_name=model_info.tokenizer or model_id,
