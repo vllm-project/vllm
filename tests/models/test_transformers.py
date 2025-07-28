@@ -151,6 +151,26 @@ def test_quantization(
 
 @pytest.mark.parametrize(
     "model",
+    [
+        # Layers live in `layers`
+        "Qwen/Qwen3-Embedding-0.6B",
+        # Layers live in `model.layers`
+        "meta-llama/Llama-3.2-1B-Instruct"
+    ],
+)
+def test_embed_loading(vllm_runner, model):
+    with vllm_runner(model,
+                     max_model_len=1024,
+                     enforce_eager=True,
+                     runner="pooling",
+                     model_impl="transformers") as model_test:
+        model_config = model_test.llm.llm_engine.model_config
+        assert model_config.architecture == (
+            model_config._get_transformers_backend_cls())
+
+
+@pytest.mark.parametrize(
+    "model",
     ["jason9693/Qwen2.5-1.5B-apeach"],
 )
 @pytest.mark.parametrize("dtype", ["float"])

@@ -657,6 +657,17 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
 
 
 @support_torch_compile
+class TransformersModel(TransformersBase):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            # Add `model.` prefix for base model checkpoints
+            "": "model.",
+            # Remove duplicated `model.` if checkpoint was ModelForCausalLM
+            "model.model.": "model."
+        })
+
+
+@support_torch_compile
 class TransformersForCausalLM(TransformersBase):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
