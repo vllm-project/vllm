@@ -138,7 +138,7 @@ run_benchmark() {
     prefix_len=$(( INPUT_LEN * MIN_CACHE_HIT_PCT / 100 ))
     adjusted_input_len=$(( INPUT_LEN - prefix_len ))
     # --profile flag is removed from this call
-    python3 benchmarks/benchmark_serving.py \
+    vllm bench serve \
         --backend vllm \
         --model $MODEL  \
         --dataset-name random \
