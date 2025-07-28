@@ -38,6 +38,8 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    dt_softplus=False,
                                    dt_limit=(0.0, float("inf")),
                                    out=None):
+    assert isinstance(chunk_size, int) and chunk_size > 0 and (chunk_size & (chunk_size - 1)) == 0, \
+        "chunk_size must be integer power of 2"
     batch, seqlen, nheads, headdim = x.shape
     _, _, ngroups, dstate = B.shape
     assert nheads % ngroups == 0
