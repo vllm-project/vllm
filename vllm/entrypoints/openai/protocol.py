@@ -871,7 +871,7 @@ class CompletionRequest(OpenAIBaseModel):
     )
 
     # --8<-- [end:completion-extra-params]
-    accumulate: Optional[bool] = Field(
+    accumulate_on_model_server: Optional[bool] = Field(
         default=None,
         description=
         ("Special kind of echo where in the response instead of delta we return the accumulated text"

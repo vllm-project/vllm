@@ -72,6 +72,7 @@ class BeamValidator:
 
         raw_res.choices = filtered_res
         if len(filtered_res) == 0:
+            raw_res.choices = res
             return raw_res
 
         return raw_res

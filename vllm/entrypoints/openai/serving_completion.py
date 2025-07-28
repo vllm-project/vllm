@@ -473,7 +473,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                 *(output.logprobs or []),
                             ]
                         has_echoed[i] = True
-                    elif request.accumulate:
+                    elif request.accumulate_on_model_server:
                         i = output.index + prompt_idx * num_choices
                         # return the accumulated response
                         accumulated_text[i] += output.text
@@ -561,7 +561,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 )
 
                 # if accumulate, send the usage info attached to last chunk instead
-                if request.accumulate and chunk is not None:
+                if request.accumulate_on_model_server and chunk is not None:
                     chunk.usage = final_usage_info
                     final_usage_chunk = chunk
 
