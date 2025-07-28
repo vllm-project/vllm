@@ -10,17 +10,17 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+    QuantizationConfig,QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_linear_quant_method)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
                                            PackedColumnParameter,
-                                           PackedvLLMParameter,
-                                           RowvLLMParameter)
+                                           PackedvLLMParameter, RowvLLMParameter)
 
 
 class GPTQConfig(QuantizationConfig):
@@ -110,8 +110,23 @@ class GPTQConfig(QuantizationConfig):
         return cls(weight_bits, group_size, desc_act, lm_head_quantized,
                    dynamic)
 
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["GPTQLinearMethod"]:
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> Optional[Union["GPTQLinearMethod", "QuantizeMethodBase"]]:
+        if isinstance(layer, FusedMoE):
+            # GPTQ MoE support: fall back to MoeWNA16 for broad compatibility
+            from .moe_wna16 import MoeWNA16Config
+
+            config = {
+                "quant_method": "gptq",
+                "bits": self.weight_bits,
+                "group_size": self.group_size,
+                "sym": True,  # GPTQ typically uses symmetric quantization
+                "lm_head": False,
+            }
+            return MoeWNA16Config.from_config(config).get_quant_method(
+                layer, prefix)
+
         return get_linear_quant_method(self, layer, prefix, GPTQLinearMethod)
 
 
@@ -150,8 +165,8 @@ class GPTQLinearMethod(LinearMethodBase):
                 "weight shape. This can be caused by too large "
                 "tensor parallel size.")
         output_size_per_partition = sum(output_partition_sizes)
-        if (output_size_per_partition % self.quant_config.pack_factor.numerator
-                != 0):
+        if (output_size_per_partition %
+                self.quant_config.pack_factor.numerator != 0):
             raise ValueError(
                 "The output size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
@@ -186,15 +201,14 @@ class GPTQLinearMethod(LinearMethodBase):
             packed_factor=self.quant_config.pack_factor,
             weight_loader=weight_loader)
 
-        g_idx = RowvLLMParameter(data=torch.tensor(
-            [
+        g_idx = RowvLLMParameter(
+            data=torch.tensor([
                 i // self.quant_config.group_size
                 for i in range(input_size_per_partition)
             ],
-            dtype=torch.int32,
-        ),
-                                 input_dim=0,
-                                 weight_loader=weight_loader)
+                              dtype=torch.int32, ),
+            input_dim=0,
+            weight_loader=weight_loader)
         qzeros_args = {
             "data":
             torch.empty(
@@ -276,3 +290,4 @@ class GPTQLinearMethod(LinearMethodBase):
         if bias is not None:
             output.add_(bias)
         return output.reshape(out_shape)
+    
