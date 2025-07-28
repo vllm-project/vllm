@@ -122,7 +122,7 @@ block_size=128
 if (( max_model_len <= 16384 )); then
 	export VLLM_GPU_MEMORY_UTILIZATION=0.85
 else
-	export VLLM_GPU_MEMORY_UTILIZATION=0.75
+	export VLLM_GPU_MEMORY_UTILIZATION=0.7
 fi
 export VLLM_GRAPH_RESERVED_MEM=0.2
 export VLLM_GRAPH_PROMPT_RATIO=0
