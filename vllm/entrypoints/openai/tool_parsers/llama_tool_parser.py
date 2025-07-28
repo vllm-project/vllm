@@ -92,10 +92,10 @@ class Llama3JsonToolParser(ToolParser):
                         function=FunctionCall(
                             name=obj["name"],
                             # function call args are JSON but as a string
-                            arguments=json.dumps(obj["arguments"] \
-                                    if "arguments" in obj \
-                                    else obj["parameters"])))
-                )
+                            arguments=json.dumps(
+                                obj["arguments"]
+                                if "arguments" in obj else obj["parameters"],
+                                ensure_ascii=False))))
 
             return ExtractedToolCallInformation(tools_called=True,
                                                 tool_calls=tool_calls,
