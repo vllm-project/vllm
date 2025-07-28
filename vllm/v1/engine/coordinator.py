@@ -153,6 +153,7 @@ class DPCoordinatorProc:
 
         stats_changed = False
         last_stats_step = -1
+        last_stats_wave = -1
         last_step_counts: Optional[list[list[int]]] = None
 
         with make_zmq_socket(
@@ -275,15 +276,24 @@ class DPCoordinatorProc:
                         # state with these.
                         stats = self.engines[eng_index].request_counts
                         stats_step = scheduler_stats.step_counter
-                        if stats_changed and stats_step != last_stats_step:
-                            last_step_counts = self._get_engine_counts(
-                                do_copy=True)
-                        elif stats_step < last_stats_step:
-                            logger.warning("Received stats for out-of-order "
-                                           "step from engine {eng_index}")
+                        stats_wave = scheduler_stats.current_wave
+                        if (stats_wave > last_stats_wave
+                                or stats_wave == last_stats_wave
+                                and stats_step > last_stats_step):
+                            if stats_changed:
+                                last_step_counts = self._get_engine_counts(
+                                    do_copy=True)
+                            last_stats_step = stats_step
+                            last_stats_wave = stats_wave
+                        elif stats_wave != last_stats_wave or (
+                                stats_step != last_stats_step):
+                            logger.warning(
+                                "Received stats for out-of-order "
+                                "step (%d, %d) from engine %d (expected "
+                                "> (%d, %d))", stats_wave, stats_step,
+                                eng_index, last_stats_wave, last_stats_step)
                         stats[0] = scheduler_stats.num_waiting_reqs
                         stats[1] = scheduler_stats.num_running_reqs
-                        last_stats_step = stats_step
                         stats_changed = True
 
                     if (wave := outputs.wave_complete) is not None:

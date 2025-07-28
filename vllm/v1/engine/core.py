@@ -954,7 +954,9 @@ class DPEngineCoreProc(EngineCoreProc):
         counts = self.scheduler.get_request_counts()
         if counts != self.last_counts:
             self.last_counts = counts
-            stats = SchedulerStats(*counts, step_counter=self.step_counter)
+            stats = SchedulerStats(*counts,
+                                   step_counter=self.step_counter,
+                                   current_wave=self.current_wave)
             self.output_queue.put_nowait(
                 (-1, EngineCoreOutputs(scheduler_stats=stats)))
 
@@ -996,15 +998,16 @@ class DPEngineCoreProc(EngineCoreProc):
                     self.output_queue.put_nowait(
                         (client_index,
                          EngineCoreOutputs(wave_complete=self.current_wave)))
+                # Increment wave count and reset step counter.
                 self.current_wave += 1
+                self.step_counter = 0
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
 
         # Optimization - only perform finish-sync all-reduce every 32 steps.
         self.step_counter += 1
-        if self.step_counter != 32:
+        if self.step_counter % 32 != 0:
             return True
-        self.step_counter = 0
 
         return ParallelConfig.has_unfinished_dp(self.dp_group,
                                                 local_unfinished)

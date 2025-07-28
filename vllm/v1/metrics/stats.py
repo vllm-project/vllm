@@ -34,6 +34,7 @@ class SchedulerStats:
     num_waiting_reqs: int = 0
 
     step_counter: int = 0
+    current_wave: int = 0
 
     kv_cache_usage: float = 0.0
 
