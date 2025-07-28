@@ -518,7 +518,7 @@ def rejection_random_sample_kernel(
     alpha = 1.0
     if thinking_states_ptr is not None:
         thinking_state = tl.load(thinking_states_ptr + req_idx)
-        if thinking_state == True:
+        if thinking_state:
             alpha = posterior_alpha
 
     rejected = False
