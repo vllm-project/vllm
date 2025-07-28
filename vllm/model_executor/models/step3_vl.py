@@ -42,20 +42,20 @@ from .utils import (flatten_bn, init_vllm_registered_model,
                     merge_multimodal_embeddings)
 
 
-class MMStep1oImagePixelInputs(TypedDict):
+class Step3VLImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     pixel_values: torch.Tensor
     patch_pixel_values: Optional[torch.Tensor]
     num_patches: list[int]
 
 
-class MMStep1oImageEmbeddingInputs(TypedDict):
+class Step3VLImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     image_embeds: torch.Tensor
 
 
-MMStep1oImageInputs = Union[MMStep1oImagePixelInputs,
-                            MMStep1oImageEmbeddingInputs]
+Step3VLImageInputs = Union[Step3VLImagePixelInputs,
+                           Step3VLImageEmbeddingInputs]
 
 ImageWithPatches = tuple[Image.Image, list[Image.Image], list[int] | None]
 
@@ -223,7 +223,7 @@ class ImagePatcher:
                                   ] if len(patches) > 0 else None
 
 
-class Step1oProcessor:
+class Step3VLProcessor:
 
     def __init__(
         self,
@@ -416,10 +416,10 @@ class Step1oProcessor:
         )
 
 
-class Step1oProcessingInfo(BaseProcessingInfo):
+class Step3VLProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_processor(self) -> Step1oProcessor:
-        return Step1oProcessor(
+    def get_hf_processor(self) -> Step3VLProcessor:
+        return Step3VLProcessor(
             self.get_hf_config(),
             self.get_tokenizer(),
         )
@@ -457,7 +457,7 @@ class Step1oProcessingInfo(BaseProcessingInfo):
                    for img in image_data)
 
 
-class Step1oDummyInputsBuilder(BaseDummyInputsBuilder[Step1oProcessingInfo]):
+class Step3VLDummyInputsBuilder(BaseDummyInputsBuilder[Step3VLProcessingInfo]):
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
@@ -480,7 +480,8 @@ class Step1oDummyInputsBuilder(BaseDummyInputsBuilder[Step1oProcessingInfo]):
         }
 
 
-class Step1oMultiModalProcessor(BaseMultiModalProcessor[Step1oProcessingInfo]):
+class Step3VLMultiModalProcessor(BaseMultiModalProcessor[Step3VLProcessingInfo]
+                                 ):
 
     def _get_prompt_updates(
         self,
@@ -712,20 +713,15 @@ class Step3VisionEncoderLayer(nn.Module):
     def __init__(self,
                  config: Step3VisionEncoderConfig,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = "",
-                 need_dp: bool = False):
+                 prefix: str = ""):
         super().__init__()
         self.embed_dim = config.hidden_size
         self.self_attn = Step3VisionAttention(config,
                                               quant_config,
-                                              prefix=f"{prefix}.self_attn",
-                                              need_dp=need_dp)
+                                              prefix=f"{prefix}.self_attn")
         self.layer_norm1 = nn.LayerNorm(self.embed_dim,
                                         eps=config.layer_norm_eps)
-        self.mlp = Step3VisionMLP(config,
-                                  quant_config,
-                                  prefix=f"{prefix}.mlp",
-                                  need_dp=need_dp)
+        self.mlp = Step3VisionMLP(config, quant_config, prefix=f"{prefix}.mlp")
         self.layer_norm2 = nn.LayerNorm(self.embed_dim,
                                         eps=config.layer_norm_eps)
 
@@ -745,15 +741,13 @@ class Step3VisionEncoder(nn.Module):
     def __init__(self,
                  config: Step3VisionEncoderConfig,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = "",
-                 need_dp: bool = False):
+                 prefix: str = ""):
         super().__init__()
         self.config = config
         self.layers = nn.ModuleList([
             Step3VisionEncoderLayer(config,
                                     quant_config,
-                                    prefix=f"{prefix}.layers.{i}",
-                                    need_dp=need_dp)
+                                    prefix=f"{prefix}.layers.{i}")
             for i in range(config.num_hidden_layers)
         ])
 
@@ -772,16 +766,14 @@ class Step3VisionTransformer(nn.Module):
     def __init__(self,
                  config: Step3VisionEncoderConfig,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = "",
-                 need_dp: bool = False):
+                 prefix: str = ""):
         super().__init__()
         self.config = config
         self.image_size = config.image_size
         self.embeddings = Step3VisionEmbeddings(config)
         self.transformer = Step3VisionEncoder(config,
                                               quant_config,
-                                              prefix=f"{prefix}.transformer",
-                                              need_dp=need_dp)
+                                              prefix=f"{prefix}.transformer")
 
     def forward(
         self,
@@ -792,10 +784,18 @@ class Step3VisionTransformer(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(Step1oMultiModalProcessor,
-                                        info=Step1oProcessingInfo,
-                                        dummy_inputs=Step1oDummyInputsBuilder)
-class Step3VLForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+@MULTIMODAL_REGISTRY.register_processor(Step3VLMultiModalProcessor,
+                                        info=Step3VLProcessingInfo,
+                                        dummy_inputs=Step3VLDummyInputsBuilder)
+class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                      SupportsPP):
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return f"Picture {i}: <img></img>"
+
+        raise ValueError("Only image modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -851,7 +851,7 @@ class Step3VLForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return next(self.parameters()).dtype
 
     def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[MMStep1oImageInputs]:
+            self, **kwargs: object) -> Optional[Step3VLImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         patch_pixel_values = kwargs.pop("patch_pixel_values", None)
         num_patches = kwargs.pop("num_patches", None)
@@ -874,7 +874,7 @@ class Step3VLForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                     patch_pixel_values = None
             num_patches = flatten_bn(num_patches, concat=True).tolist()
 
-            return MMStep1oImagePixelInputs(
+            return Step3VLImagePixelInputs(
                 type="pixel_values",
                 pixel_values=pixel_values.to(self.dtype).to(self.device),
                 patch_pixel_values=patch_pixel_values.to(self.dtype).to(
@@ -889,7 +889,7 @@ class Step3VLForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 raise ValueError(
                     f"Unexpected shape for image_embeds: {image_embeds.shape}")
 
-            return MMStep1oImageEmbeddingInputs(
+            return Step3VLImageEmbeddingInputs(
                 type="image_embeds",
                 image_embeds=image_embeds.to(self.dtype).to(self.device),
             )
@@ -912,8 +912,7 @@ class Step3VLForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return self.vision_model(input_tensor)[0][:, 4:]
 
     def _process_image_input(
-            self,
-            image_input: MMStep1oImageInputs) -> tuple[torch.Tensor, ...]:
+            self, image_input: Step3VLImageInputs) -> tuple[torch.Tensor, ...]:
 
         if image_input["type"] == "image_embeds":
             image_features = image_input["image_embeds"]
@@ -1020,8 +1019,6 @@ class Step3VLForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             name = name.replace("model.", "language_model.model.")
         if name.startswith("lm_head"):
             name = name.replace("lm_head", "language_model.lm_head")
-        if name.startswith("vision_model."):
-            name = name.replace("vision_model.", "vision_model.vision_model.")
         return name
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
@@ -1029,17 +1026,24 @@ class Step3VLForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         qkv_params_mapping = [
             # (param_name, shard_name, relative_start_idx, relative_end_idx)
-            (".qkv_proj", ".q_proj", 0, self.config.share_q_dim /
-             (self.config.share_q_dim + self.config.head_dim * 2)),
-            (".qkv_proj", ".k_proj", self.config.share_q_dim /
-             (self.config.share_q_dim + self.config.head_dim * 2),
-             (self.config.share_q_dim + self.config.head_dim) /
-             (self.config.share_q_dim + self.config.head_dim * 2)),
-            (".qkv_proj", ".v_proj",
-             (self.config.share_q_dim + self.config.head_dim) /
-             (self.config.share_q_dim + self.config.head_dim * 2),
-             (self.config.share_q_dim + self.config.head_dim * 2) /
-             (self.config.share_q_dim + self.config.head_dim * 2)),
+            (".qkv_proj", ".q_proj", 0, self.config.text_config.share_q_dim /
+             (self.config.text_config.share_q_dim +
+              self.config.text_config.head_dim * 2)),
+            (".qkv_proj", ".k_proj", self.config.text_config.share_q_dim /
+             (self.config.text_config.share_q_dim +
+              self.config.text_config.head_dim * 2),
+             (self.config.text_config.share_q_dim +
+              self.config.text_config.head_dim) /
+             (self.config.text_config.share_q_dim +
+              self.config.text_config.head_dim * 2)),
+            (".qkv_proj", ".v_proj", (self.config.text_config.share_q_dim +
+                                      self.config.text_config.head_dim) /
+             (self.config.text_config.share_q_dim +
+              self.config.text_config.head_dim * 2),
+             (self.config.text_config.share_q_dim +
+              self.config.text_config.head_dim * 2) /
+             (self.config.text_config.share_q_dim +
+              self.config.text_config.head_dim * 2)),
         ]
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -1052,16 +1056,13 @@ class Step3VLForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.language_model.model.config.moe_num_experts)
+            num_experts=self.config.text_config.moe_num_experts)
 
-        if self.language_model.model.use_fused_moe:
-            expert_params_mapping = [
-                (".moe.experts.w13_weight", ".moe.gate_proj.weight", "w1"),
-                (".moe.experts.w13_weight", ".moe.up_proj.weight", "w3"),
-                (".moe.experts.w2_weight", ".moe.down_proj.weight", "w2")
-            ]
-        else:
-            expert_params_mapping = []
+        expert_params_mapping = [
+            (".moe.experts.w13_weight", ".moe.gate_proj.weight", "w1"),
+            (".moe.experts.w13_weight", ".moe.up_proj.weight", "w3"),
+            (".moe.experts.w2_weight", ".moe.down_proj.weight", "w2")
+        ]
 
         disable_moe_stacked_params = [
             data[1] for data in expert_params_mapping
