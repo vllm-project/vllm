@@ -17,16 +17,13 @@ prompts = [
 sampling_params = SamplingParams(temperature=0, max_tokens=100)
 
 MODEL_PATH = os.environ.get(
-    "MODEL_PATH", "/data/xmo/yongye/models/real-weight-120b-mxfp4/pytorch-rc-120b"
+    "MODEL_PATH", "/data/zhang-chen/os-mini/models/real-weights-2/pytorch-rc-120b/hf-converted-60af84"
 )
-TOKENIZER_PATH = os.environ.get("TOKENIZER_PATH", "../../../../models/hf-converted")
-
 
 def main():
     # Create an LLM.
     llm = LLM(
         model=MODEL_PATH,
-        tokenizer=TOKENIZER_PATH,
         tensor_parallel_size=4,
         # Set these to make dummy run faster
         enforce_eager=True,
