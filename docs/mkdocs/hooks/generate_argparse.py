@@ -65,7 +65,6 @@ class MarkdownFormatter(HelpFormatter):
             elif ((metavar := action.metavar)
                   and isinstance(metavar, (list, tuple))):
                 metavar = f'`{"`, `".join(str(m) for m in metavar)}`'
-                print("HERE: ", metavar)
                 self._markdown_output.append(
                     f"Possible choices: {metavar}\n\n")
 
