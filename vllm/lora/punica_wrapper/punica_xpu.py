@@ -58,8 +58,8 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         y: torch.Tensor,
         x: torch.Tensor,
         w_t_all: torch.Tensor,
-        y_offset: Optional[int],
-        y_slice_size: Optional[int],
+        y_offset: int,
+        y_slice_size: int,
         add_inputs: bool,
     ):
         token_lora_indices = self._get_token_lora_indices(x)
