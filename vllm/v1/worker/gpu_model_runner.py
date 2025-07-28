@@ -1210,9 +1210,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cumulative_index += 1 + num_spec_tokens
         grammar_bitmask = sorted_bitmask
 
+        # If the grammar bitmask and the logits have the same shape
+        # we don't need to pass indices to the kernel,
+        # since the bitmask is already aligned with the logits.
+        skip_out_indices = grammar_bitmask.shape[0] == logits.shape[0]
+
         # Serialization of np.ndarray is much more efficient than a tensor,
         # so we receive it in that format.
-        grammar_bitmask = torch.from_numpy(grammar_bitmask)
+        grammar_bitmask = torch.from_numpy(grammar_bitmask).contiguous()
 
         # Force use of the torch.compile implementation from xgrammar to work
         # around issues with the Triton kernel in concurrent structured output
@@ -1220,7 +1225,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         xgr_torch_compile.apply_token_bitmask_inplace_torch_compile(
             logits,
             grammar_bitmask.to(self.device, non_blocking=True),
-            indices=out_indices,
+            indices=out_indices if not skip_out_indices else None,
         )
 
     def sync_and_slice_intermediate_tensors(
