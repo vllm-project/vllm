@@ -310,8 +310,8 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         image_patches = kwargs.pop("image_patches", None)
         if image_patches is not None:
             image_patches_flat = flatten_bn(image_patches)
-            flat_data = flatten_bn(image_patches_flat, concat=True).data.to(
-                self.vision_embed_tokens.weight.dtype)
+            flat_data = flatten_bn(image_patches_flat, concat=True)
+
             return FuyuImagePatchInputs(
                 type="image_patches",
                 flat_data=flat_data,
