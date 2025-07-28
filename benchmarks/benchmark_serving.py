@@ -32,7 +32,8 @@ import time
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from multiprocessing import Process, Queue
 from typing import Any, Literal, Optional
 
 import numpy as np
@@ -106,6 +107,11 @@ class BenchmarkMetrics:
     median_e2el_ms: float
     std_e2el_ms: float
     percentiles_e2el_ms: list[tuple[float, float]]
+    # Custom Metric - Power Consumption
+    mean_power_consumption: float
+    median_power_consumption: float
+    std_power_consumption: float
+    percentiles_power_consumption: list[tuple[float, float]]
 
 
 def calculate_metrics(
@@ -116,6 +122,7 @@ def calculate_metrics(
     selected_percentile_metrics: list[str],
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float],
+    power_consumptions: list[float] = None,
 ) -> tuple[BenchmarkMetrics, list[int]]:
     actual_output_lens: list[int] = []
     total_input = 0
@@ -221,9 +228,108 @@ def calculate_metrics(
         percentiles_e2el_ms=[
             (p, np.percentile(e2els or 0, p) * 1000) for p in selected_percentiles
         ],
+        mean_power_consumption=np.mean(power_consumptions or 0),
+        std_power_consumption=np.std(power_consumptions or 0),
+        median_power_consumption=np.median(power_consumptions or 0),
+        percentiles_power_consumption=[
+            (p, np.percentile(power_consumptions or 0, p)) for p in selected_percentiles
+        ],
     )
 
     return metrics, actual_output_lens
+
+
+def monitor_npu(
+    save_file_path: str, process_queue: Queue = None, interval_ms: int = 500
+):
+    try:
+        from furiosa_smi_py import init, list_devices
+
+        init()
+    except ImportError:
+        print("furiosa_smi_py module not found. Exiting process.")
+        return
+
+    try:
+        with open(save_file_path, mode="a") as file:
+            file.write("timestamp,device,utilization,power_consumption,temperature\n")
+            devices = list_devices()
+            while process_queue.empty():
+                dt = datetime.now(timezone.utc).isoformat()
+                for device in devices:
+                    device_name = f"rngd{device.device_info().index()}"
+                    power_consumption = device.power_consumption()
+                    utilization = sum(
+                        [
+                            pe.pe_usage_percentage()
+                            for pe in device.core_utilization().pe_utilization()
+                        ]
+                    )
+                    temperature = device.device_temperature().soc_peak()
+                    if utilization > 0.0:
+                        file.write(
+                            f"{dt},{device_name},{float(utilization):.3f},{float(power_consumption)},{float(temperature):.3f}\n"
+                        )
+                time.sleep(interval_ms / 1000.0)
+            process_queue.get()
+    except KeyboardInterrupt:
+        print("Monitoring Stopped.")
+
+
+def monitor_gpu(
+    save_file_path: str, process_queue: Queue = None, interval_ms: int = 500
+):
+    import subprocess
+
+    try:
+        with open(save_file_path, mode="a") as file:
+            file.write("timestamp,device,utilization,power_consumption,temperature\n")
+            while process_queue.empty():
+                dt = datetime.now(timezone.utc).isoformat()
+                nvidia_smi = subprocess.Popen(
+                    [
+                        "nvidia-smi",
+                        "--query-gpu=name,utilization.gpu,power.draw,temperature.gpu",
+                        "--format=csv,noheader,nounits",
+                    ],
+                    stdout=subprocess.PIPE,
+                )
+                output, _ = nvidia_smi.communicate()
+                devices_status = output.decode("utf-8").strip().split("\n")
+
+                for idx, device_status in enumerate(devices_status):
+                    device_info = device_status.split(",")
+                    device_info[0] = device_info[0] + "-" + str(idx)
+                    if int(device_info[1]) > 0:
+                        device_status = ",".join(device_info)
+                        file.write(f"{dt},{device_status}\n")
+                time.sleep(interval_ms / 1000.0)
+            process_queue.get()
+    except KeyboardInterrupt:
+        print("Monitoring Stopped.")
+
+
+def calculate_power_consumption(save_file_path: str):
+    import pandas as pd
+
+    try:
+        df = pd.read_csv(save_file_path)
+        if "power_consumption" not in df.columns:
+            print("Required columns are missing.")
+            return
+
+        dt_group = df.groupby("timestamp")["power_consumption"]
+        dt = dt_group.groups.keys()
+
+        power_consumptions = []
+        for timestamp in dt:
+            power_consumption = dt_group.get_group(timestamp).tolist()
+            power_consumptions.append(np.sum(power_consumption))
+        return power_consumptions
+    except FileNotFoundError:
+        print("Monitoring log file not found.")
+    except Exception as e:
+        print(f"Error calculating average power usage: {e}")
 
 
 async def benchmark(
@@ -246,6 +352,9 @@ async def benchmark(
     max_concurrency: Optional[int],
     lora_modules: Optional[Iterable[str]],
     extra_body: Optional[dict],
+    include_time_series: bool,
+    time_interval_sec: int,
+    enable_device_monitor: Optional[str] = None,
     ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
     ramp_up_start_rps: Optional[int] = None,
     ramp_up_end_rps: Optional[int] = None,
@@ -352,67 +461,95 @@ async def benchmark(
             }
         )
 
-    async for request, current_request_rate in get_request(
-        input_requests,
-        request_rate,
-        burstiness,
-        ramp_up_strategy,
-        ramp_up_start_rps,
-        ramp_up_end_rps,
-    ):
-        if ramp_up_strategy is not None:
-            current_int_rps = int(current_request_rate)
-            if current_int_rps > last_int_rps:
-                timestamp = datetime.now().isoformat()
-                for rps_val in range(last_int_rps + 1, current_int_rps + 1):
-                    rps_change_events.append({"rps": rps_val, "timestamp": timestamp})
-                last_int_rps = current_int_rps
-
-        prompt, prompt_len, output_len, mm_content = (
-            request.prompt,
-            request.prompt_len,
-            request.expected_output_len,
-            request.multi_modal_data,
+    if enable_device_monitor in ["npu", "gpu"]:
+        dt = datetime.now().isoformat()
+        save_file_path = os.path.join(
+            args.result_dir, f"{enable_device_monitor}-{dt}.csv"
         )
-        req_model_id, req_model_name = model_id, model_name
-        if lora_modules:
-            req_lora_module = next(lora_modules)
-            req_model_id, req_model_name = req_lora_module, req_lora_module
+        process = monitor_npu if enable_device_monitor == "npu" else monitor_gpu
+        process_queue = Queue()
 
-        request_func_input = RequestFuncInput(
-            model=req_model_id,
-            model_name=req_model_name,
-            prompt=prompt,
-            api_url=api_url,
-            prompt_len=prompt_len,
-            output_len=output_len,
-            logprobs=logprobs,
-            multi_modal_content=mm_content,
-            ignore_eos=ignore_eos,
-            extra_body=extra_body,
+        status_monitor_process = Process(
+            target=process, args=(save_file_path, process_queue)
         )
-        task = limited_request_func(request_func_input=request_func_input, pbar=pbar)
-        tasks.append(asyncio.create_task(task))
-    outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
+        status_monitor_process.start()
+    else:
+        status_monitor_process = None
+        process_queue = None
+        power_consumptions = None
 
-    if profile:
-        print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
-            api_url=base_url + "/stop_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-        )
-        profile_output = await request_func(request_func_input=profile_input)
-        if profile_output.success:
-            print("Profiler stopped")
+    try:
+        async for request, current_request_rate in get_request(
+            input_requests,
+            request_rate,
+            burstiness,
+            ramp_up_strategy,
+            ramp_up_start_rps,
+            ramp_up_end_rps,
+        ):
+            if ramp_up_strategy is not None:
+                current_int_rps = int(current_request_rate)
+                if current_int_rps > last_int_rps:
+                    timestamp = datetime.now().isoformat()
+                    for rps_val in range(last_int_rps + 1, current_int_rps + 1):
+                        rps_change_events.append(
+                            {"rps": rps_val, "timestamp": timestamp}
+                        )
+                    last_int_rps = current_int_rps
 
-    if pbar is not None:
-        pbar.close()
+            prompt, prompt_len, output_len, mm_content = (
+                request.prompt,
+                request.prompt_len,
+                request.expected_output_len,
+                request.multi_modal_data,
+            )
+            req_model_id, req_model_name = model_id, model_name
+            if lora_modules:
+                req_lora_module = next(lora_modules)
+                req_model_id, req_model_name = req_lora_module, req_lora_module
 
-    benchmark_duration = time.perf_counter() - benchmark_start_time
+            request_func_input = RequestFuncInput(
+                model=req_model_id,
+                model_name=req_model_name,
+                prompt=prompt,
+                api_url=api_url,
+                prompt_len=prompt_len,
+                output_len=output_len,
+                logprobs=logprobs,
+                multi_modal_content=mm_content,
+                ignore_eos=ignore_eos,
+                extra_body=extra_body,
+            )
+            task = limited_request_func(
+                request_func_input=request_func_input, pbar=pbar
+            )
+            tasks.append(asyncio.create_task(task))
+        outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
+
+        if profile:
+            print("Stopping profiler...")
+            profile_input = RequestFuncInput(
+                model=model_id,
+                prompt=test_prompt,
+                api_url=base_url + "/stop_profile",
+                prompt_len=test_prompt_len,
+                output_len=test_output_len,
+                logprobs=logprobs,
+            )
+            profile_output = await request_func(request_func_input=profile_input)
+            if profile_output.success:
+                print("Profiler stopped")
+
+        if pbar is not None:
+            pbar.close()
+
+        benchmark_duration = time.perf_counter() - benchmark_start_time
+
+    finally:
+        if status_monitor_process is not None:
+            process_queue.put(0)
+            status_monitor_process.join()
+            power_consumptions = calculate_power_consumption(save_file_path)
 
     metrics, actual_output_lens = calculate_metrics(
         input_requests=input_requests,
@@ -422,6 +559,7 @@ async def benchmark(
         selected_percentile_metrics=selected_percentile_metrics,
         selected_percentiles=selected_percentiles,
         goodput_config_dict=goodput_config_dict,
+        power_consumptions=power_consumptions,
     )
 
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
@@ -515,8 +653,180 @@ async def benchmark(
     process_one_metric("itl", "ITL", "Inter-token Latency")
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
 
-    print("=" * 50)
+    def process_power_consumption_metric():
+        metric_header = "Device Power Consumption(W)"
+        metric_name = "Power Consumption"
+        metric_attribute_name = "power_consumption"
 
+        print("{s:{c}^{n}}".format(s=metric_header, n=50, c="-"))
+        print(
+            "{:<40} {:<10.2f}".format(
+                f"Mean {metric_name}:",
+                getattr(metrics, f"mean_{metric_attribute_name}"),
+            )
+        )
+        print(
+            "{:<40} {:<10.2f}".format(
+                f"Median {metric_name}:",
+                getattr(metrics, f"median_{metric_attribute_name}"),
+            )
+        )
+        result[f"mean_{metric_attribute_name}"] = getattr(
+            metrics, f"mean_{metric_attribute_name}"
+        )
+        result[f"median_{metric_attribute_name}"] = getattr(
+            metrics, f"median_{metric_attribute_name}"
+        )
+        result[f"std_{metric_attribute_name}"] = getattr(
+            metrics, f"std_{metric_attribute_name}"
+        )
+        for p, value in getattr(metrics, f"percentiles_{metric_attribute_name}"):
+            p_word = str(int(p)) if int(p) == p else str(p)
+            print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name}:", value))
+            result[f"p{p_word}_{metric_attribute_name}"] = value
+
+    if enable_device_monitor:
+        process_power_consumption_metric()
+
+    def process_time_series_metric():
+        result["timestamp_data"] = {}
+
+        e2els = [output.latency for output in outputs]
+        requests_init_timestamp = [output.initiated_timestamp for output in outputs]
+        requests_comp_timestamp = [output.completed_timestamp for output in outputs]
+
+        entire_start_timestamp = min(requests_init_timestamp)
+        entire_end_timestamp = max(requests_comp_timestamp)
+
+        print(
+            "{s:{c}^{n}}".format(
+                s="Timestamp: " + entire_start_timestamp.isoformat(), n=50, c="-"
+            )
+        )
+        print(
+            "{:<40} {:<10.2f}".format(
+                "Completed Requests:",
+                0,
+            )
+        )
+        print(
+            "{:<40} {:<10.2f}".format(
+                "Number of Waiting Requests:",
+                0,
+            )
+        )
+        result["timestamp_data"][entire_start_timestamp.isoformat()] = {
+            f"total_requests_per_{time_interval_sec}": 0,
+            "number_of_wating_requests": 0,
+        }
+        for metric_name in ["ttft", "e2el"]:
+            print(
+                "{:<40} {:<10.2f}".format(
+                    f"Mean {metric_name} (ms):",
+                    0,
+                )
+            )
+            result["timestamp_data"][entire_start_timestamp.isoformat()][
+                f"mean_{metric_name}_ms"
+            ] = 0.0
+            for p_word in ["99", "95", "50"]:
+                print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name} (ms):", 0.0))
+                result["timestamp_data"][entire_start_timestamp.isoformat()][
+                    f"p{p_word}_{metric_name}_ms"
+                ] = 0.0
+
+        current_timestamp = entire_start_timestamp
+        number_of_completed_requests = 0
+        while True:
+            next_timestamp = min(
+                current_timestamp + timedelta(seconds=time_interval_sec),
+                entire_end_timestamp + timedelta(milliseconds=1),
+            )
+            completed_requests_index = [
+                index
+                for index, request_comp_timestamp in enumerate(requests_comp_timestamp)
+                if current_timestamp <= request_comp_timestamp < next_timestamp
+            ]
+            generated_requests_index = [
+                index
+                for index, request_init_timestamp in enumerate(requests_init_timestamp)
+                if entire_start_timestamp <= request_init_timestamp < next_timestamp
+            ]
+            number_of_completed_requests += len(completed_requests_index)
+            if len(completed_requests_index) == 0:
+                current_timestamp = next_timestamp
+                continue
+
+            print(
+                "{s:{c}^{n}}".format(
+                    s="Timestamp: " + next_timestamp.isoformat(), n=50, c="-"
+                )
+            )
+            print(
+                "{:<40} {:<10.2f}".format(
+                    "Completed Requests:",
+                    len(completed_requests_index),
+                )
+            )
+            print(
+                "{:<40} {:<10.2f}".format(
+                    "Number of Waiting Requests:",
+                    len(generated_requests_index) - number_of_completed_requests,
+                )
+            )
+            result["timestamp_data"][next_timestamp.isoformat()] = {
+                f"total_requests_per_{time_interval_sec}": len(
+                    completed_requests_index
+                ),
+                "number_of_wating_requests": len(generated_requests_index)
+                - number_of_completed_requests,
+            }
+
+            interval_requests_ttfts = np.array(result["ttfts"])[
+                completed_requests_index
+            ]
+            interval_requests_e2els = np.array(e2els)[completed_requests_index]
+
+            mean_ttft_ms = np.mean(interval_requests_ttfts) * 1000
+            p99_ttft_ms = np.percentile(interval_requests_ttfts, 99) * 1000
+            p95_ttft_ms = np.percentile(interval_requests_ttfts, 95) * 1000
+            p50_ttft_ms = np.percentile(interval_requests_ttfts, 50) * 1000
+
+            mean_e2el_ms = np.mean(interval_requests_e2els) * 1000
+            p99_e2el_ms = np.percentile(interval_requests_e2els, 99) * 1000
+            p95_e2el_ms = np.percentile(interval_requests_e2els, 95) * 1000
+            p50_e2el_ms = np.percentile(interval_requests_e2els, 50) * 1000
+
+            for metric_name in ["ttft", "e2el"]:
+                mean_value = locals().get(f"mean_{metric_name}_ms", 0.0)
+                print(
+                    "{:<40} {:<10.2f}".format(
+                        f"Mean {metric_name} (ms):",
+                        mean_value,
+                    )
+                )
+                result["timestamp_data"][next_timestamp.isoformat()][
+                    f"mean_{metric_name}_ms"
+                ] = mean_value
+                for p_word in ["99", "95", "50"]:
+                    p_value = locals().get(f"p{p_word}_{metric_name}_ms", 0.0)
+                    print(
+                        "{:<40} {:<10.2f}".format(
+                            f"P{p_word} {metric_name} (ms):", p_value
+                        )
+                    )
+                    result["timestamp_data"][next_timestamp.isoformat()][
+                        f"p{p_word}_{metric_name}_ms"
+                    ] = p_value
+
+            current_timestamp = next_timestamp
+            if current_timestamp >= entire_end_timestamp:
+                break
+
+    if include_time_series:
+        process_time_series_metric()
+
+    print("=" * 50)
     return result
 
 
@@ -817,6 +1127,9 @@ def main(args: argparse.Namespace):
             max_concurrency=args.max_concurrency,
             lora_modules=args.lora_modules,
             extra_body=sampling_params,
+            include_time_series=args.include_time_series,
+            time_interval_sec=args.time_interval_sec,
+            enable_device_monitor=args.enable_device_monitor,
             ramp_up_strategy=args.ramp_up_strategy,
             ramp_up_start_rps=args.ramp_up_start_rps,
             ramp_up_end_rps=args.ramp_up_end_rps,
@@ -1280,7 +1593,25 @@ def create_argument_parser():
         help="The ending request rate for ramp-up (RPS). "
         "Needs to be specified when --ramp-up-strategy is used.",
     )
-
+    parser.add_argument(
+        "--include-time-series",
+        action="store_true",
+        help="Include time series format data in the output.",
+    )
+    parser.add_argument(
+        "--time-interval-sec",
+        type=int,
+        default=10,
+        help="Specify the interval between time series data points in seconds.",
+    )
+    parser.add_argument(
+        "--enable-device-monitor",
+        type=str,
+        default=None,
+        help="Specify the device (e.g., 'npu', 'gpu') for "
+        "monitoring power, temperature, and utilization."
+        "Default is None, which disables device monitoring.",
+    )
     return parser
 
 

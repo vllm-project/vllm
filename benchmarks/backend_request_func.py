@@ -8,6 +8,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional, Union
 
 import aiohttp
@@ -47,6 +48,8 @@ class RequestFuncOutput:
     tpot: float = 0.0  # avg next-token latencies
     prompt_len: int = 0
     error: str = ""
+    initiated_timestamp: datetime = datetime.now()
+    completed_timestamp: datetime = datetime.now()
 
 
 async def async_request_tgi(
@@ -286,6 +289,7 @@ async def async_request_openai_completions(
 
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
+        output.initiated_timestamp = datetime.now(timezone.utc)
 
         generated_text = ""
         st = time.perf_counter()
@@ -337,6 +341,7 @@ async def async_request_openai_completions(
                         )
                     output.generated_text = generated_text
                     output.latency = most_recent_timestamp - st
+                    output.completed_timestamp = datetime.now(timezone.utc)
                 else:
                     output.error = response.reason or ""
                     output.success = False
