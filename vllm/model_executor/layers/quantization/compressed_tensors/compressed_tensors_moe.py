@@ -11,7 +11,6 @@ from compressed_tensors.quantization import (ActivationOrdering,
                                              QuantizationStrategy)
 
 import vllm.envs as envs
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.distributed import get_ep_group
 from vllm.logger import init_logger
@@ -128,7 +127,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                     "Please use Blackwell and above.")
 
         self.group_size = 16
-        self.fused_experts: Optional[mk.FusedMoEModularKernel] = None
+        self.fused_experts = None  # type: ignore[assignment]
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -483,6 +482,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             is_rocm_aiter_moe_enabled)
 
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
+        self.fused_experts = None  # type: ignore[assignment]
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -822,7 +822,7 @@ class CompressedTensorsW8A8Fp8MoECutlassMethod(CompressedTensorsMoEMethod):
                 "channelwise, dynamic per token quantization.")
 
         self.topk_indices_dtype = None
-        self.fused_experts: Optional[mk.FusedMoEModularKernel] = None
+        self.fused_experts = None  # type: ignore[assignment]
         self.disable_expert_map = False
         self.is_fp8_w8a8_sm100 = self.quant_config._is_fp8_w8a8_sm100(
             self.weight_quant, self.input_quant)
