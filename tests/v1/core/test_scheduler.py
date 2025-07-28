@@ -6,7 +6,6 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm.attention import AttentionType
 from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
@@ -1291,7 +1290,7 @@ def create_scheduler_with_priority(
         kv_cache_groups=[
             KVCacheGroupSpec(['layer'],
                              FullAttentionSpec(block_size, 1, 1, torch.float32,
-                                               False, AttentionType.DECODER))
+                                               False))
         ],
     )
     cache_config.num_gpu_blocks = num_blocks

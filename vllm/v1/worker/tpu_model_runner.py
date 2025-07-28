@@ -562,7 +562,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         dtype=self.kv_cache_dtype,
                         sliding_window=attn_module.sliding_window,
                         use_mla=False,
-                        attn_type=str(attn_module.attn_type),
                     )
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
@@ -571,7 +570,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
                         use_mla=False,
-                        attn_type=str(attn_module.attn_type),
                     )
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):

@@ -2830,8 +2830,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 continue
 
             # TODO: Support other attention modules, e.g., cross-attention
-            if attn_module.attn_type in (AttentionType.DECODER,
-                                         AttentionType.ENCODER_ONLY):
+            if attn_module.attn_type == AttentionType.DECODER:
                 use_local_attention = (self.attention_chunk_size is not None
                                        and attn_module.use_irope)
                 if attn_module.sliding_window is not None:
@@ -2841,8 +2840,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
                         sliding_window=attn_module.sliding_window,
-                        use_mla=use_mla,
-                        attn_type=str(attn_module.attn_type))
+                        use_mla=use_mla)
                     assert not use_local_attention, (
                         "attention module can not be with ",
                         "both local attention and sliding window")
@@ -2853,18 +2851,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
                         attention_chunk_size=self.attention_chunk_size,
-                        use_mla=use_mla,
-                        attn_type=str(attn_module.attn_type))
+                        use_mla=use_mla)
                 else:
                     kv_cache_spec[layer_name] = FullAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
                         dtype=self.kv_cache_dtype,
-                        use_mla=use_mla,
-                        attn_type=str(attn_module.attn_type))
-            elif attn_module.attn_type == AttentionType.ENCODER:
-                # encoder attention does not need KV cache.
+                        use_mla=use_mla)
+            elif attn_module.attn_type in (AttentionType.ENCODER,
+                                           AttentionType.ENCODER_ONLY):
+                # encoder-only attention does not need KV cache.
                 continue
             elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
                 raise NotImplementedError

@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention import Attention
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VllmConfig, set_current_vllm_config)
 from vllm.distributed.parallel_state import (init_distributed_environment,
@@ -42,7 +42,6 @@ def initialize_kv_cache(runner: GPUModelRunner):
         head_size=runner.model_config.get_head_size(),
         dtype=runner.kv_cache_dtype,
         use_mla=False,
-        attn_type=AttentionType.DECODER,
     )
     tensor_size = attn_spec.page_size_bytes * NUM_BLOCKS
     kv_cache_config = KVCacheConfig(

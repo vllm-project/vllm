@@ -4,7 +4,6 @@ from copy import deepcopy
 from typing import TYPE_CHECKING
 
 import vllm.envs as envs
-from vllm.attention import AttentionType
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
@@ -252,8 +251,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             num_kv_heads=model_config.get_num_kv_heads(parallel_config),
             head_size=model_config.get_head_size(),
             dtype=kv_cache_dtype,
-            use_mla=model_config.use_mla,
-            attn_type=AttentionType.DECODER).page_size_bytes
+            use_mla=model_config.use_mla).page_size_bytes
 
         model_cls = ModelRegistry.resolve_model_cls(
             model_config._model_info.architecture)[0]

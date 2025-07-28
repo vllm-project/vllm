@@ -16,7 +16,6 @@ from transformers import AutoTokenizer
 
 from tests.utils import multi_gpu_test
 from vllm import SamplingParams
-from vllm.attention import AttentionType
 from vllm.distributed.kv_events import (BlockStored, KVEventBatch,
                                         ZmqEventPublisher)
 from vllm.engine.arg_utils import EngineArgs
@@ -546,8 +545,7 @@ def test_engine_core_proc_instantiation_cuda_empty(
                                       num_kv_heads=1,
                                       head_size=64,
                                       dtype=torch.float16,
-                                      use_mla=False,
-                                      attn_type=AttentionType.DECODER)
+                                      use_mla=False)
 
         mock_executor.get_kv_cache_specs.return_value = [{
             "default": mock_spec
