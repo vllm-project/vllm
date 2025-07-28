@@ -11,10 +11,12 @@ from typing import Any, Callable, NamedTuple, Optional
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, cdiv, sha256_cbor_64bit
-from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
+from vllm.v1.kv_cache_interface import (AttentionSpec,
+                                        ChunkedLocalAttentionSpec,
                                         FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
-                                        KVCacheTensor, SlidingWindowSpec)
+                                        KVCacheTensor, MambaSpec,
+                                        SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -973,14 +975,37 @@ def _get_kv_cache_config_uniform_page_size(
     num_blocks = get_num_blocks(vllm_config, group_size, available_memory,
                                 page_size)
     per_memory_pool_size = page_size * num_blocks
-    kv_cache_tensors = []
-    for i in range(group_size):
-        shared_by = []
-        for j in range(len(kv_cache_groups)):
-            if i < len(grouped_layers[j]):
-                shared_by.append(grouped_layers[j][i])
-        kv_cache_tensors.append(
-            KVCacheTensor(size=per_memory_pool_size, shared_by=shared_by))
+    
+    # Check for hybrid attention+mamba model
+    has_attention = any(isinstance(group.kv_cache_spec, AttentionSpec) 
+                       for group in kv_cache_groups)
+    has_mamba = any(isinstance(group.kv_cache_spec, MambaSpec) 
+                   for group in kv_cache_groups)
+    
+    if has_attention and has_mamba:
+        # Giant tensor: single shared tensor for all layers
+        all_layer_names = [layer for group in kv_cache_groups 
+                          for layer in group.layer_names]
+        
+        # Screenshot formula: block_id_alloc × num_attention_layer × 2
+        num_attention_layers = sum(1 for group in kv_cache_groups 
+                                  if isinstance(group.kv_cache_spec, AttentionSpec))
+        giant_tensor_size = per_memory_pool_size * num_attention_layers * 2
+        
+        kv_cache_tensors = [KVCacheTensor(
+            size=giant_tensor_size,
+            shared_by=all_layer_names
+        )]
+    else:
+        # Standard approach: separate tensors per memory pool
+        kv_cache_tensors = []
+        for i in range(group_size):
+            shared_by = []
+            for j in range(len(kv_cache_groups)):
+                if i < len(grouped_layers[j]):
+                    shared_by.append(grouped_layers[j][i])
+            kv_cache_tensors.append(
+                KVCacheTensor(size=per_memory_pool_size, shared_by=shared_by))
 
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,

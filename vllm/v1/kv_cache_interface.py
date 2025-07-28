@@ -231,6 +231,14 @@ class KVCacheTensor:
     """
     size: int  # size of the KV cache tensor in bytes
     shared_by: list[str]  # layer names that share the same KV cache tensor
+    
+    def get_attention_key_offset(self, layer_index: int, page_size: int) -> int:
+        """Screenshot formula: ki → tensor + 2 × i × page_size"""
+        return 2 * layer_index * page_size
+    
+    def get_attention_value_offset(self, layer_index: int, page_size: int) -> int:
+        """Screenshot formula: vi → tensor + (2 × i + 1) × page_size"""
+        return (2 * layer_index + 1) * page_size
 
 
 @dataclass
