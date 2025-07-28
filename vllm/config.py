@@ -1479,7 +1479,7 @@ class ModelConfig:
             dict[str, Any]: A dictionary with the differing sampling
             parameters, if `generation_config` is `"vllm"` an empty dictionary.
         """
-        config = {}
+        config: Union[dict[str, Any], GenerationConfig] = {}
 
         if self.generation_config == "auto":
             config = try_get_generation_config(
