@@ -68,7 +68,7 @@ the pooler assigned to each task has the following attributes by default:
 
 | Task       | Pooling Type   | Normalization | Softmax |
 |------------|----------------|---------------|---------|
-| `encode`   | `ALL`          | ❌            | ❌      |
+| `reward`   | `ALL`          | ❌            | ❌      |
 | `embed`    | `LAST`         | ✅︎            | ❌      |
 | `classify` | `LAST`         | ❌            | ✅︎      |
 
