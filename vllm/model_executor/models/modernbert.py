@@ -23,8 +23,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.pooling_params import PoolingTask
 from vllm.sequence import IntermediateTensors
+from vllm.tasks import PoolingTask
 
 from .interfaces import SupportsCrossEncoding, SupportsV0Only
 from .utils import WeightsMapper, maybe_prefix
