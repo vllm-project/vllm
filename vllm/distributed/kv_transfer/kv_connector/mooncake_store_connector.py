@@ -126,6 +126,7 @@ class MooncakeStoreConnector(KVConnectorBase):
         start_layer = model_executable.model.start_layer
         end_layer = model_executable.model.end_layer
         hidden_or_intermediate_states_for_one_req = []
+        num_heads, head_size = self.kv_helper.get_model_args(model_executable)
 
         for idx, slen in enumerate(seq_lens):
             start_pos = sum(seq_lens[:idx])
@@ -175,7 +176,8 @@ class MooncakeStoreConnector(KVConnectorBase):
                 self.kv_helper.put_kv_to_cache(model_executable, remote_k,
                                                remote_v, layer, kv_cache,
                                                slot_mapping, start_pos,
-                                               end_pos)
+                                               end_pos,
+                                               num_heads, head_size)
 
             hidden_or_intermediate_states_for_one_req.append(hidden)
 
