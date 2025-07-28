@@ -62,7 +62,7 @@ class EplbStatLogger:
         self.lock = threading.Lock()
         self.start_loop()
 
-    def record(self, moe_load, phy2log_map):
+    def record(self, moe_load: Optional[torch.Tensor], phy2log_map: Optional[torch.Tensor]):
         with self.lock:
             if moe_load:
                 self.moe_load = [old + new for old, new in zip(self.moe_load, moe_load)]
@@ -85,7 +85,7 @@ class EplbStatLogger:
         if self.rank == 0:
             self.do_record_loop.start()
 
-    def record_phy2log(self, phy2log_map):
+    def record_phy2log(self, phy2log_map: list[list[int]]):
         if self.rank == 0:
             for layer_id in range(len(phy2log_map)):
                 for phy_expert_id, log_expert_id in enumerate(phy2log_map[layer_id]):
@@ -104,7 +104,7 @@ class EplbStatLogger:
                     ).set(1)
                     self.phy2log_map[layer_id][phy_expert_id] = log_expert_id
 
-    def record_expert_load(self, moe_load):
+    def record_expert_load(self, moe_load: list[list[int]]):
         if self.rank == 0:
             for layer_id in range(len(moe_load)):
                 for phy_expert_id, load in enumerate(moe_load[layer_id]):

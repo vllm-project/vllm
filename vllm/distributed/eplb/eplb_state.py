@@ -29,7 +29,7 @@ physical experts.
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Optional, Union, Tuple
+from typing import Optional, Union
 
 import torch
 from torch.distributed import ProcessGroup, all_gather, all_reduce
@@ -322,7 +322,7 @@ class EplbState:
              model: MixtureOfExperts,
              is_dummy: bool = False,
              is_profile: bool = False,
-             log_stats: bool = False) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+             log_stats: bool = False) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Step the EPLB state.
 
