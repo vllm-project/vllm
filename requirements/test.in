@@ -15,7 +15,7 @@ httpx
 librosa # required for audio tests
 vector_quantize_pytorch # required for minicpmo_26 test
 vocos # required for minicpmo_26 test
-peft
+peft>=0.15.0 # required for phi-4-mm test
 pqdm
 ray[cgraph,default]>=2.43.0, !=2.44.* # Ray Compiled Graph, required by pipeline parallelism tests
 sentence-transformers # required for embedding tests

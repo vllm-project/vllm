@@ -661,7 +661,7 @@ pathvalidate==3.2.1
     # via pytablewriter
 patsy==1.0.1
     # via statsmodels
-peft==0.13.2
+peft==0.16.0
     # via
     #   -r requirements/test.in
     #   lm-eval
