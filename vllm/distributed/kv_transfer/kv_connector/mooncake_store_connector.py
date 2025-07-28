@@ -176,8 +176,7 @@ class MooncakeStoreConnector(KVConnectorBase):
                 self.kv_helper.put_kv_to_cache(model_executable, remote_k,
                                                remote_v, layer, kv_cache,
                                                slot_mapping, start_pos,
-                                               end_pos,
-                                               num_heads, head_size)
+                                               end_pos, num_heads, head_size)
 
             hidden_or_intermediate_states_for_one_req.append(hidden)
 

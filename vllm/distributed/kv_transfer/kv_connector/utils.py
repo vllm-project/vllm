@@ -88,11 +88,12 @@ class model_aware_kv_ops_helper:
         else:
             if len(kv_cache.shape) != 5:
                 if len(kv_cache.shape) != 3:
-                    raise ValueError(f"Unsupported kv_cache shape: {kv_cache.shape}. "
-                                     "Expected 3 or 5 dimensions.")
+                    raise ValueError(
+                        f"Unsupported kv_cache shape: {kv_cache.shape}. "
+                        "Expected 3 or 5 dimensions.")
                 num_kv, num_blks, last_dim_size = kv_cache.shape
                 kv_cache = kv_cache.reshape(num_kv, num_blks, -1, num_heads,
-                                              head_size)
+                                            head_size)
 
             key_cache, value_cache = kv_cache[0], kv_cache[1]
             ops.reshape_and_cache_flash(
