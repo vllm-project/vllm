@@ -255,15 +255,6 @@ def validate_parsed_serve_args(args: argparse.Namespace):
                         "--tool-call-parser")
 
 
-def log_non_default_args(args: argparse.Namespace):
-    non_default_args = {}
-    parser = make_arg_parser(FlexibleArgumentParser())
-    for arg, default in vars(parser.parse_args([])).items():
-        if default != getattr(args, arg):
-            non_default_args[arg] = getattr(args, arg)
-    logger.info("non-default args: %s", non_default_args)
-
-
 def create_parser_for_docs() -> FlexibleArgumentParser:
     parser_for_docs = FlexibleArgumentParser(
         prog="-m vllm.entrypoints.openai.api_server")

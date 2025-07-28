@@ -34,7 +34,8 @@ from vllm.entrypoints.score_utils import (ScoreContentPartParam,
                                           _cosine_similarity,
                                           _validate_score_input_lens,
                                           get_score_prompt)
-from vllm.entrypoints.utils import _validate_truncation_size
+from vllm.entrypoints.utils import (_validate_truncation_size,
+                                    log_non_default_args)
 from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
@@ -272,6 +273,8 @@ class LLM:
             compilation_config=compilation_config_instance,
             **kwargs,
         )
+
+        log_non_default_args(engine_args)
 
         # Create the Engine (autoselects V0 vs V1)
         self.llm_engine = LLMEngine.from_engine_args(
