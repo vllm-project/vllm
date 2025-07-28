@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import contextlib
+import multiprocessing
 import queue
 import sys
 import uuid
@@ -476,6 +477,9 @@ class MPClient(EngineCoreClient):
             # underlying data.
             self.pending_messages = deque[tuple[zmq.MessageTracker, Any]]()
 
+            # Start monitoring engine core processes for unexpected failures
+            self.start_engine_core_monitor()
+
             success = True
         finally:
             if not success:
@@ -504,6 +508,41 @@ class MPClient(EngineCoreClient):
 
     def dp_engines_running(self) -> bool:
         return self.engines_running
+
+    def start_engine_core_monitor(self):
+        """Start a monitor thread for engine core processes."""
+        engine_manager = self.resources.engine_manager
+        if (engine_manager is None or not hasattr(engine_manager, 'processes')
+                or not engine_manager.processes):
+            # No engine processes to monitor
+            return
+
+        engine_processes = engine_manager.processes
+        self_ref = weakref.ref(self)
+
+        # Monitor engine core process liveness. If any die unexpectedly,
+        # logs an error, shuts down the client and invokes the failure
+        # callback to inform the engine.
+        def monitor_engine_cores():
+            sentinels = [proc.sentinel for proc in engine_processes]
+            died = multiprocessing.connection.wait(sentinels)
+            _self = self_ref()
+            if not _self or _self.resources.engine_dead:
+                return
+            _self.resources.engine_dead = True
+            proc_name = next(proc.name for proc in engine_processes
+                             if proc.sentinel == died[0])
+            logger.error(
+                "Engine core proc %s died unexpectedly, "
+                "shutting down client.", proc_name)
+            _self.shutdown()
+            # Note: For MPClient, we don't have a failure callback mechanism
+            # like MultiprocExecutor, but we set engine_dead flag which will
+            # cause subsequent operations to raise EngineDeadError
+
+        Thread(target=monitor_engine_cores,
+               daemon=True,
+               name="MPClientEngineMonitor").start()
 
 
 def _process_utility_output(output: UtilityOutput,
@@ -749,6 +788,8 @@ class AsyncMPClient(MPClient):
                         outputs_queue.put_nowait(outputs)
             except Exception as e:
                 outputs_queue.put_nowait(e)
+            except asyncio.CancelledError:
+                outputs_queue.put_nowait(EngineDeadError())
 
         resources.output_queue_task = asyncio.create_task(
             process_outputs_socket(), name="EngineCoreOutputQueueTask")
