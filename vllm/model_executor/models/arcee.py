@@ -262,8 +262,8 @@ class ArceeModel(nn.Module):
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def load_weights(
-            self, weights: Iterable[tuple[str, torch.Tensor]]) -> (set[str]):
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         """Load weights, mapping q/k/v projections to fused qkv_proj."""
         stacked_params_mapping = [
             (".qkv_proj", ".q_proj", "q"),
