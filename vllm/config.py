@@ -802,6 +802,10 @@ class ModelConfig:
             return "TransformersForMultimodalLM"
         return "TransformersForCausalLM"
 
+    def using_transformers_backend(self) -> bool:
+        """Check if the model is using the Transformers backend class."""
+        return self.architecture == self._get_transformers_backend_cls()
+
     @property
     def registry(self):
         return me_models.ModelRegistry
