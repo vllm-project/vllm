@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from vllm import SamplingParams
 from vllm.v1.sample.logits_processor.interface import (BatchUpdate,
                                                        LogitsProcessor,
                                                        MoveDirectionality)
@@ -53,7 +52,8 @@ class MinPLogitsProcessor(LogitsProcessor):
         needs_update = False
         # Process added requests.
         for _, index, params, _ in batch_update.added:
-            min_p = params.min_p if isinstance(params, SamplingParams) else 0.0
+            assert params is not None
+            min_p = params.min_p
             if self.min_p_cpu[index] != min_p:
                 needs_update = True
                 self.min_p_cpu[index] = min_p
@@ -129,8 +129,8 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
         needs_update: bool = False
         # Process added requests.
         for _, index, params, _ in batch_update.added:
-            if isinstance(params, SamplingParams) and (lb :=
-                                                       params.logit_bias):
+            assert params is not None
+            if (lb := params.logit_bias):
                 self.biases[index] = lb
                 needs_update = True
             else:
@@ -216,8 +216,8 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         if batch_update:
             # Process added requests.
             for _, index, params, output_tok_ids in batch_update.added:
-                if (isinstance(params, SamplingParams)
-                        and (min_tokens := params.min_tokens)
+                assert params is not None
+                if ((min_tokens := params.min_tokens)
                         and len(output_tok_ids) < min_tokens):
                     # Replace request metadata at batch index
                     self.min_toks[index] = (min_tokens, output_tok_ids,

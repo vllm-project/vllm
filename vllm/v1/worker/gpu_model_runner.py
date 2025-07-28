@@ -215,7 +215,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             block_sizes=[self.cache_config.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
             logitsprocs=build_logitsprocs(self.vllm_config, self.device,
-                                          self.pin_memory),
+                                          self.pin_memory,
+                                          self.is_pooling_model),
+            is_pooling_model=self.is_pooling_model,
         )
 
         self.use_cuda_graph = (
@@ -2478,6 +2480,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 block_sizes=block_sizes,
                 is_spec_decode=bool(self.vllm_config.speculative_config),
                 logitsprocs=self.input_batch.logitsprocs,
+                is_pooling_model=self.is_pooling_model,
             )
 
     def _allocate_kv_cache_tensors(

@@ -96,6 +96,7 @@ def _generate_fake_sampling_metadata(
         vllm_config=VllmConfig(),
         device=device,
         is_pin_memory=PIN_MEMORY_AVAILABLE,
+        is_pooling_model=False,
     )
     fake_sampling_metadata = SamplingMetadata(
         temperature=torch.full((batch_size, ), 0.0),
