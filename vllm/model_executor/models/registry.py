@@ -605,9 +605,10 @@ class _ModelRegistry:
                 if model_info is not None:
                     return (model_info, arch)
 
-        # Fallback to transformers impl
+        # Fallback to transformers impl (after resolving convert_type)
         if (all(arch not in self.models for arch in architectures)
-                and model_config.model_impl == ModelImpl.AUTO):
+                and model_config.model_impl == ModelImpl.AUTO
+                and getattr(model_config, "convert_type", "none") == "none"):
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
             if arch is not None:
@@ -620,6 +621,16 @@ class _ModelRegistry:
             model_info = self._try_inspect_model_cls(normalized_arch)
             if model_info is not None:
                 return (model_info, arch)
+
+        # Fallback to transformers impl (before resolving runner_type)
+        if (all(arch not in self.models for arch in architectures)
+                and model_config.model_impl == ModelImpl.AUTO):
+            arch = self._try_resolve_transformers(architectures[0],
+                                                  model_config)
+            if arch is not None:
+                model_info = self._try_inspect_model_cls(arch)
+                if model_info is not None:
+                    return (model_info, arch)
 
         return self._raise_for_unsupported(architectures)
 
@@ -642,9 +653,10 @@ class _ModelRegistry:
                 if model_cls is not None:
                     return (model_cls, arch)
 
-        # Fallback to transformers impl
+        # Fallback to transformers impl (after resolving convert_type)
         if (all(arch not in self.models for arch in architectures)
-                and model_config.model_impl == ModelImpl.AUTO):
+                and model_config.model_impl == ModelImpl.AUTO
+                and getattr(model_config, "convert_type", "none") == "none"):
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
             if arch is not None:
@@ -657,6 +669,16 @@ class _ModelRegistry:
             model_cls = self._try_load_model_cls(normalized_arch)
             if model_cls is not None:
                 return (model_cls, arch)
+
+        # Fallback to transformers impl (before resolving runner_type)
+        if (all(arch not in self.models for arch in architectures)
+                and model_config.model_impl == ModelImpl.AUTO):
+            arch = self._try_resolve_transformers(architectures[0],
+                                                  model_config)
+            if arch is not None:
+                model_cls = self._try_load_model_cls(arch)
+                if model_cls is not None:
+                    return (model_cls, arch)
 
         return self._raise_for_unsupported(architectures)
 
