@@ -24,8 +24,6 @@ FROM ubuntu:22.04 AS base-common
 
 WORKDIR /workspace/
 
-ENV LD_PRELOAD=""
-
 ARG PYTHON_VERSION=3.12
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
 
@@ -66,12 +64,12 @@ ENV TARGETARCH=${TARGETARCH}
 ######################### x86_64 BASE IMAGE #########################
 FROM base-common AS base-amd64
 
-ENV LD_PRELOAD="$LD_PRELOAD:/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/opt/venv/lib/libiomp5.so"
+ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/opt/venv/lib/libiomp5.so"
 
 ######################### arm64 BASE IMAGE #########################
 FROM base-common AS base-arm64
 
-ENV LD_PRELOAD="$LD_PRELOAD:/usr/lib/aarch64-linux-gnu/libtcmalloc_minimal.so.4"
+ENV LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libtcmalloc_minimal.so.4"
 
 ######################### BASE IMAGE #########################
 FROM base-${TARGETARCH} AS base
