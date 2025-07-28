@@ -21,13 +21,8 @@ def test_max_tokens_none():
 def model_config():
     return ModelConfig(
         MODEL_NAME,
-        task="auto",
-        tokenizer=MODEL_NAME,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
         seed=0,
         dtype="float16",
-        revision=None,
     )
 
 

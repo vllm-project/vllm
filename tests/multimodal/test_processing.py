@@ -954,13 +954,6 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
 
     model_config = ModelConfig(
         model=model_id,
-        task="auto",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
-        dtype="auto",
-        revision=None,
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
 
@@ -993,13 +986,6 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
 
     model_config = ModelConfig(
         model=model_id,
-        task="auto",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
-        dtype="auto",
-        revision=None,
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
 
@@ -1061,16 +1047,7 @@ class _ProcessorProxy:
 )
 # yapf: enable
 def test_hf_processor_kwargs(model_id, call_kwargs, expected_kwargs):
-    model_config = ModelConfig(
-        model=model_id,
-        task="auto",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
-        dtype="auto",
-        revision=None,
-    )
+    model_config = ModelConfig(model_id)
 
     processor = MULTIMODAL_REGISTRY.create_processor(model_config)
     orig_get_hf_processor = processor.info.get_hf_processor

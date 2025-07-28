@@ -85,7 +85,7 @@ def test_models(
         hf_outputs = hf_model.encode(example_prompts)
 
     with vllm_runner(model,
-                     task="embed",
+                     runner="pooling",
                      max_model_len=max_model_len,
                      **vllm_extra_kwargs) as vllm_model:
         vllm_outputs = vllm_model.embed(example_prompts)

@@ -37,7 +37,9 @@ def test_cross_encoder_1_to_1(vllm_runner, hf_runner, model_name):
     with hf_runner(model_name, dtype=DTYPE, is_cross_encoder=True) as hf_model:
         hf_outputs = hf_model.predict([text_pair]).tolist()
 
-    with vllm_runner(model_name, task="score", dtype=DTYPE,
+    with vllm_runner(model_name,
+                     runner="pooling",
+                     dtype=DTYPE,
                      max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.score(text_pair[0], text_pair[1])
 
@@ -56,7 +58,9 @@ def test_cross_encoder_1_to_N(vllm_runner, hf_runner, model_name):
     with hf_runner(model_name, dtype=DTYPE, is_cross_encoder=True) as hf_model:
         hf_outputs = hf_model.predict(text_pairs).tolist()
 
-    with vllm_runner(model_name, task="score", dtype=DTYPE,
+    with vllm_runner(model_name,
+                     runner="pooling",
+                     dtype=DTYPE,
                      max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1[0], TEXTS_2)
 
@@ -76,7 +80,9 @@ def test_cross_encoder_N_to_N(vllm_runner, hf_runner, model_name):
     with hf_runner(model_name, dtype=DTYPE, is_cross_encoder=True) as hf_model:
         hf_outputs = hf_model.predict(text_pairs).tolist()
 
-    with vllm_runner(model_name, task="score", dtype=DTYPE,
+    with vllm_runner(model_name,
+                     runner="pooling",
+                     dtype=DTYPE,
                      max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1, TEXTS_2)
 
@@ -103,7 +109,7 @@ def test_embedding_1_to_1(vllm_runner, hf_runner, emb_model_name):
         ]
 
     with vllm_runner(emb_model_name,
-                     task="embed",
+                     runner="pooling",
                      dtype=DTYPE,
                      max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.score(text_pair[0], text_pair[1])
@@ -131,7 +137,7 @@ def test_embedding_1_to_N(vllm_runner, hf_runner, emb_model_name):
         ]
 
     with vllm_runner(emb_model_name,
-                     task="embed",
+                     runner="pooling",
                      dtype=DTYPE,
                      max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1[0], TEXTS_2)
@@ -160,7 +166,7 @@ def test_embedding_N_to_N(vllm_runner, hf_runner, emb_model_name):
         ]
 
     with vllm_runner(emb_model_name,
-                     task="embed",
+                     runner="pooling",
                      dtype=DTYPE,
                      max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.score(TEXTS_1, TEXTS_2)

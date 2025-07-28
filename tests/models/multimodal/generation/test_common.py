@@ -222,7 +222,6 @@ VLM_TEST_SETTINGS = {
         },
         marks=[large_gpu_mark(min_gb=32)],
     ),
-    # Check "auto" with fallback to transformers
     "internvl-transformers": VLMTestInfo(
         models=["OpenGVLab/InternVL3-1B-hf"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -232,7 +231,7 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         image_size_factors=[(0.25, 0.5, 1.0)],
         vllm_runner_kwargs={
-            "model_impl": "auto",
+            "model_impl": "transformers",
         },
         auto_cls=AutoModelForImageTextToText,
         marks=[pytest.mark.core_model],
@@ -638,7 +637,7 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: f"<|image_{idx}|>\n",
         max_model_len=4096,
         max_num_seqs=2,
-        task="generate",
+        runner="generate",
         # use sdpa mode for hf runner since phi3v didn't work with flash_attn
         hf_model_kwargs={"_attn_implementation": "sdpa"},
         use_tokenizer_eos=True,

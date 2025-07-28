@@ -69,10 +69,7 @@ async def test_guided_logits_processor_black_box(backend: str, is_local: bool,
 
     config = ModelConfig(
         MODEL_NAME,
-        task="generate",
-        tokenizer=MODEL_NAME,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
+        runner="generate",
         seed=0,
         dtype="bfloat16",
     )
@@ -113,10 +110,7 @@ async def test_guided_logits_processor_with_reasoning(
 
     config = ModelConfig(
         REASONING_MODEL_NAME,
-        task="generate",
-        tokenizer=REASONING_MODEL_NAME,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
+        runner="generate",
         seed=0,
         dtype="bfloat16",
     )
