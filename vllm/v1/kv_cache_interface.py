@@ -184,6 +184,7 @@ class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtype: torch.dtype
     page_size_padded: Optional[int] = None
+    mamba_type: str = "mamba2"
 
     def __post_init__(self):
         self.num_elements = sum(prod(shape) for shape in self.shapes)
