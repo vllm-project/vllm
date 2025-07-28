@@ -143,7 +143,6 @@ if TYPE_CHECKING:
     VLLM_USE_CUDNN_PREFILL: bool = False
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
-    VLLM_COMPUTE_PADDED_LOGITS_INDICES: bool = False
 
 
 def get_default_cache_root():
@@ -992,10 +991,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The default value is "VLLM".
     "VLLM_PROCESS_NAME_PREFIX":
     lambda: os.getenv("VLLM_PROCESS_NAME_PREFIX", "VLLM"),
-
-    # Enable computing and propagating cudagraph padded logits indices
-    "VLLM_COMPUTE_PADDED_LOGITS_INDICES":
-    lambda: bool(int(os.getenv("VLLM_COMPUTE_PADDED_LOGITS_INDICES", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]

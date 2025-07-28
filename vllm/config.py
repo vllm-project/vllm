@@ -1684,6 +1684,10 @@ class CacheConfig:
     num_cpu_blocks: Optional[int] = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
 
+    enable_kv_sharing_truncated_prefill: bool = False
+    """Skip prefill for tokens where applicable in YOCO-like KV-sharing 
+    setups (e.g. Gemma3n)"""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

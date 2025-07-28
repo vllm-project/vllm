@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
 import gc
 import time
 from contextlib import contextmanager
@@ -45,7 +46,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
 from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionBackend
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
-    make_local_attention_virtual_batches)
+    make_local_attention_virtual_batches, subclass_attention_metadata)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         ChunkedLocalAttentionSpec,
@@ -317,9 +318,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # means this layer will perform attention using the keys and values
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
+        self.truncated_prefill_eligible_layers: set[str] = set()
 
         self.logits_indices = None
-        if envs.VLLM_COMPUTE_PADDED_LOGITS_INDICES:
+        if self.cache_config.enable_kv_sharing_truncated_prefill:
             self.logits_indices = torch.zeros(self.max_num_tokens,
                                               dtype=torch.int32,
                                               device=self.device)
@@ -738,6 +740,51 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         spec_decode_common_attn_metadata = None
 
+        use_spec_decode = len(
+            scheduler_output.scheduled_spec_decode_tokens) > 0
+        if not use_spec_decode:
+            # NOTE(woosuk): Due to chunked prefills, the batch may contain
+            # partial requests. While we should not sample any token
+            # from these partial requests, we do so for simplicity.
+            # We will ignore the sampled tokens from the partial requests.
+            # TODO: Support prompt logprobs.
+            logits_indices = query_start_loc[1:] - 1
+            spec_decode_metadata = None
+        else:
+            # Get the number of draft tokens for each request.
+            # Iterate over the dictionary rather than all requests since not all
+            # requests have draft tokens.
+            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+            for req_id, draft_token_ids in (
+                    scheduler_output.scheduled_spec_decode_tokens.items()):
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                num_draft_tokens[req_idx] = len(draft_token_ids)
+
+            spec_decode_metadata = self._calc_spec_decode_metadata(
+                num_draft_tokens, cu_num_tokens)
+            logits_indices = spec_decode_metadata.logits_indices
+
+        logits_indices_padded = None
+        if self.cache_config.enable_kv_sharing_truncated_prefill:
+            assert self.logits_indices is not None
+            num_logits = logits_indices.shape[0]
+            assert num_logits > 0
+            self.logits_indices[:num_logits].copy_(logits_indices)
+            # self.logits_indices[num_logits:] might have leftover indices from
+            # previous iterations, whose values may be greater than the batch
+            # size in the current iteration. To ensure the indices are always
+            # valid, we fill the padded indices with the last index.
+            self.logits_indices[num_logits:].fill_(logits_indices[-1].item())
+            if (self.use_cuda_graph
+                    and num_logits <= self.cudagraph_batch_sizes[-1]):
+                # Use piecewise CUDA graphs.
+                # Add padding to the batch size.
+                num_logits_padded = self.vllm_config.pad_for_cudagraph(
+                    num_logits)
+            else:
+                num_logits_padded = num_logits
+            logits_indices_padded = self.logits_indices[:num_logits_padded]
+
         attn_metadata: dict[str, Any] = {}
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
@@ -794,35 +841,36 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             ))
 
             for layer_name in kv_cache_group_spec.layer_names:
+                if (self.cache_config.enable_kv_sharing_truncated_prefill and
+                        layer_name in self.truncated_prefill_eligible_layers):
+                    fields = [
+                        ('logits_indices_padded', Optional[torch.Tensor],
+                         None),
+                        ('num_logits_indices', int, 0),
+                    ]
+                    # Dynamically createa a dataclass type that inherits 
+                    # from attention metadata type but includes additional 
+                    # fields logits_indices_padded and num_logits_indices
+                    # which are required for prefill truncation
+                    truncated_prefill_metadata_type = (
+                        subclass_attention_metadata(
+                            name_prefix="TruncatedPrefill",
+                            metadata_cls=type(attn_metadata_i),
+                            fields=fields,
+                        ))
+                    attn_metadata[
+                        layer_name] = truncated_prefill_metadata_type(
+                            **dataclasses.asdict(attn_metadata_i),
+                            logits_indices_padded=logits_indices_padded,
+                            num_logits_indices=logits_indices.size(0),
+                        )
+                    continue
+
                 attn_metadata[layer_name] = attn_metadata_i
 
         attention_cuda_graphs = all(
             b.can_run_in_cudagraph(common_attn_metadata)
             for b in self.attn_metadata_builders)
-
-        use_spec_decode = len(
-            scheduler_output.scheduled_spec_decode_tokens) > 0
-        if not use_spec_decode:
-            # NOTE(woosuk): Due to chunked prefills, the batch may contain
-            # partial requests. While we should not sample any token
-            # from these partial requests, we do so for simplicity.
-            # We will ignore the sampled tokens from the partial requests.
-            # TODO: Support prompt logprobs.
-            logits_indices = query_start_loc[1:] - 1
-            spec_decode_metadata = None
-        else:
-            # Get the number of draft tokens for each request.
-            # Iterate over the dictionary rather than all requests since not all
-            # requests have draft tokens.
-            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
-            for req_id, draft_token_ids in (
-                    scheduler_output.scheduled_spec_decode_tokens.items()):
-                req_idx = self.input_batch.req_id_to_index[req_id]
-                num_draft_tokens[req_idx] = len(draft_token_ids)
-
-            spec_decode_metadata = self._calc_spec_decode_metadata(
-                num_draft_tokens, cu_num_tokens)
-            logits_indices = spec_decode_metadata.logits_indices
 
         # Hot-Swap lora model
         if self.lora_config:
@@ -1443,24 +1491,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # compiled with full CUDA graphs, we have to skip them entirely.
         skip_cuda_graphs = self.full_cuda_graph and not attention_cuda_graphs
 
-        logits_indices_padded = None
-        if envs.VLLM_COMPUTE_PADDED_LOGITS_INDICES:
-            assert self.logits_indices is not None
-            num_logits = logits_indices.shape[0]
-            assert num_logits > 0
-            self.logits_indices[:num_logits].copy_(logits_indices)
-            # Ensure we keep duplicates instead of zeros
-            self.logits_indices[num_logits:].fill_(logits_indices[-1].item())
-            if (self.use_cuda_graph
-                    and num_logits <= self.cudagraph_batch_sizes[-1]):
-                # Use piecewise CUDA graphs.
-                # Add padding to the batch size.
-                num_logits_padded = self.vllm_config.pad_for_cudagraph(
-                    num_logits)
-            else:
-                num_logits_padded = num_logits
-            logits_indices_padded = self.logits_indices[:num_logits_padded]
-
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(
@@ -1469,7 +1499,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
                 skip_cuda_graphs=skip_cuda_graphs,
-                logits_indices_padded=logits_indices_padded,
         ):
             self.maybe_setup_kv_connector(scheduler_output)
 
@@ -2716,6 +2745,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 kv_cache_config.kv_cache_groups,
                 kv_caches,
             )
+            attn_layers = get_layers_from_vllm_config(self.vllm_config,
+                                                      Attention)
+            # Iterate in reversed order and add layers that re-use KV cache
+            # e.g. in YOCO-like KV sharing setups used for Gemma3n
+            for layer_name in reversed(attn_layers):
+                if layer_name in self.shared_kv_cache_layers:
+                    self.truncated_prefill_eligible_layers.add(layer_name)
+                else:
+                    break
 
         bind_kv_cache(kv_caches,
                       self.compilation_config.static_forward_context,

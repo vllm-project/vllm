@@ -3,8 +3,8 @@
 import abc
 import functools
 from abc import abstractmethod
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Generic, Optional, TypeVar
+from dataclasses import dataclass, make_dataclass
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar
 
 import numpy as np
 import torch
@@ -501,3 +501,16 @@ def reorder_batch_to_split_decodes_and_prefills(
         modified_batch = True
 
     return modified_batch
+
+
+def subclass_attention_metadata(
+    name_prefix: str,
+    metadata_cls: Any,
+    fields: list[tuple[str, Any, Any]],
+) -> Any:
+    """
+    Return a new subclass of `metadata_cls` with additional fields
+    """
+    name: str = name_prefix + metadata_cls.__name__  # type: ignore
+    Wrapped = make_dataclass(name, fields, bases=(metadata_cls, ))
+    return Wrapped
