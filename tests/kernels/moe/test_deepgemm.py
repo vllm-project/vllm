@@ -15,15 +15,10 @@ import torch
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
-from vllm.utils import has_deep_gemm
-from vllm.utils.deep_gemm import calc_diff, per_block_cast_to_fp8
+from vllm.utils.deep_gemm import (calc_diff, is_deepgemm_available,
+                                  per_block_cast_to_fp8)
 
 BLOCK_SIZE = [128, 128]
-
-requires_deep_gemm = pytest.mark.skipif(
-    not has_deep_gemm(),
-    reason="Requires deep_gemm kernels",
-)
 
 
 def make_block_quant_fp8_weights(
@@ -148,7 +143,8 @@ NUM_EXPERTS = [32]
 @pytest.mark.parametrize("mnk", MNKs)
 @pytest.mark.parametrize("topk", TOPKS)
 @pytest.mark.parametrize("num_experts", NUM_EXPERTS)
-@requires_deep_gemm
+@pytest.mark.skipif(not is_deepgemm_available(),
+                    reason="Requires deep_gemm kernels")
 def test_deepgemm_vs_triton(mnk, topk, num_experts, monkeypatch):
 
     with monkeypatch.context() as m:
