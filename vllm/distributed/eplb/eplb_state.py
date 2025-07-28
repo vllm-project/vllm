@@ -345,7 +345,7 @@ class EplbState:
 
         if is_profile:
             self.rearrange(model, is_profile=True)
-            return
+            return None, None
 
         if is_dummy:
             # Do not record load metrics for dummy steps
