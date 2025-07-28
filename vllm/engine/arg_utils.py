@@ -41,8 +41,7 @@ from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
-from vllm.v1.sample.logits_processor import (LogitsProcessor,
-                                             load_custom_logitsprocs)
+from vllm.v1.sample.logits_processor import LogitsProcessor
 
 # yapf: enable
 
@@ -439,7 +438,8 @@ class EngineArgs:
     enable_multimodal_encoder_data_parallel: bool = \
         ParallelConfig.enable_multimodal_encoder_data_parallel
 
-    logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]] = None
+    logits_processors: Optional[list[Union[
+        str, type[LogitsProcessor]]]] = ModelConfig.logits_processors
     """Custom logitproc types"""
 
     async_scheduling: bool = SchedulerConfig.async_scheduling
@@ -456,14 +456,6 @@ class EngineArgs:
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
-        if envs.VLLM_USE_V1:
-            # Setup V1 custom logitsprocs. Load plugins & any logitsprocs
-            # specified by FQCN
-            self.logits_processors = load_custom_logitsprocs(
-                self.logits_processors)
-        elif self.logits_processors is not None:
-            raise ValueError(
-                "vLLM V0 does not support logits_processors engine args")
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -561,10 +553,8 @@ class EngineArgs:
                                  **model_kwargs["model_impl"])
         model_group.add_argument("--override-attention-dtype",
                                  **model_kwargs["override_attention_dtype"])
-        model_group.add_argument(
-            "--logits-processors",
-            nargs='+',
-            help="One or more logits processors' fully-qualified class names.")
+        model_group.add_argument("--logits-processors",
+                                 **model_kwargs["logits_processors"])
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
@@ -936,6 +926,7 @@ class EngineArgs:
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
+            logits_processors=self.logits_processors,
         )
 
     def validate_tensorizer_args(self):
@@ -1313,7 +1304,6 @@ class EngineArgs:
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
             additional_config=self.additional_config,
-            logits_processors=self.logits_processors,
         )
 
         return config

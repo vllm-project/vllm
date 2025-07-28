@@ -6,11 +6,6 @@ import os
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
-<<<<<<< HEAD
-import regex as re
-import requests
-=======
->>>>>>> main
 
 from tests.utils import RemoteOpenAIServer
 from tests.v1.test_utils import check_request_balancing

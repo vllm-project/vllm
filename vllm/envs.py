@@ -990,7 +990,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Controls whether or not to use cudnn prefill
     "VLLM_MOCK_LP_ENTRYPOINT":
     lambda: bool(int(os.getenv("VLLM_MOCK_LP_ENTRYPOINT", "0"))),
-    
+
     # Used to set the process name prefix for vLLM processes.
     # This is useful for debugging and monitoring purposes.
     # The default value is "VLLM".

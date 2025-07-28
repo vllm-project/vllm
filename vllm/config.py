@@ -51,7 +51,6 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
                         cuda_device_count_stateless, get_cpu_memory,
                         get_open_port, is_torch_equal_or_newer, random_uuid,
                         resolve_obj_by_qualname)
-from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 
 # yapf: enable
 
@@ -68,6 +67,7 @@ if TYPE_CHECKING:
         QuantizationConfig)
     from vllm.model_executor.model_loader import LoadFormats
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+    from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 
     ConfigType = type[DataclassInstance]
     HfOverrides = Union[dict, Callable[[type], type]]
@@ -81,6 +81,7 @@ else:
     BaseModelLoader = Any
     LoadFormats = Any
     TensorizerConfig = Any
+    LogitsProcessor = Any
     ConfigType = type
     HfOverrides = Union[dict[str, Any], Callable[[type], type]]
 
@@ -482,6 +483,9 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation."""
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
+    logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]] = None
+    """One or more logits processors' fully-qualified class names or class
+    definitions"""
 
     def compute_hash(self) -> str:
         """
@@ -4490,8 +4494,6 @@ class VllmConfig:
     you are using. Contents must be hashable."""
     instance_id: str = ""
     """The ID of the vLLM instance."""
-    logits_processors: Optional[list[type[LogitsProcessor]]] = None
-    """A list of logitproc types to construct for this vLLM instance"""
 
     def compute_hash(self) -> str:
         """
