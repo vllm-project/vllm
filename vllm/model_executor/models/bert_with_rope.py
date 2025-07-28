@@ -8,7 +8,6 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionType
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import (get_act_and_mul_fn,
@@ -364,7 +363,6 @@ class BertWithRopeBlock(nn.Module):
         return hidden_states
 
 
-@support_torch_compile
 class BertWithRopeEncoder(nn.Module):
 
     def __init__(self,
@@ -398,7 +396,7 @@ class BertWithRopeEncoder(nn.Module):
         return hidden_states
 
 
-class BertWithRope(nn.Module, SupportsV0Only, SupportsQuant):
+class BertWithRope(nn.Module, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -468,7 +466,7 @@ class BertWithRope(nn.Module, SupportsV0Only, SupportsQuant):
         return loaded_params
 
 
-class NomicBertModel(BertWithRope):
+class NomicBertModel(BertWithRope, SupportsV0Only):
     # for https://huggingface.co/nomic-ai/nomic-bert-2048
 
     hf_to_vllm_mapper = WeightsMapper(

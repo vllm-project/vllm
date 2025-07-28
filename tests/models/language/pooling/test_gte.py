@@ -56,17 +56,10 @@ MODELS = [
                    enable_test=False),
 ]
 
-V1FlashAttentionImpNotSupported = [
-    "Alibaba-NLP/gte-Qwen2-1.5B-instruct", "Alibaba-NLP/gte-modernbert-base"
-]
-
 
 @pytest.mark.parametrize("model_info", MODELS)
 def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo,
                            monkeypatch) -> None:
-    if model_info.name in V1FlashAttentionImpNotSupported:
-        monkeypatch.setenv("VLLM_USE_V1", "0")
-
     vllm_extra_kwargs: dict[str, Any] = {}
     if model_info.architecture == "GteNewModel":
         vllm_extra_kwargs["hf_overrides"] = {"architectures": ["GteNewModel"]}
@@ -79,9 +72,6 @@ def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo,
 def test_embed_models_correctness(hf_runner, vllm_runner,
                                   model_info: EmbedModelInfo, example_prompts,
                                   monkeypatch) -> None:
-    if model_info.name in V1FlashAttentionImpNotSupported:
-        monkeypatch.setenv("VLLM_USE_V1", "0")
-
     vllm_extra_kwargs: dict[str, Any] = {}
     if model_info.architecture == "GteNewModel":
         vllm_extra_kwargs["hf_overrides"] = {"architectures": ["GteNewModel"]}

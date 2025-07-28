@@ -4885,6 +4885,11 @@ class VllmConfig:
         if self.model_config is None:
             return
 
+        # Avoid running try_verify_and_update_config multiple times
+        if getattr(self.model_config, "config_updated", False):
+            return
+        self.model_config.config_updated = True
+
         architecture = self.model_config.architecture
         if architecture is None:
             return
