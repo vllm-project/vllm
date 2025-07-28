@@ -1093,13 +1093,14 @@ class LLM:
             instead pass them via the `inputs` parameter.
         """
         if pooling_task is None:
-            raise ValueError(
+            logger.warning(
                 "`pooling_task` must be specified. Please use one of the more "
                 "specific methods instead of `encode`:\n"
                 "  - For embeddings, use `LLM.embed(...)`.\n"
                 "  - For classification logits, use `LLM.classify(...)`.\n"
                 "  - For reward scores, use `LLM.reward(...)`.\n"
                 "  - For similarity scores, use `LLM.score(...)`.")
+            pooling_task = "embed"
 
         model_config = self.llm_engine.model_config
         runner_type = model_config.runner_type
