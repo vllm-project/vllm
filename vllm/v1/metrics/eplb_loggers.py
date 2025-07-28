@@ -58,21 +58,22 @@ class EplbStatLogger:
 
             self.moe_load = [torch.zeros((self.layers_num, self.local_expert_num), dtype=torch.int32, device=device)
                              for _ in range(get_ep_group().world_size)]
-            self.do_record_loop.start()
+
+        self.start_loop()
 
     def record(self, moe_load, phy2log_map):
         if moe_load:
             self.moe_load = [old + new for old, new in zip(self.moe_load, moe_load)]
         if phy2log_map:
-            self.phy2log = phy2log_map
+            self.phy2log_map = phy2log_map
 
     def record_loop(self):
         while True:
             moe_load = torch.stack(self.moe_load).cpu().tolist()
-            for load in moe_load:
+            for load in self.moe_load:
                 load.zero_()
             self.record_expert_load(moe_load)
-            phy2log_map = self.phy2log.cpu().tolist()
+            phy2log_map = self.phy2log_map.cpu().tolist()
             self.record_phy2log(phy2log_map)
             time.sleep(RECORDING_TIME)
 
