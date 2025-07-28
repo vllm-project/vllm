@@ -26,7 +26,7 @@ from pydantic import (ConfigDict, SkipValidation, TypeAdapter, field_validator,
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.distributed import ProcessGroup, ReduceOp
-from typing_extensions import Self, runtime_checkable
+from typing_extensions import Self, assert_never, runtime_checkable
 
 import vllm.envs as envs
 from vllm import version
@@ -102,11 +102,62 @@ RunnerOption = Literal["auto", "generate", "pooling", "draft"]
 
 RunnerType = Literal["generate", "pooling", "draft"]
 
-_RUNNER_TASKS: dict[RunnerType, list[_ResolvedTask]] = {
+ConvertOption = Literal["auto", "none", "embed", "classify", "reward"]
+
+ConvertType = Literal["none", "embed", "classify", "reward"]
+
+_RUNNER_TASKS: dict[RunnerType, list[TaskOption]] = {
     "generate": ["generate", "transcription"],
-    "pooling": ["encode", "embed", "classify", "reward"],
+    "pooling": ["embedding", "embed", "classify", "score", "reward"],
+    "draft": ["draft"],
+}
+
+_RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
+    "generate": [],
+    "pooling": ["embed", "classify", "reward"],
     "draft": [],
 }
+
+# Some model suffixes are based on auto classes from Transformers:
+# https://huggingface.co/docs/transformers/en/model_doc/auto
+# NOTE: Items higher on this list priority over lower ones
+_SUFFIX_TO_DEFAULTS: list[tuple[str, tuple[RunnerType, ConvertType]]] = [
+    ("ForCausalLM", ("generate", "none")),
+    ("ForConditionalGeneration", ("generate", "none")),
+    ("ChatModel", ("generate", "none")),
+    ("LMHeadModel", ("generate", "none")),
+    ("ForTextEncoding", ("pooling", "embed")),
+    ("EmbeddingModel", ("pooling", "embed")),
+    ("ForSequenceClassification", ("pooling", "classify")),
+    ("ForAudioClassification", ("pooling", "classify")),
+    ("ForImageClassification", ("pooling", "classify")),
+    ("ForVideoClassification", ("pooling", "classify")),
+    ("ClassificationModel", ("pooling", "classify")),
+    ("ForRewardModeling", ("pooling", "reward")),
+    ("RewardModel", ("pooling", "reward")),
+    # Let other `*Model`s take priority
+    ("Model", ("pooling", "embed")),
+]
+
+
+def iter_architecture_defaults():
+    yield from _SUFFIX_TO_DEFAULTS
+
+
+def try_match_architecture_defaults(
+    architecture: str,
+    *,
+    runner_type: Optional[RunnerType] = None,
+    convert_type: Optional[ConvertType] = None,
+) -> Optional[tuple[str, tuple[RunnerType, ConvertType]]]:
+    for suffix, (default_runner_type,
+                 default_convert_type) in iter_architecture_defaults():
+        if ((runner_type is None or runner_type == default_runner_type) and
+            (convert_type is None or convert_type == default_convert_type)
+                and architecture.endswith(suffix)):
+            return suffix, (default_runner_type, default_convert_type)
+
+    return None
 
 
 @runtime_checkable
@@ -236,11 +287,16 @@ class ModelConfig:
     runner: RunnerOption = "auto"
     """The type of model runner to use. Each vLLM instance only supports one
     model runner, even if the same model can be used for multiple types."""
-    task: TaskOption = "auto"
-    """The task to use the model for. If the model supports more than one
-    model runner, this is used to select which model runner to run.
+    convert: ConvertOption = "auto"
+    """Convert the model using adapters defined in
+    [vllm.model_executor.models.adapters][]. The most common use case is to
+    adapt a text generation model to be used for pooling tasks."""
+    task: Optional[TaskOption] = None
+    """[DEPRECATED] The task to use the model for. If the model supports more
+    than one model runner, this is used to select which model runner to run.
 
-    Note that the model may support other tasks using the same model runner."""
+    Note that the model may support other tasks using the same model runner.
+    """
     tokenizer: SkipValidation[str] = None  # type: ignore
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
     name or path will be used."""
@@ -558,48 +614,103 @@ class ModelConfig:
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, hf_token=self.hf_token, revision=self.revision)
 
-        # For pooling models, self.task is used to indicate the
-        # user-selected task
-        if self.task == "score":
-            if self._is_classify_task(self.architectures):
-                self.task = "classify"
+        architectures = self.architectures
+        registry = self.registry
+        is_generative_model = registry.is_text_generation_model(
+            architectures, self)
+        is_pooling_model = registry.is_pooling_model(architectures, self)
+
+        def _task_to_convert(task: TaskOption) -> ConvertType:
+            if task == "embedding" or task == "embed":
+                return "embed"
+            if task == "classify":
+                return "classify"
+            if task == "reward":
+                return "reward"
+            if task == "score":
+                new_task = self._get_default_pooling_task(architectures)
+                return "classify" if new_task == "classify" else "embed"
+
+            return "none"
+
+        if self.task is not None:
+            runner: RunnerOption = "auto"
+            convert: ConvertOption = "auto"
+            msg_prefix = ("The 'task' option has been deprecated and will be "
+                          "removed in v0.13.0 or v1.0, whichever comes first.")
+            msg_hint = "Please remove this option."
+
+            is_generative_task = self.task in _RUNNER_TASKS["generate"]
+            is_pooling_task = self.task in _RUNNER_TASKS["pooling"]
+
+            if is_generative_model and is_pooling_model:
+                if is_generative_task:
+                    runner = "generate"
+                    convert = "auto"
+                    msg_hint = ("Please replace this option with `--runner "
+                                "generate` to continue using this model "
+                                "as a generative model.")
+                elif is_pooling_task:
+                    runner = "pooling"
+                    convert = "auto"
+                    msg_hint = ("Please replace this option with `--runner "
+                                "pooling` to continue using this model "
+                                "as a pooling model.")
+                else:  # task == "auto"
+                    pass
+            elif is_generative_model or is_pooling_model:
+                if is_generative_task:
+                    runner = "generate"
+                    convert = "auto"
+                    msg_hint = "Please remove this option"
+                elif is_pooling_task:
+                    runner = "pooling"
+                    convert = _task_to_convert(self.task)
+                    msg_hint = ("Please replace this option with `--convert "
+                                f"{convert}` to continue using this model "
+                                "as a pooling model.")
+                else:  # task == "auto"
+                    pass
             else:
-                self.task = "embed"
-        elif self.task == "embedding":
-            msg = ("The 'embedding' task has been renamed to 'embed', please "
-                   "use the new name. The old name will be removed in v1.0.")
+                raise AssertionError("The model should be a generative or "
+                                     "pooling model when task is set to "
+                                     f"{self.task!r}.")
+
+            self.runner = runner
+            self.convert = convert
+
+            msg = f"{msg_prefix} {msg_hint}"
             warnings.warn(msg, DeprecationWarning, stacklevel=2)
 
-            self.task = "embed"
+        self.runner_type = self._get_runner_type(architectures, self.runner)
+        self.convert_type = self._get_convert_type(architectures,
+                                                   self.runner_type,
+                                                   self.convert)
 
-        model_info, arch = self.registry.inspect_model_cls(self.architectures)
+        if self.runner_type == "generate" and not is_generative_model:
+            generate_converts = _RUNNER_CONVERTS["generate"]
+            if self.convert_type not in generate_converts:
+                # Currently we don't have any converters for generative models
+                raise ValueError(
+                    "This model does not support `--runner generate`.")
+        if self.runner_type == "pooling" and not is_pooling_model:
+            pooling_converts = _RUNNER_CONVERTS["pooling"]
+            if self.convert_type not in pooling_converts:
+                convert_option = "<" + "|".join(pooling_converts) + ">"
+                raise ValueError(
+                    "This model does not support `--runner pooling`. "
+                    f"You can pass `--convert {convert_option} to adapt "
+                    "it into a pooling model.")
+
+        self.supported_tasks = self._get_supported_tasks(
+            architectures, self.runner_type, self.convert_type)
+
+        # Note: Initialize these attributes early because transformers fallback
+        # may fail to load dynamic modules in child processes
+        model_info, arch = registry.inspect_model_cls(architectures, self)
         self._model_info = model_info
         self._architecture = arch
-
-        all_supported_tasks = self._get_supported_tasks(self.task)
-        logger.debug("Tasks supported by runner type: %s", all_supported_tasks)
-        supported_runner_types = self._get_supported_runner_types(
-            all_supported_tasks)
-        runner_type = self._resolve_runner(self.runner, self.task,
-                                           supported_runner_types,
-                                           all_supported_tasks)
-
-        logger.debug("Selected runner type: %s", runner_type)
-        # For pooling models, self.task is used to indicate the
-        # user-selected task
-        if runner_type == "pooling" and self.task == "auto":
-            selected_task = all_supported_tasks[runner_type][-1]
-            assert selected_task != "encode"
-            self.task = selected_task
-        self.supported_runner_types = supported_runner_types
-        self.runner_type = runner_type
-        self.supported_tasks = all_supported_tasks[runner_type]
-
-        if self.runner_type in ("draft",
-                                "generate") and self.task != "transcription":
-            self.truncation_side = "left"
-        else:
-            self.truncation_side = "right"
+        logger.info("Resolved architecture: %s", arch)
 
         self.pooler_config = self._init_pooler_config()
 
@@ -652,15 +763,9 @@ class ModelConfig:
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
         self.multimodal_config = self._init_multimodal_config()
-        self.model_supports_multimodal_raw_input = (
-            self.registry.supports_multimodal_raw_input(self.architectures))
+
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
-
-        self.is_attention_free = self._init_attention_free()
-        self.is_hybrid = self._init_is_hybrid()
-        self.has_noops = self._init_has_noops()
-        self.has_inner_state = self._init_has_inner_state()
 
         if (not current_platform.is_neuron() and self.override_neuron_config):
             raise ValueError(
@@ -702,29 +807,12 @@ class ModelConfig:
 
     @property
     def architectures(self) -> list[str]:
-        # architectures in the model config.
-        architectures = getattr(self.hf_config, "architectures", [])
-        # The registry assumes that it can always inspect the vLLM model class
-        # for a given architecture. This assumption breaks down for the
-        # Transformers backend, which may use a different class depending on
-        # the model type. To work around this, we add the correct Transformers
-        # backend class to the architectures list. We must do this here because
-        # we need access to the `hf_config` to determine the backend class.
-        transformers_backend_cls = self._get_transformers_backend_cls()
-        if (self.model_impl != ModelImpl.VLLM.value
-                and all(arch != transformers_backend_cls
-                        for arch in architectures)):
-            architectures.append(transformers_backend_cls)
-        return architectures
+        return getattr(self.hf_config, "architectures", [])
 
     @property
     def architecture(self) -> str:
-        # The architecture vllm actually used.
+        """The architecture vllm actually used."""
         return self._architecture
-
-    @property
-    def model_info(self):
-        return self._model_info
 
     def maybe_pull_model_tokenizer_for_s3(self, model: str,
                                           tokenizer: str) -> None:
@@ -763,7 +851,7 @@ class ModelConfig:
             self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
-        if self.registry.is_multimodal_model(self.architectures):
+        if self.registry.is_multimodal_model(self.architectures, self):
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
                 media_io_kwargs=self.media_io_kwargs,
@@ -819,19 +907,6 @@ class ModelConfig:
 
         return None
 
-    def _init_attention_free(self) -> bool:
-        return self.registry.is_attention_free_model(self.architectures)
-
-    def _init_is_hybrid(self) -> bool:
-        return self.registry.is_hybrid_model(self.architectures)
-
-    def _init_has_noops(self) -> bool:
-        architectures = getattr(self.hf_config, "architectures", [])
-        return self.registry.is_noops_model(architectures)
-
-    def _init_has_inner_state(self) -> bool:
-        return self.registry.model_has_inner_state(self.architectures)
-
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = cast(TokenizerMode, self.tokenizer_mode.lower())
         if tokenizer_mode not in get_args(TokenizerMode):
@@ -840,155 +915,168 @@ class ModelConfig:
                 f"one of {get_args(TokenizerMode)}.")
         self.tokenizer_mode = tokenizer_mode
 
-    def _is_classify_task(self, architectures: list[str]):
-        for arch in architectures:
-            if arch.endswith("ForSequenceClassification"):
-                return True
-        return self.registry.is_cross_encoder_model(architectures)
-
-    def _get_preferred_pooling_task(
+    def _get_default_runner_type(
         self,
         architectures: list[str],
-    ) -> _ResolvedTask:
-        model_id = self.model
-        if get_pooling_config(model_id, self.revision):
+    ) -> RunnerType:
+        registry = self.registry
+
+        # Some Sentence Transformers models use *ForCausalLM archs
+        if get_pooling_config(self.model, self.revision):
+            return "pooling"
+
+        for arch in architectures:
+            if arch in registry.get_supported_archs():
+                if registry.is_pooling_model(architectures, self):
+                    return "pooling"
+                if registry.is_text_generation_model(architectures, self):
+                    return "generate"
+
+            match = try_match_architecture_defaults(arch)
+            if match:
+                _, (runner_type, _) = match
+                return runner_type
+
+        return "generate"
+
+    def _get_runner_type(
+        self,
+        architectures: list[str],
+        runner: RunnerOption,
+    ) -> RunnerType:
+        if runner != "auto":
+            return runner
+
+        runner_type = self._get_default_runner_type(architectures)
+
+        logger.info(
+            "Resolved `--runner auto` to `--runner %s`. "
+            "Pass the value explicitly to silence this message.", runner_type)
+
+        return runner_type
+
+    def _get_default_convert_type(
+        self,
+        architectures: list[str],
+        runner_type: RunnerType,
+    ) -> ConvertType:
+        registry = self.registry
+
+        for arch in architectures:
+            if arch in registry.get_supported_archs():
+                if (runner_type == "generate"
+                        and registry.is_text_generation_model(
+                            architectures, self)):
+                    return "none"
+                if (runner_type == "pooling"
+                        and registry.is_pooling_model(architectures, self)):
+                    return "none"
+
+            match = try_match_architecture_defaults(arch,
+                                                    runner_type=runner_type)
+            if match:
+                _, (_, convert_type) = match
+                return convert_type
+
+        # This is to handle Sentence Transformers models that use *ForCausalLM
+        # and also multi-modal pooling models which are not defined as
+        # Sentence Transformers models
+        if runner_type == "pooling":
             return "embed"
-        if self.registry.is_transcription_model(architectures):
-            return "transcription"
 
-        suffix_to_preferred_task: list[tuple[str, _ResolvedTask]] = [
-            # Other models follow this pattern
-            ("EmbeddingModel", "embed"),
-            ("RewardModel", "reward"),
-        ]
+        return "none"
 
-        for suffix, pref_task in suffix_to_preferred_task:
-            if self.architecture.endswith(suffix):
-                return pref_task
+    def _get_convert_type(
+        self,
+        architectures: list[str],
+        runner_type: RunnerType,
+        convert: ConvertOption,
+    ) -> ConvertType:
+        if convert != "auto":
+            return convert
 
-        return "embed"
+        convert_type = self._get_default_convert_type(architectures,
+                                                      runner_type)
+
+        logger.info(
+            "Resolved `--convert auto` to `--convert %s`. "
+            "Pass the value explicitly to silence this message.", convert_type)
+
+        return convert_type
 
     def _get_supported_generation_tasks(
         self,
-        task_option: TaskOption,
+        architectures: list[str],
+        convert_type: ConvertType,
     ) -> list[_ResolvedTask]:
         registry = self.registry
-        architectures = self.architectures
 
-        if registry.is_transcription_only_model(architectures):
+        if registry.is_transcription_only_model(architectures, self):
             return ["transcription"]
 
+        # TODO: Use get_supported_generation_tasks once V0 is removed
         supported_tasks = list[_ResolvedTask]()
-        if registry.is_text_generation_model(architectures):
+        if (registry.is_text_generation_model(architectures, self)
+                or convert_type in _RUNNER_CONVERTS["generate"]):
             supported_tasks.append("generate")
 
-            if registry.is_transcription_model(architectures):
-                supported_tasks.append("transcription")
+        if registry.is_transcription_model(architectures, self):
+            supported_tasks.append("transcription")
 
         return supported_tasks
 
+    def _get_default_pooling_task(
+        self,
+        architectures: list[str],
+    ) -> Literal["embed", "classify", "reward"]:
+        if self.registry.is_cross_encoder_model(architectures, self):
+            return "classify"
+
+        for arch in architectures:
+            match = try_match_architecture_defaults(arch,
+                                                    runner_type="pooling")
+            if match:
+                _, (_, convert_type) = match
+                assert convert_type != "none"
+                return convert_type
+
+        return "embed"
+
     def _get_supported_pooling_tasks(
         self,
-        task_option: TaskOption,
+        architectures: list[str],
+        convert_type: ConvertType,
     ) -> list[_ResolvedTask]:
         registry = self.registry
-        architectures = self.architectures
 
+        # TODO: Use get_supported_pooling_tasks once V0 is removed
         supported_tasks = list[_ResolvedTask]()
-        if registry.is_pooling_model(architectures):
+        if (registry.is_pooling_model(architectures, self)
+                or convert_type in _RUNNER_CONVERTS["pooling"]):
             supported_tasks.append("encode")
 
-            # For now, users must specify the task (other than "pooling")
-            # to use for pooling models
-            if task_option == "auto":
-                preferred_task = self._get_preferred_pooling_task(
-                    architectures)
-
-                supported_tasks.append(preferred_task)
-            elif task_option in _RUNNER_TASKS["pooling"]:
-                supported_tasks.append(cast(_ResolvedTask, task_option))
+            extra_task = (self._get_default_pooling_task(architectures)
+                          if convert_type == "none" else convert_type)
+            supported_tasks.append(extra_task)
 
         return supported_tasks
 
     def _get_supported_tasks(
         self,
-        task_option: TaskOption,
-    ) -> dict[RunnerType, list[_ResolvedTask]]:
-        if self._is_classify_task(self.architectures):
-            return {"generate": [], "pooling": ["classify"], "draft": []}
-        else:
-            return {
-                "generate": self._get_supported_generation_tasks(task_option),
-                "pooling": self._get_supported_pooling_tasks(task_option),
-                "draft": ["draft"]
-            }
+        architectures: list[str],
+        runner_type: RunnerType,
+        convert_type: ConvertType,
+    ) -> list[_ResolvedTask]:
+        if runner_type == "generate":
+            return self._get_supported_generation_tasks(
+                architectures, convert_type)
+        if runner_type == "pooling":
+            return self._get_supported_pooling_tasks(architectures,
+                                                     convert_type)
+        if runner_type == "draft":
+            return ["draft"]
 
-    def _get_supported_runner_types(
-        self,
-        supported_tasks: dict[RunnerType, list[_ResolvedTask]],
-    ) -> set[RunnerType]:
-        return {
-            runner
-            for runner, runner_tasks in supported_tasks.items()
-            if len(runner_tasks) > 0
-        }
-
-    def _resolve_runner(
-        self,
-        runner_option: RunnerOption,
-        task_option: TaskOption,
-        supported_runner_types: set[RunnerType],
-        supported_tasks: dict[RunnerType, list[_ResolvedTask]],
-    ) -> RunnerType:
-        if not supported_runner_types:
-            raise ValueError("This model does not support any model runners!")
-
-        if runner_option != "auto":
-            if runner_option not in supported_runner_types:
-                raise ValueError(
-                    f"This model does not support runner={runner_option!r}. "
-                    f"Available runners: {supported_runner_types}")
-
-            return runner_option
-
-        if task_option != "auto":
-            for runner, runner_tasks in supported_tasks.items():
-                if task_option in runner_tasks:
-                    return runner
-            else:
-                task_runner: RunnerType = next(
-                    runner for runner, tasks in _RUNNER_TASKS.items()
-                    if task_option in tasks)
-                raise ValueError(
-                    f"This model does not support task={task_option!r}. "
-                    f"Available tasks for runner={task_runner!r}: "
-                    f"{supported_tasks[task_runner]}")
-
-        if "classify" in supported_tasks.get("pooling", []):
-            # When multiple pooling tasks are present, default to
-            # pooling (eg cross-encoder) for non-standard architectures.
-            return "pooling"
-
-        suffix_to_preferred_runner: list[tuple[str, RunnerType]] = [
-            ("ForCausalLM", "generate"),
-            ("ForConditionalGeneration", "generate"),
-            ("ChatModel", "generate"),
-            ("LMHeadModel", "generate"),
-            ("EmbeddingModel", "pooling"),
-            ("RewardModel", "pooling"),
-        ]
-
-        for suffix, pref_runner in suffix_to_preferred_runner:
-            if self.architecture.endswith(
-                    suffix) and pref_runner in supported_runner_types:
-                return pref_runner
-
-        if "generate" in supported_runner_types:
-            return "generate"
-        if "pooling" in supported_runner_types:
-            return "pooling"
-
-        raise AssertionError("This line should not be reached")
+        assert_never(runner_type)
 
     def _parse_quant_hf_config(self):
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
@@ -1216,7 +1304,8 @@ class ModelConfig:
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1:
-            if not self.registry.is_pp_supported_model(self.architectures):
+            if not self.registry.is_pp_supported_model(self.architectures,
+                                                       self):
                 raise NotImplementedError(
                     "Pipeline parallelism is not supported for this model. "
                     "Supported models implement the `SupportsPP` interface.")
@@ -1571,16 +1660,40 @@ class ModelConfig:
 
     @property
     def is_cross_encoder(self) -> bool:
-        return self.task == "classify"
+        return (self._model_info.supports_cross_encoding
+                or self.convert_type == "classify")
+
+    @property
+    def is_pp_supported(self) -> bool:
+        return self._model_info.supports_pp
+
+    @property
+    def is_multimodal_raw_input_supported(self) -> bool:
+        return self._model_info.supports_multimodal_raw_input
+
+    @property
+    def is_attention_free(self) -> bool:
+        return self._model_info.is_attention_free
+
+    @property
+    def is_hybrid(self) -> bool:
+        return self._model_info.is_hybrid
+
+    @property
+    def has_noops(self) -> bool:
+        return self._model_info.has_noops
+
+    @property
+    def has_inner_state(self):
+        return self._model_info.has_inner_state
+
+    @property
+    def is_v1_compatible(self) -> bool:
+        return not self._model_info.supports_v0_only
 
     @property
     def use_mla(self) -> bool:
         return self.is_deepseek_mla and not envs.VLLM_MLA_DISABLE
-
-    @property
-    def is_v1_compatible(self) -> bool:
-        architectures = getattr(self.hf_config, "architectures", [])
-        return me_models.ModelRegistry.is_v1_compatible(architectures)
 
     @property
     def is_matryoshka(self) -> bool:
@@ -4784,7 +4897,10 @@ class VllmConfig:
         self.scheduler_config.max_model_len = max_model_len
 
     def try_verify_and_update_config(self):
-        architecture = getattr(self.model_config, "architecture", None)
+        if self.model_config is None:
+            return
+
+        architecture = self.model_config.architecture
         if architecture is None:
             return
 
@@ -4797,7 +4913,7 @@ class VllmConfig:
         if self.model_config.is_hybrid:
             HybridAttentionMambaModelConfig.verify_and_update_config(self)
 
-        if self.model_config.task == "classify":
+        if self.model_config.convert_type == "classify":
             # Maybe convert ForCausalLM into ForSequenceClassification model.
             from vllm.model_executor.models.adapters import (
                 SequenceClassificationConfig)

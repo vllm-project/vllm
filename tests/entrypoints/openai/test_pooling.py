@@ -20,8 +20,8 @@ DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' +
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--task",
-        "reward",
+        "--runner",
+        "pooling",
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",

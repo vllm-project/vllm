@@ -4,6 +4,7 @@ from functools import partial
 
 import pytest
 
+import vllm.envs as envs
 from vllm import PoolingParams
 
 from ...utils import EmbedModelInfo, RerankModelInfo
@@ -62,6 +63,10 @@ def test_embed_models_correctness(hf_runner, vllm_runner,
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
 def test_rerank_models_mteb(hf_runner, vllm_runner,
                             model_info: RerankModelInfo) -> None:
+    if (model_info.architecture == "XLMRobertaForSequenceClassification"
+            and envs.VLLM_USE_V1):
+        pytest.skip("Not supported yet")
+
     mteb_test_rerank_models(hf_runner, vllm_runner, model_info)
 
 
@@ -92,7 +97,7 @@ def test_matryoshka(
         hf_outputs = matryoshka_fy(hf_outputs, dimensions)
 
     with vllm_runner(model_info.name,
-                     task="embed",
+                     runner="pooling",
                      dtype=dtype,
                      max_model_len=None) as vllm_model:
         assert vllm_model.llm.llm_engine.model_config.is_matryoshka
