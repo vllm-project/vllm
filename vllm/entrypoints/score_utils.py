@@ -196,10 +196,11 @@ def get_score_prompt(
         prompt_inputs = tokenizer(text=prompt_1,
                                   text_pair=prompt_2,
                                   **tokenization_kwargs)
+        full_prompt = tokenizer.decode(prompt_inputs["input_ids"])
     else:
         # `llm as reranker` models defaults to not using pad_token.
-        prompt_inputs = tokenizer(text=prompt_1 + prompt_2,
-                                  **tokenization_kwargs)
+        full_prompt = prompt_1 + prompt_2
+        prompt_inputs = tokenizer(text=full_prompt, **tokenization_kwargs)
 
     engine_prompt = TokensPrompt(prompt_token_ids=prompt_inputs["input_ids"])
 
