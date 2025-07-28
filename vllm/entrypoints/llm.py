@@ -1093,7 +1093,7 @@ class LLM:
             instead pass them via the `inputs` parameter.
         """
         if pooling_task is None:
-            if self.llm_engine.model_config.encoder_config is not None:
+            if "embed" in self.supported_tasks:
                 pooling_task = "embed"
             else:
                 pooling_task = "encode"
