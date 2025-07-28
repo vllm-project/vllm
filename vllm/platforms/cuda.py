@@ -150,11 +150,28 @@ class CudaPlatformBase(Platform):
         # TODO(lucas): handle this more gracefully
         # Note: model_config may be None during testing
         if model_config is not None and model_config.use_mla:
-            # if `VLLM_ATTENTION_BACKEND` is not set and we are using MLA, then
-            # we default to FlashMLA backend, so we need to force the blocksize
-            # here
-            use_flashmla = (envs.VLLM_ATTENTION_BACKEND is None \
-                or envs.VLLM_ATTENTION_BACKEND == "FLASHMLA")
+            # If `VLLM_ATTENTION_BACKEND` is not set and we are using MLA,
+            # then we default to FlashMLA backend for non-blackwell GPUs,
+            # else we default to CutlassMLA. For each case, we force the
+            # required block_size.
+            use_flashmla = False
+            use_cutlass_mla = False
+
+            if envs.VLLM_ATTENTION_BACKEND is None:
+                # Default case
+                if cls.is_device_capability(100):
+                    # Blackwell => Force CutlassMLA.
+                    use_cutlass_mla = True
+                    envs.VLLM_ATTENTION_BACKEND = "CUTLASS_MLA_VLLM_V1"
+                else:
+                    # Not Blackwell
+                    use_flashmla = True
+            else:
+                # Forced case
+                use_flashmla = (envs.VLLM_ATTENTION_BACKEND == "FLASHMLA")
+                use_cutlass_mla = (
+                    envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA_VLLM_V1")
+
             from vllm.attention.ops.flashmla import is_flashmla_supported
             if use_flashmla and is_flashmla_supported()[0] \
                 and cache_config.block_size != 64:
@@ -162,8 +179,6 @@ class CudaPlatformBase(Platform):
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLA backend.")
 
-            use_cutlass_mla = (envs.VLLM_ATTENTION_BACKEND is not None \
-                and envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA_VLLM_V1")
             if use_cutlass_mla and cache_config.block_size != 128:
                 cache_config.block_size = 128
                 logger.info("Forcing kv cache block size to 128 for "
@@ -182,9 +197,6 @@ class CudaPlatformBase(Platform):
             compilation_config.use_cudagraph = False
             if model_config is not None:
                 model_config.enforce_eager = True
-            # TODO (varun): Turning this ON gives incorrect results for the
-            # Deepseek-V2-lite model.
-            vllm_config.compilation_config.use_inductor = False
 
     @classmethod
     def get_current_memory_usage(cls,
@@ -458,6 +470,19 @@ class CudaPlatformBase(Platform):
     @classmethod
     def device_count(cls) -> int:
         return cuda_device_count_stateless()
+
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+        fp8_attention = kv_cache_dtype.startswith("fp8")
+        will_use_fa = (not envs.is_set("VLLM_ATTENTION_BACKEND")
+                       ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
+        supported = False
+        if cls.is_device_capability(100):
+            supported = True
+        elif fp8_attention and will_use_fa:
+            from vllm.attention.utils.fa_utils import flash_attn_supports_fp8
+            supported = flash_attn_supports_fp8()
+        return supported
 
 
 # NVML utils

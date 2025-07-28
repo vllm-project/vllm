@@ -120,8 +120,8 @@ class KVOutputAggregator:
     output corresponding to Rank 0 for scheduler."""
 
     def __init__(self, world_size: int):
-        # Complete transfer tracker. Used by to track finished requests
-        # [req_id -> n_finished_workers]
+        # Complete transfer tracker. Used to track finished requests
+        # [req_id -> n_remaining_workers]
         self._recv_remaining_count = defaultdict[str, int](lambda: world_size)
         self._send_remaining_count = defaultdict[str, int](lambda: world_size)
 
@@ -134,20 +134,32 @@ class KVOutputAggregator:
                                 remaining_count_dict: dict[str, int],
                                 finished_set: set[str]) -> None:
             for req_id in req_ids or ():
-                new_count = remaining_count_dict[req_id] - 1
-                if new_count == 0:
+                remaining_count_dict[req_id] -= 1
+                if remaining_count_dict[req_id] == 0:
                     finished_set.add(req_id)
                     del remaining_count_dict[req_id]
+
+        def update_finished_load_dict(worker_finished_loading_dict: dict[str,
+                                                                         int],
+                                      finished_loading_dict: dict[str, int]):
+            for req_id, num_actual_load_tokens in (worker_finished_loading_dict
+                                                   or {}).items():
+                if req_id in finished_loading_dict:
+                    finished_loading_dict[req_id] = min(
+                        finished_loading_dict[req_id], num_actual_load_tokens)
                 else:
-                    remaining_count_dict[req_id] = new_count
+                    finished_loading_dict[req_id] = num_actual_load_tokens
 
         finished_sending = set[str]()
         finished_recving = set[str]()
+        finished_loading_dict: dict[str, int] = {}
         for output in outputs:
             update_finished_set(output.finished_sending,
                                 self._send_remaining_count, finished_sending)
             update_finished_set(output.finished_recving,
                                 self._recv_remaining_count, finished_recving)
+            update_finished_load_dict(output.finished_loading_dict,
+                                      finished_loading_dict)
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
@@ -159,7 +171,7 @@ class KVOutputAggregator:
         # send/recv
         output.finished_sending = finished_sending if finished_sending else None
         output.finished_recving = finished_recving if finished_recving else None
-
+        output.finished_loading_dict = finished_loading_dict or None
         return output
 
     def async_aggregate(self,

@@ -13,7 +13,6 @@ UNSUPPORTED_MODELS_V1 = [
     "openai/whisper-large-v3",  # transcription
     "facebook/bart-large-cnn",  # encoder decoder
     "state-spaces/mamba-130m-hf",  # mamba1
-    "BAAI/bge-m3",  # embedding
 ]
 
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
@@ -106,9 +105,9 @@ def test_v1_llm_by_default(monkeypatch):
             m.delenv("VLLM_USE_V1")
 
         # Should default to V1 for supported config.
-        model = LLM(MODEL, enforce_eager=True, enable_lora=True)
-        print(model.generate("Hello my name is"))
-        assert hasattr(model.llm_engine, "engine_core")
+        llm = LLM(MODEL, enforce_eager=True, enable_lora=True)
+        print(llm.generate("Hello my name is"))
+        assert hasattr(llm.llm_engine, "engine_core")
         m.delenv("VLLM_USE_V1")
 
 
