@@ -253,8 +253,10 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             dtype=kv_cache_dtype,
             use_mla=model_config.use_mla).page_size_bytes
 
-        model_cls = ModelRegistry.resolve_model_cls(
-            model_config._model_info.architecture)[0]
+        model_cls, _ = ModelRegistry.resolve_model_cls(
+            model_config.architecture,
+            model_config=model_config,
+        )
 
         # get mamba page size
         mamba_page_size = MambaSpec(

@@ -76,10 +76,6 @@ def get_vllm_config():
     )
     model_config = ModelConfig(
         model="facebook/opt-125m",
-        task="generate",
-        tokenizer="facebook/opt-125m",
-        tokenizer_mode="auto",
-        trust_remote_code=True,
         dtype="float16",
         seed=42,
     )
