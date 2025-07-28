@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-from typing import TYPE_CHECKING
 from typing import Counter as CollectionsCounter
 from typing import Dict, List, Optional, Type, Union, cast
 
@@ -18,9 +17,6 @@ if ray is not None:
     from ray.util import metrics as ray_metrics
 else:
     ray_metrics = None
-
-if TYPE_CHECKING:
-    from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 logger = init_logger(__name__)
 
@@ -199,30 +195,6 @@ class Metrics:
             documentation="Count of successfully processed requests.",
             labelnames=labelnames + [Metrics.labelname_finish_reason])
 
-        # Speculative decoding stats
-        self.gauge_spec_decode_draft_acceptance_rate = self._gauge_cls(
-            name="vllm:spec_decode_draft_acceptance_rate",
-            documentation="Speulative token acceptance rate.",
-            labelnames=labelnames,
-            multiprocess_mode="sum")
-        self.gauge_spec_decode_efficiency = self._gauge_cls(
-            name="vllm:spec_decode_efficiency",
-            documentation="Speculative decoding system efficiency.",
-            labelnames=labelnames,
-            multiprocess_mode="sum")
-        self.counter_spec_decode_num_accepted_tokens = (self._counter_cls(
-            name="vllm:spec_decode_num_accepted_tokens_total",
-            documentation="Number of accepted tokens.",
-            labelnames=labelnames))
-        self.counter_spec_decode_num_draft_tokens = self._counter_cls(
-            name="vllm:spec_decode_num_draft_tokens_total",
-            documentation="Number of draft tokens.",
-            labelnames=labelnames)
-        self.counter_spec_decode_num_emitted_tokens = (self._counter_cls(
-            name="vllm:spec_decode_num_emitted_tokens_total",
-            documentation="Number of emitted tokens.",
-            labelnames=labelnames))
-
 
 # --8<-- [end:metrics-definitions]
 
@@ -391,9 +363,6 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_prompt_tokens.append(stats.num_prompt_tokens_iter)
         self.num_generation_tokens.append(stats.num_generation_tokens_iter)
 
-        # Update spec decode metrics
-        self.maybe_update_spec_decode_metrics(stats)
-
         # Log locally every local_interval seconds.
         if local_interval_elapsed(stats.now, self.last_local_log,
                                   self.local_interval):
@@ -435,10 +404,6 @@ class LoggingStatLogger(StatLoggerBase):
                     stats.gpu_prefix_cache_hit_rate * 100,
                     stats.cpu_prefix_cache_hit_rate * 100,
                 )
-            if self.spec_decode_metrics is not None:
-                log_fn(
-                    self._format_spec_decode_metrics_str(
-                        self.spec_decode_metrics))
 
             self._reset(stats, prompt_throughput, generation_throughput)
 
@@ -447,20 +412,8 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_prompt_tokens = []
         self.num_generation_tokens = []
         self.last_local_log = stats.now
-        self.spec_decode_metrics = None
         self.last_prompt_throughput = prompt_throughput
         self.last_generation_throughput = generation_throughput
-
-    def _format_spec_decode_metrics_str(
-            self, metrics: "SpecDecodeWorkerMetrics") -> str:
-
-        return ("Speculative metrics: "
-                f"Draft acceptance rate: {metrics.draft_acceptance_rate:.3f}, "
-                f"System efficiency: {metrics.system_efficiency:.3f}, "
-                f"Number of speculative tokens: {metrics.num_spec_tokens}, "
-                f"Number of accepted tokens: {metrics.accepted_tokens}, "
-                f"Number of draft tokens: {metrics.draft_tokens}, "
-                f"Number of emitted tokens: {metrics.emitted_tokens}.")
 
     def info(self, type: str, obj: SupportsMetricsInfo) -> None:
         raise NotImplementedError
@@ -579,33 +532,14 @@ class PrometheusStatLogger(StatLoggerBase):
         self.num_prompt_tokens.append(stats.num_prompt_tokens_iter)
         self.num_generation_tokens.append(stats.num_generation_tokens_iter)
 
-        # Update spec decode metrics
-        self.maybe_update_spec_decode_metrics(stats)
-
         # Log locally every local_interval seconds.
         if local_interval_elapsed(stats.now, self.last_local_log,
                                   self.local_interval):
-            if self.spec_decode_metrics is not None:
-                self._log_gauge(
-                    self.metrics.gauge_spec_decode_draft_acceptance_rate,
-                    self.spec_decode_metrics.draft_acceptance_rate)
-                self._log_gauge(self.metrics.gauge_spec_decode_efficiency,
-                                self.spec_decode_metrics.system_efficiency)
-                self._log_counter(
-                    self.metrics.counter_spec_decode_num_accepted_tokens,
-                    self.spec_decode_metrics.accepted_tokens)
-                self._log_counter(
-                    self.metrics.counter_spec_decode_num_draft_tokens,
-                    self.spec_decode_metrics.draft_tokens)
-                self._log_counter(
-                    self.metrics.counter_spec_decode_num_emitted_tokens,
-                    self.spec_decode_metrics.emitted_tokens)
 
             # Reset tracked stats for next interval.
             self.num_prompt_tokens = []
             self.num_generation_tokens = []
             self.last_local_log = stats.now
-            self.spec_decode_metrics = None
 
     def info(self, type: str, obj: SupportsMetricsInfo) -> None:
         # Info type metrics are syntactic sugar for a gauge permanently set to 1

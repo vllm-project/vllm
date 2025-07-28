@@ -88,6 +88,8 @@ void static_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
                              torch::Tensor const& input,  // [..., d]
                              torch::Tensor const& scale)  // [1]
 {
+  TORCH_CHECK(input.is_contiguous());
+  TORCH_CHECK(out.is_contiguous());
   int const block_size = 256;
   int const num_tokens = input.numel() / input.size(-1);
   int const num_elems = input.numel();
@@ -111,6 +113,8 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
                               torch::Tensor const& input,  // [..., d]
                               torch::Tensor& scale)        // [1]
 {
+  TORCH_CHECK(input.is_contiguous());
+  TORCH_CHECK(out.is_contiguous());
   int const block_size = 256;
   int const num_tokens = input.numel() / input.size(-1);
   int const num_elems = input.numel();

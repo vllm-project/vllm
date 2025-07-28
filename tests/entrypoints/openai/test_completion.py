@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # imports for guided decoding tests
 import json
+import os
 import shutil
 from tempfile import TemporaryDirectory
 from typing import Optional
@@ -11,6 +12,7 @@ import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 import regex as re
+import requests
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
 from openai import BadRequestError
@@ -25,10 +27,6 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 # technically these adapters use a different base model,
 # but we're not testing generation quality here
 LORA_NAME = "typeof/zephyr-7b-beta-lora"
-PA_NAME = "swapnilbp/llama_tweet_ptune"
-# if PA_NAME changes, PA_NUM_VIRTUAL_TOKENS might also
-# need to change to match the prompt adapter
-PA_NUM_VIRTUAL_TOKENS = 8
 
 GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
 
@@ -55,13 +53,7 @@ def zephyr_lora_added_tokens_files(zephyr_lora_files):
 
 
 @pytest.fixture(scope="module")
-def zephyr_pa_files():
-    return snapshot_download(repo_id=PA_NAME)
-
-
-@pytest.fixture(scope="module")
-def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files,
-                        zephyr_pa_files):
+def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files):
     return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -80,15 +72,6 @@ def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files,
         "64",
         "--max-cpu-loras",
         "2",
-        # pa config
-        "--enable-prompt-adapter",
-        "--prompt-adapters",
-        f"zephyr-pa={zephyr_pa_files}",
-        f"zephyr-pa2={zephyr_pa_files}",
-        "--max-prompt-adapters",
-        "2",
-        "--max-prompt-adapter-token",
-        "128",
     ]
 
 
@@ -97,8 +80,19 @@ def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files,
 def server(default_server_args, request):
     if request.param:
         default_server_args.append(request.param)
-    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
-        yield remote_server
+
+    original_value = os.environ.get('VLLM_USE_V1')
+    os.environ['VLLM_USE_V1'] = '0'
+    try:
+        with RemoteOpenAIServer(MODEL_NAME,
+                                default_server_args) as remote_server:
+            yield remote_server
+    finally:
+        # Restore original env value
+        if original_value is None:
+            os.environ.pop('VLLM_USE_V1', None)
+        else:
+            os.environ['VLLM_USE_V1'] = original_value
 
 
 @pytest_asyncio.fixture
@@ -109,14 +103,11 @@ async def client(server):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    # first test base model, then test loras, then test prompt adapters
-    "model_name,num_virtual_tokens",
-    [(MODEL_NAME, 0), ("zephyr-lora", 0), ("zephyr-lora2", 0),
-     ("zephyr-pa", PA_NUM_VIRTUAL_TOKENS),
-     ("zephyr-pa2", PA_NUM_VIRTUAL_TOKENS)],
+    # first test base model, then test loras
+    "model_name",
+    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
 )
-async def test_single_completion(client: openai.AsyncOpenAI, model_name: str,
-                                 num_virtual_tokens: int):
+async def test_single_completion(client: openai.AsyncOpenAI, model_name: str):
     completion = await client.completions.create(model=model_name,
                                                  prompt="Hello, my name is",
                                                  max_tokens=5,
@@ -129,9 +120,7 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str,
     assert len(choice.text) >= 5
     assert choice.finish_reason == "length"
     assert completion.usage == openai.types.CompletionUsage(
-        completion_tokens=5,
-        prompt_tokens=6 + num_virtual_tokens,
-        total_tokens=11 + num_virtual_tokens)
+        completion_tokens=5, prompt_tokens=6, total_tokens=11)
 
     # test using token IDs
     completion = await client.completions.create(
@@ -174,9 +163,9 @@ async def test_added_lora_tokens_base_model(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    # first test base model, then test loras, then test prompt adapters
+    # first test base model, then test loras
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-lora2", "zephyr-pa", "zephyr-pa2"],
+    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
 )
 async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
@@ -193,9 +182,9 @@ async def test_no_logprobs(client: openai.AsyncOpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    # just test 1 lora and 1 pa hereafter
+    # just test 1 lora
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_zero_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
@@ -216,7 +205,7 @@ async def test_zero_logprobs(client: openai.AsyncOpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_some_logprobs(client: openai.AsyncOpenAI, model_name: str):
     # test using token IDs
@@ -237,7 +226,7 @@ async def test_some_logprobs(client: openai.AsyncOpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_too_many_completion_logprobs(client: openai.AsyncOpenAI,
                                             model_name: str):
@@ -313,7 +302,7 @@ async def test_prompt_logprobs_completion(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_completion_streaming(client: openai.AsyncOpenAI,
                                     model_name: str):
@@ -347,7 +336,7 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
     """Streaming for parallel sampling.
@@ -381,7 +370,7 @@ async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_completion_stream_options(client: openai.AsyncOpenAI,
                                          model_name: str):
@@ -518,7 +507,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_batch_completions(client: openai.AsyncOpenAI, model_name: str):
     # test both text and token IDs
@@ -833,3 +822,27 @@ async def test_echo_stream_completion(client: openai.AsyncOpenAI,
             assert content is not None and saying in content
         else:
             assert content is not None and saying not in content
+
+
+@pytest.mark.asyncio
+async def test_invocations(server: RemoteOpenAIServer,
+                           client: openai.AsyncOpenAI):
+    request_args = {
+        "model": MODEL_NAME,
+        "prompt": "Hello, my name is",
+        "max_tokens": 5,
+        "temperature": 0.0,
+        "logprobs": None,
+    }
+
+    completion = await client.completions.create(**request_args)
+
+    invocation_response = requests.post(server.url_for("invocations"),
+                                        json=request_args)
+    invocation_response.raise_for_status()
+
+    completion_output = completion.model_dump()
+    invocation_output = invocation_response.json()
+
+    assert completion_output.keys() == invocation_output.keys()
+    assert completion_output["choices"] == invocation_output["choices"]
