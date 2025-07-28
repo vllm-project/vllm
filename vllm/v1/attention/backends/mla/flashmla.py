@@ -102,7 +102,8 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             sm_parts = tile_scheduler_metadata.size(0)
             self.cg_buf_tile_scheduler_metadata[:sm_parts].\
                 copy_(tile_scheduler_metadata)
-            tile_scheduler_metadata = self.cg_buf_tile_scheduler_metadata
+            tile_scheduler_metadata = \
+                self.cg_buf_tile_scheduler_metadata[:sm_parts]
 
             # Num splits is per-batch, varying size (batch_size,)
             n = num_splits.size(0)
