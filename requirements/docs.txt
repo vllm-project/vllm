@@ -5,6 +5,7 @@ mkdocstrings-python
 mkdocs-gen-files
 mkdocs-awesome-nav
 mkdocs-glightbox
+mkdocs-git-revision-date-localized-plugin
 python-markdown-math
 regex
 ruff
