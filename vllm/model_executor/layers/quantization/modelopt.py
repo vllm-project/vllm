@@ -1525,6 +1525,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        routed_scaling_factor: Optional[float] = 1.0,
     ):
         if enable_eplb:
             raise NotImplementedError(
@@ -1599,37 +1600,33 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                     x, a1_gscale, 
                     is_sf_swizzled_layout=False,
                 )
-                # num_experts = 
-                # print("gen"*20)
-                # print(f"use_grouped_topk:{use_grouped_topk}")
-                # print(f"imm:{layer.w13_weight.shape[1] // 2}")
-                # print(f"num_loc_expert:{layer.w13_weight.shape[0]}")
                 out = fused_moe.trtllm_fp4_block_scale_moe(
-                    router_logits.to(torch.float32),
-                    e_score_correction_bias,
-                    hidden_states_fp4,
-                    hidden_states_scale_linear_fp4.view(torch.float8_e4m3fn).flatten(),
-                    layer.gemm1_weights_fp4_shuffled.data,
-                    layer.gemm1_scales_fp4_shuffled.data.view(torch.float8_e4m3fn),
-                    layer.gemm2_weights_fp4_shuffled.data,
-                    layer.gemm2_scales_fp4_shuffled.data.view(torch.float8_e4m3fn),
-                    layer.g1_scale_c.data,
-                    layer.g1_alphas.data,
-                    layer.g2_alphas.data,
-                    256, #layer.w13_weight.shape[0], #num_experts,
-                    top_k,
-                    8, #layer.n_group,
-                    4, #layer.top_k_group,
-                    512, #layer.w13_weight.shape[1] // 2, # imm
-                    0, # local_expert_offset
-                    256, #layer.w13_weight.shape[0], # loc_num_experts,
-                    2.5, #layer.routed_scaling,
-                    _get_tile_tokens_dim(x.shape[0], top_k, 256), #tile_tokens_dim,
-                    flashinfer.RoutingMethodType.DeepSeekV3,
+                    routing_logits=router_logits.to(torch.float32),
+                    routing_bias=e_score_correction_bias,
+                    hidden_states=hidden_states_fp4,
+                    hidden_states_scale=hidden_states_scale_linear_fp4.view(torch.float8_e4m3fn).flatten(),
+                    gemm1_weights=layer.gemm1_weights_fp4_shuffled.data,
+                    gemm1_weights_scale=layer.gemm1_scales_fp4_shuffled.data.view(torch.float8_e4m3fn),
+                    gemm2_weights=layer.gemm2_weights_fp4_shuffled.data,
+                    gemm2_weights_scale=layer.gemm2_scales_fp4_shuffled.data.view(torch.float8_e4m3fn),
+                    output1_scale_scalar=layer.g1_scale_c.data,
+                    output1_scale_gate_scalar=layer.g1_alphas.data,
+                    output2_scale_scalar=layer.g2_alphas.data,
+                    num_experts=global_num_experts, 
+                    top_k=top_k,
+                    n_group=num_expert_group,
+                    topk_group=topk_group,
+                    intermediate_size=layer.intermediate_size_per_partition,
+                    local_expert_offset=layer.ep_rank * layer.local_num_experts,
+                    local_num_experts=layer.local_num_experts,
+                    routed_scaling_factor=routed_scaling_factor,
+                    tile_tokens_dim=_get_tile_tokens_dim(x.shape[0], top_k, layer.local_num_experts),
+                    routing_method_type=flashinfer.RoutingMethodType.DeepSeekV3,
                     do_finalize=True,
                 )[0]
+                # to offset the multiply by routed_scaling_factor in deepseek_v2.py since this kernel already done it.
                 if x.dtype != torch.float16:
-                    out = out * (1./ 2.5) # to offset the multiply by routed_scaling_factor in deepseek_v2.py since this kernel already done it.
+                    out = out * (1./ routed_scaling_factor) 
             elif self.flashinfer_moe_backend == "CUTLASS":
                 # TP or DP case
                 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501

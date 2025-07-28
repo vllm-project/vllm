@@ -308,68 +308,68 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # are not supported by Machete yet.
   # 9.0 for latest bf16 atomicAdd PTX
   cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.7;9.0+PTX" "${CUDA_ARCHS}")
-  # if (MARLIN_ARCHS)
+  if (MARLIN_ARCHS)
 
-  #   #
-  #   # For the Marlin kernels we automatically generate sources for various
-  #   # preselected input type pairs and schedules.
-  #   # Generate sources:
-  #   set(MARLIN_GEN_SCRIPT
-  #     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/gptq_marlin/generate_kernels.py)
-  #   file(MD5 ${MARLIN_GEN_SCRIPT} MARLIN_GEN_SCRIPT_HASH)
+    #
+    # For the Marlin kernels we automatically generate sources for various
+    # preselected input type pairs and schedules.
+    # Generate sources:
+    set(MARLIN_GEN_SCRIPT
+      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/gptq_marlin/generate_kernels.py)
+    file(MD5 ${MARLIN_GEN_SCRIPT} MARLIN_GEN_SCRIPT_HASH)
 
-  #   message(STATUS "Marlin generation script hash: ${MARLIN_GEN_SCRIPT_HASH}")
-  #   message(STATUS "Last run Marlin generate script hash: $CACHE{MARLIN_GEN_SCRIPT_HASH}")
+    message(STATUS "Marlin generation script hash: ${MARLIN_GEN_SCRIPT_HASH}")
+    message(STATUS "Last run Marlin generate script hash: $CACHE{MARLIN_GEN_SCRIPT_HASH}")
 
-  #   if (NOT DEFINED CACHE{MARLIN_GEN_SCRIPT_HASH}
-  #       OR NOT $CACHE{MARLIN_GEN_SCRIPT_HASH} STREQUAL ${MARLIN_GEN_SCRIPT_HASH})
-  #     execute_process(
-  #       COMMAND ${CMAKE_COMMAND} -E env
-  #       PYTHONPATH=$PYTHONPATH
-  #         ${Python_EXECUTABLE} ${MARLIN_GEN_SCRIPT}
-  #       RESULT_VARIABLE marlin_generation_result
-  #       OUTPUT_VARIABLE marlin_generation_result
-  #       OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/marlin_generation.log
-  #       ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/marlin_generation.log
-  #     )
+    if (NOT DEFINED CACHE{MARLIN_GEN_SCRIPT_HASH}
+        OR NOT $CACHE{MARLIN_GEN_SCRIPT_HASH} STREQUAL ${MARLIN_GEN_SCRIPT_HASH})
+      execute_process(
+        COMMAND ${CMAKE_COMMAND} -E env
+        PYTHONPATH=$PYTHONPATH
+          ${Python_EXECUTABLE} ${MARLIN_GEN_SCRIPT}
+        RESULT_VARIABLE marlin_generation_result
+        OUTPUT_VARIABLE marlin_generation_result
+        OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/marlin_generation.log
+        ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/marlin_generation.log
+      )
 
-  #     if (NOT marlin_generation_result EQUAL 0)
-  #       message(FATAL_ERROR "Marlin generation failed."
-  #                           " Result: \"${marlin_generation_result}\""
-  #                           "\nCheck the log for details: "
-  #                           "${CMAKE_CURRENT_BINARY_DIR}/marlin_generation.log")
-  #     else()
-  #       set(MARLIN_GEN_SCRIPT_HASH ${MARLIN_GEN_SCRIPT_HASH}
-  #           CACHE STRING "Last run Marlin generate script hash" FORCE)
-  #       message(STATUS "Marlin generation completed successfully.")
-  #     endif()
-  #   else()
-  #     message(STATUS "Marlin generation script has not changed, skipping generation.")
-  #   endif()
+      if (NOT marlin_generation_result EQUAL 0)
+        message(FATAL_ERROR "Marlin generation failed."
+                            " Result: \"${marlin_generation_result}\""
+                            "\nCheck the log for details: "
+                            "${CMAKE_CURRENT_BINARY_DIR}/marlin_generation.log")
+      else()
+        set(MARLIN_GEN_SCRIPT_HASH ${MARLIN_GEN_SCRIPT_HASH}
+            CACHE STRING "Last run Marlin generate script hash" FORCE)
+        message(STATUS "Marlin generation completed successfully.")
+      endif()
+    else()
+      message(STATUS "Marlin generation script has not changed, skipping generation.")
+    endif()
 
-  #   file(GLOB MARLIN_TEMPLATE_KERNEL_SRC "csrc/quantization/gptq_marlin/kernel_*.cu")
-  #   set_gencode_flags_for_srcs(
-  #     SRCS "${MARLIN_TEMPLATE_KERNEL_SRC}"
-  #     CUDA_ARCHS "${MARLIN_ARCHS}")
+    file(GLOB MARLIN_TEMPLATE_KERNEL_SRC "csrc/quantization/gptq_marlin/kernel_*.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${MARLIN_TEMPLATE_KERNEL_SRC}"
+      CUDA_ARCHS "${MARLIN_ARCHS}")
 
-  #   list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_KERNEL_SRC})
+    list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_KERNEL_SRC})
 
-  #   set(MARLIN_SRCS
-  #      "csrc/quantization/marlin/dense/marlin_cuda_kernel.cu"
-  #      "csrc/quantization/marlin/sparse/marlin_24_cuda_kernel.cu"
-  #      "csrc/quantization/marlin/qqq/marlin_qqq_gemm_kernel.cu"
-  #      "csrc/quantization/gptq_marlin/gptq_marlin.cu"
-  #      "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
-  #      "csrc/quantization/gptq_marlin/awq_marlin_repack.cu")
-  #   set_gencode_flags_for_srcs(
-  #     SRCS "${MARLIN_SRCS}"
-  #     CUDA_ARCHS "${MARLIN_ARCHS}")
-  #   list(APPEND VLLM_EXT_SRC "${MARLIN_SRCS}")
-  #   message(STATUS "Building Marlin kernels for archs: ${MARLIN_ARCHS}")
-  # else()
-  #   message(STATUS "Not building Marlin kernels as no compatible archs found"
-  #                  " in CUDA target architectures")
-  # endif()
+    set(MARLIN_SRCS
+       "csrc/quantization/marlin/dense/marlin_cuda_kernel.cu"
+       "csrc/quantization/marlin/sparse/marlin_24_cuda_kernel.cu"
+       "csrc/quantization/marlin/qqq/marlin_qqq_gemm_kernel.cu"
+       "csrc/quantization/gptq_marlin/gptq_marlin.cu"
+       "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
+       "csrc/quantization/gptq_marlin/awq_marlin_repack.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${MARLIN_SRCS}"
+      CUDA_ARCHS "${MARLIN_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${MARLIN_SRCS}")
+    message(STATUS "Building Marlin kernels for archs: ${MARLIN_ARCHS}")
+  else()
+    message(STATUS "Not building Marlin kernels as no compatible archs found"
+                   " in CUDA target architectures")
+  endif()
 
   # Only build AllSpark kernels if we are building for at least some compatible archs.
   cuda_archs_loose_intersection(ALLSPARK_ARCHS "8.0;8.6;8.7;8.9" "${CUDA_ARCHS}")
@@ -662,69 +662,69 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # The machete kernels only work on hopper and require CUDA 12.0 or later.
   # Only build Machete kernels if we are building for something compatible with sm90a
   cuda_archs_loose_intersection(MACHETE_ARCHS "9.0a" "${CUDA_ARCHS}")
-  # if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND MACHETE_ARCHS)
-  #   #
-  #   # For the Machete kernels we automatically generate sources for various
-  #   # preselected input type pairs and schedules.
-  #   # Generate sources:
-  #   set(MACHETE_GEN_SCRIPT
-  #     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generate.py)
-  #   file(MD5 ${MACHETE_GEN_SCRIPT} MACHETE_GEN_SCRIPT_HASH)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND MACHETE_ARCHS)
+    #
+    # For the Machete kernels we automatically generate sources for various
+    # preselected input type pairs and schedules.
+    # Generate sources:
+    set(MACHETE_GEN_SCRIPT
+      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generate.py)
+    file(MD5 ${MACHETE_GEN_SCRIPT} MACHETE_GEN_SCRIPT_HASH)
 
-  #   message(STATUS "Machete generation script hash: ${MACHETE_GEN_SCRIPT_HASH}")
-  #   message(STATUS "Last run machete generate script hash: $CACHE{MACHETE_GEN_SCRIPT_HASH}")
+    message(STATUS "Machete generation script hash: ${MACHETE_GEN_SCRIPT_HASH}")
+    message(STATUS "Last run machete generate script hash: $CACHE{MACHETE_GEN_SCRIPT_HASH}")
 
-  #   if (NOT DEFINED CACHE{MACHETE_GEN_SCRIPT_HASH}
-  #       OR NOT $CACHE{MACHETE_GEN_SCRIPT_HASH} STREQUAL ${MACHETE_GEN_SCRIPT_HASH})
-  #     execute_process(
-  #       COMMAND ${CMAKE_COMMAND} -E env
-  #       PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$PYTHONPATH
-  #         ${Python_EXECUTABLE} ${MACHETE_GEN_SCRIPT}
-  #       RESULT_VARIABLE machete_generation_result
-  #       OUTPUT_VARIABLE machete_generation_output
-  #       OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log
-  #       ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log
-  #     )
+    if (NOT DEFINED CACHE{MACHETE_GEN_SCRIPT_HASH}
+        OR NOT $CACHE{MACHETE_GEN_SCRIPT_HASH} STREQUAL ${MACHETE_GEN_SCRIPT_HASH})
+      execute_process(
+        COMMAND ${CMAKE_COMMAND} -E env
+        PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$PYTHONPATH
+          ${Python_EXECUTABLE} ${MACHETE_GEN_SCRIPT}
+        RESULT_VARIABLE machete_generation_result
+        OUTPUT_VARIABLE machete_generation_output
+        OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log
+        ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log
+      )
 
-  #     if (NOT machete_generation_result EQUAL 0)
-  #       message(FATAL_ERROR "Machete generation failed."
-  #                           " Result: \"${machete_generation_result}\""
-  #                           "\nCheck the log for details: "
-  #                           "${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log")
-  #     else()
-  #       set(MACHETE_GEN_SCRIPT_HASH ${MACHETE_GEN_SCRIPT_HASH}
-  #           CACHE STRING "Last run machete generate script hash" FORCE)
-  #       message(STATUS "Machete generation completed successfully.")
-  #     endif()
-  #   else()
-  #     message(STATUS "Machete generation script has not changed, skipping generation.")
-  #   endif()
+      if (NOT machete_generation_result EQUAL 0)
+        message(FATAL_ERROR "Machete generation failed."
+                            " Result: \"${machete_generation_result}\""
+                            "\nCheck the log for details: "
+                            "${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log")
+      else()
+        set(MACHETE_GEN_SCRIPT_HASH ${MACHETE_GEN_SCRIPT_HASH}
+            CACHE STRING "Last run machete generate script hash" FORCE)
+        message(STATUS "Machete generation completed successfully.")
+      endif()
+    else()
+      message(STATUS "Machete generation script has not changed, skipping generation.")
+    endif()
 
-  #   # Add machete generated sources
-  #   file(GLOB MACHETE_GEN_SOURCES "csrc/quantization/machete/generated/*.cu")
-  #   list(APPEND VLLM_EXT_SRC ${MACHETE_GEN_SOURCES})
+    # Add machete generated sources
+    file(GLOB MACHETE_GEN_SOURCES "csrc/quantization/machete/generated/*.cu")
+    list(APPEND VLLM_EXT_SRC ${MACHETE_GEN_SOURCES})
 
-  #   # forward compatible
-  #   set_gencode_flags_for_srcs(
-  #     SRCS "${MACHETE_GEN_SOURCES}"
-  #     CUDA_ARCHS "${MACHETE_ARCHS}")
+    # forward compatible
+    set_gencode_flags_for_srcs(
+      SRCS "${MACHETE_GEN_SOURCES}"
+      CUDA_ARCHS "${MACHETE_ARCHS}")
 
-  #   list(APPEND VLLM_EXT_SRC
-  #     csrc/quantization/machete/machete_pytorch.cu)
+    list(APPEND VLLM_EXT_SRC
+      csrc/quantization/machete/machete_pytorch.cu)
 
-  #   message(STATUS "Building Machete kernels for archs: ${MACHETE_ARCHS}")
-  # else()
-  #   if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0
-  #       AND MACHETE_ARCHS)
-  #     message(STATUS "Not building Machete kernels as CUDA Compiler version is "
-  #                    "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
-  #                    "later if you intend on running w4a16 quantized models on "
-  #                    "Hopper.")
-  #   else()
-  #     message(STATUS "Not building Machete kernels as no compatible archs "
-  #                    "found in CUDA target architectures")
-  #   endif()
-  # endif()
+    message(STATUS "Building Machete kernels for archs: ${MACHETE_ARCHS}")
+  else()
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0
+        AND MACHETE_ARCHS)
+      message(STATUS "Not building Machete kernels as CUDA Compiler version is "
+                     "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
+                     "later if you intend on running w4a16 quantized models on "
+                     "Hopper.")
+    else()
+      message(STATUS "Not building Machete kernels as no compatible archs "
+                     "found in CUDA target architectures")
+    endif()
+  endif()
 # if CUDA endif
 endif()
 

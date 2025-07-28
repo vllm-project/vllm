@@ -628,6 +628,7 @@ class FusedMoE(torch.nn.Module):
         renomalize: Whether to renormalize the logits in the fused_moe kernel
         quant_config: Quantization configure.
         enable_eplb: Whether to enable expert parallelism load balancer.
+        routed_scaling_factor: scaling factor for routing.
     """
 
     def __init__(
@@ -654,6 +655,7 @@ class FusedMoE(torch.nn.Module):
         activation: str = "silu",
         enable_eplb: bool = False,
         num_redundant_experts: int = 0,
+        routed_scaling_factor: Optional[float] = 1.0,
     ):
         super().__init__()
         if params_dtype is None:
@@ -718,6 +720,7 @@ class FusedMoE(torch.nn.Module):
         self.custom_routing_function = custom_routing_function
         self.scoring_func = scoring_func
         self.e_score_correction_bias = e_score_correction_bias
+        self.routed_scaling_factor = routed_scaling_factor
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
 
@@ -1453,6 +1456,7 @@ class FusedMoE(torch.nn.Module):
                 expert_load_view=self.expert_load_view,
                 logical_to_physical_map=self.logical_to_physical_map,
                 logical_replica_count=self.logical_replica_count,
+                routed_scaling_factor=self.routed_scaling_factor,
             )
 
             if not skip_result_store:
@@ -1521,6 +1525,7 @@ class FusedMoE(torch.nn.Module):
             expert_load_view=self.expert_load_view,
             logical_to_physical_map=self.logical_to_physical_map,
             logical_replica_count=self.logical_replica_count,
+            routed_scaling_factor=self.routed_scaling_factor,
         )
 
         if do_naive_dispatch_combine:
