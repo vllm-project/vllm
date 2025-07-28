@@ -10,11 +10,14 @@ build:
   jobs:
     post_checkout:
       - git fetch --unshallow || true
+    pre_create_environment:
+        - asdf plugin add uv
+        - asdf install uv latest
+        - asdf global uv latest
+    create_environment:
+        - uv venv "${READTHEDOCS_VIRTUALENV_PATH}"
+    install:
+        - uv pip install -r requirements/docs.txt
 
 mkdocs:
   configuration: mkdocs.yaml
-
-# Optionally declare the Python requirements required to build your docs
-python:
-  install:
-    - requirements: requirements/docs.txt
