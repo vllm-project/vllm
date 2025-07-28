@@ -16,7 +16,6 @@
 	    "block_size": 128,
 	    "trust_remote_code": "",
             "disable_log_stats": "",
-            "disable_log_requests": "",
 	    "enforce_eager": "",
             "load_format": "dummy"
         },
@@ -46,7 +45,6 @@
 	    "block_size": 128,
 	    "trust_remote_code": "",
             "disable_log_stats": "",
-            "disable_log_requests": "",
 	    "enforce_eager": "",
             "load_format": "dummy"
         },
@@ -76,7 +74,6 @@
 	    "block_size": 128,
 	    "trust_remote_code": "",
             "disable_log_stats": "",
-            "disable_log_requests": "",
 	    "enforce_eager": "",
             "load_format": "dummy"
         },
@@ -107,7 +104,6 @@
 	    "trust_remote_code": "",
 	    "enable_chunked_prefill": "",
             "disable_log_stats": "",
-            "disable_log_requests": "",
 	    "enforce_eager": "",
             "load_format": "dummy"
         },
@@ -140,7 +136,6 @@
 	    "trust_remote_code": "",
 	    "enable_chunked_prefill": "",
             "disable_log_stats": "",
-            "disable_log_requests": "",
 	    "enforce_eager": "",
             "load_format": "dummy"
         },

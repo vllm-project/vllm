@@ -100,7 +100,6 @@ We test the throughput by using `benchmark_serving.py` with request rate = inf t
             "tensor_parallel_size": 1,
             "swap_space": 16,
             "disable_log_stats": "",
-            "disable_log_requests": "",
             "load_format": "dummy"
         },
         "client_parameters": {

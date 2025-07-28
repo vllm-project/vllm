@@ -326,10 +326,10 @@ async def main(args):
         for name in served_model_names
     ]
 
-    if args.disable_log_requests:
-        request_logger = None
-    else:
+    if args.enable_log_requests:
         request_logger = RequestLogger(max_log_len=args.max_log_len)
+    else:
+        request_logger = None
 
     # Create the openai serving objects.
     openai_serving_models = OpenAIServingModels(
