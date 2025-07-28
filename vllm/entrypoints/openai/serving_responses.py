@@ -10,11 +10,17 @@ from typing import Callable, Final, Optional, Union
 import jinja2
 from fastapi import Request
 from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+from openai_harmony import Message as OpenAIMessage
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption)
+from vllm.entrypoints.harmony_utils import (
+    get_developer_message, get_stop_tokens_for_assistant_actions,
+    get_streamable_parser_for_assistant, get_system_message, get_user_message,
+    parse_output_message, parse_response_input, parse_response_output,
+    render_for_completion)
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -27,8 +33,9 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
-from vllm.outputs import RequestOutput
+from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -89,6 +96,17 @@ class OpenAIServingResponses(OpenAIServing):
             logger.info("Using default chat sampling params from %s: %s",
                         source, self.default_sampling_params)
 
+        self.use_harmony = True
+        self.supports_browsing = False
+        self.supports_code_interpreter = False
+        if self.use_harmony:
+            # OpenAI models have two EOS-like tokens: <|return|> and <|call|>.
+            # We need to add them to the stop token ids.
+            if "stop_token_ids" not in self.default_sampling_params:
+                self.default_sampling_params["stop_token_ids"] = []
+            self.default_sampling_params["stop_token_ids"].extend(
+                get_stop_tokens_for_assistant_actions())
+
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: This causes a memory leak since we never remove responses
         # from the store.
@@ -98,7 +116,8 @@ class OpenAIServingResponses(OpenAIServing):
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: This causes a memory leak since we never remove messages
         # from the store.
-        self.msg_store: dict[str, list[ChatCompletionMessageParam]] = {}
+        self.msg_store: dict[str, Union[list[ChatCompletionMessageParam],
+                                        list[OpenAIMessage]]] = {}
 
         self.background_tasks: dict[str, asyncio.Task] = {}
 
@@ -129,21 +148,20 @@ class OpenAIServingResponses(OpenAIServing):
                 return self._make_not_found_error(prev_response_id)
         else:
             prev_response = None
-        # Construct the input messages.
-        messages = self._construct_input_messages(request, prev_response)
 
         try:
             lora_request = self._maybe_get_adapters(request)
             model_name = self._get_model_name(request.model, lora_request)
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
-            _, request_prompts, engine_prompts = await self._preprocess_chat(
-                request,
-                tokenizer,
-                messages,
-                chat_template=self.chat_template,
-                chat_template_content_format=self.chat_template_content_format,
-            )
+            if self.use_harmony:
+                messages, request_prompts, engine_prompts = (
+                    self._make_request_with_harmony(request, prev_response))
+            else:
+                messages, request_prompts, engine_prompts = (
+                    await self._make_request(request, prev_response,
+                                             tokenizer))
+
         except (ValueError, TypeError, RuntimeError,
                 jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
@@ -241,6 +259,34 @@ class OpenAIServingResponses(OpenAIServing):
         except Exception as e:
             return self.create_error_response(str(e))
 
+    async def _make_request(
+        self,
+        request: ResponsesRequest,
+        prev_response: Optional[ResponsesResponse],
+        tokenizer: AnyTokenizer,
+    ):
+        # Construct the input messages.
+        messages = self._construct_input_messages(request, prev_response)
+        _, request_prompts, engine_prompts = await self._preprocess_chat(
+            request,
+            tokenizer,
+            messages,
+            chat_template=self.chat_template,
+            chat_template_content_format=self.chat_template_content_format,
+        )
+        return messages, request_prompts, engine_prompts
+
+    def _make_request_with_harmony(
+        self,
+        request: ResponsesRequest,
+        prev_response: Optional[ResponsesResponse],
+    ):
+        messages = self._construct_input_messages_with_harmony(
+            request, prev_response)
+        prompt_token_ids = render_for_completion(messages)
+        engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
+        return messages, [prompt_token_ids], [engine_prompt]
+
     async def responses_full_generator(
         self,
         request: ResponsesRequest,
@@ -268,42 +314,12 @@ class OpenAIServingResponses(OpenAIServing):
         assert len(final_res.outputs) == 1
         final_output = final_res.outputs[0]
 
-        if self.reasoning_parser:
-            try:
-                reasoning_parser = self.reasoning_parser(tokenizer)
-            except RuntimeError as e:
-                logger.exception("Error in reasoning parser creation.")
-                return self.create_error_response(str(e))
-
-            reasoning_content, content = (
-                reasoning_parser.extract_reasoning_content(final_output.text,
-                                                           request=request))
+        if self.use_harmony:
+            output = self._make_response_output_items_with_harmony(
+                final_output)
         else:
-            reasoning_content = None
-            content = final_output.text
-
-        output = []
-        if reasoning_content:
-            reasoning_item = ResponseReasoningItem(
-                text=reasoning_content,
-                status=None,  # NOTE: Only the last output item has status.
-            )
-            output.append(reasoning_item)
-        if content:
-            output_text = ResponseOutputText(
-                text=content,
-                annotations=[],  # TODO
-                type="output_text",
-                logprobs=None,  # TODO
-            )
-            message = ResponseOutputMessage(
-                id=f"msg_{random_uuid()}",
-                content=[output_text],
-                role="assistant",
-                status="completed",
-                type="message",
-            )
-            output.append(message)
+            output = self._make_response_output_items(request, final_output,
+                                                      tokenizer)
 
         # Calculate usage.
         assert final_res.prompt_token_ids is not None
@@ -338,6 +354,64 @@ class OpenAIServingResponses(OpenAIServing):
                     self.response_store[response.id] = response
         return response
 
+    def _make_response_output_items(
+        self,
+        request: ResponsesRequest,
+        final_output: CompletionOutput,
+        tokenizer: AnyTokenizer,
+    ):
+        if self.reasoning_parser:
+            try:
+                reasoning_parser = self.reasoning_parser(tokenizer)
+            except RuntimeError as e:
+                logger.exception("Error in reasoning parser creation.")
+                return self.create_error_response(str(e))
+
+            reasoning_content, content = (
+                reasoning_parser.extract_reasoning_content(final_output.text,
+                                                           request=request))
+        else:
+            reasoning_content = None
+            content = final_output.text
+
+        output_items = []
+        if reasoning_content:
+            reasoning_item = ResponseReasoningItem(
+                text=reasoning_content,
+                status=None,  # NOTE: Only the last output item has status.
+            )
+            output_items.append(reasoning_item)
+        if content:
+            output_text = ResponseOutputText(
+                text=content,
+                annotations=[],  # TODO
+                type="output_text",
+                logprobs=None,  # TODO
+            )
+            message = ResponseOutputMessage(
+                id=f"msg_{random_uuid()}",
+                content=[output_text],
+                role="assistant",
+                status="completed",
+                type="message",
+            )
+            output_items.append(message)
+        return output_items
+
+    def _make_response_output_items_with_harmony(
+        self,
+        final_output: CompletionOutput,
+    ):
+        parser = get_streamable_parser_for_assistant()
+        for token_id in final_output.token_ids:
+            parser.process(token_id)
+
+        output_items = []
+        for msg in parser.messages:
+            assert msg.author.role == "assistant"
+            output_items.extend(parse_output_message(msg))
+        return output_items
+
     def _construct_input_messages(
         self,
         request: ResponsesRequest,
@@ -358,13 +432,14 @@ class OpenAIServingResponses(OpenAIServing):
 
             # Add the previous output.
             for output_item in prev_response.output:
-                # NOTE: We skip the reasoning output.
-                if isinstance(output_item, ResponseOutputMessage):
-                    for content in output_item.content:
-                        messages.append({
-                            "role": "assistant",
-                            "content": content.text,
-                        })
+                # NOTE: We skip the reasoning output of the previous response.
+                if isinstance(output_item, ResponseReasoningItem):
+                    continue
+                for content in output_item.content:
+                    messages.append({
+                        "role": "assistant",
+                        "content": content.text,
+                    })
 
         # Append the new input.
         # Responses API supports simple text inputs without chat format.
@@ -372,6 +447,47 @@ class OpenAIServingResponses(OpenAIServing):
             messages.append({"role": "user", "content": request.input})
         else:
             messages.extend(request.input)  # type: ignore
+        return messages
+
+    def _construct_input_messages_with_harmony(
+        self,
+        request: ResponsesRequest,
+        prev_response: Optional[ResponsesResponse],
+    ) -> list[OpenAIMessage]:
+        messages: list[OpenAIMessage] = []
+        if prev_response is None:
+            # New conversation.
+            reasoning_effort = (request.reasoning.effort
+                                if request.reasoning else None)
+            sys_msg = get_system_message(
+                reasoning_effort=reasoning_effort,
+                enable_browsing=self.supports_browsing,
+                enable_python=self.supports_code_interpreter,
+            )
+            messages.append(sys_msg)
+            dev_msg = get_developer_message(request.instructions)
+            messages.append(dev_msg)
+        else:
+            # Continue the previous conversation.
+            # FIXME(woosuk): Currently, request params like reasoning and
+            # instructions are ignored.
+            prev_msgs = self.msg_store[prev_response.id]
+            messages.extend(prev_msgs)
+
+            # Append the previous output.
+            for output_item in prev_response.output:
+                # NOTE: We skip the reasoning output of the previous response.
+                if isinstance(output_item, ResponseReasoningItem):
+                    continue
+                messages.append(parse_response_output(output_item))
+
+        # Append the new input.
+        # Reponses API supports simple text inputs without chat format.
+        if isinstance(request.input, str):
+            messages.append(get_user_message(request.input))
+        else:
+            for response_msg in request.input:
+                messages.append(parse_response_input(response_msg))
         return messages
 
     async def _run_background_request(
