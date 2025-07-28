@@ -142,9 +142,7 @@ class KVOutputAggregator:
 
         final_kv_connector_finish_output = (
             KVConnectorBaseType.KVConnectorFinishOutput(
-                finished_sending=set(),
-                finished_recving=set(),
-                finished_loading_num_tokens={}))
+                finished_sending=set(), finished_recving=set()))
         for output in outputs:
             kv_connector_finish_output = output.kv_connector_finish_output
             if kv_connector_finish_output is None:
