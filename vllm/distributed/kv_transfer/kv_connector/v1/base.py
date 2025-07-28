@@ -28,6 +28,9 @@ The class provides the following primitives:
 
         get_finished() - called with ids of finished requests, returns
             ids of requests that have completed async sending/recving.
+        get_finished_loading() - called with scheduler outputs, returns
+            a dictionary that the keys are request IDs and the values are
+            the actual number of tokens loaded from the remote KV cache
 """
 
 import enum
@@ -83,19 +86,22 @@ class KVConnectorBase_V1(ABC):
         Also contains optional metrics for sending and receiving KV
         caches, which can be used for performance analysis.
         """
-        __slots__ = ('sending_latencies', 'receiving_latencies')
+        __slots__ = ('sending_latencies', 'receiving_latencies',
+                     'finished_loading_num_tokens')
 
         def __new__(
             cls,
             *,
             finished_sending: set[str],
             finished_recving: set[str],
+            finished_loading_num_tokens: dict[str, int],
             sending_latencies: Sequence[float] = [],
             receiving_latencies: Sequence[float] = []
         ) -> "KVConnectorBase_V1.KVConnectorFinishOutput":
             output = super().__new__(cls, (finished_sending, finished_recving))
             output.sending_latencies = sending_latencies
             output.receiving_latencies = receiving_latencies
+            output.finished_loading_num_tokens = finished_loading_num_tokens
             return output
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
@@ -241,8 +247,9 @@ class KVConnectorBase_V1(ABC):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
-        return KVConnectorFinishOutput(finished_sending=(),
-                                       finished_recving=())
+        return self.KVConnectorFinishOutput(finished_sending=(),
+                                            finished_recving=(),
+                                            finished_loading_num_tokens={})
 
     # ==============================
     # Scheduler-side methods

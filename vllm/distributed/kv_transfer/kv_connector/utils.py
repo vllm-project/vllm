@@ -13,6 +13,7 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.logger import init_logger
 from vllm.v1.outputs import ModelRunnerOutput
 
@@ -130,22 +131,46 @@ class KVOutputAggregator:
                   output_rank: int = 0) -> ModelRunnerOutput:
         # aggregate finished_sending, finished_recving from all workers
 
-        def update_finished_set(req_ids: Optional[set[str]],
+        def update_finished_set(req_ids: set[str],
                                 remaining_count_dict: dict[str, int],
                                 finished_set: set[str]) -> None:
-            for req_id in req_ids or ():
+            for req_id in req_ids:
                 remaining_count_dict[req_id] -= 1
                 if remaining_count_dict[req_id] == 0:
                     finished_set.add(req_id)
                     del remaining_count_dict[req_id]
 
-        finished_sending = set[str]()
-        finished_recving = set[str]()
+        def update_finished_load_dict(worker_finished_loading_dict: dict[str,
+                                                                         int],
+                                      finished_loading_dict: dict[str, int]):
+            for req_id, num_actual_load_tokens in (worker_finished_loading_dict
+                                                   or {}).items():
+                if req_id in finished_loading_dict:
+                    finished_loading_dict[req_id] = min(
+                        finished_loading_dict[req_id], num_actual_load_tokens)
+                else:
+                    finished_loading_dict[req_id] = num_actual_load_tokens
+
+        final_kv_connector_finish_output = (
+            KVConnectorBaseType.KVConnectorFinishOutput(
+                finished_sending=set(),
+                finished_recving=set(),
+                finished_loading_num_tokens={}))
         for output in outputs:
-            update_finished_set(output.finished_sending,
-                                self._send_remaining_count, finished_sending)
-            update_finished_set(output.finished_recving,
-                                self._recv_remaining_count, finished_recving)
+            kv_connector_finish_output = output.kv_connector_finish_output
+            if kv_connector_finish_output is None:
+                continue
+            update_finished_set(
+                kv_connector_finish_output.finished_sending,
+                self._send_remaining_count,
+                final_kv_connector_finish_output.finished_sending)
+            update_finished_set(
+                kv_connector_finish_output.finished_recving,
+                self._recv_remaining_count,
+                final_kv_connector_finish_output.finished_recving)
+            update_finished_load_dict(
+                kv_connector_finish_output.finished_loading_num_tokens,
+                final_kv_connector_finish_output.finished_loading_num_tokens)
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
@@ -153,11 +178,9 @@ class KVOutputAggregator:
         # set the aggregated finished_sending / finished_recving
         # if output.finished_sending/recving is not empty, but the other ranks
         # still have unfinished send/recv, we want to set the aggregated
-        # finished_sending/recving to None until all ranks have finished
+        # finished_sending/recving to empty set until all ranks have finished
         # send/recv
-        output.finished_sending = finished_sending if finished_sending else None
-        output.finished_recving = finished_recving if finished_recving else None
-
+        output.kv_connector_finish_output = final_kv_connector_finish_output
         return output
 
     def async_aggregate(self,

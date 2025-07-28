@@ -15,6 +15,7 @@ from typing import Any, Callable, Optional, Union
 import msgspec
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.inputs import SingletonInputs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderDict
@@ -1164,9 +1165,9 @@ class IntermediateTensors:
     """
 
     tensors: dict[str, torch.Tensor]
-    # [req_ids]
+
     kv_connector_finish_output: Optional[
-        "KVConnectorBase_V1.KVConnectorFinishOutput"] = None
+        KVConnectorBaseType.KVConnectorFinishOutput] = None
 
     def __init__(self, tensors):
         # manually define this function, so that

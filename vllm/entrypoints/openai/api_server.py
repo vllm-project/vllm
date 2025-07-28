@@ -48,8 +48,7 @@ from vllm.entrypoints.chat_utils import (load_chat_template,
                                          resolve_mistral_chat_template)
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.cli_args import (log_non_default_args,
-                                              make_arg_parser,
+from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -94,7 +93,7 @@ from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription, OpenAIServingTranslation)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
-                                    with_cancellation)
+                                    log_non_default_args, with_cancellation)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.config import (
@@ -1586,6 +1585,14 @@ async def init_app_state(
     state.vllm_config = vllm_config
     model_config = vllm_config.model_config
 
+    if envs.VLLM_USE_V1:
+        supported_tasks = await engine_client \
+            .get_supported_tasks()  # type: ignore
+    else:
+        supported_tasks = model_config.supported_tasks
+
+    logger.info("Supported_tasks: %s", supported_tasks)
+
     resolved_chat_template = load_chat_template(args.chat_template)
     if resolved_chat_template is not None:
         # Get the tokenizer to check official template
@@ -1647,7 +1654,7 @@ async def init_app_state(
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
-    ) if "generate" in model_config.supported_tasks else None
+    ) if "generate" in supported_tasks else None
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,
@@ -1664,7 +1671,7 @@ async def init_app_state(
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
-    ) if "generate" in model_config.supported_tasks else None
+    ) if "generate" in supported_tasks else None
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
         model_config,
@@ -1673,7 +1680,7 @@ async def init_app_state(
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
-    ) if "generate" in model_config.supported_tasks else None
+    ) if "generate" in supported_tasks else None
     state.openai_serving_pooling = OpenAIServingPooling(
         engine_client,
         model_config,
@@ -1681,7 +1688,7 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if "encode" in model_config.supported_tasks else None
+    ) if "encode" in supported_tasks else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,
@@ -1689,24 +1696,22 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
-    ) if "embed" in model_config.supported_tasks else None
+    ) if "embed" in supported_tasks else None
     state.openai_serving_classification = ServingClassification(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if "classify" in model_config.supported_tasks else None
+    ) if "classify" in supported_tasks else None
 
-    enable_serving_reranking = ("classify" in model_config.supported_tasks
-                                and getattr(model_config.hf_config,
-                                            "num_labels", 0) == 1)
+    enable_serving_reranking = ("classify" in supported_tasks and getattr(
+        model_config.hf_config, "num_labels", 0) == 1)
     state.openai_serving_scores = ServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if ("embed" in model_config.supported_tasks
-          or enable_serving_reranking) else None
+    ) if ("embed" in supported_tasks or enable_serving_reranking) else None
 
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
@@ -1721,14 +1726,13 @@ async def init_app_state(
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if "transcription" in model_config.supported_tasks else None
+    ) if "transcription" in supported_tasks else None
     state.openai_serving_translation = OpenAIServingTranslation(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if "transcription" in model_config.supported_tasks else None
-    state.task = model_config.task
+    ) if "transcription" in supported_tasks else None
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
