@@ -164,6 +164,7 @@ enable_symmetric_memory()
 use_compiled = True
 model = simple_model()
 if use_compiled:
+    get_nccl_mem_pool() # otherwise load_inline fails with dynamo
     compiled_model = torch.compile(model, backend="inductor", fullgraph=False)
 x = torch.full([128], local_rank, dtype=torch.float16, device="cuda")
 for _ in range(10):
