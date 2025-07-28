@@ -594,7 +594,7 @@ class _ModelRegistry:
         if isinstance(architectures, str):
             architectures = [architectures]
         if not architectures:
-            logger.warning("No model architectures are specified")
+            raise ValueError("No model architectures are specified")
 
         # Require transformers impl
         if model_config.model_impl == ModelImpl.TRANSFORMERS:
@@ -631,7 +631,7 @@ class _ModelRegistry:
         if isinstance(architectures, str):
             architectures = [architectures]
         if not architectures:
-            logger.warning("No model architectures are specified")
+            raise ValueError("No model architectures are specified")
 
         # Require transformers impl
         if model_config.model_impl == ModelImpl.TRANSFORMERS:
