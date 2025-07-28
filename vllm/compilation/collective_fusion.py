@@ -152,31 +152,23 @@ class AsyncTPPass(VllmInductorPass):
 if flashinfer_comm is not None:
     _FI_WORKSPACE_TENSOR = None
 
-    MiB = 1024 * 1024
-    # Max size of the input tensor per world size
-    # to use flashinfer fused allreduce
-    _FI_MAX_SIZES = {
-        2: MiB,  # 1MB
-        4: MiB,  # 1MB
-        6: MiB // 2,  # 512KB
-        8: MiB // 2,  # 512KB
-    }
-    # opt for a more conservative default value
-    # when world size is not in _FI_MAX_SIZES
-    _DEFAULT_FI_MAX_SIZE = MiB // 2
-
+    # see kOneShotMaxToken in
+    # cpp/tensorrt_llm/kernels/communicationKernels/moeAllReduceFusionKernels.h
     ONESHOT_MAX_TOKENS = 128
 
     def use_flashinfer(allreduce_in: torch.Tensor, max_token_num: int,
                        world_size: int) -> bool:
+        msg_size = allreduce_in.numel()
         num_tokens, hidden_size = allreduce_in.shape
         element_size = allreduce_in.element_size()
-        current_tensor_size = num_tokens * hidden_size * element_size
-        max_fusion_size = max_token_num * hidden_size * element_size
-        return current_tensor_size <= min(
-            _FI_MAX_SIZES.get(world_size, _DEFAULT_FI_MAX_SIZE),
-            max_fusion_size,
-        )
+        msg_size_bytes = msg_size * element_size
+
+        # see cpp/tensorrt_llm/common/customAllReduceUtils.h
+        max_workspace_size = (16 * 1000 * 1000 if world_size <= 2 else 8 *
+                              1000 * 1000)
+
+        return msg_size_bytes <= min(
+            max_workspace_size, max_token_num * hidden_size * element_size)
 
     def use_oneshot(allreduce_in: torch.Tensor) -> bool:
         return allreduce_in.size(0) <= ONESHOT_MAX_TOKENS
@@ -206,8 +198,7 @@ if flashinfer_comm is not None:
                 # as flashinfer does not support rms_norm
                 # and allreduce_out together
                 residual_out = allreduce_in
-            # For the sizes that are smaller than the max size,
-            # we only use flashinfer one shot allreduce
+
             fusion_pattern = (
                 flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm)
 
@@ -633,14 +624,6 @@ class AllReduceFusionPass(VllmInductorPass):
             logger.warning(
                 "Flashinfer fusions are only available for sm90 and above, "
                 "skipping allreduce fusion pass")
-            return
-        # Check if the world size is supported
-        if self.tp_size not in _FI_MAX_SIZES:
-            logger.warning(
-                "Flashinfer allreduce fusion is not "
-                "supported for world size %s",
-                self.tp_size,
-            )
             return
 
         self.ipc_handles, workspace_tensor = (
