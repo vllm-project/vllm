@@ -119,6 +119,26 @@ test_data_list = [
             [2],  # local-batch 1, (batch 0, starting from k[0])
             [3],  # local-batch 1, (batch 0, starting from k[4])
         ]),
+    # Case where query falls in the second attention chunk
+    #  k_toks >   0 1 2 3 4
+    #  q_toks v  _____________
+    #         0 | 1
+    #         1 | 1 1
+    #         2 | 1 1 1
+    #         3 | 1 1 1 1
+    #         4 |         1
+    #  where tokens 0,1,2,3 have been pre-computed
+    LocalAttentionTestData(batch_spec=BatchSpec(
+        query_lens=[1],
+        seq_lens=[5],
+    ),
+                           attn_chunk_size=4,
+                           block_size=2,
+                           expected_q_seqlens=[1],
+                           expected_k_seqlens=[1],
+                           expected_local_block_table=[
+                               [2, 2],
+                           ]),
 ]
 
 
