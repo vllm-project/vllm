@@ -842,7 +842,6 @@ class Scheduler(SchedulerInterface):
                         spec_token_ids[req_index])
                 else:
                     request.spec_token_ids = spec_token_ids[req_index]
-
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if new_token_ids or pooler_output is not None \
@@ -869,6 +868,10 @@ class Scheduler(SchedulerInterface):
 
             if not stopped:
                 new_running.append(request)
+
+            if model_runner_output.finished_dumping is not None:
+                    request.succeed_dumped_blocks.extend(model_runner_output.finished_dumping.get(req_id, []))
+
         self.running = new_running
 
         # KV Connector: update state for finished KV Transfers.

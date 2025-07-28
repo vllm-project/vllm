@@ -107,6 +107,7 @@ class ModelRunnerOutput:
     # [req_ids]
     finished_sending: Optional[set[str]] = None
     finished_recving: Optional[set[str]] = None
+    finished_dumping: Optional[dict[str, list[str]]] = None
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
