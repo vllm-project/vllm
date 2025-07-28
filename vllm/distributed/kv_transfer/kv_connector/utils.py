@@ -67,7 +67,8 @@ class model_aware_kv_ops_helper:
         return key_cache, value_cache
 
     def put_kv_to_cache(self, model_executable: torch.nn.Module, keys, values,
-                        layer, kv_cache, slot_mapping, start_pos, end_pos):
+                        layer, kv_cache, slot_mapping, start_pos, end_pos,
+                        num_heads, head_size):
 
         model_config = model_executable.model.config
 
@@ -85,6 +86,10 @@ class model_aware_kv_ops_helper:
                 layer.self_attn.attn._k_scale,
             )
         else:
+            if len(kv_cache.shape) != 5:
+                num_kv, num_blks, _ = kv_cache.shape
+                kv_cache = kv_cache.reshape(num_kv, num_blks,  -1, num_heads, head_size)
+
             key_cache, value_cache = kv_cache[0], kv_cache[1]
             ops.reshape_and_cache_flash(
                 keys.to(key_cache.device),

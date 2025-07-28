@@ -224,6 +224,7 @@ class SimpleConnector(KVConnectorBase):
         slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
         start_layer = model_executable.model.start_layer
         end_layer = model_executable.model.end_layer
+        num_heads, head_size = self.kv_helper.get_model_args(model_executable)
 
         hidden_or_intermediate_states_for_one_req = []
 
@@ -294,7 +295,8 @@ class SimpleConnector(KVConnectorBase):
                 self.kv_helper.put_kv_to_cache(model_executable, remote_k,
                                                remote_v, layer, kv_cache,
                                                slot_mapping, start_pos,
-                                               end_pos)
+                                               end_pos,
+                                               num_heads, head_size)
 
             hidden_or_intermediate_states_for_one_req.append(hidden)
 
