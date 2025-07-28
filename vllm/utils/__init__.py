@@ -1664,6 +1664,9 @@ class FlexibleArgumentParser(ArgumentParser):
         # Enable the deprecated kwarg for Python 3.12 and below
 
         def parse_known_args(self, args=None, namespace=None):
+            if "--disable-log-requests" in args:
+                logger.warning_once(
+                    "argument '--disable-log-requests' is deprecated")
             namespace, args = super().parse_known_args(args, namespace)
             for action in FlexibleArgumentParser._deprecated:
                 if (hasattr(namespace, dest := action.dest)
