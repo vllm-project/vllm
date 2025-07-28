@@ -150,18 +150,15 @@ class AsyncTPPass(VllmInductorPass):
 if flashinfer_comm is not None:
     _FI_WORKSPACE_TENSOR = None
 
-    MiB = 1024 * 1024
-    # Max size of the input tensor per world size
-    # to use flashinfer fused allreduce
+    # see # see cpp/tensorrt_llm/common/customAllReduceUtils.h
     _FI_MAX_SIZES = {
-        2: MiB,  # 1MB
-        4: MiB,  # 1MB
-        6: MiB // 2,  # 512KB
-        8: MiB // 2,  # 512KB
+        2: 16 * 1000 * 1000,
     }
-    # opt for a more conservative default value
-    # when world size is not in _FI_MAX_SIZES
-    _DEFAULT_FI_MAX_SIZE = MiB // 2
+    _DEFAULT_FI_MAX_SIZE = 8 * 1000 * 1000
+
+    # see kOneShotMaxToken in
+    # cpp/tensorrt_llm/kernels/communicationKernels/moeAllReduceFusionKernels.h
+    _ONESHOT_MAX_TOKENS = 128
 
     def call_trtllm_fused_allreduce_norm(
         allreduce_in: torch.Tensor,
@@ -212,7 +209,7 @@ if flashinfer_comm is not None:
                 hidden_dim=allreduce_in.shape[-1],
                 workspace_ptrs=_FI_WORKSPACE_TENSOR,
                 launch_with_pdl=launch_with_pdl,
-                use_oneshot=True,
+                use_oneshot=num_tokens <= _ONESHOT_MAX_TOKENS,
                 trigger_completion_at_end=trigger_completion_at_end,
                 fp32_acc=fp32_acc,
                 pattern_code=flashinfer_comm.AllReduceFusionPattern.
@@ -279,7 +276,6 @@ class FlashInferFusedAllReduceParams:
         self.trigger_completion_at_end = True
         self.launch_with_pdl = True
         self.fp32_acc = True
-        self.use_oneshot = False
         self.max_token_num = max_token_num
 
     def get_trtllm_fused_allreduce_kwargs(self):
@@ -422,14 +418,6 @@ class AllReduceFusionPass(VllmInductorPass):
             logger.warning(
                 "Flashinfer is not installed or comm module not found, "
                 "skipping allreduce fusion pass")
-            return
-        # Check if the world size is supported
-        if self.tp_size not in _FI_MAX_SIZES:
-            logger.warning(
-                "Flashinfer allreduce fusion is not "
-                "supported for world size %s",
-                self.tp_size,
-            )
             return
 
         self.ipc_handles, workspace_tensor = (
