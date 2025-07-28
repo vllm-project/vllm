@@ -330,7 +330,7 @@ class EngineCore:
 
             # Blocking until the first result is available.
             model_output = self.execute_model_with_error_logging(
-                future.result, scheduler_output)
+                lambda _: future.result(), scheduler_output)
             assert model_output is not None
 
             self.batch_queue.task_done()
