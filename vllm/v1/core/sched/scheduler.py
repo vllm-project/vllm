@@ -436,6 +436,19 @@ class Scheduler(SchedulerInterface):
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
                             break
+                # Check if we can fit the entire remaining context
+                # before allocating
+                # This prevents scheduling requests that will likely get
+                # preempted again. Without prefix caching this results in
+                # trashed compute
+                if not self.kv_cache_manager.enable_caching and not (
+                        self._can_fit_entire_context(request,
+                                                     num_computed_tokens,
+                                                     new_computed_blocks)):
+                    # Skip this request - not enough memory for full context
+                    self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
+                    continue
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -744,6 +757,62 @@ class Scheduler(SchedulerInterface):
             encoder_budget -= num_encoder_tokens
             encoder_inputs_to_schedule.append(i)
         return encoder_inputs_to_schedule, num_new_tokens, encoder_budget
+
+    def _can_fit_entire_context(self, request: Request,
+                                num_computed_tokens: int,
+                                new_computed_blocks) -> bool:
+        """Check if there's enough KV cache for the request's entire
+        existing context.
+        
+        This prevents scheduling chunks of requests that will likely 
+        get preempted (again) due to insufficient memory for their 
+        full existing context (prompt + generated tokens),
+        reducing thrashing in chunked prefill.
+        
+        Args:
+            request: The request to check
+            num_computed_tokens: Number of tokens already computed for
+                this request
+            new_computed_blocks: New computed blocks from prefix caching
+            
+        Returns:
+            True if there's enough KV cache space for the entire
+                existing context
+        """
+        # Calculate total existing tokens (prompt + already generated tokens)
+        # request.num_tokens includes both prompt and generated tokens
+        total_existing_tokens = request.num_tokens
+
+        # Get the new computed blocks in the right format
+        if new_computed_blocks is not None:
+            new_computed_block_list = new_computed_blocks.blocks
+        else:
+            new_computed_block_list = tuple([] for _ in range(
+                len(self.kv_cache_manager.kv_cache_config.kv_cache_groups)))
+
+        # Check how many blocks would be needed for the full existing context
+        num_blocks_needed = (
+            self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
+                request_id=request.request_id,
+                num_tokens=total_existing_tokens,
+                new_computed_blocks=new_computed_block_list))
+
+        # Check if we have enough free blocks
+        num_free_blocks = self.kv_cache_manager.block_pool.get_num_free_blocks(
+        )
+
+        can_fit = num_blocks_needed <= num_free_blocks
+
+        # Debug logging for monitoring the optimization
+        if not can_fit:
+            logger.debug(
+                "Request %s skipped: needs %d blocks for full existing "
+                "context (%d tokens), "
+                "but only %d blocks available. Computed: %d",
+                request.request_id, num_blocks_needed, total_existing_tokens,
+                num_free_blocks, num_computed_tokens)
+
+        return can_fit
 
     def update_from_output(
         self,

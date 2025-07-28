@@ -1829,3 +1829,42 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
     assert len(output.scheduled_new_reqs) == 0
     assert len(scheduler.running) == 0
     assert len(scheduler.waiting) == 1
+
+
+def test_chunked_prefill_prevents_thrashing_when_full_context_exceeds_memory():
+    """Test chunked prefill skips when full context exceeds memory.
+    
+    This test simulates the thrashing scenario where:
+    - Prefix caching is disabled
+    - A request's full context exceeds available memory
+    - But a single chunk could fit
+    """
+    # Create scheduler with limited memory and chunked prefill enabled
+    scheduler = create_scheduler(
+        max_num_batched_tokens=32,
+        num_blocks=20,  # Limited memory - only ~320 tokens worth of blocks
+        block_size=16,
+        enable_prefix_caching=False,  # Disable prefix caching
+    )
+
+    # Create a request with large context that exceeds available memory
+    sampling_params = SamplingParams(ignore_eos=False, max_tokens=100)
+    request = Request(
+        request_id="large_context_request",
+        prompt_token_ids=[1] * 400,  # 400 prompt tokens
+        sampling_params=sampling_params,
+        pooling_params=None,
+        multi_modal_inputs=None,
+        multi_modal_placeholders=None,
+        multi_modal_hashes=None,
+        eos_token_id=EOS_TOKEN_ID,
+    )
+
+    scheduler.add_request(request)
+
+    # Should be skipped due to insufficient memory for full context
+    output = scheduler.schedule()
+
+    assert len(output.scheduled_new_reqs) == 0
+    assert len(scheduler.waiting) == 1
+    assert request.status.name == 'WAITING'
