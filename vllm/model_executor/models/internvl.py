@@ -85,13 +85,14 @@ InternVLImageInputs = Union[InternVLImagePixelInputs,
 class InternVLVideoPixelInputs(TensorSchema):
     """
     Dimensions:
-        - bn: Batch size * number of videos * num_frames
+        - bvf: Batch size * number of videos * num_frames
+        - bn: Batch size * number of images
         - c: Number of channels (3)
         - h: Height of each video frame
         - w: Width of each video frame
     """
     type: Literal["pixel_values_videos"]
-    pixel_values_flat: Annotated[torch.Tensor, TensorShape("bn", 3, "h", "w")]
+    pixel_values_flat: Annotated[torch.Tensor, TensorShape("bvf", 3, "h", "w")]
     num_patches: Annotated[torch.Tensor, TensorShape("bn")]
 
 
