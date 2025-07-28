@@ -1673,7 +1673,7 @@ class AsyncEngineArgs(EngineArgs):
     @property
     @deprecated(
         "`disable_log_requests` is deprecated and has been replaced with "
-        "`enable_log_requests`. This will be removed in v0.11.0. Please use "
+        "`enable_log_requests`. This will be removed in v0.12.0. Please use "
         "`enable_log_requests` instead.")
     def disable_log_requests(self) -> bool:
         return not self.enable_log_requests
@@ -1681,7 +1681,7 @@ class AsyncEngineArgs(EngineArgs):
     @disable_log_requests.setter
     @deprecated(
         "`disable_log_requests` is deprecated and has been replaced with "
-        "`enable_log_requests`. This will be removed in v0.11.0. Please use "
+        "`enable_log_requests`. This will be removed in v0.12.0. Please use "
         "`enable_log_requests` instead.")
     def disable_log_requests(self, value: bool):
         self.enable_log_requests = not value

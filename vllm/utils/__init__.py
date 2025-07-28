@@ -1669,7 +1669,7 @@ class FlexibleArgumentParser(ArgumentParser):
                 # if –-disable-log-requests because its value is default.
                 logger.warning_once(
                     "argument '--disable-log-requests' is deprecated. This "
-                    "will be removed in v0.11.0.")
+                    "will be removed in v0.12.0.")
             namespace, args = super().parse_known_args(args, namespace)
             for action in FlexibleArgumentParser._deprecated:
                 if (hasattr(namespace, dest := action.dest)
