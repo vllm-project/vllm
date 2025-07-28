@@ -78,8 +78,6 @@ class KVConnectorBase_V1(ABC):
 
         - finished_sending: request ids that have finished sending KV
         - finished_recving: request ids that have finished receiving KV
-        - finished_loading_num_tokens: dict of request ids and the number of
-            tokens that have finished loading from the remote KV cache.
         """
 
         def __init__(
@@ -87,11 +85,9 @@ class KVConnectorBase_V1(ABC):
             *,
             finished_sending: set[str],
             finished_recving: set[str],
-            finished_loading_num_tokens: dict[str, int],
         ) -> "KVConnectorBase_V1.KVConnectorFinishOutput":
             self.finished_sending = finished_sending
             self.finished_recving = finished_recving
-            self.finished_loading_num_tokens = finished_loading_num_tokens
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         logger.warning(
@@ -237,8 +233,7 @@ class KVConnectorBase_V1(ABC):
             call to this method (this call or a prior one).
         """
         return self.KVConnectorFinishOutput(finished_sending=set(),
-                                            finished_recving=set(),
-                                            finished_loading_num_tokens={})
+                                            finished_recving=set())
 
     # ==============================
     # Scheduler-side methods
