@@ -269,7 +269,7 @@ if (( $(echo "$best_throughput > 0" | bc -l) )); then
     echo "Running benchmark with profiling..."
     prefix_len=$(( INPUT_LEN * MIN_CACHE_HIT_PCT / 100 ))
     adjusted_input_len=$(( INPUT_LEN - prefix_len ))
-    python3 benchmarks/benchmark_serving.py \
+    vllm bench serve \
         --backend vllm \
         --model $MODEL \
         --dataset-name random \
