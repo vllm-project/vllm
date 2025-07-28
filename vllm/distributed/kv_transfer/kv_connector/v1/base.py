@@ -35,7 +35,6 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 import torch
@@ -77,32 +76,25 @@ class KVConnectorMetadata(ABC):  # noqa: B024
 
 class KVConnectorBase_V1(ABC):
 
-    class KVConnectorFinishOutput(tuple[set[str], set[str]]):
+    class KVConnectorFinishOutput:
         """Output of get_finished() method.
 
-        Contains two sets:
-            - finished_sending: request ids that have finished sending KV
-            - finished_recving: request ids that have finished receiving KV
-        Also contains optional metrics for sending and receiving KV
-        caches, which can be used for performance analysis.
+        - finished_sending: request ids that have finished sending KV
+        - finished_recving: request ids that have finished receiving KV
+        - finished_loading_num_tokens: dict of request ids and the number of
+            tokens that have finished loading from the remote KV cache.
         """
-        __slots__ = ('sending_latencies', 'receiving_latencies',
-                     'finished_loading_num_tokens')
 
-        def __new__(
-            cls,
+        def __init__(
+            self,
             *,
             finished_sending: set[str],
             finished_recving: set[str],
             finished_loading_num_tokens: dict[str, int],
-            sending_latencies: Sequence[float] = [],
-            receiving_latencies: Sequence[float] = []
         ) -> "KVConnectorBase_V1.KVConnectorFinishOutput":
-            output = super().__new__(cls, (finished_sending, finished_recving))
-            output.sending_latencies = sending_latencies
-            output.receiving_latencies = receiving_latencies
-            output.finished_loading_num_tokens = finished_loading_num_tokens
-            return output
+            self.finished_sending = finished_sending
+            self.finished_recving = finished_recving
+            self.finished_loading_num_tokens = finished_loading_num_tokens
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         logger.warning(
