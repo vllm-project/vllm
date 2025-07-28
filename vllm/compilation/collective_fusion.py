@@ -150,7 +150,9 @@ class AsyncTPPass(VllmInductorPass):
 if flashinfer_comm is not None:
     _FI_WORKSPACE_TENSOR = None
 
-    # see # see cpp/tensorrt_llm/common/customAllReduceUtils.h
+    # Max size of the input tensor per world size
+    # to use flashinfer fused allreduce
+    # see cpp/tensorrt_llm/common/customAllReduceUtils.h
     _FI_MAX_SIZES = {
         2: 16 * 1000 * 1000,
     }
