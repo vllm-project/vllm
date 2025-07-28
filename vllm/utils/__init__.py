@@ -58,6 +58,7 @@ import numpy as np
 import numpy.typing as npt
 import psutil
 import regex as re
+import setproctitle
 import torch
 import torch.types
 import yaml
@@ -128,10 +129,6 @@ STR_NOT_IMPL_ENC_DEC_BACKEND = ("XFormers and Flash-Attention are the only "
                                 "backends currently supported with encoder/"
                                 "decoder models.")
 
-STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER = ("Prompt adapters are not "
-                                       "currently supported with encoder/"
-                                       "decoder models.")
-
 # Efficiently import all enc/dec error strings
 # rather than having to import all of the above
 STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
@@ -145,7 +142,6 @@ STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
     "STR_NOT_IMPL_ENC_DEC_MM": STR_NOT_IMPL_ENC_DEC_MM,
     "STR_NOT_IMPL_ENC_DEC_SPEC_DEC": STR_NOT_IMPL_ENC_DEC_SPEC_DEC,
     "STR_NOT_IMPL_ENC_DEC_BACKEND": STR_NOT_IMPL_ENC_DEC_BACKEND,
-    "STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER": STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER,
 }
 
 # Constants related to forcing the attention backend selection
@@ -2887,26 +2883,27 @@ def _maybe_force_spawn():
     if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "spawn":
         return
 
-    reason = None
-    if cuda_is_initialized():
-        reason = "CUDA is initialized"
-    elif xpu_is_initialized():
-        reason = "XPU is initialized"
-    elif is_in_ray_actor():
+    reasons = []
+    if is_in_ray_actor():
         # even if we choose to spawn, we need to pass the ray address
         # to the subprocess so that it knows how to connect to the ray cluster.
         # env vars are inherited by subprocesses, even if we use spawn.
         import ray
         os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
-        reason = "In a Ray actor and can only be spawned"
+        reasons.append("In a Ray actor and can only be spawned")
 
-    if reason is not None:
+    if cuda_is_initialized():
+        reasons.append("CUDA is initialized")
+    elif xpu_is_initialized():
+        reasons.append("XPU is initialized")
+
+    if reasons:
         logger.warning(
             "We must use the `spawn` multiprocessing start method. "
             "Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
             "See https://docs.vllm.ai/en/latest/usage/"
             "troubleshooting.html#python-multiprocessing "
-            "for more information. Reason: %s", reason)
+            "for more information. Reasons: %s", "; ".join(reasons))
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
@@ -3283,3 +3280,16 @@ def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available."""
 
     return _has_module("deep_gemm")
+
+
+def bind_process_name(name: str, suffix: str = "") -> None:
+    """Bind the process name to a specific name with an optional suffix.
+
+    Args:
+        name: The base name to bind the process to.
+        suffix: An optional suffix to append to the base name.
+    """
+    name = f"{envs.VLLM_PROCESS_NAME_PREFIX}::{name}"
+    if suffix:
+        name = f"{name}_{suffix}"
+    setproctitle.setproctitle(name)

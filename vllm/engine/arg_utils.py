@@ -22,17 +22,17 @@ from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         ConfigFormat, ConfigType, DecodingConfig,
-                         DetailedTraceModules, Device, DeviceConfig,
-                         DistributedExecutorBackend, GuidedDecodingBackend,
-                         GuidedDecodingBackendV1, HfOverrides, KVEventsConfig,
-                         KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ModelDType, ModelImpl, MultiModalConfig,
+                         ConfigFormat, ConfigType, ConvertOption,
+                         DecodingConfig, DetailedTraceModules, Device,
+                         DeviceConfig, DistributedExecutorBackend,
+                         GuidedDecodingBackend, GuidedDecodingBackendV1,
+                         HfOverrides, KVEventsConfig, KVTransferConfig,
+                         LoadConfig, LogprobsMode, LoRAConfig, ModelConfig,
+                         ModelDType, ModelImpl, MultiModalConfig,
                          ObservabilityConfig, ParallelConfig, PoolerConfig,
-                         PrefixCachingHashAlgo, PromptAdapterConfig,
-                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         TaskOption, TokenizerMode, VllmConfig, get_attr_docs,
-                         get_field)
+                         PrefixCachingHashAlgo, RunnerOption, SchedulerConfig,
+                         SchedulerPolicy, SpeculativeConfig, TaskOption,
+                         TokenizerMode, VllmConfig, get_attr_docs, get_field)
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -49,10 +49,12 @@ from vllm.v1.sample.logits_processor import (LogitsProcessor,
 if TYPE_CHECKING:
     from vllm.executor.executor_base import ExecutorBase
     from vllm.model_executor.layers.quantization import QuantizationMethods
+    from vllm.model_executor.model_loader import LoadFormats
     from vllm.usage.usage_lib import UsageContext
 else:
     ExecutorBase = Any
     QuantizationMethods = Any
+    LoadFormats = Any
     UsageContext = Any
 
 logger = init_logger(__name__)
@@ -271,14 +273,16 @@ class EngineArgs:
         str, List[str]]] = ModelConfig.served_model_name
     tokenizer: Optional[str] = ModelConfig.tokenizer
     hf_config_path: Optional[str] = ModelConfig.hf_config_path
-    task: TaskOption = ModelConfig.task
+    runner: RunnerOption = ModelConfig.runner
+    convert: ConvertOption = ModelConfig.convert
+    task: Optional[TaskOption] = ModelConfig.task
     skip_tokenizer_init: bool = ModelConfig.skip_tokenizer_init
     enable_prompt_embeds: bool = ModelConfig.enable_prompt_embeds
     tokenizer_mode: TokenizerMode = ModelConfig.tokenizer_mode
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     download_dir: Optional[str] = LoadConfig.download_dir
-    load_format: str = LoadConfig.load_format
+    load_format: Union[str, LoadFormats] = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
     kv_cache_dtype: CacheDType = CacheConfig.cache_dtype
@@ -297,9 +301,11 @@ class EngineArgs:
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: Optional[int] = None
+    data_parallel_start_rank: Optional[int] = None
     data_parallel_size_local: Optional[int] = None
     data_parallel_address: Optional[str] = None
     data_parallel_rpc_port: Optional[int] = None
+    data_parallel_hybrid_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_eplb: bool = ParallelConfig.enable_eplb
@@ -326,6 +332,7 @@ class EngineArgs:
         SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: Optional[int] = SchedulerConfig.max_num_seqs
     max_logprobs: int = ModelConfig.max_logprobs
+    logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     disable_log_stats: bool = False
     revision: Optional[str] = ModelConfig.revision
     code_revision: Optional[str] = ModelConfig.code_revision
@@ -359,11 +366,6 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
     lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
     lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
-    # PromptAdapter fields
-    enable_prompt_adapter: bool = False
-    max_prompt_adapters: int = PromptAdapterConfig.max_prompt_adapters
-    max_prompt_adapter_token: int = \
-        PromptAdapterConfig.max_prompt_adapter_token
 
     num_scheduler_steps: int = SchedulerConfig.num_scheduler_steps
     multi_step_stream_outputs: bool = SchedulerConfig.multi_step_stream_outputs
@@ -441,6 +443,8 @@ class EngineArgs:
     """Custom logitproc types"""
 
     async_scheduling: bool = SchedulerConfig.async_scheduling
+    # DEPRECATED
+    enable_prompt_adapter: bool = False
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -473,7 +477,11 @@ class EngineArgs:
         )
         if not ('serve' in sys.argv[1:] and '--help' in sys.argv[1:]):
             model_group.add_argument("--model", **model_kwargs["model"])
-        model_group.add_argument("--task", **model_kwargs["task"])
+        model_group.add_argument("--runner", **model_kwargs["runner"])
+        model_group.add_argument("--convert", **model_kwargs["convert"])
+        model_group.add_argument("--task",
+                                 **model_kwargs["task"],
+                                 deprecated=True)
         model_group.add_argument("--tokenizer", **model_kwargs["tokenizer"])
         model_group.add_argument("--tokenizer-mode",
                                  **model_kwargs["tokenizer_mode"])
@@ -503,6 +511,8 @@ class EngineArgs:
                                  **model_kwargs["max_seq_len_to_capture"])
         model_group.add_argument("--max-logprobs",
                                  **model_kwargs["max_logprobs"])
+        model_group.add_argument("--logprobs-mode",
+                                 **model_kwargs["logprobs_mode"])
         model_group.add_argument("--disable-sliding-window",
                                  **model_kwargs["disable_sliding_window"])
         model_group.add_argument("--disable-cascade-attn",
@@ -562,9 +572,7 @@ class EngineArgs:
             title="LoadConfig",
             description=LoadConfig.__doc__,
         )
-        load_group.add_argument("--load-format",
-                                choices=[f.value for f in LoadFormat],
-                                **load_kwargs["load_format"])
+        load_group.add_argument("--load-format", **load_kwargs["load_format"])
         load_group.add_argument("--download-dir",
                                 **load_kwargs["download_dir"])
         load_group.add_argument("--model-loader-extra-config",
@@ -621,6 +629,11 @@ class EngineArgs:
             type=int,
             help='Data parallel rank of this instance. '
             'When set, enables external load balancer mode.')
+        parallel_group.add_argument('--data-parallel-start-rank',
+                                    '-dpr',
+                                    type=int,
+                                    help='Starting data parallel rank '
+                                    'for secondary nodes.')
         parallel_group.add_argument('--data-parallel-size-local',
                                     '-dpl',
                                     type=int,
@@ -642,6 +655,9 @@ class EngineArgs:
                                     default='mp',
                                     help='Backend for data parallel, either '
                                     '"mp" or "ray".')
+        parallel_group.add_argument(
+            "--data-parallel-hybrid-lb",
+            **parallel_kwargs["data_parallel_hybrid_lb"])
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
@@ -742,23 +758,6 @@ class EngineArgs:
                                 **lora_kwargs["fully_sharded_loras"])
         lora_group.add_argument("--default-mm-loras",
                                 **lora_kwargs["default_mm_loras"])
-
-        # PromptAdapter related configs
-        prompt_adapter_kwargs = get_kwargs(PromptAdapterConfig)
-        prompt_adapter_group = parser.add_argument_group(
-            title="PromptAdapterConfig",
-            description=PromptAdapterConfig.__doc__,
-        )
-        prompt_adapter_group.add_argument(
-            "--enable-prompt-adapter",
-            action=argparse.BooleanOptionalAction,
-            help="If True, enable handling of PromptAdapters.")
-        prompt_adapter_group.add_argument(
-            "--max-prompt-adapters",
-            **prompt_adapter_kwargs["max_prompt_adapters"])
-        prompt_adapter_group.add_argument(
-            "--max-prompt-adapter-token",
-            **prompt_adapter_kwargs["max_prompt_adapter_token"])
 
         # Speculative arguments
         speculative_group = parser.add_argument_group(
@@ -864,6 +863,12 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
+        parser.add_argument('--enable-prompt-adapter',
+                            action='store_true',
+                            deprecated=True,
+                            help='[DEPRECATED] Prompt adapter has been '
+                            'removed. Setting this flag to True or False'
+                            ' has no effect on vLLM behavior.')
 
         return parser
 
@@ -882,14 +887,15 @@ class EngineArgs:
 
         # NOTE: This is to allow model loading from S3 in CI
         if (not isinstance(self, AsyncEngineArgs) and envs.VLLM_CI_USE_S3
-                and self.model in MODELS_ON_S3
-                and self.load_format == LoadFormat.AUTO):  # noqa: E501
+                and self.model in MODELS_ON_S3 and self.load_format == "auto"):
             self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
-            self.load_format = LoadFormat.RUNAI_STREAMER
+            self.load_format = "runai_streamer"
 
         return ModelConfig(
             model=self.model,
             hf_config_path=self.hf_config_path,
+            runner=self.runner,
+            convert=self.convert,
             task=self.task,
             tokenizer=self.tokenizer,
             tokenizer_mode=self.tokenizer_mode,
@@ -909,6 +915,7 @@ class EngineArgs:
             enforce_eager=self.enforce_eager,
             max_seq_len_to_capture=self.max_seq_len_to_capture,
             max_logprobs=self.max_logprobs,
+            logprobs_mode=self.logprobs_mode,
             disable_sliding_window=self.disable_sliding_window,
             disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,
@@ -999,6 +1006,7 @@ class EngineArgs:
     def create_engine_config(
         self,
         usage_context: Optional[UsageContext] = None,
+        headless: bool = False,
     ) -> VllmConfig:
         """
         Create the VllmConfig.
@@ -1087,15 +1095,41 @@ class EngineArgs:
             # but we should not do this here.
             placement_group = ray.util.get_current_placement_group()
 
+        assert not headless or not self.data_parallel_hybrid_lb, (
+            "data_parallel_hybrid_lb is not applicable in "
+            "headless mode")
+
         data_parallel_external_lb = self.data_parallel_rank is not None
+        # Local DP rank = 1, use pure-external LB.
         if data_parallel_external_lb:
             assert self.data_parallel_size_local in (1, None), (
                 "data_parallel_size_local must be 1 when data_parallel_rank "
                 "is set")
             data_parallel_size_local = 1
+            # Use full external lb if we have local_size of 1.
+            self.data_parallel_hybrid_lb = False
         elif self.data_parallel_size_local is not None:
             data_parallel_size_local = self.data_parallel_size_local
+
+            if self.data_parallel_start_rank and not headless:
+                # Infer hybrid LB mode.
+                self.data_parallel_hybrid_lb = True
+
+            if self.data_parallel_hybrid_lb and data_parallel_size_local == 1:
+                # Use full external lb if we have local_size of 1.
+                data_parallel_external_lb = True
+                self.data_parallel_hybrid_lb = False
+
+            if data_parallel_size_local == self.data_parallel_size:
+                # Disable hybrid LB mode if set for a single node
+                self.data_parallel_hybrid_lb = False
+
+            self.data_parallel_rank = self.data_parallel_start_rank or 0
         else:
+            assert not self.data_parallel_hybrid_lb, (
+                "data_parallel_size_local must be set to use "
+                "data_parallel_hybrid_lb.")
+
             # Local DP size defaults to global DP size if not set.
             data_parallel_size_local = self.data_parallel_size
 
@@ -1152,6 +1186,7 @@ class EngineArgs:
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
+            data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.num_redundant_experts,
@@ -1247,11 +1282,6 @@ class EngineArgs:
 
         load_config = self.create_load_config()
 
-        prompt_adapter_config = PromptAdapterConfig(
-            max_prompt_adapters=self.max_prompt_adapters,
-            max_prompt_adapter_token=self.max_prompt_adapter_token) \
-                                        if self.enable_prompt_adapter else None
-
         decoding_config = DecodingConfig(
             backend=self.guided_decoding_backend,
             disable_fallback=self.guided_decoding_disable_fallback,
@@ -1279,7 +1309,6 @@ class EngineArgs:
             load_config=load_config,
             decoding_config=decoding_config,
             observability_config=observability_config,
-            prompt_adapter_config=prompt_adapter_config,
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
@@ -1295,7 +1324,7 @@ class EngineArgs:
         #############################################################
         # Unsupported Feature Flags on V1.
 
-        if self.load_format == LoadFormat.SHARDED_STATE.value:
+        if self.load_format == "sharded_state":
             _raise_or_fallback(
                 feature_name=f"--load_format {self.load_format}",
                 recommend_to_remove=False)
@@ -1355,12 +1384,6 @@ class EngineArgs:
                 _raise_or_fallback(feature_name="--kv-cache-dtype",
                                    recommend_to_remove=False)
                 return False
-
-        # No Prompt Adapter so far.
-        if self.enable_prompt_adapter:
-            _raise_or_fallback(feature_name="--enable-prompt-adapter",
-                               recommend_to_remove=False)
-            return False
 
         # No text embedding inputs so far.
         if self.enable_prompt_embeds:
@@ -1483,7 +1506,6 @@ class EngineArgs:
 
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
-                        and not self.enable_prompt_adapter
                         and model_config.runner_type != "pooling"):
                     self.enable_chunked_prefill = True
                     logger.warning(
@@ -1654,7 +1676,8 @@ class EngineArgs:
 
         if (self.max_num_seqs is None
                 and usage_context in default_max_num_seqs):
-            self.max_num_seqs = default_max_num_seqs[usage_context]
+            self.max_num_seqs = min(default_max_num_seqs[usage_context],
+                                    self.max_num_batched_tokens or sys.maxsize)
 
             logger.debug("Setting max_num_seqs to %d for %s usage context.",
                          self.max_num_seqs, use_context_value)

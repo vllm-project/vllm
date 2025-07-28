@@ -28,11 +28,14 @@ The class provides the following primitives:
 
         get_finished() - called with ids of finished requests, returns
             ids of requests that have completed async sending/recving.
+        get_finished_loading() - called with scheduler outputs, returns
+            a dictionary that the keys are request IDs and the values are
+            the actual number of tokens loaded from the remote KV cache
 """
 
 import enum
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 import torch
 
@@ -45,6 +48,12 @@ if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
+
+# s_tensor_list, d_tensor_list, s_indices, d_indices, direction
+CopyBlocksOp = Callable[[
+    dict[str, torch.Tensor], dict[
+        str, torch.Tensor], list[int], list[int], Literal["h2d", "d2h"]
+], None]
 
 logger = init_logger(__name__)
 
@@ -127,6 +136,13 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
+        """
+        Set the xPU-specific ops for copying KV between host and device.
+        Needed when host buffer is used for kv transfer (e.g., in NixlConnector)
+        """
+        return
+
     @abstractmethod
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
@@ -205,6 +221,23 @@ class KVConnectorBase_V1(ABC):
             call to this method (this call or a prior one).
         """
         return None, None
+
+    def get_finished_loading(
+            self, scheduler_output: "SchedulerOutput") -> dict[str, int]:
+        """
+        Retrieves the actual number of tokens loaded for requests that have
+        completed the asynchronous loading process from the remote KV cache.
+
+        This function is used by the scheduler process (via the Executors)
+        to track the progress of requests and determine which requests have
+        successfully finished loading their KV cache data.
+
+        Returns:
+            A dictionary where the keys are request IDs and the values are the
+            corresponding number of tokens that have been successfully loaded
+            for each request.
+        """
+        return {}
 
     # ==============================
     # Scheduler-side methods

@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
+    VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MM_INPUT_CACHE_GIB: int = 8
     VLLM_TARGET_DEVICE: str = "cuda"
@@ -140,6 +141,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: Optional[int] = None
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 120
     VLLM_USE_CUDNN_PREFILL: bool = False
+    VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
     VLLM_MOCK_LP_ENTRYPOINT: bool = False
 
@@ -518,6 +520,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default is 10 seconds
     "VLLM_AUDIO_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
+
+    # Maximum filesize in MB for a single audio file when processing
+    # speech-to-text requests. Files larger than this will be rejected.
+    # Default is 25 MB
+    "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB":
+    lambda: int(os.getenv("VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", "25")),
 
     # Backend for Video IO
     # - "opencv": Default backend that uses OpenCV stream buffered backend.
@@ -969,6 +977,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_TRTLLM_DECODE_ATTENTION":
     lambda: os.getenv("VLLM_USE_TRTLLM_DECODE_ATTENTION", None),
 
+    # Controls garbage collection during CUDA graph capture.
+    # If set to 0 (default), enables GC freezing to speed up capture time.
+    # If set to 1, allows GC to run during capture.
+    "VLLM_ENABLE_CUDAGRAPH_GC":
+    lambda: bool(int(os.getenv("VLLM_ENABLE_CUDAGRAPH_GC", "0"))),
+
     # Used to force set up loopback IP
     "VLLM_LOOPBACK_IP":
     lambda: os.getenv("VLLM_LOOPBACK_IP", ""),
@@ -976,6 +990,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Controls whether or not to use cudnn prefill
     "VLLM_MOCK_LP_ENTRYPOINT":
     lambda: bool(int(os.getenv("VLLM_MOCK_LP_ENTRYPOINT", "0"))),
+    
+    # Used to set the process name prefix for vLLM processes.
+    # This is useful for debugging and monitoring purposes.
+    # The default value is "VLLM".
+    "VLLM_PROCESS_NAME_PREFIX":
+    lambda: os.getenv("VLLM_PROCESS_NAME_PREFIX", "VLLM"),
 }
 
 # --8<-- [end:env-vars-definition]
