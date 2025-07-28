@@ -148,9 +148,11 @@ class DPCoordinatorProc:
 
         decoder = MsgpackDecoder(EngineCoreOutputs)
 
+        # For tracking request wave progression.
         current_wave = 0
         engines_running = False
 
+        # For tracking request counts for internal load-balancing.
         stats_changed = False
         last_stats_step = -1
         last_stats_wave = -1
