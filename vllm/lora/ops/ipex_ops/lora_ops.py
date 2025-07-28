@@ -10,7 +10,7 @@ logger = init_logger(__name__)
 try:
     import intel_extension_for_pytorch as ipex
 except ImportError as e:
-   raise e
+    raise e
 
 
 def bgmv_shrink(inputs: torch.Tensor,
