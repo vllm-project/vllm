@@ -17,7 +17,7 @@ build:
     create_environment:
         - uv venv "${READTHEDOCS_VIRTUALENV_PATH}"
     install:
-        - uv pip install -r requirements/docs.txt
+        - uv pip install --no-cache -r requirements/docs.txt
 
 mkdocs:
   configuration: mkdocs.yaml
