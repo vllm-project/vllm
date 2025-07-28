@@ -16,7 +16,9 @@ def test_dummy_loader(vllm_runner, monkeypatch, model: str) -> None:
         ) as llm:
             if model == "google/gemma-3-4b-it":
                 normalizers = llm.model.collective_rpc(
-                    lambda self: self.model_runner.model.language_model.model.normalizer.cpu().item()
+                    lambda self: (
+                        self.model_runner.model.language_model.model.normalizer.cpu().item()
+                    )
                 )
                 config = llm.model.llm_engine.model_config.hf_config.text_config
             else:

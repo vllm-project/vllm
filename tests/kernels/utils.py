@@ -915,13 +915,10 @@ def make_test_metadata(
             None if encoder_seq_lens is None else (sum(encoder_seq_lens))
         )
 
-    if cross_test_params is None:
-        cross_kv_mmap = None
-    else:
-        # Encoder/decoder or encoder-only models only:
-        # * Extract *cross-attention* slot_mapping and block table
-        #   (kv_mmap)
-        cross_kv_mmap = cross_test_params.kv_mmap
+    # Encoder/decoder or encoder-only models only:
+    # * Extract *cross-attention* slot_mapping and block table
+    #   (kv_mmap)
+    cross_kv_mmap = None if cross_test_params is None else cross_test_params.kv_mmap
 
     attn_backend_obj = make_backend(attn_backend.name)
 

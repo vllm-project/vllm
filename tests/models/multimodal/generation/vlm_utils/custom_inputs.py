@@ -104,9 +104,9 @@ def multi_video_multi_aspect_ratio_inputs(
 
 def different_patch_input_cases_internvl():
     images = [asset.pil_image.resize((896, 896)) for asset in IMAGE_ASSETS]
-    formatter = (
-        lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n"
-    )  # noqa: E501
+    formatter = lambda img_prompt: (
+        f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n"
+    )
     single_img_prompts = [
         "<image>\nWhat's the content in the center of the image?",
         "<image>\nWhat is the season?",

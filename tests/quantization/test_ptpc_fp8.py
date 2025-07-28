@@ -47,10 +47,10 @@ def test_ptpc_fp8_rocm(vllm_runner, dtype: str, kv_cache_dtype: str) -> None:
             output = llm.generate_greedy("Hello my name is", max_tokens=20)
             assert output
     except AssertionError as e:
-        if (
-            str(e)
-            == "Currently torch._scaled_mm (hipBLASLt) rowwise gemm only support output dtype of bfloat16. torch.float16 is specified."
-        ):  # noqa: E501
+        if str(e) == (
+            "Currently torch._scaled_mm (hipBLASLt) rowwise gemm only support output "
+            "dtype of bfloat16. torch.float16 is specified."
+        ):
             # If the error message matches, the test passes
             pass
         else:

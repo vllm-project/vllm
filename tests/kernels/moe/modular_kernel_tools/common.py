@@ -640,7 +640,8 @@ def run_modular_kernel(
     mk = make_modular_kernel(config, vllm_config)
 
     mk_kwargs = {
-        "hidden_states": rank_tensors.hidden_states.clone(),  # impls might update the tensor in place
+        # impls might update the tensor in place
+        "hidden_states": rank_tensors.hidden_states.clone(),
         "w1": rank_weights.w1,
         "w2": rank_weights.w2,
         "topk_weights": rank_tensors.topk_weights,

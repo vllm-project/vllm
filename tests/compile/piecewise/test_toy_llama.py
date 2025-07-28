@@ -361,11 +361,14 @@ def test_toy_llama(use_inductor: bool):
         kwargs = {"num_eager_compiles": 1, "num_inductor_compiles": 0}
 
     with compilation_counter.expect(
-        num_graphs_seen=1,  # one graph for the model
+        # one graph for the model
+        num_graphs_seen=1,
         num_piecewise_graphs_seen=1,
         num_piecewise_capturable_graphs_seen=1,
-        num_backend_compilations=1,  # num_piecewise_capturable_graphs_seen
-        num_cudagraph_captured=2,  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        # num_piecewise_capturable_graphs_seen
+        num_backend_compilations=1,
+        # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        num_cudagraph_captured=2,
         **kwargs,
     ):
         outputs.append(
@@ -374,16 +377,16 @@ def test_toy_llama(use_inductor: bool):
     run_model(tractable_config, use_inductor=use_inductor, use_compile=True)
 
     with compilation_counter.expect(
-        num_graphs_seen=1,  # one graph for the model
-        num_piecewise_graphs_seen=2 * llama_config.num_layers + 1,  # 2 * num_layers + 1
-        num_piecewise_capturable_graphs_seen=1
-        + llama_config.num_layers,  # 1 + num_layers
-        num_backend_compilations=1
-        + llama_config.num_layers,  # num_piecewise_capturable_graphs_seen
-        num_cudagraph_captured=2
-        * (
-            1 + llama_config.num_layers
-        ),  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        # one graph for the model
+        num_graphs_seen=1,
+        # 2 * num_layers + 1
+        num_piecewise_graphs_seen=2 * llama_config.num_layers + 1,
+        # 1 + num_layers
+        num_piecewise_capturable_graphs_seen=1 + llama_config.num_layers,
+        # num_piecewise_capturable_graphs_seen
+        num_backend_compilations=1 + llama_config.num_layers,
+        # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        num_cudagraph_captured=2 * (1 + llama_config.num_layers),
     ):
         outputs.append(
             run_model(
@@ -470,11 +473,7 @@ def benchmark():
                 # and use it later, because it will look up the name `b` in the
                 # enclosing scope, and the value of `b` will always be 256.
                 # it is fine here, because we only use the lambda function once.
-                runtime = do_bench(
-                    lambda: graphs[b][0](  # noqa
-                        input_ids[:b], positions[:b]
-                    )
-                )  # noqa
+                runtime = do_bench(lambda: graphs[b][0](input_ids[:b], positions[:b]))  # noqa
                 piecewise_cudagraph_time[b] = runtime
             else:
                 runtime = do_bench(lambda: graphs[b][0].replay())  # noqa

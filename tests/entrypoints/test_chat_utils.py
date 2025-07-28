@@ -382,7 +382,8 @@ def test_parse_chat_messages_placeholder_already_in_prompt(
                     {"type": "image_url", "image_url": {"url": image_url}},
                     {
                         "type": "text",
-                        "text": "What's in <|image_1|> and how does it compare to <|image_2|>?",
+                        "text": "What's in <|image_1|> and how does it compare to "
+                        "<|image_2|>?",
                     },
                 ],
             }
@@ -427,8 +428,8 @@ def test_parse_chat_messages_placeholder_one_already_in_prompt(
     assert conversation == [
         {
             "role": "user",
-            "content": "<|image_2|>\nWhat's in <|image_1|> and how does it compare to the "
-            "other one?",
+            "content": "<|image_2|>\nWhat's in <|image_1|> and how does it compare to "
+            "the other one?",
         }
     ]
     _assert_mm_data_is_image_input(mm_data, 2)
@@ -730,14 +731,14 @@ def test_parse_chat_messages_multiple_modals_multiple_messages_interleave(
     assert conversation == [
         {
             "role": "user",
-            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>\n"
-            "Now listen to this audio\nAudio 1: <|audio_bos|><|AUDIO|><|audio_eos|>",
+            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>"
+            "\nNow listen to this audio\nAudio 1: <|audio_bos|><|AUDIO|><|audio_eos|>",
         },
         {"role": "assistant", "content": "Some stuff."},
         {
             "role": "user",
-            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>\n"
-            "And what's in the video?\n<|vision_start|><|VIDEO|><|vision_end|>",
+            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>"
+            "\nAnd what's in the video?\n<|vision_start|><|VIDEO|><|vision_end|>",
         },
     ]
 

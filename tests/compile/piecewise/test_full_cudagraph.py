@@ -159,7 +159,8 @@ def test_full_cudagraph_with_invalid_backend():
         temporary_environ(
             {
                 "VLLM_USE_V1": "1",
-                "VLLM_FLASH_ATTN_VERSION": "2",  # FA2 not supported with full_cuda_graph
+                # FA2 not supported with full_cuda_graph
+                "VLLM_FLASH_ATTN_VERSION": "2",
             }
         ),
         pytest.raises(RuntimeError),

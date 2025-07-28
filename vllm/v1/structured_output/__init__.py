@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger

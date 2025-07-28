@@ -67,13 +67,15 @@ def sample_complex_json_schema():
         "type": "object",
         "properties": {
             "score": {
+                # Numeric range
                 "type": "integer",
                 "minimum": 0,
-                "maximum": 100,  # Numeric range
+                "maximum": 100,
             },
             "grade": {
+                # Regex pattern
                 "type": "string",
-                "pattern": "^[A-D]$",  # Regex pattern
+                "pattern": "^[A-D]$",
             },
             "email": {
                 "type": "string",
@@ -82,8 +84,9 @@ def sample_complex_json_schema():
             "tags": {
                 "type": "array",
                 "items": {
+                    # Combining length and pattern restrictions
                     "type": "string",
-                    "pattern": "^[a-z]{1,10}$",  # Combining length and pattern restrictions
+                    "pattern": "^[a-z]{1,10}$",
                 },
             },
         },

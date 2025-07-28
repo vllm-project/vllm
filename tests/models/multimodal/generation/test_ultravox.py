@@ -170,7 +170,8 @@ async def test_online_serving(client, audio_assets: AudioTestAssets):
                 ],
                 {
                     "type": "text",
-                    "text": f"What's happening in these {len(audio_assets)} audio clips?",
+                    "text": f"What's happening in these {len(audio_assets)} audio "
+                    "clips?",
                 },
             ],
         }

@@ -24,7 +24,7 @@ repos:
   rev: v0.11.7
   hooks:
   - id: ruff
-    args: [--output-format, github, --fix]
+    # args: [--output-format, github, --fix]
   - id: ruff-format
     files: |
       (?x)^(

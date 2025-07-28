@@ -115,11 +115,12 @@ def get_attention_backend(backend_name: _Backend):
     Returns:
         Tuple of (backend_builder_class, backend_impl_class)
     """
+    backends = "vllm.v1.attention.backends"
     backend_map = {
-        _Backend.FLASH_ATTN_VLLM_V1: "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend",
-        _Backend.FLASHINFER_VLLM_V1: "vllm.v1.attention.backends.flashinfer.FlashInferBackend",
-        _Backend.FLEX_ATTENTION: "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend",
-        _Backend.TRITON_ATTN_VLLM_V1: "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",
+        _Backend.FLASH_ATTN_VLLM_V1: f"{backends}.flash_attn.FlashAttentionBackend",
+        _Backend.FLASHINFER_VLLM_V1: f"{backends}.flashinfer.FlashInferBackend",
+        _Backend.FLEX_ATTENTION: f"{backends}.flex_attention.FlexAttentionBackend",
+        _Backend.TRITON_ATTN_VLLM_V1: f"{backends}.triton_attn.TritonAttentionBackend",
     }
 
     if backend_name not in backend_map:

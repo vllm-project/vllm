@@ -38,8 +38,8 @@ def server(
     request,
     monkeypatch_module,
     zephyr_lora_files,  # noqa: F811
-    zephyr_lora_added_tokens_files,
-):  # noqa: F811
+    zephyr_lora_added_tokens_files,  # noqa: F811
+):
     use_v1 = request.param
     monkeypatch_module.setenv("VLLM_USE_V1", "1" if use_v1 else "0")
 
@@ -713,12 +713,14 @@ async def test_required_tool_use(
                     "properties": {
                         "city": {
                             "type": "string",
-                            "description": "The city to find the weather for, e.g. 'Vienna'",
+                            "description": "The city to find the weather for, e.g. "
+                            "'Vienna'",
                             "default": "Vienna",
                         },
                         "country": {
                             "type": "string",
-                            "description": "The country that the city is in, e.g. 'Austria'",
+                            "description": "The country that the city is in, e.g. "
+                            "'Austria'",
                         },
                         "unit": {
                             "type": "string",
@@ -740,16 +742,19 @@ async def test_required_tool_use(
                     "properties": {
                         "city": {
                             "type": "string",
-                            "description": "The city to get the forecast for, e.g. 'Vienna'",
+                            "description": "The city to get the forecast for, e.g. "
+                            "'Vienna'",
                             "default": "Vienna",
                         },
                         "country": {
                             "type": "string",
-                            "description": "The country that the city is in, e.g. 'Austria'",
+                            "description": "The country that the city is in, e.g. "
+                            "'Austria'",
                         },
                         "days": {
                             "type": "integer",
-                            "description": "Number of days to get the forecast for (1-7)",
+                            "description": "Number of days to get the forecast for "
+                            "(1-7)",
                         },
                         "unit": {
                             "type": "string",
@@ -957,7 +962,8 @@ async def test_complex_message_content(client: openai.AsyncOpenAI):
                 "content": [
                     {
                         "type": "text",
-                        "text": "what is 1+1? please provide the result without any other text.",
+                        "text": "what is 1+1? please provide the result without any "
+                        "other text.",
                     }
                 ],
             }

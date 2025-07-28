@@ -42,10 +42,8 @@ def test_gptq_with_dynamic(
         GPTQMarlinLinearMethod if use_marlin_kernel else (GPTQLinearMethod)
     )
 
-    for (
-        name,
-        submodule,
-    ) in vllm_model.model.llm_engine.model_executor.driver_worker.model_runner.model.named_modules():
+    model_runner = vllm_model.model.llm_engine.model_executor.driver_worker.model_runner
+    for name, submodule in model_runner.model.named_modules():
         if name == "lm_head":
             assert isinstance(submodule.quant_method, linear_method_cls)
         elif name == "model.layers.0.self_attn.qkv_proj":

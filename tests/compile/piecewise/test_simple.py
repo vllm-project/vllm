@@ -100,11 +100,16 @@ def test_simple_piecewise_compile(use_inductor):
 
     with (
         compilation_counter.expect(
-            num_graphs_seen=1,  # one graph for the model
-            num_piecewise_graphs_seen=5,  # 2 * num_layers + 1
-            num_piecewise_capturable_graphs_seen=3,  # 1 + num_layers
-            num_backend_compilations=3,  # num_piecewise_capturable_graphs_seen
-            num_cudagraph_captured=6,  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+            # one graph for the model
+            num_graphs_seen=1,
+            # 2 * num_layers + 1
+            num_piecewise_graphs_seen=5,
+            # 1 + num_layers
+            num_piecewise_capturable_graphs_seen=3,
+            # num_piecewise_capturable_graphs_seen
+            num_backend_compilations=3,
+            # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+            num_cudagraph_captured=6,
         ),
         set_forward_context({}, vllm_config=vllm_config),
     ):

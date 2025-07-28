@@ -60,12 +60,14 @@ async def test_function_tool_use(
                     "properties": {
                         "city": {
                             "type": "string",
-                            "description": "The city to find the weather for, e.g. 'Vienna'",
+                            "description": "The city to find the weather for, e.g. "
+                            "'Vienna'",
                             "default": "Vienna",
                         },
                         "country": {
                             "type": "string",
-                            "description": "The country that the city is in, e.g. 'Austria'",
+                            "description": "The country that the city is in, e.g. "
+                            "'Austria'",
                         },
                         "unit": {
                             "type": "string",
@@ -94,7 +96,8 @@ async def test_function_tool_use(
                                 "include_forecast": {
                                     "type": "boolean",
                                     "default": False,
-                                    "description": "Whether to include a 24-hour forecast",
+                                    "description": "Whether to include a 24-hour "
+                                    "forecast",
                                     "title": "Include Forecast",
                                 },
                                 "language": {
@@ -120,16 +123,19 @@ async def test_function_tool_use(
                     "properties": {
                         "city": {
                             "type": "string",
-                            "description": "The city to get the forecast for, e.g. 'Vienna'",
+                            "description": "The city to get the forecast for, e.g. "
+                            "'Vienna'",
                             "default": "Vienna",
                         },
                         "country": {
                             "type": "string",
-                            "description": "The country that the city is in, e.g. 'Austria'",
+                            "description": "The country that the city is in, e.g. "
+                            "'Austria'",
                         },
                         "days": {
                             "type": "integer",
-                            "description": "Number of days to get the forecast for (1-7)",
+                            "description": "Number of days to get the forecast for "
+                            "(1-7)",
                         },
                         "unit": {
                             "type": "string",
