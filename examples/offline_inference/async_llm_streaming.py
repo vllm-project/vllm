@@ -12,7 +12,6 @@ Usage:
 """
 
 import asyncio
-import os
 
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -65,11 +64,6 @@ async def stream_response(engine: AsyncLLM, prompt: str, request_id: str) -> Non
 
 
 async def main():
-    """Main function demonstrating AsyncLLM streaming."""
-
-    # Ensure V1 engine is enabled
-    os.environ["VLLM_USE_V1"] = "1"
-
     print("🔧 Initializing AsyncLLM...")
 
     # Create AsyncLLM engine with simple configuration
