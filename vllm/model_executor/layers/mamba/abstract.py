@@ -27,3 +27,8 @@ class MambaBase(ABC):
         In this case, returns (conv_state_shape, ssm_state_shape).
         """
         pass
+
+    @property
+    @abstractmethod
+    def mamba_type(self) -> str:
+        pass
