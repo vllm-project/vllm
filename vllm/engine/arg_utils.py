@@ -108,15 +108,19 @@ def get_type(type_hints: set[TypeHint], type: TypeHintT) -> TypeHintT:
 
 
 def literal_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
-    """Convert Literal type hints to argparse kwargs."""
+    """Get the `type` and `choices` from a `Literal` type hint in `type_hints`.
+
+    If `type_hints` also contains `str`, we use `metavar` instead of `choices`.
+    """
     type_hint = get_type(type_hints, Literal)
-    choices = get_args(type_hint)
-    choice_type = type(choices[0])
-    if not all(isinstance(choice, choice_type) for choice in choices):
+    options = get_args(type_hint)
+    option_type = type(options[0])
+    if not all(isinstance(option, option_type) for option in options):
         raise ValueError(
-            "All choices must be of the same type. "
-            f"Got {choices} with types {[type(c) for c in choices]}")
-    return {"type": choice_type, "choices": sorted(choices)}
+            "All options must be of the same type. "
+            f"Got {options} with types {[type(c) for c in options]}")
+    kwarg = "metavar" if contains_type(type_hints, str) else "choices"
+    return {"type": option_type, kwarg: sorted(options)}
 
 
 def is_not_builtin(type_hint: TypeHint) -> bool:
