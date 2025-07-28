@@ -1790,6 +1790,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if prefill_meta is None and decode_meta.use_cuda_graph:
             assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
+            logger.info("DIEGO: GRAPH BATCH SIZE: %d", graph_batch_size)
             use_inputs_embeds = model_input.inputs_embeds is not None
             model_executable = self.graph_runners[virtual_engine][(
                 graph_batch_size, use_inputs_embeds)]
