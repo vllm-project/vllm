@@ -45,17 +45,17 @@ To call the server, in your preferred text editor, create a script that uses an 
 We currently support the following OpenAI APIs:
 
 - [Completions API][completions-api] (`/v1/completions`)
-    - Only applicable to [text generation models](../models/generative_models.md) (`--task generate`).
+    - Only applicable to [text generation models](../models/generative_models.md).
     - *Note: `suffix` parameter is not supported.*
 - [Chat Completions API][chat-api] (`/v1/chat/completions`)
-    - Only applicable to [text generation models](../models/generative_models.md) (`--task generate`) with a [chat template][chat-template].
+    - Only applicable to [text generation models](../models/generative_models.md) with a [chat template][chat-template].
     - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
 - [Embeddings API][embeddings-api] (`/v1/embeddings`)
-    - Only applicable to [embedding models](../models/pooling_models.md) (`--task embed`).
+    - Only applicable to [embedding models](../models/pooling_models.md).
 - [Transcriptions API][transcriptions-api] (`/v1/audio/transcriptions`)
-    - Only applicable to Automatic Speech Recognition (ASR) models (OpenAI Whisper) (`--task generate`).
+    - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
 - [Translation API][translations-api] (`/v1/audio/translations`)
-    - Only applicable to Automatic Speech Recognition (ASR) models (OpenAI Whisper) (`--task generate`).
+    - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
 
 In addition, we have the following custom APIs:
 
@@ -64,14 +64,14 @@ In addition, we have the following custom APIs:
 - [Pooling API][pooling-api] (`/pooling`)
     - Applicable to all [pooling models](../models/pooling_models.md).
 - [Classification API][classification-api] (`/classify`)
-    - Only applicable to [classification models](../models/pooling_models.md) (`--task classify`).
+    - Only applicable to [classification models](../models/pooling_models.md).
 - [Score API][score-api] (`/score`)
-    - Applicable to embedding models and [cross-encoder models](../models/pooling_models.md) (`--task score`).
+    - Applicable to [embedding models and cross-encoder models](../models/pooling_models.md).
 - [Re-rank API][rerank-api] (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Implements [Jina AI's v1 re-rank API](https://jina.ai/reranker/)
     - Also compatible with [Cohere's v1 & v2 re-rank APIs](https://docs.cohere.com/v2/reference/rerank)
     - Jina and Cohere's APIs are very similar; Jina's includes extra information in the rerank endpoint's response.
-    - Only applicable to [cross-encoder models](../models/pooling_models.md) (`--task score`).
+    - Only applicable to [cross-encoder models](../models/pooling_models.md).
 
 [](){ #chat-template }
 
@@ -250,14 +250,14 @@ and passing a list of `messages` in the request. Refer to the examples below for
     To serve the model:
 
     ```bash
-    vllm serve TIGER-Lab/VLM2Vec-Full --task embed \
+    vllm serve TIGER-Lab/VLM2Vec-Full --runner pooling \
       --trust-remote-code \
       --max-model-len 4096 \
       --chat-template examples/template_vlm2vec.jinja
     ```
 
     !!! important
-        Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass `--task embed`
+        Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass `--runner pooling`
         to run this model in embedding mode instead of text generation mode.
 
         The custom chat template is completely different from the original one for this model,
@@ -296,14 +296,14 @@ and passing a list of `messages` in the request. Refer to the examples below for
     To serve the model:
 
     ```bash
-    vllm serve MrLight/dse-qwen2-2b-mrl-v1 --task embed \
+    vllm serve MrLight/dse-qwen2-2b-mrl-v1 --runner pooling \
       --trust-remote-code \
       --max-model-len 8192 \
       --chat-template examples/template_dse_qwen2_vl.jinja
     ```
 
     !!! important
-        Like with VLM2Vec, we have to explicitly pass `--task embed`.
+        Like with VLM2Vec, we have to explicitly pass `--runner pooling`.
 
         Additionally, `MrLight/dse-qwen2-2b-mrl-v1` requires an EOS token for embeddings, which is handled
         by a custom chat template: <gh-file:examples/template_dse_qwen2_vl.jinja>
