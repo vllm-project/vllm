@@ -1105,7 +1105,8 @@ class LLM:
                 "  - For embeddings, use `LLM.embed(...)`.\n"
                 "  - For classification logits, use `LLM.classify(...)`.\n"
                 "  - For reward scores, use `LLM.reward(...)`.\n"
-                "  - For similarity scores, use `LLM.score(...)`.", pooling_task)
+                "  - For similarity scores, use `LLM.score(...)`.",
+                pooling_task)
 
         model_config = self.llm_engine.model_config
         runner_type = model_config.runner_type
