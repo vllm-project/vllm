@@ -128,7 +128,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                     "Please use Blackwell and above.")
 
         self.group_size = 16
-        self.fused_experts = None
+        self.fused_experts: Optional[mk.FusedMoEModularKernel] = None
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
