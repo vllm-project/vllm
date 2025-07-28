@@ -108,7 +108,18 @@ def get_kv_connector_cache_layout():
         "Defaulting to NHD kv cache layout.")
     elif kv_config is not None:
         use_mla = vllm_config.model_config.use_mla
-        if not use_mla and kv_config.kv_connector == "NixlConnector":
+        # Check if NixlConnector is used directly or within MultiConnector
+        nixl_in_multi = False
+        if kv_config.kv_connector == "MultiConnector":
+            connectors = kv_config.kv_connector_extra_config.get("connectors")
+            if isinstance(connectors, list):
+                nixl_in_multi = any(
+                    c.get("kv_connector") == "NixlConnector" for c in connectors)
+
+        nixl_detected = (kv_config.kv_connector == "NixlConnector" or
+                         nixl_in_multi)
+        
+        if not use_mla and nixl_detected:
             logger.info_once("NixlConnector detected. Setting KV cache " \
             "layout to HND for better xfer performance.")
             return "HND"
