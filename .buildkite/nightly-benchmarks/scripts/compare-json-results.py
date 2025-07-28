@@ -46,7 +46,7 @@ if __name__ == "__main__":
 
     drop_column = "P99"
     name_column = "Test name"
-    info_cols = ["# of max concurrency.", "Total input tokens", "Total output tokens"]
+    info_cols = ["Model", "# of max concurrency."]
     data_cols_to_compare = ["Output Tput (tok/s)", "Median TTFT (ms)", "Median"]
     html_msgs_for_data_cols = [
         "Compare Output Tokens /n",

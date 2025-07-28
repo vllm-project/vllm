@@ -43,14 +43,15 @@ throughput_results_column_mapping = {
 serving_results = []
 serving_column_mapping = {
     "test_name": "Test name",
+    "model_id": "Model",
     "gpu_type": "GPU",
     "completed": "# of req.",
     "max_concurrency": "# of max concurrency.",
     "request_throughput": "Tput (req/s)",
     "total_token_throughput": "Total Token Tput (tok/s)",
     "output_throughput": "Output Tput (tok/s)",
-    "total_input_tokens": "Total input tokens",
-    "total_output_tokens": "Total output tokens",
+    #"total_input_tokens": "Total input tokens",
+    #"total_output_tokens": "Total output tokens",
     "mean_ttft_ms": "Mean TTFT (ms)",
     "median_ttft_ms": "Median TTFT (ms)",
     "p99_ttft_ms": "P99 TTFT (ms)",
@@ -138,7 +139,6 @@ if __name__ == "__main__":
 
             # update the test name of this result
             raw_result.update({"test_name": test_file.stem})
-
             # add the result to raw_result
             serving_results.append(raw_result)
             continue
