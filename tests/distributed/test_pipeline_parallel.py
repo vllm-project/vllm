@@ -14,7 +14,7 @@ from typing import Literal, NamedTuple, Optional
 
 import pytest
 
-from vllm.config import _FLOAT16_NOT_SUPPORTED_MODELS, TaskOption
+from vllm.config import _FLOAT16_NOT_SUPPORTED_MODELS, RunnerOption
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config
 
@@ -60,7 +60,7 @@ class PPTestSettings:
     distributed_backends: list[str]
     # vllm major version: "0" for V0, "1" for V1
     vllm_major_versions: list[str]
-    task: TaskOption
+    runner: RunnerOption
     test_options: PPTestOptions
 
     def __post_init__(self):
@@ -76,7 +76,7 @@ class PPTestSettings:
         tp_base: int = 1,
         pp_base: int = 2,
         multi_node_only: bool = False,
-        task: TaskOption = "auto",
+        runner: RunnerOption = "auto",
         load_format: Optional[str] = None,
     ):
         return PPTestSettings(
@@ -104,7 +104,7 @@ class PPTestSettings:
             ],
             distributed_backends=["mp", "mp", "ray", "ray"],
             vllm_major_versions=["0", "1", "0", "1"],
-            task=task,
+            runner=runner,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
                                        load_format=load_format),
         )
@@ -114,7 +114,7 @@ class PPTestSettings:
         *,
         tp_base: int = 1,
         pp_base: int = 2,
-        task: TaskOption = "auto",
+        runner: RunnerOption = "auto",
         multi_node_only: bool = False,
         load_format: Optional[str] = None,
     ):
@@ -127,7 +127,7 @@ class PPTestSettings:
             ],
             distributed_backends=["mp"],
             vllm_major_versions=["0"],
-            task=task,
+            runner=runner,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
                                        load_format=load_format),
         )
@@ -139,7 +139,7 @@ class PPTestSettings:
             for backend, vllm_major_version in zip(self.distributed_backends,
                                                    self.vllm_major_versions):
                 yield (model_id, parallel_setup, backend, vllm_major_version,
-                       self.task, opts)
+                       self.runner, opts)
 
 
 # NOTE: You can adjust tp_base and/or pp_base locally to fit the model in GPU
@@ -211,10 +211,10 @@ TEXT_GENERATION_MODELS = {
 
 EMBEDDING_MODELS = {  # type: ignore[var-annotated]
     # [Text-only]
-    "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(task="embed"),
-    "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(task="embed"),
+    "intfloat/e5-mistral-7b-instruct": PPTestSettings.fast(runner="pooling"),
+    "BAAI/bge-multilingual-gemma2": PPTestSettings.fast(runner="pooling"),
     "Qwen/Qwen2.5-Math-RM-72B": PPTestSettings.fast(
-        load_format="dummy", task="embed"
+        load_format="dummy", runner="pooling"
     ),
 }
 
@@ -269,7 +269,7 @@ def _compare_tp(
     parallel_setup: ParallelSetup,
     distributed_backend: str,
     vllm_major_version: str,
-    task: TaskOption,
+    runner: RunnerOption,
     test_options: PPTestOptions,
     num_gpus_available: int,
     *,
@@ -335,8 +335,8 @@ def _compare_tp(
         common_args.append("--enable-chunked-prefill")
     if eager_mode:
         common_args.append("--enforce-eager")
-    if task != "auto":
-        common_args.extend(["--task", task])
+    if runner != "auto":
+        common_args.extend(["--runner", runner])
     if trust_remote_code:
         common_args.append("--trust-remote-code")
     if tokenizer_mode:
@@ -415,7 +415,7 @@ def _compare_tp(
 
 @pytest.mark.parametrize(
     ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
-     "task", "test_options"),
+     "runner", "test_options"),
     [
         params for model_id, settings in TEXT_GENERATION_MODELS.items()
         for params in settings.iter_params(model_id) if model_id in TEST_MODELS
@@ -427,7 +427,7 @@ def test_tp_language_generation(
     parallel_setup: ParallelSetup,
     distributed_backend: str,
     vllm_major_version: str,
-    task: TaskOption,
+    runner: RunnerOption,
     test_options: PPTestOptions,
     num_gpus_available,
 ):
@@ -435,7 +435,7 @@ def test_tp_language_generation(
                 parallel_setup,
                 distributed_backend,
                 vllm_major_version,
-                task,
+                runner,
                 test_options,
                 num_gpus_available,
                 method="generate",
@@ -444,7 +444,7 @@ def test_tp_language_generation(
 
 @pytest.mark.parametrize(
     ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
-     "task", "test_options"),
+     "runner", "test_options"),
     [
         params for model_id, settings in EMBEDDING_MODELS.items()
         for params in settings.iter_params(model_id) if model_id in TEST_MODELS
@@ -456,7 +456,7 @@ def test_tp_language_embedding(
     parallel_setup: ParallelSetup,
     distributed_backend: str,
     vllm_major_version: str,
-    task: TaskOption,
+    runner: RunnerOption,
     test_options: PPTestOptions,
     num_gpus_available,
 ):
@@ -464,7 +464,7 @@ def test_tp_language_embedding(
                 parallel_setup,
                 distributed_backend,
                 vllm_major_version,
-                task,
+                runner,
                 test_options,
                 num_gpus_available,
                 method="encode",
@@ -473,7 +473,7 @@ def test_tp_language_embedding(
 
 @pytest.mark.parametrize(
     ("model_id", "parallel_setup", "distributed_backend", "vllm_major_version",
-     "task", "test_options"),
+     "runner", "test_options"),
     [
         params for model_id, settings in MULTIMODAL_MODELS.items()
         for params in settings.iter_params(model_id) if model_id in TEST_MODELS
@@ -485,7 +485,7 @@ def test_tp_multimodal_generation(
     parallel_setup: ParallelSetup,
     distributed_backend: str,
     vllm_major_version: str,
-    task: TaskOption,
+    runner: RunnerOption,
     test_options: PPTestOptions,
     num_gpus_available,
 ):
@@ -493,7 +493,7 @@ def test_tp_multimodal_generation(
                 parallel_setup,
                 distributed_backend,
                 vllm_major_version,
-                task,
+                runner,
                 test_options,
                 num_gpus_available,
                 method="generate",

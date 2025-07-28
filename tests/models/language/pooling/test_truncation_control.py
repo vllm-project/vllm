@@ -26,7 +26,7 @@ def test_smaller_truncation_size(vllm_runner,
 
     truncate_prompt_tokens = 10
 
-    with vllm_runner(model_name, task="embed",
+    with vllm_runner(model_name, runner="pooling",
                      max_model_len=max_model_len) as vllm_model:
         vllm_output = vllm_model.llm.encode(
             input_str, truncate_prompt_tokens=truncate_prompt_tokens)
@@ -41,7 +41,7 @@ def test_max_truncation_size(vllm_runner,
                              input_str=input_str):
     truncate_prompt_tokens = -1
 
-    with vllm_runner(model_name, task="embed",
+    with vllm_runner(model_name, runner="pooling",
                      max_model_len=max_model_len) as vllm_model:
         vllm_output = vllm_model.llm.encode(
             input_str, truncate_prompt_tokens=truncate_prompt_tokens)
@@ -58,7 +58,7 @@ def test_bigger_truncation_size(vllm_runner,
     truncate_prompt_tokens = max_model_len + 1
 
     with pytest.raises(ValueError), vllm_runner(
-            model_name, task="embed",
+            model_name, runner="pooling",
             max_model_len=max_model_len) as vllm_model:
 
         llm_output = vllm_model.llm.encode(
