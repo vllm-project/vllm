@@ -175,6 +175,7 @@ TEXT_GENERATION_MODELS = {
     "internlm/internlm2-chat-7b": PPTestSettings.fast(),
     "inceptionai/jais-13b-chat": PPTestSettings.fast(),
     "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
+    "pfnet/plamo-2-1b": PPTestSettings.fast(),
     "meta-llama/Llama-3.2-1B-Instruct": PPTestSettings.detailed(),
     # Tests TransformersForCausalLM
     "hmellor/Ilama-3.2-1B": PPTestSettings.fast(),
