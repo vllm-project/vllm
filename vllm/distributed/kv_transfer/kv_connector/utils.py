@@ -140,17 +140,6 @@ class KVOutputAggregator:
                     finished_set.add(req_id)
                     del remaining_count_dict[req_id]
 
-        def update_finished_load_dict(worker_finished_loading_dict: dict[str,
-                                                                         int],
-                                      finished_loading_dict: dict[str, int]):
-            for req_id, num_actual_load_tokens in (worker_finished_loading_dict
-                                                   or {}).items():
-                if req_id in finished_loading_dict:
-                    finished_loading_dict[req_id] = min(
-                        finished_loading_dict[req_id], num_actual_load_tokens)
-                else:
-                    finished_loading_dict[req_id] = num_actual_load_tokens
-
         final_kv_connector_finish_output = (
             KVConnectorBaseType.KVConnectorFinishOutput(
                 finished_sending=set(),
@@ -168,9 +157,6 @@ class KVOutputAggregator:
                 kv_connector_finish_output.finished_recving,
                 self._recv_remaining_count,
                 final_kv_connector_finish_output.finished_recving)
-            update_finished_load_dict(
-                kv_connector_finish_output.finished_loading_num_tokens,
-                final_kv_connector_finish_output.finished_loading_num_tokens)
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
