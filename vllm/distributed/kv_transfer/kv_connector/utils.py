@@ -114,11 +114,12 @@ def get_kv_connector_cache_layout():
             connectors = kv_config.kv_connector_extra_config.get("connectors")
             if isinstance(connectors, list):
                 nixl_in_multi = any(
-                    c.get("kv_connector") == "NixlConnector" for c in connectors)
+                    c.get("kv_connector") == "NixlConnector"
+                    for c in connectors)
 
-        nixl_detected = (kv_config.kv_connector == "NixlConnector" or
-                         nixl_in_multi)
-        
+        nixl_detected = (kv_config.kv_connector == "NixlConnector"
+                         or nixl_in_multi)
+
         if not use_mla and nixl_detected:
             logger.info_once("NixlConnector detected. Setting KV cache " \
             "layout to HND for better xfer performance.")
