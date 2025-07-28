@@ -538,20 +538,6 @@ async def benchmark(
         )
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
-    if profile:
-        print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_request.prompt,
-            api_url=base_url + "/stop_profile",
-            prompt_len=test_request.prompt_len,
-            output_len=test_request.expected_output_len,
-            extra_body={test_request.structure_type: test_request.schema},
-        )
-        profile_output = await request_func(request_func_input=profile_input)
-        if profile_output.success:
-            print("Profiler stopped")
-
     if pbar is not None:
         pbar.close()
 
@@ -665,6 +651,20 @@ async def benchmark(
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
 
     print("=" * 50)
+
+    if profile:
+        print("Stopping profiler...")
+        profile_input = RequestFuncInput(
+            model=model_id,
+            prompt=test_request.prompt,
+            api_url=base_url + "/stop_profile",
+            prompt_len=test_request.prompt_len,
+            output_len=test_request.expected_output_len,
+            extra_body={test_request.structure_type: test_request.schema},
+        )
+        profile_output = await request_func(request_func_input=profile_input)
+        if profile_output.success:
+            print("Profiler stopped")
 
     return result, ret
 
