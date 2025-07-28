@@ -54,13 +54,10 @@ def test_hf_model_weights_mapper(model_arch: str):
 
     model_config = ModelConfig(
         model_id,
-        task="auto",
         tokenizer=model_info.tokenizer or model_id,
         tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
-        seed=0,
-        dtype="auto",
-        revision=None,
         hf_overrides=model_info.hf_overrides,
     )
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
