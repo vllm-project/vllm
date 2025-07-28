@@ -44,7 +44,7 @@ from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, check_use_alibi, get_dtype_size,
                         is_pin_memory_available, round_up)
-from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionBackend
+from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
     make_local_attention_virtual_batches)
@@ -2539,7 +2539,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     "Non-Attention backend is not supported by V1 "
                     "GPUModelRunner.")
         elif isinstance(kv_cache_spec, MambaSpec):
-            attn_backend_i = Mamba2AttentionBackend
+            attn_backend_i = get_mamba_attn_backend(kv_cache_spec.mamba_type)
         else:
             raise ValueError(
                 f"Unknown KV cache spec type: {type(kv_cache_spec)}")
@@ -2919,7 +2919,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     shapes=mamba_module.get_state_shape(),
                     dtype=self.kv_cache_dtype,
                     block_size=max_model_len,
-                    page_size_padded=page_size_padded)
+                    page_size_padded=page_size_padded,
+                    mamba_type=mamba_module.mamba_type)
 
         return kv_cache_spec
 
