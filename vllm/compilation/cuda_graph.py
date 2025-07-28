@@ -58,8 +58,8 @@ class CUDAGraphWrapper:
     runtime inputs into that buffers for replay. We assume implementing them
     is done outside of the wrapper. That is because we do not make any 
     assumption on the dynamic shape (batch size) of the runtime inputs, as a
-    trade-off for the orthogonal to compilation logic. Nevertheless, tracing
-    and checking the input addresses to be consistent during replay is
+    trade-off for staying orthogonal to compilation logic. Nevertheless, 
+    tracing and checking the input addresses to be consistent during replay is
     guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
     """
 

@@ -2715,16 +2715,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     f"to `NONE` or `PIECEWISE`, or use a different "
                     f"attention backend.")
 
-            if len(self.compilation_config.splitting_ops) == 0:
-                assert attn_cg_i in [
-                    AttentionCGSupport.ALWAYS_UNIFIED,
-                    AttentionCGSupport.ALWAYS_SEPARATE,
-                ], (f"Full CUDAGraph not supported for "
-                    f"{attn_backend_i.__name__} with "
-                    f"CompilationConfig.splitting_ops = []. "
-                    f"Set it to None (default values) "
-                    f"or use a different attention backend.")
-
             # check if the attention backends compatible with
             # CompilationConfig.cudagraph_separate_routine
             if attn_cg_i == AttentionCGSupport.ALWAYS_UNIFIED and \
@@ -2734,19 +2724,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     f" is {AttentionCGSupport.ALWAYS_UNIFIED}, which expect"
                     f"CompilationConfig.cudagraph_separate_routine as "
                     f"False. Set it to False now.")
-                self.compilation_config.cudagraph_separate_routine = \
-                                                                False
+                self.compilation_config.cudagraph_separate_routine = False
 
             if attn_cg_i == AttentionCGSupport.PURE_DECODE_ONLY and \
                 not self.compilation_config.cudagraph_separate_routine:
-
                 logger.warning_once(
                     f"Full CUDAGraph support for {attn_backend_i.__name__}"
                     f" is {AttentionCGSupport.PURE_DECODE_ONLY}, which "
                     f"expect CompilationConfig.cudagraph_separate_routine"
                     f"as True. Set it to True now.")
-                self.compilation_config.cudagraph_separate_routine = \
-                                                                True
+                self.compilation_config.cudagraph_separate_routine = True
 
             # when AttentionCGSupport.ALWAYS_SEPARATE, we don't change
             # the cudagraph_separate_routine flag, but should inform
@@ -2762,22 +2749,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     f"CompilationConfig.cudagraph_separate_routine.")
 
             # for attn_cg is pure decode only, and no piecewise compilation,
+            # or piecewise compilation but not splitting by attention ops,
             # we skip capturing mix prefill-decode (general) batches.
-            if attn_cg_i == AttentionCGSupport.PURE_DECODE_ONLY:
-                if self.no_piecewise_compilation:
-                    logger.warning_once(
-                        f"Skipping capturing mixed prefill-decode batches, "
-                        f"since backend {attn_backend_i.__name__} "
-                        f"supports full cudagraph for pure decode only and "
-                        f"vllm piecewise compilation is disabled.")
-                    self.capture_mixed_batches = False
-                else:
-                    assert self.compilation_config.is_attention_splitting,\
-                    "Invalid splitting_ops for piecewise compilation "
-                    "with cudagraph_mode `FULL` for backend "
-                    f"{attn_backend_i.__name__}, which support "
-                    "cudagraph only for pure decode. Please include "
-                    "attention ops in compilation_config.splitting_ops."
+            if attn_cg_i == AttentionCGSupport.PURE_DECODE_ONLY and \
+                (self.no_piecewise_compilation or not \
+                self.compilation_config.is_attention_splitting):
+                logger.warning_once(
+                    f"Skipping capturing mixed prefill-decode batches, "
+                    f"since backend {attn_backend_i.__name__} "
+                    f"supports full cudagraph for pure decode only and "
+                    f"vllm piecewise compilation disabled or enabled but "
+                    f"compilation_config.splitting_ops does not include "
+                    f"attention ops")
+                self.capture_mixed_batches = False
 
             # check if speculative decode is compatible for full cudagraph
             if self.uniform_decode_query_len > 1:
