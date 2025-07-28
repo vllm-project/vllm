@@ -1,9 +1,9 @@
 # Pooling Models
 
-vLLM also supports pooling models, including embedding, reranking and reward models.
+vLLM also supports pooling models, such as embedding, classification and reward models.
 
 In vLLM, pooling models implement the [VllmModelForPooling][vllm.model_executor.models.VllmModelForPooling] interface.
-These models use a [Pooler][vllm.model_executor.layers.Pooler] to extract the final hidden states of the input
+These models use a [Pooler][vllm.model_executor.layers.pooler.Pooler] to extract the final hidden states of the input
 before returning them.
 
 !!! note
@@ -11,18 +11,39 @@ before returning them.
     As shown in the [Compatibility Matrix](../features/compatibility_matrix.md), most vLLM features are not applicable to
     pooling models as they only work on the generation or decode stage, so performance may not improve as much.
 
-If the model doesn't implement this interface, you can set `--task` which tells vLLM
-to convert the model into a pooling model.
+## Configuration
 
-| `--task`   | Model type           | Supported pooling tasks       |
-|------------|----------------------|-------------------------------|
-| `embed`    | Embedding model      | `encode`, `embed`             |
-| `classify` | Classification model | `encode`, `classify`, `score` |
-| `reward`   | Reward model         | `encode`                      |
+### Model Runner
 
-## Pooling Tasks
+Run a model in pooling mode via the option `--runner pooling`.
 
-In vLLM, we define the following pooling tasks and corresponding APIs:
+!!! tip
+    There is no need to set this option in the vast majority of cases as vLLM can automatically
+    detect the model runner to use via `--runner auto`.
+
+### Model Conversion
+
+vLLM can adapt models for various pooling tasks via the option `--convert <type>`.
+
+If `--runner pooling` has been set (manually or automatically) but the model does not implement the
+[VllmModelForPooling][vllm.model_executor.models.VllmModelForPooling] interface,
+vLLM will attempt to automatically convert the model according to the architecture names
+shown in the table below.
+
+| Architecture                                    | `--convert` | Supported pooling tasks       |
+|-------------------------------------------------|-------------|-------------------------------|
+| `*ForTextEncoding`, `*EmbeddingModel`, `*Model` | `embed`     | `encode`, `embed`             |
+| `*For*Classification`, `*ClassificationModel`   | `classify`  | `encode`, `classify`, `score` |
+| `*ForRewardModeling`, `*RewardModel`            | `reward`    | `encode`                      |
+
+!!! tip
+    You can explicitly set `--convert <type>` to specify how to convert the model.
+
+### Pooling Tasks
+
+Each pooling model in vLLM supports one or more of these tasks according to
+[Pooler.get_supported_tasks][vllm.model_executor.layers.pooler.Pooler.get_supported_tasks],
+enabling the corresponding APIs:
 
 | Task       | APIs               |
 |------------|--------------------|
@@ -31,11 +52,19 @@ In vLLM, we define the following pooling tasks and corresponding APIs:
 | `classify` | `classify`         |
 | `score`    | `score`            |
 
-\*The `score` API falls back to `embed` task if the model does not support `score` task.
+\* The `score` API falls back to `embed` task if the model does not support `score` task.
 
-Each pooling model in vLLM supports one or more of these tasks according to [Pooler.get_supported_tasks][vllm.model_executor.layers.Pooler.get_supported_tasks].
+### Pooler Configuration
 
-By default, the pooler assigned to each task has the following attributes:
+#### Predefined models
+
+If the [Pooler][vllm.model_executor.layers.pooler.Pooler] defined by the model accepts `pooler_config`,
+you can override some of its attributes via the `--override-pooler-config` option.
+
+#### Converted models
+
+If the model has been converted via `--convert` (see above),
+the pooler assigned to each task has the following attributes by default:
 
 | Task       | Pooling Type   | Normalization | Softmax |
 |------------|----------------|---------------|---------|
@@ -43,19 +72,11 @@ By default, the pooler assigned to each task has the following attributes:
 | `embed`    | `LAST`         | ✅︎            | ❌      |
 | `classify` | `LAST`         | ❌            | ✅︎      |
 
-These defaults may be overridden by the model's implementation in vLLM.
-
 When loading [Sentence Transformers](https://huggingface.co/sentence-transformers) models,
-we attempt to override the defaults based on its Sentence Transformers configuration file (`modules.json`),
-which takes priority over the model's defaults.
+its Sentence Transformers configuration file (`modules.json`) takes priority over the model's defaults.
 
 You can further customize this via the `--override-pooler-config` option,
 which takes priority over both the model's and Sentence Transformers's defaults.
-
-!!! note
-
-    The above configuration may be disregarded if the model's implementation in vLLM defines its own pooler
-    that is not based on [PoolerConfig][vllm.config.PoolerConfig].
 
 ## Offline Inference
 
@@ -70,7 +91,7 @@ It returns the extracted hidden states directly, which is useful for reward mode
 ```python
 from vllm import LLM
 
-llm = LLM(model="Qwen/Qwen2.5-Math-RM-72B", task="reward")
+llm = LLM(model="Qwen/Qwen2.5-Math-RM-72B", runner="pooling")
 (output,) = llm.encode("Hello, my name is")
 
 data = output.outputs.data
@@ -85,7 +106,7 @@ It is primarily designed for embedding models.
 ```python
 from vllm import LLM
 
-llm = LLM(model="intfloat/e5-mistral-7b-instruct", task="embed")
+llm = LLM(model="intfloat/e5-mistral-7b-instruct", runner="pooling")
 (output,) = llm.embed("Hello, my name is")
 
 embeds = output.outputs.embedding
@@ -102,7 +123,7 @@ It is primarily designed for classification models.
 ```python
 from vllm import LLM
 
-llm = LLM(model="jason9693/Qwen2.5-1.5B-apeach", task="classify")
+llm = LLM(model="jason9693/Qwen2.5-1.5B-apeach", runner="pooling")
 (output,) = llm.classify("Hello, my name is")
 
 probs = output.outputs.probs
@@ -123,7 +144,7 @@ It is designed for embedding models and cross encoder models. Embedding models u
 ```python
 from vllm import LLM
 
-llm = LLM(model="BAAI/bge-reranker-v2-m3", task="score")
+llm = LLM(model="BAAI/bge-reranker-v2-m3", runner="pooling")
 (output,) = llm.score("What is the capital of France?",
                       "The capital of Brazil is Brasilia.")
 
@@ -175,7 +196,7 @@ You can change the output dimensions of embedding models that support Matryoshka
 from vllm import LLM, PoolingParams
 
 llm = LLM(model="jinaai/jina-embeddings-v3",
-          task="embed",
+          runner="pooling",
           trust_remote_code=True)
 outputs = llm.embed(["Follow the white rabbit."],
                     pooling_params=PoolingParams(dimensions=32))

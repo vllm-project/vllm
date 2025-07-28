@@ -7,13 +7,15 @@ import pytest
 from transformers import PretrainedConfig
 
 from vllm import LLM
+from vllm.config import ModelImpl
 from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
 from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
 from ..utils import create_new_process_for_each_test
-from .registry import AUTO_EXAMPLE_MODELS, HF_EXAMPLE_MODELS, HfExampleModels
+from .registry import (_TRANSFORMERS_BACKEND_MODELS, AUTO_EXAMPLE_MODELS,
+                       HF_EXAMPLE_MODELS, HfExampleModels)
 
 
 @create_new_process_for_each_test()
@@ -126,6 +128,8 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
             # these tests seem to produce leftover memory
             gpu_memory_utilization=0.80,
             load_format="dummy",
+            model_impl=ModelImpl.TRANSFORMERS
+            if model_arch in _TRANSFORMERS_BACKEND_MODELS else ModelImpl.VLLM,
             hf_overrides=hf_overrides,
         )
 

@@ -343,7 +343,7 @@ Here is a simple example using Phi-3.5-Vision.
 First, launch the OpenAI-compatible server:
 
 ```bash
-vllm serve microsoft/Phi-3.5-vision-instruct --task generate \
+vllm serve microsoft/Phi-3.5-vision-instruct --runner generate \
   --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt '{"image":2}'
 ```
 
@@ -422,7 +422,7 @@ Instead of `image_url`, you can pass a video file via `video_url`. Here is a sim
 First, launch the OpenAI-compatible server:
 
 ```bash
-vllm serve llava-hf/llava-onevision-qwen2-0.5b-ov-hf --task generate --max-model-len 8192
+vllm serve llava-hf/llava-onevision-qwen2-0.5b-ov-hf --runner generate --max-model-len 8192
 ```
 
 Then, you can use the OpenAI client as follows:
