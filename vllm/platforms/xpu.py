@@ -67,7 +67,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        xpu_use_triton_kernel = os.getenv("XPU_USE_TRITION_KERNEL", "0") == "1"
+        xpu_use_triton_kernel = os.getenv("XPU_USE_TRITON_KERNEL", "0") == "1"
         if not xpu_use_triton_kernel:
             return "vllm.lora.punica_wrapper.punica_xpu.PunicaWrapperXPU"
         else:
