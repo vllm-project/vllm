@@ -29,8 +29,8 @@ input = """Immerse yourself in the enchanting chronicle of calculus, a
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--task",
-        "embed",
+        "--runner",
+        "pooling",
         "--dtype",
         "bfloat16",
         "--enforce-eager",
