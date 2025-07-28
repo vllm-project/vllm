@@ -325,8 +325,8 @@ class FusedMoEConfig:
 
     def __post_init__(self):
         if self.dp_size > 1:
-            logger.debug("Using FusedMoEConfig::max_num_tokens=%d",
-                         self.max_num_tokens)
+            logger.debug_once("Using FusedMoEConfig::max_num_tokens=%d",
+                              self.max_num_tokens)
 
         assert self.max_num_tokens > 0
 

@@ -47,8 +47,7 @@ __global__ void compute_problem_sizes(const int32_t* __restrict__ topk_ids,
 
 __global__ void compute_expert_offsets(
     const int32_t* __restrict__ problem_sizes1, int32_t* expert_offsets,
-    int32_t* atomic_buffer, const int num_experts, const int topk_length,
-    const bool swap_ab) {
+    int32_t* atomic_buffer, const int num_experts, const bool swap_ab) {
   int32_t tot_offset = 0;
   expert_offsets[0] = 0;
   for (int i = 0; i < num_experts; ++i) {
@@ -61,7 +60,7 @@ __global__ void compute_expert_offsets(
 __global__ void compute_expert_blockscale_offsets(
     const int32_t* __restrict__ problem_sizes1, int32_t* expert_offsets,
     int32_t* blockscale_offsets, int32_t* atomic_buffer, const int num_experts,
-    const int topk_length, const bool swap_ab) {
+    const bool swap_ab) {
   int32_t tot_offset = 0;
   int32_t tot_offset_round = 0;
   expert_offsets[0] = 0;
@@ -137,18 +136,17 @@ void get_cutlass_moe_mm_data_caller(
   }
 
   if (blockscale_offsets.has_value()) {
+    // fp4 path
     compute_expert_blockscale_offsets<<<1, 1, 0, stream>>>(
         static_cast<const int32_t*>(problem_sizes1.data_ptr()),
         static_cast<int32_t*>(expert_offsets.data_ptr()),
         static_cast<int32_t*>(blockscale_offsets.value().data_ptr()),
-        static_cast<int32_t*>(atomic_buffer.data_ptr()), num_experts,
-        topk_ids.numel(), swap_ab);
+        static_cast<int32_t*>(atomic_buffer.data_ptr()), num_experts, swap_ab);
   } else {
     compute_expert_offsets<<<1, 1, 0, stream>>>(
         static_cast<const int32_t*>(problem_sizes1.data_ptr()),
         static_cast<int32_t*>(expert_offsets.data_ptr()),
-        static_cast<int32_t*>(atomic_buffer.data_ptr()), num_experts,
-        topk_ids.numel(), swap_ab);
+        static_cast<int32_t*>(atomic_buffer.data_ptr()), num_experts, swap_ab);
   }
   compute_arg_sorts<<<num_experts, num_threads, 0, stream>>>(
       static_cast<const int32_t*>(topk_ids.data_ptr()),

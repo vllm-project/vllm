@@ -22,6 +22,7 @@ pillow
 psutil
 pybase64
 pydantic
+setproctitle
 torch
 transformers
 zmq
