@@ -200,13 +200,14 @@ class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtype: torch.dtype
     page_size_padded: Optional[int] = None
+    mamba_type: str = "mamba2"
 
     def __post_init__(self):
         self.num_elements = sum(prod(shape) for shape in self.shapes)
 
     @property
     def type_id(self) -> str:
-        return f"mamba_{self.shapes}_{self.dtype}"
+        return f"mamba_{self.shapes}_{self.dtype}_{self.mamba_type}"
 
     @property
     def page_size_bytes(self) -> int:
