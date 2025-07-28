@@ -3272,7 +3272,7 @@ class MultiModalConfig:
     Defaults to 1 (V0) or 999 (V1) for each modality.
 
     For example, to allow up to 16 images and 2 videos per prompt:
-    `{"images": 16, "videos": 2}`
+    `{"image": 16, "video": 2}`
     """
 
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
