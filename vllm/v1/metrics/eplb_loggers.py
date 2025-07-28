@@ -60,8 +60,7 @@ class EplbStatLogger:
                              for _ in range(get_ep_group().world_size)]
 
         self.lock = threading.Lock()
-        if self.rank == 0:
-            self.start_loop()
+        self.start_loop()
 
     def record(self, moe_load: Optional[torch.Tensor], phy2log_map: Optional[torch.Tensor]) -> None:
         if self.rank != 0:
