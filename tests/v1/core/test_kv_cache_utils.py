@@ -695,11 +695,7 @@ def test_estimate_max_model_len(model_id, max_model_len,
     # Create a VllmConfig
     model_config = ModelConfig(
         model_id,
-        task="generate",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
+        runner="generate",
         dtype="float16",
         max_model_len=max_model_len,
     )
@@ -733,11 +729,7 @@ def test_get_max_concurrency_for_kv_cache_config():
     max_model_len = 16384
     model_config = ModelConfig(
         model_id,
-        task="generate",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
+        runner="generate",
         dtype="float16",
         max_model_len=max_model_len,
     )

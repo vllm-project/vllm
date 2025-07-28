@@ -381,6 +381,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                          extras={"2B": "OpenGVLab/InternVL2-2B",
                                                  "3.0": "OpenGVLab/InternVL3-1B"},  # noqa: E501
                                          trust_remote_code=True),
+    "InternS1ForConditionalGeneration": _HfExamplesInfo("internlm/Intern-S1",
+                                         trust_remote_code=True),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo("HuggingFaceM4/Idefics3-8B-Llama3",  # noqa: E501
                                                         {"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"}),  # noqa: E501
     "KeyeForConditionalGeneration": _HfExamplesInfo("Kwai-Keye/Keye-VL-8B-Preview", # noqa: E501
@@ -431,6 +433,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                     "1.6-gemma": "AIDC-AI/Ovis1.6-Gemma2-9B"}),  # noqa: E501
     "Phi4MMForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",
                                         trust_remote_code=True),
+    "Phi4MultimodalForCausalLM": _HfExamplesInfo("microsoft/Phi-4-multimodal-instruct",  # noqa: E501
+                                                 revision="refs/pr/70"),
     "PixtralForConditionalGeneration": _HfExamplesInfo("mistralai/Pixtral-12B-2409",  # noqa: E501
                                                        tokenizer_mode="mistral"),
     "QwenVLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen-VL",

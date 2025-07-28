@@ -468,6 +468,39 @@ def run_tarsier(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Intern-S1
+def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "internlm/Intern-S1"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+        enforce_eager=True,
+    )
+
+    if modality == "image":
+        placeholder = "<IMG_CONTEXT>"
+    elif modality == "video":
+        placeholder = "<video>"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [
+        [{"role": "user", "content": f"{placeholder}\n{question}"}]
+        for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # InternVL
 def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "OpenGVLab/InternVL3-2B"
@@ -1066,6 +1099,41 @@ def run_phi4mm(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# HF format Phi-4-multimodal-instruct
+def run_phi4_multimodal(questions: list[str], modality: str) -> ModelRequestData:
+    """
+    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
+    show how to process image inputs.
+    """
+    assert modality == "image"
+    model_path = snapshot_download(
+        "microsoft/Phi-4-multimodal-instruct", revision="refs/pr/70"
+    )
+    # Since the vision-lora and speech-lora co-exist with the base model,
+    # we have to manually specify the path of the lora weights.
+    vision_lora_path = os.path.join(model_path, "vision-lora")
+    prompts = [
+        f"<|user|><|image|>{question}<|end|><|assistant|>" for question in questions
+    ]
+    engine_args = EngineArgs(
+        model=model_path,
+        max_model_len=5120,
+        max_num_seqs=2,
+        max_num_batched_tokens=12800,
+        enable_lora=True,
+        max_lora_rank=320,
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
+        mm_processor_kwargs={"dynamic_hd": 16},
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        lora_requests=[LoRARequest("vision", 1, vision_lora_path)],
+    )
+
+
 # Pixtral HF-format
 def run_pixtral_hf(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1303,6 +1371,7 @@ model_example_map = {
     "h2ovl_chat": run_h2ovl,
     "hyperclovax_seed_vision": run_hyperclovax_seed_vision,
     "idefics3": run_idefics3,
+    "interns1": run_interns1,
     "internvl_chat": run_internvl,
     "nemotron_vl": run_nemotron_vl,
     "keye_vl": run_keye_vl,
@@ -1324,6 +1393,7 @@ model_example_map = {
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
     "phi4_mm": run_phi4mm,
+    "phi4_multimodal": run_phi4_multimodal,
     "pixtral_hf": run_pixtral_hf,
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
