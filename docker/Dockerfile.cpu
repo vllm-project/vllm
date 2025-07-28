@@ -19,15 +19,13 @@
 #   VLLM_CPU_AVX512VNNI=false (default)|true
 #
 
-######################### BASE IMAGE #########################
-FROM ubuntu:22.04 AS base
+######################### COMMON BASE IMAGE #########################
+FROM ubuntu:22.04 AS base-common
 
 WORKDIR /workspace/
 
 ARG PYTHON_VERSION=3.12
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
-
-ENV LD_PRELOAD=""
 
 # Install minimal dependencies and uv
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -63,17 +61,18 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ARG TARGETARCH
 ENV TARGETARCH=${TARGETARCH}
 
-RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        PRELOAD_PATH="/usr/lib/aarch64-linux-gnu/libtcmalloc_minimal.so.4"; \
-    else \
-        PRELOAD_PATH="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/opt/venv/lib/libiomp5.so"; \
-    fi && \
-    echo "export LD_PRELOAD=$PRELOAD_PATH" >> ~/.bashrc
+######################### x86_64 BASE IMAGE #########################
+FROM base-common AS base-amd64
 
-# Ensure that the LD_PRELOAD environment variable for export is in effect.
-SHELL ["/bin/bash", "-c"]
+ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/opt/venv/lib/libiomp5.so"
 
-ENV LD_PRELOAD=${LD_PRELOAD}
+######################### arm64 BASE IMAGE #########################
+FROM base-common AS base-arm64
+
+ENV LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libtcmalloc_minimal.so.4"
+
+######################### BASE IMAGE #########################
+FROM base-${TARGETARCH} AS base
 
 RUN echo 'ulimit -c 0' >> ~/.bashrc
 
