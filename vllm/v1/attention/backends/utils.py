@@ -293,9 +293,16 @@ def make_local_attention_virtual_batches(
     q_tokens_in_first_block = np.minimum(
         attn_chunk_size - ((seq_lens_np - q_seqlens) % attn_chunk_size),
         q_seqlens).astype(np.int32)
-    tokens_in_last_block = attn_chunk_size + (seq_lens_np % -attn_chunk_size)
     local_blocks = 1 + cdiv(q_seqlens - q_tokens_in_first_block,
                             attn_chunk_size)
+    # When there's only one local block, we should take up as many
+    # KV tokens as possible, up to attn_chunk_size.
+    # Otherwise, calculate it based on the remainder
+    tokens_in_last_block = np.where(
+        local_blocks == 1,
+        np.minimum(attn_chunk_size, seq_lens_np),
+        attn_chunk_size + (seq_lens_np % -attn_chunk_size)
+    )
 
     # Once we know the number of local blocks we can compute the request spans
     #  for each batch idx, we can figure out the number of "virtual" requests we
