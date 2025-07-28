@@ -1434,14 +1434,18 @@ class EngineArgs:
                 and _warn_or_fallback("Engine in background thread")):
             return False
 
-        if (self.pipeline_parallel_size > 1
-                and self.distributed_executor_backend
-                not in (ParallelConfig.distributed_executor_backend, "ray",
-                        "mp", "external_launcher")):
-            name = "Pipeline Parallelism without Ray distributed executor " \
-                    "or multiprocessing executor or external launcher"
-            _raise_or_fallback(feature_name=name, recommend_to_remove=False)
-            return False
+        if self.pipeline_parallel_size > 1:
+            supports_pp = hasattr(
+                self.distributed_executor_backend, 'supports_pp'
+            ) and self.distributed_executor_backend.supports_pp
+            if not supports_pp and self.distributed_executor_backend not in (
+                    ParallelConfig.distributed_executor_backend, "ray", "mp",
+                    "external_launcher"):
+                name = "Pipeline Parallelism without Ray distributed executor " \
+                        "or multiprocessing executor or external launcher"
+                _raise_or_fallback(feature_name=name,
+                                   recommend_to_remove=False)
+                return False
 
         # The platform may be supported on V1, but off by default for now.
         if not current_platform.default_v1(  # noqa: SIM103
