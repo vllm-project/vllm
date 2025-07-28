@@ -10,16 +10,15 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize, BatchedTritonExperts)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
-from vllm.utils import has_deep_gemm
-from vllm.utils.deep_gemm import calc_diff
+from vllm.utils.deep_gemm import calc_diff, is_deepgemm_available
 
 from .test_deepgemm import make_block_quant_fp8_weights
 
 BLOCK_SIZE = [128, 128]
 
 
-@pytest.mark.skipif(not has_deep_gemm(), reason="Requires deep_gemm kernels")
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.skipif(not is_deepgemm_available(),
+                    reason="Requires deep_gemm kernels")
 @pytest.mark.parametrize("E", [16, 32])  # number of experts
 @pytest.mark.parametrize("T", [256, 512])  # tokens per expert
 @pytest.mark.parametrize("K", [128, 256])  # hidden dim

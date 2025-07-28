@@ -18,6 +18,13 @@ from vllm.utils import has_deep_gemm
 
 
 @functools.cache
+def is_deepgemm_available() -> bool:
+    return has_deep_gemm() and current_platform.is_cuda() and (
+        current_platform.is_device_capability(100)
+        or current_platform.is_device_capability(90))
+
+
+@functools.cache
 def is_blackwell_deep_gemm_used() -> bool:
     """Return ``True`` if vLLM is configured to use DeepGEMM on a
     Blackwell-class GPU.
@@ -136,10 +143,7 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
 
 
 __all__ = [
-    "calc_diff",
-    "fp8_gemm_nt",
-    "m_grouped_fp8_gemm_nt_contiguous",
-    "fp8_m_grouped_gemm_nt_masked",
-    "per_block_cast_to_fp8",
-    "is_blackwell_deep_gemm_used",
+    "calc_diff", "fp8_gemm_nt", "m_grouped_fp8_gemm_nt_contiguous",
+    "fp8_m_grouped_gemm_nt_masked", "per_block_cast_to_fp8",
+    "is_blackwell_deep_gemm_used", "is_deepgemm_available"
 ]
