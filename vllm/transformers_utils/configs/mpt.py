@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copied from
 # https://huggingface.co/mosaicml/mpt-7b/blob/main/configuration_mpt.py

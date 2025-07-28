@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing
 import os
 import pickle
@@ -19,26 +20,23 @@ from typing import Any, Callable, Optional, Union, cast
 
 import cloudpickle
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.executor.multiproc_worker_utils import (
     _add_prefix, set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
-from vllm.utils import (get_distributed_init_method, get_mp_context,
-                        get_open_port)
+from vllm.utils import (bind_process_name, get_distributed_init_method,
+                        get_loopback_ip, get_mp_context, get_open_port)
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
-
-POLLING_TIMEOUT_MS = 5000
-POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
-
-EXECUTE_MODEL_TIMEOUT_S = 300
 
 
 class MultiprocExecutor(Executor):
@@ -65,13 +63,16 @@ class MultiprocExecutor(Executor):
 
         # Multiprocessing-based executor does not support multi-node setting.
         # Since it only works for single node, we can use the loopback address
-        # 127.0.0.1 for communication.
+        # get_loopback_ip() for communication.
         distributed_init_method = get_distributed_init_method(
-            "127.0.0.1", get_open_port())
+            get_loopback_ip(), get_open_port())
 
         # Initialize worker and set up message queues for SchedulerOutputs
         # and ModelRunnerOutputs
-        self.rpc_broadcast_mq = MessageQueue(self.world_size, self.world_size)
+        max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
+        self.rpc_broadcast_mq = MessageQueue(self.world_size,
+                                             self.world_size,
+                                             max_chunk_bytes=max_chunk_bytes)
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
         # Create workers
@@ -111,10 +112,14 @@ class MultiprocExecutor(Executor):
         if self.max_concurrent_batches > 1:
             # Note: must use only 1 IO thread to keep dequeue sequence
             # from the response queue
+            # _async_aggregate_workers_output also assumes a single IO thread
             self.io_thread_pool = ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="mp_exec_io")
 
         self.output_rank = self._get_output_rank()
+        self.has_connector = self.vllm_config.kv_transfer_config is not None
+        self.kv_output_aggregator = KVOutputAggregator(
+            self.parallel_config.world_size)
 
     def start_worker_monitor(self):
         workers = self.workers
@@ -155,13 +160,30 @@ class MultiprocExecutor(Executor):
         self,
         scheduler_output,
     ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
-        (output, ) = self.collective_rpc("execute_model",
-                                         args=(scheduler_output, ),
-                                         unique_reply_rank=self.output_rank,
-                                         non_block=self.max_concurrent_batches
-                                         > 1,
-                                         timeout=EXECUTE_MODEL_TIMEOUT_S)
-        return output
+        non_block = self.max_concurrent_batches > 1
+
+        if not self.has_connector:
+            # get output only from a single worker (output_rank)
+            (output, ) = self.collective_rpc(
+                "execute_model",
+                args=(scheduler_output, ),
+                unique_reply_rank=self.output_rank,
+                non_block=non_block,
+                timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS)
+            return output
+
+        # get output from all workers
+        outputs = self.collective_rpc(
+            "execute_model",
+            args=(scheduler_output, ),
+            non_block=non_block,
+            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS)
+
+        # aggregate all workers output to a single output
+        if non_block:
+            return self.kv_output_aggregator.async_aggregate(
+                outputs, self.output_rank)
+        return self.kv_output_aggregator.aggregate(outputs, self.output_rank)
 
     def collective_rpc(self,
                        method: Union[str, Callable],
@@ -271,6 +293,8 @@ class MultiprocExecutor(Executor):
 
     @property
     def max_concurrent_batches(self) -> int:
+        if self.scheduler_config.async_scheduling:
+            return 2
         return self.parallel_config.pipeline_parallel_size
 
     def _get_output_rank(self) -> int:
@@ -341,7 +365,10 @@ class WorkerProc:
         }
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
-
+        bind_process_name(
+            self.worker.worker.__class__.__name__,
+            f"TP{self.rank}_DP{vllm_config.parallel_config.data_parallel_rank}"
+        )
         pid = os.getpid()
         _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)
         _add_prefix(sys.stderr, f"VllmWorker rank={rank}", pid)

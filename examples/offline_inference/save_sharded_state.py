@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Saves each worker's model state dict directly to a checkpoint, which enables a
 fast load path for large tensor-parallel models where each worker only needs to
@@ -28,6 +29,7 @@ import shutil
 from pathlib import Path
 
 from vllm import LLM, EngineArgs
+from vllm.model_executor.model_loader import ShardedStateLoader
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -38,7 +40,10 @@ def parse_args():
         "--output", "-o", required=True, type=str, help="path to output checkpoint"
     )
     parser.add_argument(
-        "--file-pattern", type=str, help="string pattern of saved filenames"
+        "--file-pattern",
+        type=str,
+        default=ShardedStateLoader.DEFAULT_PATTERN,
+        help="string pattern of saved filenames",
     )
     parser.add_argument(
         "--max-file-size",

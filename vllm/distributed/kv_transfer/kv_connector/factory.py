@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
 from typing import TYPE_CHECKING, Callable
@@ -110,6 +111,11 @@ KVConnectorFactory.register_connector(
     "SharedStorageConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector",
     "SharedStorageConnector")
+
+KVConnectorFactory.register_connector(
+    "P2pNcclConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_connector",
+    "P2pNcclConnector")
 
 KVConnectorFactory.register_connector(
     "LMCacheConnectorV1",

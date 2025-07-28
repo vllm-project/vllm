@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 MooncakeStore Connector for Distributed Machine Learning Inference
 The MooncakeStoreConnector transfers KV caches between prefill vLLM workers

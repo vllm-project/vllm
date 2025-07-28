@@ -29,38 +29,93 @@ See <gh-file:LICENSE>.
 Depending on the kind of development you'd like to do (e.g. Python, CUDA), you can choose to build vLLM with or without compilation.
 Check out the [building from source][build-from-source] documentation for details.
 
-### Building the docs
+For an optimized workflow when iterating on C++/CUDA kernels, see the [Incremental Compilation Workflow](./incremental_build.md) for recommendations.
 
-Install the dependencies:
+### Building the docs with MkDocs
+
+#### Introduction to MkDocs
+
+[MkDocs](https://github.com/mkdocs/mkdocs) is a fast, simple and downright gorgeous static site generator that's geared towards building project documentation. Documentation source files are written in Markdown, and configured with a single YAML configuration file.
+
+#### Install MkDocs and Plugins
+
+Install MkDocs along with the [plugins](https://github.com/vllm-project/vllm/blob/main/mkdocs.yaml) used in the vLLM documentation, as well as required dependencies:
 
 ```bash
 pip install -r requirements/docs.txt
 ```
 
-Start the autoreloading MkDocs server:
+!!! note
+    Ensure that your Python version is compatible with the plugins (e.g., `mkdocs-awesome-nav` requires Python 3.10+)
+
+#### Verify Installation
+
+Confirm that MkDocs is correctly installed:
+
+```bash
+mkdocs --version
+```
+
+Example output:
+
+```console
+mkdocs, version 1.6.1 from /opt/miniconda3/envs/mkdoc/lib/python3.10/site-packages/mkdocs (Python 3.10)
+```
+
+#### Clone the `vLLM` repository
+
+```bash
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+```
+
+#### Start the Development Server
+
+MkDocs comes with a built-in dev-server that lets you preview your documentation as you work on it. Make sure you're in the same directory as the `mkdocs.yml` configuration file, and then start the server by running the `mkdocs serve` command:
 
 ```bash
 mkdocs serve
 ```
 
+Example output:
+
+```console
+INFO    -  Documentation built in 106.83 seconds
+INFO    -  [22:02:02] Watching paths for changes: 'docs', 'mkdocs.yaml'
+INFO    -  [22:02:02] Serving on http://127.0.0.1:8000/
+```
+
+#### View in Your Browser
+
+Open up [http://127.0.0.1:8000/](http://127.0.0.1:8000/) in your browser to see a live preview:.
+
+#### Learn More
+
+For additional features and advanced configurations, refer to the official [MkDocs Documentation](https://www.mkdocs.org/).
+
 ## Testing
 
-```bash
-pip install -r requirements/dev.txt
+??? console "Commands"
 
-# Linting, formatting and static type checking
-pre-commit install --hook-type pre-commit --hook-type commit-msg
+    ```bash
+    pip install -r requirements/common.txt -r requirements/dev.txt
 
-# You can manually run pre-commit with
-pre-commit run --all-files
+    # Linting, formatting and static type checking
+    pre-commit install --hook-type pre-commit --hook-type commit-msg
 
-# To manually run something from CI that does not run
-# locally by default, you can run:
-pre-commit run mypy-3.9 --hook-stage manual --all-files
+    # You can manually run pre-commit with
+    pre-commit run --all-files
 
-# Unit tests
-pytest tests/
-```
+    # To manually run something from CI that does not run
+    # locally by default, you can run:
+    pre-commit run mypy-3.9 --hook-stage manual --all-files
+
+    # Unit tests
+    pytest tests/
+
+    # Run tests for a single test file with detailed output
+    pytest -s -v tests/test_logger.py
+    ```
 
 !!! tip
     Since the <gh-file:docker/Dockerfile> ships with Python 3.12, all tests in CI (except `mypy`) are run with Python 3.12.
@@ -79,7 +134,7 @@ pytest tests/
 
 If you encounter a bug or have a feature request, please [search existing issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue) first to see if it has already been reported. If not, please [file a new issue](https://github.com/vllm-project/vllm/issues/new/choose), providing as much relevant information as possible.
 
-!!! warning
+!!! important
     If you discover a security vulnerability, please follow the instructions [here](gh-file:SECURITY.md#reporting-a-vulnerability).
 
 ## Pull Requests & Code Reviews
@@ -95,6 +150,14 @@ Commits must include a `Signed-off-by:` header which certifies agreement with
 the terms of the DCO.
 
 Using `-s` with `git commit` will automatically add this header.
+
+!!! tip
+    You can enable automatic sign-off via your IDE:
+  
+    - **PyCharm**: Click on the `Show Commit Options` icon to the right of the `Commit and Push...` button in the `Commit` window.
+      It will bring up a `git` window where you can modify the `Author` and enable `Sign-off commit`.
+    - **VSCode**: Open the [Settings editor](https://code.visualstudio.com/docs/configure/settings)
+      and enable the `Git: Always Sign Off` (`git.alwaysSignOff`) field.
 
 ### PR Title and Classification
 
@@ -135,6 +198,7 @@ The PR needs to meet the following code quality standards:
 
 ### Adding or Changing Kernels
 
+When actively developing or modifying kernels, using the [Incremental Compilation Workflow](./incremental_build.md) is highly recommended for faster build times.
 Each custom kernel needs a schema and one or more implementations to be registered with PyTorch.
 
 - Make sure custom ops are registered following PyTorch guidelines:

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Usage:
 Single node:
@@ -63,6 +64,18 @@ def parse_args():
     parser.add_argument(
         "--trust-remote-code", action="store_true", help="Trust remote code."
     )
+    parser.add_argument(
+        "--max-num-seqs",
+        type=int,
+        default=64,
+        help=("Maximum number of sequences to be processed in a single iteration."),
+    )
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.8,
+        help=("Fraction of GPU memory vLLM is allowed to allocate (0.0, 1.0]."),
+    )
     return parser.parse_args()
 
 
@@ -76,6 +89,8 @@ def main(
     GPUs_per_dp_rank,
     enforce_eager,
     trust_remote_code,
+    max_num_seqs,
+    gpu_memory_utilization,
 ):
     os.environ["VLLM_DP_RANK"] = str(global_dp_rank)
     os.environ["VLLM_DP_RANK_LOCAL"] = str(local_dp_rank)
@@ -97,10 +112,14 @@ def main(
     # with DP, each rank should process different prompts.
     # usually all the DP ranks process a full dataset,
     # and each rank processes a different part of the dataset.
-    promts_per_rank = len(prompts) // dp_size
-    start = global_dp_rank * promts_per_rank
-    end = start + promts_per_rank
-    prompts = prompts[start:end]
+    floor = len(prompts) // dp_size
+    remainder = len(prompts) % dp_size
+
+    # Distribute prompts into even groups.
+    def start(rank):
+        return rank * floor + min(rank, remainder)
+
+    prompts = prompts[start(global_dp_rank) : start(global_dp_rank + 1)]
     if len(prompts) == 0:
         # if any rank has no prompts to process,
         # we need to set a placeholder prompt
@@ -122,6 +141,8 @@ def main(
         enforce_eager=enforce_eager,
         enable_expert_parallel=True,
         trust_remote_code=trust_remote_code,
+        max_num_seqs=max_num_seqs,
+        gpu_memory_utilization=gpu_memory_utilization,
     )
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
@@ -176,6 +197,8 @@ if __name__ == "__main__":
                 tp_size,
                 args.enforce_eager,
                 args.trust_remote_code,
+                args.max_num_seqs,
+                args.gpu_memory_utilization,
             ),
         )
         proc.start()

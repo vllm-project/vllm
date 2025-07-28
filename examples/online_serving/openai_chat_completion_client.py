@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Example Python client for OpenAI Chat Completion using vLLM API server
 NOTE: start a supported chat completion model server with `vllm serve`, e.g.
     vllm serve meta-llama/Llama-2-7b-chat-hf

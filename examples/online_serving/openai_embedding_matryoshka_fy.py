@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Example Python client for embedding API dimensions using vLLM API server
 NOTE:
     start a supported Matryoshka Embeddings model server with `vllm serve`, e.g.

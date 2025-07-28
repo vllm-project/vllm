@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Block manager utils."""
 from vllm.sequence import SequenceGroup
 from vllm.utils import (STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
