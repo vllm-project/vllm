@@ -44,7 +44,7 @@ from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, check_use_alibi, get_dtype_size,
                         is_pin_memory_available, round_up)
-from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionBackend
+from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
     make_local_attention_virtual_batches)
@@ -2539,7 +2539,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     "Non-Attention backend is not supported by V1 "
                     "GPUModelRunner.")
         elif isinstance(kv_cache_spec, MambaSpec):
-            attn_backend_i = Mamba2AttentionBackend
+            attn_backend_i = get_mamba_attn_backend(kv_cache_spec.mamba_type)
         else:
             raise ValueError(
                 f"Unknown KV cache spec type: {type(kv_cache_spec)}")
@@ -2725,20 +2725,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     dtype = kv_cache_spec.dtype
                     num_element_per_page = (kv_cache_spec.page_size_bytes //
                                             get_dtype_size(dtype))
-                    state_tensors = []
-                    storage_offset = 0
-                    for shape in kv_cache_spec.shapes:
-                        target_shape = (num_blocks, *shape)
-                        stride = torch.empty(target_shape).stride()
-                        target_stride = (num_element_per_page, *stride[1:])
-                        tensor = torch.as_strided(
-                            raw_tensor.view(dtype),
-                            size=target_shape,
-                            stride=target_stride,
-                            storage_offset=storage_offset,
-                        )
-                        state_tensors.append(tensor)
-                        storage_offset += stride[0]
+
+                    if kv_cache_spec.mamba_type == "mamba1":
+                        state_tensors = self._create_mamba1_state_tensors(
+                            raw_tensor=raw_tensor,
+                            dtype=dtype,
+                            shapes=kv_cache_spec.shapes)
+                    else:
+                        state_tensors = self._create_mamba2_state_tensors(
+                            raw_tensor=raw_tensor,
+                            shapes=kv_cache_spec.shapes,
+                            num_blocks=num_blocks,
+                            num_element_per_page=num_element_per_page,
+                            dtype=dtype)
 
                     kv_caches[layer_name] = state_tensors
                 else:
@@ -2919,7 +2918,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     shapes=mamba_module.get_state_shape(),
                     dtype=self.kv_cache_dtype,
                     block_size=max_model_len,
-                    page_size_padded=page_size_padded)
+                    page_size_padded=page_size_padded,
+                    mamba_type=mamba_module.mamba_type)
 
         return kv_cache_spec
 
@@ -2972,3 +2972,58 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             common_prefix_len=0,  # No cascade for encoder
             common_attn_metadata=common_metadata,
         )
+
+    def _create_mamba1_state_tensors(self, raw_tensor: torch.Tensor,
+                                     dtype: torch.dtype,
+                                     shapes: tuple) -> list[torch.Tensor]:
+        storage_offset = 0
+        conv_state_shape, temporal_state_shape = shapes
+        num_sequences = len(self.seq_lens)
+
+        conv_target_shape = (num_sequences, conv_state_shape[1],
+                             conv_state_shape[0])
+        conv_stride = torch.empty(conv_target_shape).stride()
+        conv_state = torch.as_strided(
+            raw_tensor.view(dtype),
+            size=conv_target_shape,
+            stride=conv_stride,
+            storage_offset=storage_offset,
+        ).transpose(-1, -2)
+
+        conv_elements = conv_target_shape[0] * conv_target_shape[
+            1] * conv_target_shape[2]
+        storage_offset += conv_elements
+
+        temporal_target_shape = (num_sequences, temporal_state_shape[0],
+                                 temporal_state_shape[1])
+        temporal_stride = torch.empty(temporal_target_shape).stride()
+        temporal_state = torch.as_strided(
+            raw_tensor.view(dtype),
+            size=temporal_target_shape,
+            stride=temporal_stride,
+            storage_offset=storage_offset,
+        )
+
+        return [conv_state, temporal_state]
+
+    def _create_mamba2_state_tensors(self, raw_tensor: torch.Tensor,
+                                     shapes: tuple, num_blocks: int,
+                                     num_element_per_page: int,
+                                     dtype: torch.dtype) -> list[torch.Tensor]:
+        state_tensors = []
+        storage_offset = 0
+
+        for shape in shapes:
+            target_shape = (num_blocks, *shape)
+            stride = torch.empty(target_shape).stride()
+            target_stride = (num_element_per_page, *stride[1:])
+            tensor = torch.as_strided(
+                raw_tensor.view(dtype),
+                size=target_shape,
+                stride=target_stride,
+                storage_offset=storage_offset,
+            )
+            storage_offset += stride[0]
+            state_tensors.append(tensor)
+
+        return state_tensors
