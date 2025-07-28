@@ -1094,8 +1094,8 @@ class LLM:
         """
         if pooling_task is None:
             logger.warning(
-                "`pooling_task` must be specified. Please use one of the more "
-                "specific methods instead of `encode`:\n"
+                "`LLM.encode` defaults to using `pooling_task = embed`.\n"
+                "Please use one of the more specific methods instead of `encode`:\n"
                 "  - For embeddings, use `LLM.embed(...)`.\n"
                 "  - For classification logits, use `LLM.classify(...)`.\n"
                 "  - For reward scores, use `LLM.reward(...)`.\n"
