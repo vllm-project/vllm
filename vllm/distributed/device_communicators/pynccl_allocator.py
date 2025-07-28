@@ -74,10 +74,10 @@ class use_symmetric_memory:
         if not is_symmetric_memory_enabled():
             return self
         assert (
-            self.group_coordinator.pynccl_comm is not None
+            self.group_coordinator.device_communicator.pynccl_comm is not None
         ), f"Symmetric memory requires pynccl to be enabled in group '{self.group_coordinator.group_name}'"
         assert (
-            self.group_coordinator.pynccl_comm.nccl_version >= 22703
+            self.group_coordinator.device_communicator.pynccl_comm.nccl_version >= 22703
         ), "NCCL version 2.27.3 or higher is required for NCCL symmetric memory"
         if self.is_graph_capture:
             assert (
@@ -109,7 +109,7 @@ class use_symmetric_memory:
                     # WAR is to skip allocations on the default stream since
                     # the forward_pass thread always runs on a custom stream
                     continue
-                self.group_coordinator.pynccl_comm.register_comm_window_raw(
+                self.group_coordinator.device_communicator.pynccl_comm.register_comm_window_raw(
                     segment["address"], segment["total_size"]
                 )
                 _registered_base_addrs.add(segment["address"])

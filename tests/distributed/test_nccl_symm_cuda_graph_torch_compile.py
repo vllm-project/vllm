@@ -165,7 +165,7 @@ use_compiled = True
 model = simple_model()
 if use_compiled:
     get_nccl_mem_pool() # otherwise load_inline fails with dynamo
-    compiled_model = torch.compile(model, backend="inductor", fullgraph=False)
+    compiled_model = torch.compile(model, backend="inductor", fullgraph=True)
 x = torch.full([128], local_rank, dtype=torch.float16, device="cuda")
 for _ in range(10):
     y = compiled_model(x) if use_compiled else model(x)
