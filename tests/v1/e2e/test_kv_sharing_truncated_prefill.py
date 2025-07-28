@@ -19,6 +19,7 @@ from ...utils import fork_new_process_for_each_test
 
 
 class TestGemma3nForConditionalGeneration(Gemma3nForConditionalGeneration):
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -32,27 +33,30 @@ class TestGemma3nForConditionalGeneration(Gemma3nForConditionalGeneration):
         attn_metadata = get_forward_context().attn_metadata
         # attn_metadata is None during dummy runs
         if attn_metadata is not None:
-            assert isinstance(attn_metadata, dict) # true in V1
-            # Layer 20 is a cross-decoder layer in YOCO
-            layer_attn_metadata = attn_metadata['model.language_model.layers.20.self_attn.attn']
+            assert isinstance(attn_metadata, dict)  # true in V1
+            # Layer 20 is a cross-decoder layer for Gemma3n
+            layer_attn_metadata = attn_metadata[
+                'model.language_model.layers.20.self_attn.attn']
             if hasattr(layer_attn_metadata, 'logits_indices_padded'):
                 # This field is only set when
-                # enable_kv_sharing_truncated_prefill is set to True 
+                # enable_kv_sharing_truncated_prefill is set to True
                 assert self.cache_config.enable_kv_sharing_truncated_prefill
                 logits_indices_padded = (
-                    layer_attn_metadata.logits_indices_padded
-                )
+                    layer_attn_metadata.logits_indices_padded)
                 assert logits_indices_padded is not None
                 num_logits_indices = layer_attn_metadata.num_logits_indices
                 assert num_logits_indices > 0
-
-                logits_hs =  hidden_states[logits_indices_padded]
+                # Reset hidden states to random values and
+                # only set logits at logits_indices to valid values
+                # Because logits_indices are the only positions that are used
+                # for output token sampling, this still produces same outputs
+                logits_hs = hidden_states[logits_indices_padded]
                 hidden_states = torch.randn_like(hidden_states)
                 gen_indices = logits_indices_padded[:num_logits_indices]
-                # Only set logits for logits_indices to valid values 
                 hidden_states[gen_indices] = logits_hs[:num_logits_indices]
 
         return hidden_states
+
 
 @pytest.fixture
 def test_prompts():
@@ -90,14 +94,15 @@ def test_kv_sharing_truncated_prefill(
     enforce_eager: bool,
     test_prompts: list[str],
 ):
-    ModelRegistry.register_model("Gemma3nForConditionalGeneration", TestGemma3nForConditionalGeneration)
+    ModelRegistry.register_model("Gemma3nForConditionalGeneration",
+                                 TestGemma3nForConditionalGeneration)
     sampling_params = SamplingParams(temperature=0.0, max_tokens=100)
     compilation_config = CompilationConfig(
-        # This allows vLLM compilation backend to handle allocating and 
+        # This allows vLLM compilation backend to handle allocating and
         # managing buffers for cudagraph
         cudagraph_copy_inputs=True,
-        level=CompilationLevel.
-        PIECEWISE if not enforce_eager else CompilationLevel.NO_COMPILATION)
+        level=CompilationLevel.PIECEWISE
+        if not enforce_eager else CompilationLevel.NO_COMPILATION)
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")

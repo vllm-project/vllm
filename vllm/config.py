@@ -1685,8 +1685,10 @@ class CacheConfig:
     """The number of blocks to allocate for CPU memory."""
 
     enable_kv_sharing_truncated_prefill: bool = False
-    """Skip prefill for tokens where applicable in YOCO-like KV-sharing 
-    setups (e.g. Gemma3n)"""
+    """In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
+    some layers can skip tokens corresponding to prefill. This flag enables
+    attention metadata for eligible layers to be overriden with metadata
+    necessary for implementating this optimization in some models"""
 
     def compute_hash(self) -> str:
         """

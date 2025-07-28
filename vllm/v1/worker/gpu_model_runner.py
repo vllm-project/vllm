@@ -848,8 +848,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                          None),
                         ('num_logits_indices', int, 0),
                     ]
-                    # Dynamically createa a dataclass type that inherits 
-                    # from attention metadata type but includes additional 
+                    # Dynamically create a a dataclass type that inherits
+                    # from attention metadata type but includes additional
                     # fields logits_indices_padded and num_logits_indices
                     # which are required for prefill truncation
                     truncated_prefill_metadata_type = (
