@@ -841,7 +841,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_attn_metadata=common_attn_metadata,
             ))
 
-            truncated_prefill_metadata_type = type(attn_metadata_i)
+            truncated_prefill_metadata = attn_metadata_i
             if (self.cache_config.enable_kv_sharing_truncated_prefill
                     and self.truncated_prefill_eligible_layers):
                 # Dynamically create a a dataclass type that inherits
@@ -851,16 +851,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 truncated_prefill_metadata_type = (
                     make_truncated_prefill_attention_metadata(
                         metadata_cls=type(attn_metadata_i), ))
+                truncated_prefill_metadata = truncated_prefill_metadata_type(
+                    **dataclasses.asdict(attn_metadata_i),
+                    logits_indices_padded=logits_indices_padded,
+                    num_logits_indices=logits_indices.size(0),
+                )
 
             for layer_name in kv_cache_group_spec.layer_names:
                 if (self.cache_config.enable_kv_sharing_truncated_prefill and
                         layer_name in self.truncated_prefill_eligible_layers):
-                    attn_metadata[
-                        layer_name] = truncated_prefill_metadata_type(
-                            **dataclasses.asdict(attn_metadata_i),
-                            logits_indices_padded=logits_indices_padded,
-                            num_logits_indices=logits_indices.size(0),
-                        )
+                    attn_metadata[layer_name] = truncated_prefill_metadata
                     continue
 
                 attn_metadata[layer_name] = attn_metadata_i
@@ -2745,7 +2745,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             attn_layers = get_layers_from_vllm_config(self.vllm_config,
                                                       Attention)
             # Iterate in reversed order and add layers that re-use KV cache
-            # e.g. in YOCO-like KV sharing setups used for Gemma3n
+            # e.g. in YOCO-like KV sharing setups (e.g. Gemma3n)
             for layer_name in reversed(attn_layers):
                 if layer_name in self.shared_kv_cache_layers:
                     self.truncated_prefill_eligible_layers.add(layer_name)

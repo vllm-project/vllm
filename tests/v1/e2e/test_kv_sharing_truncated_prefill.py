@@ -47,9 +47,9 @@ class TestGemma3nForConditionalGeneration(Gemma3nForConditionalGeneration):
                     assert not hasattr(metadata, 'logits_indices_padded')
                     assert not hasattr(metadata, 'num_logits_indices')
 
-            # Layer 20 is the first cross-decoder layer for Gemma3n
+            # Last layer will be a KV sharing layer
             layer_attn_metadata = attn_metadata[
-                'model.language_model.layers.20.self_attn.attn']
+                self.model.language_model.layers[-1].self_attn.attn.layer_name]
             logits_indices_padded = (layer_attn_metadata.logits_indices_padded)
             assert logits_indices_padded is not None
             num_logits_indices = layer_attn_metadata.num_logits_indices

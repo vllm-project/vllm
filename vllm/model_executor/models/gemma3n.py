@@ -581,15 +581,6 @@ class Gemma3nTextModel(nn.Module):
             lambda prefix: Gemma3nDecoderLayer(
                 config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
-
-        first_kv_shared_layer_idx = (config.num_hidden_layers -
-                                     config.num_kv_shared_layers)
-        # Layer idx 0-19 are self-decoder layers in You Only Cache Once (YOCO)
-        self.self_decoder_layers = self.layers[:first_kv_shared_layer_idx]
-        # Layer idx 20-34 are cross-decoder layers in YOCO
-        # Refer to YOCO paper https://arxiv.org/abs/2405.05254
-        self.cross_decoder_layers = self.layers[first_kv_shared_layer_idx:]
-
         self.norm = RMSNorm(
             config.hidden_size,
             eps=config.rms_norm_eps,
@@ -655,17 +646,7 @@ class Gemma3nTextModel(nn.Module):
         hidden_states = torch.stack(hidden_states, dim=0)
 
         # Transformer blocks.
-        for layer_idx, layer in enumerate(self.self_decoder_layers):
-            # [altup_num_inputs, num_tokens, hidden_size]
-            hidden_states = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                per_layer_input=per_layer_inputs[:, layer_idx, :],
-                **kwargs,
-            )
-
-        for layer_idx, layer in enumerate(self.cross_decoder_layers,
-                                          start=len(self.self_decoder_layers)):
+        for layer_idx, layer in enumerate(self.layers):
             # [altup_num_inputs, num_tokens, hidden_size]
             hidden_states = layer(
                 positions=positions,
