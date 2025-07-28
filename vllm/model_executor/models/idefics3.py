@@ -63,13 +63,12 @@ class Idefics3ImagePixelInputs(TensorSchema):
         - bn: Batch size * number of images
         - bnp: Batch size * number of images * number of patches
         - c: Number of channels (3)
-        - ms: Mask size
-        - h: Height of each image patch
-        - w: Width of each image patch
+        - h: Height
+        - w: Width
     """
     type: Literal["pixel_values"]
     pixel_values: Annotated[torch.Tensor, TensorShape("bnp", 3, "h", "w")]
-    pixel_attention_mask: Annotated[torch.Tensor, TensorShape("ms")]
+    pixel_attention_mask: torch.Tensor
     num_patches: Annotated[torch.Tensor, TensorShape("bn")]
 
 
