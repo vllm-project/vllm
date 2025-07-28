@@ -148,6 +148,7 @@ class XgrammarGrammar(StructuredOutputGrammar):
                                       repr=False,
                                       hash=False,
                                       init=False)
+    _is_terminated: bool = field(default=False, repr=False, hash=False)
 
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
         """Accepts a list of tokens and advances the FSM.
@@ -155,6 +156,8 @@ class XgrammarGrammar(StructuredOutputGrammar):
         Returns True if the FSM was advanced successfully.
         Returns False if the FSM failed to advance.
         """
+        if self._is_terminated:
+            return False
         for token in tokens:
             if not self.matcher.accept_token(token):
                 logger.error(
@@ -162,6 +165,7 @@ class XgrammarGrammar(StructuredOutputGrammar):
                     "for tokens %s. Please file an issue.", request_id, token)
                 return False
             self.num_processed_tokens += 1
+        self._is_terminated = self.matcher.is_terminated()
         return True
 
     def validate_tokens(self, tokens: list[int]) -> list[int]:
@@ -189,7 +193,7 @@ class XgrammarGrammar(StructuredOutputGrammar):
         self.matcher.fill_next_token_bitmask(bitmask, idx)
 
     def is_terminated(self) -> bool:
-        return self.matcher.is_terminated()
+        return self._is_terminated
 
     def reset(self):
         self.num_processed_tokens = 0
