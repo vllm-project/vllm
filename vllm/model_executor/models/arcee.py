@@ -9,7 +9,7 @@
 # activation.
 
 from collections.abc import Iterable
-from typing import Any, Optional, Union, overload
+from typing import Any, Optional, Union
 
 import torch
 from torch import nn
@@ -382,37 +382,13 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             # Placeholder for lm_head on non-last ranks
             self.lm_head = PPMissingLayer()
 
-    def make_empty_intermediate_tensors(
-        self,
-        batch_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> IntermediateTensors:
-        return self.model.make_empty_intermediate_tensors(
-            batch_size, dtype, device)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
 
-    @overload
-    def forward(
-        self,
-        *,
-        intermediate_tensors: Optional[IntermediateTensors],
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        ...
-
-    @overload
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        ...
-
-    def forward(
-        self,
-        input_ids: Optional[torch.Tensor] = None,
-        positions: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None
     ) -> Union[torch.Tensor, IntermediateTensors]:
