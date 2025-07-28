@@ -67,7 +67,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
+        return "vllm.lora.punica_wrapper.punica_xpu.PunicaWrapperXPU"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
