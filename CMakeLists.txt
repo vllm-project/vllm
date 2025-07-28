@@ -243,7 +243,6 @@ set(VLLM_EXT_SRC
   "csrc/sampler.cu"
   "csrc/cuda_view.cu"
   "csrc/quantization/gptq/q_gemm.cu"
-  "csrc/quantization/compressed_tensors/int8_quant_kernels.cu"
   "csrc/quantization/fp8/common.cu"
   "csrc/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"
   "csrc/quantization/gguf/gguf_kernel.cu"
@@ -297,7 +296,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
     "csrc/cutlass_extensions/common.cpp"
     "csrc/attention/mla/cutlass_mla_entry.cu"
-    "csrc/quantization/fp8/per_token_group_quant.cu")
+    "csrc/quantization/fp8/per_token_group_quant.cu"
+    "csrc/quantization/compressed_tensors/int8_quant_kernels.cu")
 
   set_gencode_flags_for_srcs(
     SRCS "${VLLM_EXT_SRC}"
