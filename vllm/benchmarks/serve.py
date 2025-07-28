@@ -34,10 +34,10 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import (SampleRequest, add_dataset_parser,
                                       get_samples)
-from vllm.benchmarks.endpoint_request_func import (ASYNC_REQUEST_FUNCS,
-                                                   OPENAI_COMPATIBLE_BACKENDS,
-                                                   RequestFuncInput,
-                                                   RequestFuncOutput)
+from vllm.benchmarks.lib.endpoint_request_func import (
+    ASYNC_REQUEST_FUNCS, OPENAI_COMPATIBLE_BACKENDS, RequestFuncInput,
+    RequestFuncOutput)
+from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.utils import (convert_to_pytorch_benchmark_format,
                                    write_to_json)
 from vllm.transformers_utils.tokenizer import get_tokenizer
@@ -359,7 +359,7 @@ async def benchmark(
         extra_body=extra_body,
     )
 
-    test_output = await request_func(request_func_input=test_input)
+    test_output = await wait_for_endpoint(request_func, test_input)
     if not test_output.success:
         raise ValueError(
             "Initial test run failed - Please make sure benchmark arguments "
