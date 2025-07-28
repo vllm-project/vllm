@@ -64,14 +64,15 @@ class GraniteSpeechAudioInputs(TensorSchema):
     
     Dimensions:
         - b: Batch size
-        - nf: Number of audio features (variable length)
+        - fi: Number of input features from the Mel spectrogram.
+        - fo: Number of output features, i.e. the embedding size.
         - 160: Fixed feature dimension for Mel spectrogram features
     """
 
-    input_features: Annotated[torch.Tensor, TensorShape("b", "nf", 160)]
+    input_features: Annotated[torch.Tensor, TensorShape("b", "fi", 160)]
     """Audio input features."""
 
-    input_features_mask: Annotated[torch.Tensor, TensorShape("b", "nf")]
+    input_features_mask: Annotated[torch.Tensor, TensorShape("b", "fo")]
     """Mask for variable length audio features."""
 
     audio_embed_sizes: Annotated[list[int], TensorShape("b")]
