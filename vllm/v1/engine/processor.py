@@ -65,6 +65,8 @@ class Processor:
         params: SamplingParams,
     ) -> None:
         max_logprobs = self.model_config.max_logprobs
+        if max_logprobs == -1:
+            return
         # Validate sample logprobs.
         if params.logprobs and params.logprobs > max_logprobs:
             raise ValueError(
