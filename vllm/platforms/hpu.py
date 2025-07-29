@@ -35,6 +35,14 @@ class HpuPlatform(Platform):
         "bitsandbytes"
     ]
 
+    @property
+    def supported_dtypes(self) -> list[torch.dtype]:
+        """Returns the supported dtypes for the current platform."""
+        # Be careful with the order of the dtypes. The first dtype will
+        # be used as the default dtype fallback for the current platform,
+        # when encountering unsupported dtypes in "auto" dtype.
+        return [torch.bfloat16, torch.float32]
+
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
