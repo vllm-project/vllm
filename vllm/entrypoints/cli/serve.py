@@ -166,6 +166,11 @@ def run_multi_api_server(args: argparse.Namespace):
                 "Multi-model preprocessor cache will be disabled for"
                 " api_server_count > 1")
             model_config.disable_mm_preprocessor_cache = True
+            mm_config = model_config.get_multimodal_config()
+            mm_config.disable_mm_preprocessor_cache = True
+
+            # Need to set this for the API server processes
+            args.disable_mm_preprocessor_cache = True
 
     executor_class = Executor.get_class(vllm_config)
     log_stats = not engine_args.disable_log_stats
