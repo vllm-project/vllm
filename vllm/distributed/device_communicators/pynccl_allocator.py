@@ -29,6 +29,7 @@ _graph_pool_id = None
 
 def is_symmetric_memory_enabled():
     from vllm.config import ParallelConfig
+
     return ParallelConfig.enable_nccl_symm_mem
 
 
@@ -78,7 +79,8 @@ class use_symmetric_memory:
             self.group_coordinator.device_communicator.pynccl_comm is not None
         ), f"Symmetric memory requires pynccl to be enabled in group '{self.group_coordinator.group_name}'"
         assert (
-            self.group_coordinator.device_communicator.pynccl_comm.nccl_version >= 22703
+            self.group_coordinator.device_communicator.pynccl_comm.nccl_version
+            >= 22703
         ), "NCCL version 2.27.3 or higher is required for NCCL symmetric memory"
         if self.is_graph_capture:
             assert (
@@ -117,3 +119,17 @@ class use_symmetric_memory:
 
         if self.is_graph_capture:
             torch._C._cuda_beginAllocateToPool(self.device, _graph_pool_id)
+
+
+class dummy_symmetric_memory:
+    """Dummy context manager that mimics use_symmetric_memory interface
+    but does nothing."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+    def tag(self, tensor: torch.Tensor):
+        pass

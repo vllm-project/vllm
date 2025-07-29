@@ -7,7 +7,7 @@ import torch
 import torch.distributed
 from contextlib import nullcontext
 from vllm.distributed.device_communicators.pynccl_allocator import (
-    get_nccl_mem_pool, use_symmetric_memory)
+    use_symmetric_memory, dummy_symmetric_memory)
 from .parallel_state import get_tp_group
 
 
@@ -49,5 +49,5 @@ def tensor_model_parallel_use_symmetric_memory():
     # TODO(asamani): remove this once we have a way to torch compile with 
     # mempool or break the graph.
     if torch.compiler.is_compiling():
-        return nullcontext()
+        return dummy_symmetric_memory()
     return use_symmetric_memory(get_tp_group())
