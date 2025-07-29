@@ -94,25 +94,30 @@ class RayPPCommunicator(Communicator):
             return {}
 
         current_actor = ray.get_runtime_context().current_actor
-        actor_id_hash = self._hash_actor(current_actor)
+        actor_id_str = current_actor._actor_id.hex()
 
-        actor_id_tensor = torch.tensor([actor_id_hash],
-                                       dtype=torch.int32,
-                                       device=self._comm.device)
+        # Ray actor IDs are 32-character hex strings (128 bits)
+        ACTOR_ID_LEN = 32
+        actor_id_bytes = actor_id_str.encode('utf-8')
+        assert len(
+            actor_id_bytes
+        ) == ACTOR_ID_LEN, f"Unexpected actor ID length: {len(actor_id_bytes)}"
 
-        # All-gather actor ID hashes from all actors
+        actor_id_tensor = torch.frombuffer(
+            actor_id_bytes, dtype=torch.uint8).to(self._comm.device)
+
+        # All-gather full actor IDs from all actors
         gathered_ids = self._comm.all_gather(actor_id_tensor, dim=0)
 
-        # Build mapping: actor_id_hash -> device_comm_rank
-        self._actor_hash_to_rank = {}
-        for rank, actor_id_hash in enumerate(gathered_ids.cpu().tolist()):
-            self._actor_hash_to_rank[actor_id_hash] = rank
-
-    def _hash_actor(self, actor: ray.actor.ActorHandle) -> int:
-        """
-        Hash an actor handle to a 32-bit integer.
-        """
-        return hash(actor._actor_id) % (2**31)
+        # Build mapping: actor_id -> device_comm_rank
+        self._actor_id_to_rank = {}
+        for rank in range(self._world_size):
+            start_idx = rank * ACTOR_ID_LEN
+            end_idx = (rank + 1) * ACTOR_ID_LEN
+            actor_bytes = gathered_ids[start_idx:end_idx].cpu().numpy(
+            ).tobytes()
+            actor_id = actor_bytes.decode('utf-8')
+            self._actor_id_to_rank[actor_id] = rank
 
     def initialize(self, rank: int) -> None:
         # No additional initialization is needed.
@@ -125,14 +130,14 @@ class RayPPCommunicator(Communicator):
         """
         Return the given actor's rank using device communicator collective ops.
         """
-        assert hasattr(self, '_actor_hash_to_rank'), (
+        assert hasattr(self, '_actor_id_to_rank'), (
             "Actor rank mapping not built. "
             "This should have been done during initialization.")
 
-        actor_hash = self._hash_actor(actor)
+        actor_id_str = actor._actor_id.hex()
 
-        if actor_hash in self._actor_hash_to_rank:
-            return self._actor_hash_to_rank[actor_hash]  # type: ignore
+        if actor_id_str in self._actor_id_to_rank:
+            return self._actor_id_to_rank[actor_id_str]  # type: ignore
         else:
             raise ValueError(f"Actor {actor} not found in communicator group")
 
