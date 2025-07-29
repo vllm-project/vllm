@@ -10,7 +10,6 @@
 /vllm/worker/worker.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
 /vllm/model_executor/layers/sampler.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth
-/vllm/model_executor/guided_decoding @mgoin @russellb @aarnphm
 /vllm/multimodal @DarkLight1337 @ywang96
 /vllm/vllm_flash_attn @LucasWilkinson
 /vllm/lora @jeejeelee
@@ -35,9 +34,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/distributed/test_pipeline_parallel.py @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
 /tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @simon-mo @aarnphm
-/tests/entrypoints/llm/test_guided_generate.py @mgoin @russellb @aarnphm
 /tests/kernels @tlrmchlsmth @WoosukKwon
-/tests/model_executor/test_guided_processors.py @mgoin @russellb
 /tests/models @DarkLight1337 @ywang96
 /tests/multi_step @alexm-redhat @comaniac
 /tests/multimodal @DarkLight1337 @ywang96
