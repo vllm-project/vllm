@@ -183,6 +183,16 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
             mm_kwargs,
             tok_kwargs,
         )
+        if 'input_features' in processed_outputs:
+            # Avoid padding since we need the output of each item to be
+            # independent of other items for the cache to work correctly
+            unpadded_features = [
+                f[mask] for f, mask in zip(
+                    processed_outputs["input_features"],
+                    processed_outputs["input_features_mask"],
+                )
+            ]
+            processed_outputs["input_features"] = unpadded_features
         return processed_outputs
 
     def _get_mm_fields_config(
@@ -194,7 +204,7 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
             input_features=MultiModalFieldConfig.batched("audio"),
-            input_features_mask=MultiModalFieldConfig.batched("audio"),
+            # input_features_mask=MultiModalFieldConfig.batched("audio"),
         )
 
     def _get_prompt_updates(
