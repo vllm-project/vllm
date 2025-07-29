@@ -92,6 +92,11 @@ class PyNcclCommunicator:
             device = torch.device(device)
         # now `device` is a `torch.device` object
         assert isinstance(device, torch.device)
+
+        # Check if device has specific index, if not, resolve to current device
+        if getattr(device, "index", None) is None:
+            device = torch.device(torch.cuda.current_device())
+
         self.device = device
         # nccl communicator and stream will use this device
         # `torch.cuda.device` is a context manager that changes the
@@ -299,12 +304,6 @@ class PyNcclCommunicator:
               as the communicator.
         '''
 
-        # Check if device has specific index, if not, resolve to current device
-        if getattr(self.device, "index", None) is None:
-            device = torch.device(torch.cuda.current_device())
-        else:
-            device = self.device
-
-        assert tensor.device == device, (
-            f"this nccl communicator is created to work on {device}, "
+        assert tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
             f"but the input tensor is on {tensor.device}")
