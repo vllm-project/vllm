@@ -12,6 +12,7 @@ from torch import nn
 from transformers import (BatchFeature, WhisperConfig, WhisperFeatureExtractor,
                           WhisperProcessor)
 from transformers.models.whisper.modeling_whisper import sinusoids
+from transformers.models.whisper.tokenization_whisper import LANGUAGES
 
 from vllm.attention import Attention, AttentionType
 from vllm.attention.layer import MultiHeadAttention
@@ -109,51 +110,7 @@ ISO639_1_SUPPORTED_LANGS = {
     "vi": "Vietnamese",
     "cy": "Welsh"
 }
-ISO639_1_OTHER_LANGS = {
-    "lo": "Lao",
-    "jw": "Javanese",
-    "tk": "Turkmen",
-    "yi": "Yiddish",
-    "so": "Somali",
-    "bn": "Bengali",
-    "nn": "Norwegian Nynorsk",
-    "si": "Sinhala",
-    "yo": "Yoruba",
-    "sa": "Sanskrit",
-    "mi": "Māori",
-    "fo": "Faroese",  # codespell:ignore
-    "mt": "Maltese",
-    "tg": "Tajik",
-    "mg": "Malagasy",
-    "haw": "Hawaiian",
-    "km": "Khmer",
-    "br": "Breton",
-    "ps": "Pashto",
-    "ln": "Lingala",
-    "la": "Latin",
-    "ml": "Malayalam",
-    "sq": "Albanian",
-    "su": "Sundanese",
-    "eu": "Basque",
-    "ka": "Georgian",
-    "uz": "Uzbek",
-    "sn": "Shona",
-    "ht": "Haitian",
-    "as": "Assamese",
-    "mn": "Mongolian",
-    "te": "Telugu",
-    "pa": "Panjabi",
-    "tt": "Tatar",
-    "gu": "Gujarati",
-    "oc": "Occitan",
-    "ha": "Hausa",
-    "ba": "Bashkir",
-    "my": "Burmese",
-    "sd": "Sindhi",
-    "am": "Amharic",
-    "lb": "Luxembourgish",
-    "bo": "Tibetan"
-}
+ISO639_1_OTHER_LANGS = {k: v for k,v  in LANGUAGES.items() if k not in ISO639_1_SUPPORTED_LANGS}
 
 
 class WhisperAudioInputs(TypedDict):
