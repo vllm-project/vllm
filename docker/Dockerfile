@@ -439,8 +439,10 @@ ARG DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
 ARG DEEPGEMM_GIT_REF="187656694f7f69e3e7975617a68bc3387680a7e1"
 RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
   . /etc/environment
-    # Check if torch_cuda_arch_list contains 9.0 or 10.0 (with optional 'a' suffix)
-    if echo "${torch_cuda_arch_list}" | grep -E "(9\.0a?|10\.0a?)" > /dev/null; then
+    CUDA_MAJOR="${CUDA_VERSION%%.*}"
+    CUDA_MINOR="${CUDA_VERSION#${CUDA_MAJOR}.}"
+    CUDA_MINOR="${CUDA_MINOR%%.*}"
+    if [ "$CUDA_MAJOR" -ge 12 ] && [ "$CUDA_MINOR" -ge 8 ]; then
         git clone --recursive --shallow-submodules \
             ${DEEPGEMM_GIT_REPO} deepgemm
         echo "🏗️  Building DeepGEMM"
@@ -455,7 +457,7 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
         popd
         rm -rf deepgemm
     else
-        echo "Skipping DeepGEMM installation (requires CUDA arch 9.0 or 10.0 but got: ${torch_cuda_arch_list})"
+        echo "Skipping DeepGEMM installation (requires CUDA 12.8+)"
     fi
 BASH
 
