@@ -8,12 +8,6 @@
 ARG CUDA_VERSION=12.8.1
 ARG PYTHON_VERSION=3.12
 
-# cuda arch list used by torch
-# can be useful for both `dev` and `test`
-# explicitly set the list to avoid issues with torch 2.2
-# see https://github.com/pytorch/pytorch/pull/123243
-ARG torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0 10.0 12.0'
-
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in
 # private registries that use a different repository naming conventions.
@@ -21,6 +15,7 @@ ARG torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0 10.0 12.0'
 # Example:
 # docker build --build-arg BUILD_BASE_IMAGE=registry.acme.org/mirror/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
 ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
+# TODO: Restore to base image after FlashInfer AOT wheel fixed
 ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 
 # By parameterizing the Deadsnakes repository URL, we allow third-party to use
@@ -166,6 +161,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/cuda.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
+# cuda arch list used by torch
+# can be useful for both `dev` and `test`
+# explicitly set the list to avoid issues with torch 2.2
+# see https://github.com/pytorch/pytorch/pull/123243
+ARG torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0 10.0 12.0'
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 # Override the arch list for flash-attn to reduce the binary size
 ARG vllm_fa_cmake_gpu_arches='80-real;90-real'
 ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
@@ -288,11 +289,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-# TODO: Restore to base image after FlashInfer AOT wheel fixed
 FROM ${FINAL_BASE_IMAGE} AS vllm-base
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
-ARG torch_cuda_arch_list
 ARG INSTALL_KV_CONNECTORS=false
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
@@ -303,8 +302,6 @@ SHELL ["/bin/bash", "-c"]
 ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
-
-ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
     echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
