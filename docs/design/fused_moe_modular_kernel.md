@@ -8,8 +8,7 @@ Based on the format of the input activations, FusedMoE implementations are broad
 * Contiguous / Standard / Non-Batched, and
 * Batched
 
-!!! note
-    The terms Contiguous, Standard, and Non-Batched are used interchangeably throughout the document.
+> **_NOTE:_** The terms Contiguous, Standard, and Non-Batched are used interchangeably throughout the document.
 
 The input activation format completely depends on the All2All Dispatch being used.
 
@@ -22,8 +21,7 @@ The FusedMoE operation is generally made of multiple operations, in both the Con
 
 ![](../assets/design/fused_moe_modular_kernel/fused_moe_batched.png "FusedMoE Batched")
 
-!!! note
-    The main difference, in terms of operations, between the Batched and Non-Batched cases is the Permute / Unpermute operations. All other operations remain.
+> **_NOTE:_** The main difference, in terms of operations, between the Batched and Non-Batched cases is the Permute / Unpermute operations. All other operations remain.
 
 ## Motivation
 
