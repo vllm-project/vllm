@@ -11,15 +11,7 @@
         "types": [],
         "names": [
             "lm_head",
-            "mlp\\.gate\\b",
-            "latent_cache_k_nodeq",
-            "latent_cache_v_nodeq",
-            "latent_cache_v",
-            "kv_b_proj",
-            "matmul_qk",
-            "matmul_av",
-            "block2batch_matmul",
-            "batch2block_matmul"
+            "mlp\\.gate\\b"
         ]
     },
     "dump_stats_path": "./scripts/nc_workspace_measure_kvcache/inc_measure_output"
