@@ -116,9 +116,7 @@ class PyNcclCommunicator:
         # nccl communicator created on a specific device
         # will only work on tensors on the same device
         # otherwise it will cause "illegal memory access"
-        assert in_tensor.device == self.device, (
-            f"this nccl communicator is created to work on {self.device}, "
-            f"but the input tensor is on {in_tensor.device}")
+        self._assert_tensor_on_device(in_tensor)
 
         out_tensor = torch.empty_like(in_tensor)
 
@@ -141,9 +139,9 @@ class PyNcclCommunicator:
         # nccl communicator created on a specific device
         # will only work on tensors on the same device
         # otherwise it will cause "illegal memory access"
-        assert input_tensor.device == self.device, (
-            f"this nccl communicator is created to work on {self.device}, "
-            f"but the input tensor is on {input_tensor.device}")
+
+        self._assert_tensor_on_device(input_tensor)
+
         if stream is None:
             stream = current_stream()
         self.nccl.ncclAllGather(
@@ -164,9 +162,9 @@ class PyNcclCommunicator:
         # nccl communicator created on a specific device
         # will only work on tensors on the same device
         # otherwise it will cause "illegal memory access"
-        assert input_tensor.device == self.device, (
-            f"this nccl communicator is created to work on {self.device}, "
-            f"but the input tensor is on {input_tensor.device}")
+
+        self._assert_tensor_on_device(input_tensor)
+
         if stream is None:
             stream = current_stream()
         assert output_tensor.shape[0] == sum(sizes)
@@ -196,9 +194,9 @@ class PyNcclCommunicator:
         # nccl communicator created on a specific device
         # will only work on tensors on the same device
         # otherwise it will cause "illegal memory access"
-        assert input_tensor.device == self.device, (
-            f"this nccl communicator is created to work on {self.device}, "
-            f"but the input tensor is on {input_tensor.device}")
+
+        self._assert_tensor_on_device(input_tensor)
+
         if stream is None:
             stream = current_stream()
         self.nccl.ncclReduceScatter(
@@ -221,9 +219,9 @@ class PyNcclCommunicator:
         # nccl communicator created on a specific device
         # will only work on tensors on the same device
         # otherwise it will cause "illegal memory access"
-        assert input_tensor.device == self.device, (
-            f"this nccl communicator is created to work on {self.device}, "
-            f"but the input tensor is on {input_tensor.device}")
+
+        self._assert_tensor_on_device(input_tensor)
+
         if stream is None:
             stream = current_stream()
 
@@ -243,9 +241,9 @@ class PyNcclCommunicator:
     def send(self, tensor: torch.Tensor, dst: int, stream=None):
         if self.disabled:
             return
-        assert tensor.device == self.device, (
-            f"this nccl communicator is created to work on {self.device}, "
-            f"but the input tensor is on {tensor.device}")
+
+        self._assert_tensor_on_device(tensor)
+
         if stream is None:
             stream = current_stream()
         self.nccl.ncclSend(buffer_type(tensor.data_ptr()), tensor.numel(),
@@ -255,9 +253,9 @@ class PyNcclCommunicator:
     def recv(self, tensor: torch.Tensor, src: int, stream=None):
         if self.disabled:
             return
-        assert tensor.device == self.device, (
-            f"this nccl communicator is created to work on {self.device}, "
-            f"but the input tensor is on {tensor.device}")
+
+        self._assert_tensor_on_device(tensor)
+
         if stream is None:
             stream = current_stream()
         self.nccl.ncclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
@@ -267,9 +265,9 @@ class PyNcclCommunicator:
     def broadcast(self, tensor: torch.Tensor, src: int, stream=None):
         if self.disabled:
             return
-        assert tensor.device == self.device, (
-            f"this nccl communicator is created to work on {self.device}, "
-            f"but the input tensor is on {tensor.device}")
+
+        self._assert_tensor_on_device(tensor)
+
         if stream is None:
             stream = current_stream()
         if src == self.rank:
@@ -288,3 +286,25 @@ class PyNcclCommunicator:
 
     def group_end(self):
         self.nccl.ncclGroupEnd()
+
+    def _assert_tensor_on_device(self, tensor: torch.Tensor):
+        '''
+        Check if the tensor is on the same device as the communicator.
+
+        Args:
+            tensor: The tensor to check.
+
+        Raises:
+            AssertionError: If the tensor is not on the same device
+              as the communicator.
+        '''
+
+        # Check if device has specific index, if not, resolve to current device
+        if getattr(self.device, "index", None) is None:
+            device = torch.device(torch.cuda.current_device())
+        else:
+            device = self.device
+
+        assert tensor.device == device, (
+            f"this nccl communicator is created to work on {device}, "
+            f"but the input tensor is on {tensor.device}")
