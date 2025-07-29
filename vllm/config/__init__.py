@@ -53,7 +53,6 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
                         MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                         POOLING_MODEL_MAX_NUM_BATCHED_TOKENS, LayerBlockType,
                         LazyLoader, common_broadcastable_dtype, random_uuid)
-
 # yapf: enable
 
 if TYPE_CHECKING:
