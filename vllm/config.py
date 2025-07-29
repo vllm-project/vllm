@@ -4795,6 +4795,11 @@ class VllmConfig:
         # For V0 or other cases, default to level 0 with no compilation
         if self.compilation_config.level is None:
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
+            # in case compilation_config.level is not set in V1, which implies
+            # model_config is None or enforce_eager is True, we should also
+            # disable cudagraph.
+            if envs.VLLM_USE_V1:
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # disable compilation and cudagraph if enforce eager execution
         if self.model_config is not None and self.model_config.enforce_eager:
@@ -4820,21 +4825,6 @@ class VllmConfig:
                 "LoRA for V0 is not supported with `torch.compile` yet. "
                 "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
-
-        if envs.VLLM_USE_V1:
-            if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL \
-                and not self.model_config.disable_cascade_attn:
-                logger.info("CUDAGraphMode.FULL is not supported with "
-                            "cascade attention currently. Disabling cascade"
-                            "attention.")
-                self.model_config.disable_cascade_attn = True
-
-            if self.compilation_config.cudagraph_mode == \
-                CUDAGraphMode.PIECEWISE:
-                assert self.compilation_config.level == \
-                    CompilationLevel.PIECEWISE, \
-                    "Compilation level should be CompilationLevel.PIECEWISE "\
-                    "when cudagraph_mode is CUDAGraphMode.PIECEWISE"
 
         disable_chunked_prefill_reasons: list[str] = []
 
@@ -4871,6 +4861,21 @@ class VllmConfig:
                            "Modify KVEventsConfig.enable_kv_cache_events"
                            "to True to enable.")
         current_platform.check_and_update_config(self)
+
+        if envs.VLLM_USE_V1:
+            if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL \
+                and not self.model_config.disable_cascade_attn:
+                logger.info("CUDAGraphMode.FULL is not supported with "
+                            "cascade attention currently. Disabling cascade"
+                            "attention.")
+                self.model_config.disable_cascade_attn = True
+
+            if self.compilation_config.cudagraph_mode == \
+                CUDAGraphMode.PIECEWISE:
+                assert self.compilation_config.level == \
+                    CompilationLevel.PIECEWISE, \
+                    "Compilation level should be CompilationLevel.PIECEWISE "\
+                    "when cudagraph_mode is CUDAGraphMode.PIECEWISE"
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
