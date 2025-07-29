@@ -227,6 +227,7 @@ def resolve_transformers_arch(model_config: ModelConfig,
 def get_model_architecture(
         model_config: ModelConfig) -> tuple[type[nn.Module], str]:
     architectures = getattr(model_config.hf_config, "architectures", [])
+    architectures[:] = ["SophonForCausalLM" if arch == "PanguEmbeddedForCausalLM" else arch for arch in architectures]
 
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
