@@ -949,9 +949,12 @@ class ModelConfig:
 
         runner_type = self._get_default_runner_type(architectures)
 
-        logger.info(
-            "Resolved `--runner auto` to `--runner %s`. "
-            "Pass the value explicitly to silence this message.", runner_type)
+        # Don't log the most common case
+        if runner_type != "generate":
+            logger.info(
+                "Resolved `--runner auto` to `--runner %s`. "
+                "Pass the value explicitly to silence this message.",
+                runner_type)
 
         return runner_type
 
@@ -998,9 +1001,12 @@ class ModelConfig:
         convert_type = self._get_default_convert_type(architectures,
                                                       runner_type)
 
-        logger.info(
-            "Resolved `--convert auto` to `--convert %s`. "
-            "Pass the value explicitly to silence this message.", convert_type)
+        # Don't log the most common case
+        if convert_type != "none":
+            logger.info(
+                "Resolved `--convert auto` to `--convert %s`. "
+                "Pass the value explicitly to silence this message.",
+                convert_type)
 
         return convert_type
 
@@ -1768,8 +1774,8 @@ class CacheConfig:
     - "builtin" is Python's built-in hash.\n
     - "sha256" is collision resistant but with certain overheads.
     This option uses Pickle for object serialization before hashing.\n
-    - "sha256_cbor_64bit" provides a reproducible, cross-language compatible 
-    hash. It serializes objects using canonical CBOR and hashes them with 
+    - "sha256_cbor_64bit" provides a reproducible, cross-language compatible
+    hash. It serializes objects using canonical CBOR and hashes them with
     SHA-256. The resulting hash consists of the lower 64 bits of the SHA-256
     digest."""
     cpu_offload_gb: float = 0
@@ -3715,12 +3721,7 @@ def get_served_model_name(model: str,
     return served_model_name
 
 
-GuidedDecodingBackendV0 = Literal["auto", "outlines", "lm-format-enforcer",
-                                  "xgrammar", "guidance"]
-
-GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance", "outlines"]
-GuidedDecodingBackend = Literal[GuidedDecodingBackendV0,
-                                GuidedDecodingBackendV1]
+GuidedDecodingBackend = Literal["auto", "xgrammar", "guidance", "outlines"]
 
 
 @config
@@ -3728,7 +3729,7 @@ GuidedDecodingBackend = Literal[GuidedDecodingBackendV0,
 class DecodingConfig:
     """Dataclass which contains the decoding strategy of the engine."""
 
-    backend: GuidedDecodingBackend = "auto" if envs.VLLM_USE_V1 else "xgrammar"
+    backend: GuidedDecodingBackend = "auto"
     """Which engine will be used for guided decoding (JSON schema / regex etc)
     by default. With "auto", we will make opinionated choices based on request
     contents and what the backend libraries currently support, so the behavior
@@ -3770,13 +3771,6 @@ class DecodingConfig:
         return hash_str
 
     def __post_init__(self):
-        if envs.VLLM_USE_V1:
-            valid_guided_backends = get_args(GuidedDecodingBackendV1)
-        else:
-            valid_guided_backends = get_args(GuidedDecodingBackendV0)
-        if self.backend not in valid_guided_backends:
-            raise ValueError(f"Invalid backend '{self.backend}',"
-                             f" must be one of {valid_guided_backends}")
         if (self.disable_any_whitespace
                 and self.backend not in ("xgrammar", "guidance")):
             raise ValueError("disable_any_whitespace is only supported for "
@@ -4112,9 +4106,11 @@ class CompilationConfig:
         certain small batchsizes, where inductor is good at optimizing.
     """
     # Top-level Compilation control
-    level: int = 0
+    level: Optional[int] = None
     """The level of compilation:
 
+    - None: If None, we will select the default compilation level.
+      For V1 engine this is 3, for V0 engine this is 0.
     - 0: no compilation.
     - 1: dynamo as is.
     - 2: dynamo once.
@@ -4670,6 +4666,22 @@ class VllmConfig:
                 "To workaround this limitation, vLLM will set 'ieee' input "
                 "precision for chunked prefill triton kernels.")
 
+        # If the user does not explicitly set a compilation level, then
+        # we use the default level. The default level depends on other
+        # settings (see the below code).
+        if self.compilation_config.level is None:
+            if envs.VLLM_USE_V1:
+                if (self.model_config is not None
+                        and not self.model_config.enforce_eager):
+                    self.compilation_config.level = CompilationLevel.PIECEWISE
+                else:
+                    self.compilation_config.level = \
+                            CompilationLevel.NO_COMPILATION
+            else:
+                # NB: Passing both --enforce-eager and a compilation level
+                # in V0 means the compilation level wins out.
+                self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
         if self.compilation_config.pass_config.enable_async_tp:
@@ -4682,7 +4694,6 @@ class VllmConfig:
             # By default, V1 uses piecewise CUDA graphs. If full_cuda_graph
             # is set to True, full CUDA graphs will be used.
             self.compilation_config.cudagraph_num_of_warmups = 1
-            self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
 
         self._set_cudagraph_sizes()
@@ -4763,12 +4774,23 @@ class VllmConfig:
                 # Hybrid KV cache manager is not compatible with KV events.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.model_config is not None and \
-                self.model_config.attention_chunk_size is not None and \
-                self.speculative_config is not None and \
-                self.speculative_config.use_eagle():
-                # Hybrid KV cache manager is not yet supported with chunked
-                # local attention + eagle.
-                self.scheduler_config.disable_hybrid_kv_cache_manager = True
+                self.model_config.attention_chunk_size is not None:
+                if self.speculative_config is not None and \
+                    self.speculative_config.use_eagle():
+                    # Hybrid KV cache manager is not yet supported with chunked
+                    # local attention + eagle.
+                    self.scheduler_config.disable_hybrid_kv_cache_manager = True
+                elif \
+                    not envs.VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE:
+                    logger.warning(
+                        "There is a latency regression when using chunked local"
+                        " attention with the hybrid KV cache manager. Disabling"
+                        " it, by default. To enable it, set the environment "
+                        "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE=1."
+                    )
+                    # Hybrid KV cache manager is not yet supported with chunked
+                    # local attention.
+                    self.scheduler_config.disable_hybrid_kv_cache_manager = True
 
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:

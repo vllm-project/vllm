@@ -46,7 +46,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, check_use_alibi, get_dtype_size,
-                        is_pin_memory_available, round_up)
+                        is_pin_memory_available, round_up, supports_dynamo)
 from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
@@ -1400,7 +1400,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_scheduled_tokens_np: np.ndarray,
         finished_sending: Optional[set[str]],
         finished_recving: Optional[set[str]],
-        finished_loading_dict: Optional[dict[str, int]],
     ) -> ModelRunnerOutput:
         assert self.input_batch.num_reqs ==\
             len(self.input_batch.pooling_params), \
@@ -1437,7 +1436,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output=pooler_output,
             finished_sending=finished_sending,
             finished_recving=finished_recving,
-            finished_loading_dict=finished_loading_dict,
         )
 
     @torch.inference_mode()
@@ -1562,7 +1560,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = (
                 self.get_finished_kv_transfers(scheduler_output))
-            finished_loading_dict = self.get_finished_loading(scheduler_output)
 
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output
@@ -1580,11 +1577,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
             if not broadcast_pp_output:
-                if (finished_sending or finished_recving
-                        or finished_loading_dict):
+                if finished_sending or finished_recving:
                     hidden_states.finished_sending = finished_sending
                     hidden_states.finished_recving = finished_recving
-                    hidden_states.finished_loading_dict = finished_loading_dict
                 return hidden_states
             assert isinstance(hidden_states, IntermediateTensors)
             get_pp_group().send_tensor_dict(hidden_states.tensors,
@@ -1594,7 +1589,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.input_batch.pooling_params:
                 return self._pool(hidden_states, num_scheduled_tokens,
                                   num_scheduled_tokens_np, finished_sending,
-                                  finished_recving, finished_loading_dict)
+                                  finished_recving)
 
             sample_hidden_states = hidden_states[logits_indices]
             logits = self.model.compute_logits(sample_hidden_states, None)
@@ -1746,7 +1741,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output=[],
             finished_sending=finished_sending,
             finished_recving=finished_recving,
-            finished_loading_dict=finished_loading_dict,
             num_nans_in_logits=num_nans_in_logits,
         )
 
@@ -1973,6 +1967,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 old_global_expert_indices,
                 rank_mapping,
             )
+
+        if (
+            self.vllm_config.compilation_config.level == \
+                CompilationLevel.DYNAMO_AS_IS and supports_dynamo()
+        ):
+            backend = self.vllm_config.compilation_config.init_backend(
+                self.vllm_config)
+            compilation_counter.dynamo_as_is_count += 1
+            self.model.compile(
+                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                backend=backend)
 
         model_supports_token_type_ids = 'token_type_ids' in \
                 inspect.getfullargspec(self.model.forward).args
