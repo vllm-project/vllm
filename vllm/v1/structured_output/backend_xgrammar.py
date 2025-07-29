@@ -188,6 +188,7 @@ class XgrammarGrammar(StructuredOutputGrammar):
     def rollback(self, num_tokens: int) -> None:
         self.matcher.rollback(num_tokens)
         self.num_processed_tokens -= num_tokens
+        self._is_terminated = self.matcher.is_terminated()
 
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
         self.matcher.fill_next_token_bitmask(bitmask, idx)
