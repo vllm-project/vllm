@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 KVConnectorBase Class for Distributed KV Cache & Hidden State
-communication in vLLM v1
+communication in vLLM
 
 The class provides the following primitives:
     Scheduler-side: runs in the scheduler, binds metadata, which
