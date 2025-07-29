@@ -17,9 +17,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.utils import get_hash_fn_by_name
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_utils import (generate_block_hash_extra_keys,
+                                         hash_block_tokens, init_none_hash)
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
@@ -95,6 +98,9 @@ class Scheduler(SchedulerInterface):
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
 
         self.block_size = self.cache_config.block_size
+        self.caching_hash_fn = get_hash_fn_by_name(
+            self.cache_config.prefix_caching_hash_algo)
+        init_none_hash(self.caching_hash_fn)
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
@@ -155,7 +161,6 @@ class Scheduler(SchedulerInterface):
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             enable_caching=self.cache_config.enable_prefix_caching,
-            caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
@@ -925,6 +930,27 @@ class Scheduler(SchedulerInterface):
         for num_new, output_token_id in enumerate(new_token_ids, 1):
             request.append_output_token_ids(output_token_id)
 
+            # check if new token completed a new block
+            if request.num_tokens % self.block_size == 0:
+                # calculate hash for the newly completed block
+                end_token_idx = request.num_tokens
+                start_token_idx = end_token_idx - self.block_size
+
+                extra_keys, _ = generate_block_hash_extra_keys(
+                    request, start_token_idx, end_token_idx, -1)
+
+                prev_block_hash_value = None
+                if request.block_hashes:
+                    prev_block_hash_value = (
+                        request.block_hashes[-1].hash_value)
+
+                block_tokens = request.all_token_ids[
+                    start_token_idx:end_token_idx]
+                block_hash = hash_block_tokens(self.caching_hash_fn,
+                                               prev_block_hash_value,
+                                               block_tokens, extra_keys)
+                request.block_hashes.append(block_hash)
+
             # Check for stop and update request state.
             # This must be called before we make the EngineCoreOutput.
             stopped = check_stop(request, self.max_model_len)
@@ -1024,7 +1050,6 @@ class Scheduler(SchedulerInterface):
     def _free_blocks(self, request: Request):
         assert request.is_finished()
         self.kv_cache_manager.free(request)
-        self.kv_cache_manager.free_block_hashes(request)
         del self.requests[request.request_id]
 
     def get_num_unfinished_requests(self) -> int:
