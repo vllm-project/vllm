@@ -83,6 +83,13 @@ class HunyuanA13BReasoningParser(ReasoningParser):
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         return self.current_state == "response"
 
+    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        # for hunyuan streaming reason parsing, the stream parse
+        # will call first, and the same token will be called in
+        # is_reasoning_end and extract_content_ids
+        # this id is not part of content, so just return [] here.
+        return []
+
     def extract_reasoning_content(
             self, model_output: str, request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:

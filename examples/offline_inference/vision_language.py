@@ -316,6 +316,85 @@ def run_h2ovl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B
+def run_hyperclovax_seed_vision(
+    questions: list[str], modality: str
+) -> ModelRequestData:
+    model_name = "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B"
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192 if modality == "image" else 16384,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    messages = list()
+    for question in questions:
+        if modality == "image":
+            """
+            ocr: List the words in the image in raster order. 
+                Even if the word order feels unnatural for reading, 
+                the model will handle it as long as it follows raster order.
+                e.g. "Naver, CLOVA, bigshane"
+            lens_keywords: List the entity names in the image.
+                e.g. "iPhone"
+            lens_local_keywords: List the entity names with quads in the image.
+                e.g. "[0.07, 0.21, 0.92, 0.90] iPhone"
+            """
+            messages.append(
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "ocr": "",
+                                "lens_keywords": "",
+                                "lens_local_keywords": "",
+                            },
+                            {
+                                "type": "text",
+                                "text": question,
+                            },
+                        ],
+                    }
+                ]
+            )
+        elif modality == "video":
+            messages.append(
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "video",
+                            },
+                            {
+                                "type": "text",
+                                "text": question,
+                            },
+                        ],
+                    }
+                ]
+            )
+        else:
+            raise ValueError(f"Unsupported modality: {modality}")
+
+    prompts = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        stop_token_ids=None,
+    )
+
+
 # Idefics3-8B-Llama3
 def run_idefics3(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -389,6 +468,39 @@ def run_tarsier(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Intern-S1
+def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "internlm/Intern-S1"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+        enforce_eager=True,
+    )
+
+    if modality == "image":
+        placeholder = "<IMG_CONTEXT>"
+    elif modality == "video":
+        placeholder = "<video>"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [
+        [{"role": "user", "content": f"{placeholder}\n{question}"}]
+        for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # InternVL
 def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "OpenGVLab/InternVL3-2B"
@@ -404,6 +516,44 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
         placeholder = "<image>"
     elif modality == "video":
         placeholder = "<video>"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [
+        [{"role": "user", "content": f"{placeholder}\n{question}"}]
+        for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    # Stop tokens for InternVL
+    # models variants may have different stop tokens
+    # please refer to the model card for the correct "stop words":
+    # https://huggingface.co/OpenGVLab/InternVL2-2B/blob/main/conversation.py
+    stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|end|>"]
+    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
+    stop_token_ids = [token_id for token_id in stop_token_ids if token_id is not None]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        stop_token_ids=stop_token_ids,
+    )
+
+
+# Nemontron_VL
+def run_nemotron_vl(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    assert modality == "image"
+    placeholder = "<image>"
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     messages = [
@@ -949,6 +1099,41 @@ def run_phi4mm(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# HF format Phi-4-multimodal-instruct
+def run_phi4_multimodal(questions: list[str], modality: str) -> ModelRequestData:
+    """
+    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
+    show how to process image inputs.
+    """
+    assert modality == "image"
+    model_path = snapshot_download(
+        "microsoft/Phi-4-multimodal-instruct", revision="refs/pr/70"
+    )
+    # Since the vision-lora and speech-lora co-exist with the base model,
+    # we have to manually specify the path of the lora weights.
+    vision_lora_path = os.path.join(model_path, "vision-lora")
+    prompts = [
+        f"<|user|><|image|>{question}<|end|><|assistant|>" for question in questions
+    ]
+    engine_args = EngineArgs(
+        model=model_path,
+        max_model_len=5120,
+        max_num_seqs=2,
+        max_num_batched_tokens=12800,
+        enable_lora=True,
+        max_lora_rank=320,
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
+        mm_processor_kwargs={"dynamic_hd": 16},
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        lora_requests=[LoRARequest("vision", 1, vision_lora_path)],
+    )
+
+
 # Pixtral HF-format
 def run_pixtral_hf(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1184,8 +1369,11 @@ model_example_map = {
     "glm4v": run_glm4v,
     "glm4_1v": run_glm4_1v,
     "h2ovl_chat": run_h2ovl,
+    "hyperclovax_seed_vision": run_hyperclovax_seed_vision,
     "idefics3": run_idefics3,
+    "interns1": run_interns1,
     "internvl_chat": run_internvl,
+    "nemotron_vl": run_nemotron_vl,
     "keye_vl": run_keye_vl,
     "kimi_vl": run_kimi_vl,
     "llava": run_llava,
@@ -1205,6 +1393,7 @@ model_example_map = {
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
     "phi4_mm": run_phi4mm,
+    "phi4_multimodal": run_phi4_multimodal,
     "pixtral_hf": run_pixtral_hf,
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,

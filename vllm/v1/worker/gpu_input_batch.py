@@ -70,7 +70,6 @@ class InputBatch:
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
         is_spec_decode: bool = False,
-        logits_processing_needs_token_ids: bool = False,
     ):
         self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
@@ -79,8 +78,6 @@ class InputBatch:
         self.device = device
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
-        self.logits_processing_needs_token_ids = (
-            logits_processing_needs_token_ids)
 
         self._req_ids: list[Optional[str]] = []
         self.req_id_to_index: dict[str, int] = {}
@@ -233,6 +230,9 @@ class InputBatch:
         # req_index -> bad_words_token_ids
         self.bad_words_token_ids: dict[int, list[list[int]]] = {}
 
+        self.logits_processing_needs_token_ids = np.zeros(max_num_reqs,
+                                                          dtype=bool)
+
         self.req_output_token_ids: list[Optional[list[int]]] = []
 
         # This is updated each time the batch constituents change.
@@ -365,9 +365,12 @@ class InputBatch:
             if sampling_params.bad_words_token_ids:
                 self.bad_words_token_ids[
                     req_index] = sampling_params.bad_words_token_ids
+        elif pooling_params := request.pooling_params:
+            self.pooling_params[req_id] = pooling_params
+            self.logits_processing_needs_token_ids[req_index] = (
+                pooling_params.requires_token_ids)
         else:
-            assert request.pooling_params is not None
-            self.pooling_params[req_id] = request.pooling_params
+            raise NotImplementedError(request)
 
         # Add request lora ID
         if request.lora_request:
@@ -386,7 +389,7 @@ class InputBatch:
 
     def remove_request(self, req_id: str) -> Optional[int]:
         """This method must always be followed by a call to condense().
-        
+
         Args:
           req_id: request to remove
 
@@ -587,7 +590,7 @@ class InputBatch:
 
     def refresh_metadata(self):
         """Apply batch updates, reset input batch at end of step
-        
+
         * Apply batch add/remove/permute to logits procs' states
         * If batch state is modified, update sampling metadata
         """
@@ -620,9 +623,9 @@ class InputBatch:
             copy_slice(self.repetition_penalties_cpu_tensor,
                        self.repetition_penalties, num_reqs)
 
-        needs_prompt_token_ids = (not self.no_penalties or
-                                  (self.num_reqs > 0
-                                   and self.logits_processing_needs_token_ids))
+        needs_prompt_token_ids = (
+            not self.no_penalties
+            or self.logits_processing_needs_token_ids[:num_reqs].any())
         if needs_prompt_token_ids:
             # The prompt tokens are used only for applying penalties or
             # step pooling during the sampling/pooling process.

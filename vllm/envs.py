@@ -42,9 +42,9 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
     VLLM_FLASHINFER_FORCE_TENSOR_CORES: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
-    VLLM_CPU_KVCACHE_SPACE: int = 0
+    VLLM_CPU_KVCACHE_SPACE: Optional[int] = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
-    VLLM_CPU_NUM_OF_RESERVED_CPU: int = 0
+    VLLM_CPU_NUM_OF_RESERVED_CPU: Optional[int] = None
     VLLM_CPU_MOE_PREPACK: bool = True
     VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
+    VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MM_INPUT_CACHE_GIB: int = 8
     VLLM_TARGET_DEVICE: str = "cuda"
@@ -106,8 +107,6 @@ if TYPE_CHECKING:
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
-    VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
-    VLLM_HPU_USE_DELAYED_SAMPLING: bool = False
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
@@ -121,6 +120,8 @@ if TYPE_CHECKING:
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: Optional[int] = None
     VLLM_USE_DEEP_GEMM: bool = False
+    VLLM_USE_FLASHINFER_MOE_FP8: bool = False
+    VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -140,7 +141,9 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: Optional[int] = None
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 120
     VLLM_USE_CUDNN_PREFILL: bool = False
+    VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
+    VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
 
 
 def get_default_cache_root():
@@ -430,9 +433,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
 
     # (CPU backend only) CPU key-value cache space.
-    # default is 4 GiB
+    # default is None and will be set as 4 GB
     "VLLM_CPU_KVCACHE_SPACE":
-    lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0")),
+    lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0"))
+    if "VLLM_CPU_KVCACHE_SPACE" in os.environ else None,
 
     # (CPU backend only) CPU core ids bound by OpenMP threads, e.g., "0-31",
     # "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
@@ -442,7 +446,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (CPU backend only) CPU cores not used by OMP threads .
     # Those CPU cores will not be used by OMP threads of a rank.
     "VLLM_CPU_NUM_OF_RESERVED_CPU":
-    lambda: int(os.getenv("VLLM_CPU_NUM_OF_RESERVED_CPU", "0")),
+    lambda: int(os.getenv("VLLM_CPU_NUM_OF_RESERVED_CPU", "0"))
+    if "VLLM_CPU_NUM_OF_RESERVED_CPU" in os.environ else None,
 
     # (CPU backend only) whether to use prepack for MoE layer. This will be
     # passed to ipex.llm.modules.GatedMLPMOE. On unsupported CPUs, you might
@@ -515,6 +520,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default is 10 seconds
     "VLLM_AUDIO_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
+
+    # Maximum filesize in MB for a single audio file when processing
+    # speech-to-text requests. Files larger than this will be rejected.
+    # Default is 25 MB
+    "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB":
+    lambda: int(os.getenv("VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", "25")),
 
     # Backend for Video IO
     # - "opencv": Default backend that uses OpenCV stream buffered backend.
@@ -780,19 +791,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CUDART_SO_PATH":
     lambda: os.getenv("VLLM_CUDART_SO_PATH", None),
 
-    # Contiguous cache fetching to avoid using costly gather operation on
-    # Gaudi3. This is only applicable to HPU contiguous cache. If set to true,
-    # contiguous cache fetch will be used.
-    "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH":
-    lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in
-    ("1", "true"),
-
-    # Use delayed sampling for HPU to reduce host cpu overhead
-    # between each step.
-    "VLLM_HPU_USE_DELAYED_SAMPLING":
-    lambda: os.environ.get("VLLM_DELAYED_SAMPLING", "false").lower() in
-    ("1", "true"),
-
     # Rank of the process in the data parallel setting
     "VLLM_DP_RANK":
     lambda: int(os.getenv("VLLM_DP_RANK", "0")),
@@ -867,6 +865,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM":
     lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "0"))),
+
+    # Allow use of FlashInfer MoE kernels for fused moe ops.
+    "VLLM_USE_FLASHINFER_MOE_FP8":
+    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP8", "0"))),
+
+    # Allow use of FlashInfer CUTLASS kernels for fused moe ops.
+    "VLLM_USE_FLASHINFER_MOE_FP4":
+    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP4", "0"))),
 
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.
@@ -971,9 +977,32 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_TRTLLM_DECODE_ATTENTION":
     lambda: os.getenv("VLLM_USE_TRTLLM_DECODE_ATTENTION", None),
 
+    # Controls garbage collection during CUDA graph capture.
+    # If set to 0 (default), enables GC freezing to speed up capture time.
+    # If set to 1, allows GC to run during capture.
+    "VLLM_ENABLE_CUDAGRAPH_GC":
+    lambda: bool(int(os.getenv("VLLM_ENABLE_CUDAGRAPH_GC", "0"))),
+
     # Used to force set up loopback IP
     "VLLM_LOOPBACK_IP":
     lambda: os.getenv("VLLM_LOOPBACK_IP", ""),
+
+    # Used to set the process name prefix for vLLM processes.
+    # This is useful for debugging and monitoring purposes.
+    # The default value is "VLLM".
+    "VLLM_PROCESS_NAME_PREFIX":
+    lambda: os.getenv("VLLM_PROCESS_NAME_PREFIX", "VLLM"),
+
+    # Allow chunked local attention with hybrid kv cache manager.
+    # Currently using the Hybrid KV cache manager with chunked local attention
+    # in the Llama4 models (the only models currently using chunked local attn)
+    # causes a latency regression. For this reason, we disable it by default.
+    # This flag is used to allow users to enable it if they want to (to save on
+    # kv-cache memory usage and enable longer contexts)
+    # TODO(lucas): Remove this flag once latency regression is resolved.
+    "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE":
+    lambda: bool(int(os.getenv(\
+            "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
