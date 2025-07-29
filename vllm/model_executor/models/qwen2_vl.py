@@ -823,10 +823,11 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
 
-    def get_max_tokens_per_item(
-            self, seq_len: int,
-            mm_counts: Mapping[str, int]) -> Optional[Mapping[str, int]]:
-
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
         max_image_tokens = self.get_max_image_tokens()
         max_video_tokens = self.get_max_video_tokens(seq_len, mm_counts)
         return {"image": max_image_tokens, "video": max_video_tokens}
@@ -1095,6 +1096,15 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             "lm_head.": "language_model.lm_head.",
             "model.": "language_model.model.",
         })
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<|vision_start|><|image_pad|><|vision_end|>"
+        if modality.startswith("video"):
+            return "<|vision_start|><|video_pad|><|vision_end|>"
+
+        raise ValueError("Only image or video modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

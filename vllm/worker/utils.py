@@ -47,7 +47,3 @@ def assert_enc_dec_mr_supported_scenario(
     if enc_dec_mr.scheduler_config.num_lookahead_slots > 0:
         raise NotImplementedError(
             STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_SPEC_DEC'])
-
-    if enc_dec_mr.prompt_adapter_config is not None:
-        raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_ERR_STRS[
-            'STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER'])

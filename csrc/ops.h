@@ -287,6 +287,16 @@ void scaled_fp4_experts_quant(
     torch::Tensor const& input, torch::Tensor const& input_global_scale,
     torch::Tensor const& input_offset_by_experts,
     torch::Tensor const& output_scale_offset_by_experts);
+
+void per_token_group_quant_fp8(const torch::Tensor& input,
+                               torch::Tensor& output_q, torch::Tensor& output_s,
+                               int64_t group_size, double eps, double fp8_min,
+                               double fp8_max, bool scale_ue8m0);
+
+void per_token_group_quant_int8(const torch::Tensor& input,
+                                torch::Tensor& output_q,
+                                torch::Tensor& output_s, int64_t group_size,
+                                double eps, double int8_min, double int8_max);
 #endif
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
@@ -325,22 +335,6 @@ void selective_scan_fwd(const torch::Tensor& u, const torch::Tensor& delta,
                         const std::optional<torch::Tensor>& cache_indices,
                         const std::optional<torch::Tensor>& has_initial_state,
                         const torch::Tensor& ssm_states, int64_t pad_slot_id);
-
-void causal_conv1d_update(const at::Tensor& x, const at::Tensor& conv_state,
-                          const at::Tensor& weight,
-                          const std::optional<at::Tensor>& bias_,
-                          bool silu_activation,
-                          const std::optional<at::Tensor>& cache_seqlens_,
-                          const std::optional<at::Tensor>& conv_state_indices_,
-                          int64_t pad_slot_id);
-
-void causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
-                       const std::optional<at::Tensor>& bias_,
-                       const std::optional<at::Tensor>& conv_states,
-                       const std::optional<at::Tensor>& query_start_loc,
-                       const std::optional<at::Tensor>& cache_indices,
-                       const std::optional<at::Tensor>& has_initial_state,
-                       bool silu_activation, int64_t pad_slot_id);
 
 using fptr_t = int64_t;
 fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,

@@ -44,7 +44,9 @@ class TestModel(torch.nn.Module):
         ]
         self.fp8_linear = Fp8LinearOp(
             cutlass_fp8_supported=cutlass_fp8_enabled,
-            use_per_token_if_dynamic=True)
+            act_quant_static=static,
+            act_quant_group_shape=group_shape,
+        )
 
     def forward(self, x):
         resid = torch.sqrt(x)
@@ -91,9 +93,10 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
     maybe_create_device_identity()  # needed for certain non-cutlass fp8 paths
 
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
-        level=CompilationLevel.PIECEWISE, custom_ops=["+rms_norm"]))
-    vllm_config.compilation_config.pass_config = \
-        PassConfig(enable_fusion=True, enable_noop=True)
+        level=CompilationLevel.PIECEWISE,
+        custom_ops=["+rms_norm", "+quant_fp8"],
+        pass_config=PassConfig(enable_fusion=True, enable_noop=True),
+    ))
     with vllm.config.set_current_vllm_config(vllm_config):
         # Reshape pass is needed for the fusion pass to work
         noop_pass = NoOpEliminationPass(vllm_config)

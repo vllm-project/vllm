@@ -12,9 +12,8 @@ endif()
 #
 # Define environment variables for special configurations
 #
-if(DEFINED ENV{VLLM_CPU_AVX512BF16})
-    set(ENABLE_AVX512BF16 ON)
-endif()
+set(ENABLE_AVX512BF16 $ENV{VLLM_CPU_AVX512BF16})
+set(ENABLE_AVX512VNNI $ENV{VLLM_CPU_AVX512VNNI})
 
 include_directories("${CMAKE_SOURCE_DIR}/csrc")
 
@@ -59,6 +58,22 @@ function (find_isa CPUINFO TARGET OUT)
     endif()
 endfunction()
 
+
+function(check_sysctl TARGET OUT)
+    execute_process(COMMAND sysctl -n "${TARGET}"
+                    RESULT_VARIABLE SYSCTL_RET
+                    OUTPUT_VARIABLE SYSCTL_INFO
+                    ERROR_QUIET
+                    OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(SYSCTL_RET EQUAL 0 AND
+      (SYSCTL_INFO STREQUAL "1" OR SYSCTL_INFO GREATER 0))
+        set(${OUT} ON PARENT_SCOPE)
+    else()
+        set(${OUT} OFF PARENT_SCOPE)
+    endif()
+endfunction()
+
+
 function (is_avx512_disabled OUT)
     set(DISABLE_AVX512 $ENV{VLLM_CPU_DISABLE_AVX512})
     if(DISABLE_AVX512 AND DISABLE_AVX512 STREQUAL "true")
@@ -71,7 +86,10 @@ endfunction()
 is_avx512_disabled(AVX512_DISABLED)
 
 if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
-    set(APPLE_SILICON_FOUND TRUE)
+    message(STATUS "Apple Silicon Detected")
+    set(ENABLE_NUMA OFF)
+    check_sysctl(hw.optional.neon ASIMD_FOUND)
+    check_sysctl(hw.optional.arm.FEAT_BF16 ARM_BF16_FOUND)
 else()
     find_isa(${CPUINFO} "avx2" AVX2_FOUND)
     find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
@@ -82,7 +100,6 @@ else()
     find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
     find_isa(${CPUINFO} "S390" S390_FOUND)
 endif()
-
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     list(APPEND CXX_COMPILE_FLAGS
@@ -107,10 +124,19 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
     endif()
 
     find_isa(${CPUINFO} "avx512_vnni" AVX512VNNI_FOUND)
-    if (AVX512VNNI_FOUND)
-        list(APPEND CXX_COMPILE_FLAGS "-mavx512vnni")
-        set(ENABLE_AVX512VNNI ON) 
-    endif() 
+    if (AVX512VNNI_FOUND OR ENABLE_AVX512VNNI)
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+            CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
+            list(APPEND CXX_COMPILE_FLAGS "-mavx512vnni")
+            set(ENABLE_AVX512VNNI ON)
+        else()
+            set(ENABLE_AVX512VNNI OFF)
+            message(WARNING "Disable AVX512-VNNI ISA support, requires gcc/g++ >= 12.3")
+        endif()
+    else()
+        set(ENABLE_AVX512VNNI OFF)
+        message(WARNING "Disable AVX512-VNNI ISA support, no avx512_vnni found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AVX512VNNI=1.")
+    endif()
     
 elseif (AVX2_FOUND)
     list(APPEND CXX_COMPILE_FLAGS "-mavx2")
@@ -141,9 +167,6 @@ elseif (ASIMD_FOUND)
         set(MARCH_FLAGS "-march=armv8.2-a+dotprod+fp16")  
     endif()
     list(APPEND CXX_COMPILE_FLAGS ${MARCH_FLAGS})     
-elseif(APPLE_SILICON_FOUND)
-    message(STATUS "Apple Silicon Detected")
-    set(ENABLE_NUMA OFF)
 elseif (S390_FOUND)
     message(STATUS "S390 detected")
     # Check for S390 VXE support
@@ -157,16 +180,31 @@ else()
 endif()
 
 #
-# Build oneDNN for W8A8 GEMM kernels (only for x86-AVX512 platforms)
-#
-if (AVX512_FOUND AND NOT AVX512_DISABLED)
+# Build oneDNN for W8A8 GEMM kernels (only for x86-AVX512 /ARM platforms)
+# Flag to enable ACL kernels for AARCH64 platforms
+if ( VLLM_BUILD_ACL STREQUAL "ON")
+    set(USE_ACL ON)
+else()
+    set(USE_ACL OFF)
+endif()
+
+if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR ASIMD_FOUND)
     FetchContent_Declare(
         oneDNN
         GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
-        GIT_TAG  v3.7.1
+        GIT_TAG  v3.8.1
         GIT_PROGRESS TRUE
         GIT_SHALLOW TRUE
     )
+
+    if(USE_ACL)
+        find_library(ARM_COMPUTE_LIBRARY NAMES arm_compute PATHS $ENV{ACL_ROOT_DIR}/build/)
+        if(NOT ARM_COMPUTE_LIBRARY)
+            message(FATAL_ERROR "Could not find ARM Compute Library: please set ACL_ROOT_DIR")
+        endif()
+        set(ONEDNN_AARCH64_USE_ACL "ON")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,-rpath,$ENV{ACL_ROOT_DIR}/build/")
+        endif()
 
     set(ONEDNN_LIBRARY_TYPE "STATIC")
     set(ONEDNN_BUILD_DOC "OFF")
@@ -256,6 +294,13 @@ elseif(POWER10_FOUND)
         "csrc/cpu/quant.cpp"
         ${VLLM_EXT_SRC})
 endif()
+if (ASIMD_FOUND)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/quant.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
+message(STATUS "CPU extension source files: ${VLLM_EXT_SRC}")
 
 #
 # Define extension targets

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
-import os
 from typing import Any, Callable
 
 import torch
@@ -75,18 +74,6 @@ def load_general_plugins():
     if current_platform.is_xpu():
         # see https://github.com/pytorch/pytorch/blob/43c5f59/torch/_dynamo/config.py#L158
         torch._dynamo.config.disable = True
-    elif current_platform.is_hpu():
-        # NOTE(kzawora): PT HPU lazy backend (PT_HPU_LAZY_MODE = 1)
-        # does not support torch.compile
-        # Eager backend (PT_HPU_LAZY_MODE = 0) must be selected for
-        # torch.compile support
-        is_lazy = os.environ.get('PT_HPU_LAZY_MODE', '1') == '1'
-        if is_lazy:
-            torch._dynamo.config.disable = True
-            # NOTE(kzawora) multi-HPU inference with HPUGraphs (lazy-only)
-            # requires enabling lazy collectives
-            # see https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html # noqa: E501
-            os.environ['PT_HPU_ENABLE_LAZY_COLLECTIVES'] = 'true'
 
     plugins = load_plugins_by_group(group=DEFAULT_PLUGINS_GROUP)
     # general plugins, we only need to execute the loaded functions

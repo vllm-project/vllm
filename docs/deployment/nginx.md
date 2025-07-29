@@ -1,7 +1,4 @@
----
-title: Using Nginx
----
-[](){ #nginxloadbalancer }
+# Using Nginx
 
 This document shows how to launch multiple vLLM serving containers and use Nginx to act as a load balancer between the servers.
 
@@ -36,7 +33,7 @@ docker build . -f Dockerfile.nginx --tag nginx-lb
 
 Create a file named `nginx_conf/nginx.conf`. Note that you can add as many servers as you'd like. In the below example we'll start with two. To add more, add another `server vllmN:8000 max_fails=3 fail_timeout=10000s;` entry to `upstream backend`.
 
-??? Config
+??? console "Config"
 
     ```console
     upstream backend {
@@ -95,7 +92,7 @@ Notes:
 - The below example assumes GPU backend used. If you are using CPU backend, remove `--gpus device=ID`, add `VLLM_CPU_KVCACHE_SPACE` and `VLLM_CPU_OMP_THREADS_BIND` environment variables to the docker run command.
 - Adjust the model name that you want to use in your vLLM servers if you don't want to use `Llama-2-7b-chat-hf`.
 
-??? Commands
+??? console "Commands"
 
     ```console
     mkdir -p ~/.cache/huggingface/hub/

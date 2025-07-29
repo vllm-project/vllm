@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 The actual execution of the rearrangement.
 
@@ -7,6 +8,7 @@ This involves the exchange of expert weights between GPUs.
 
 from collections.abc import Iterable, MutableSequence, Sequence
 from functools import partial
+from typing import Optional
 
 import torch
 from torch.distributed import (P2POp, ProcessGroup, all_gather,
@@ -126,6 +128,8 @@ def shuffle_layer(
             dst_global = local2global(dst)
             if is_received_locally[dst]:
                 continue
+            if old_indices[src_global] == -1 or new_indices[dst_global] == -1:
+                continue
             if old_indices[src_global] == new_indices[dst_global]:
                 is_received_locally[dst] = True
                 for weight, buffer in zip(expert_weights,
@@ -138,6 +142,8 @@ def shuffle_layer(
     experts_send_loc: dict[int, int] = {}
     for src in range(num_local_experts):
         expert = old_indices[local2global(src)]
+        if expert == -1:
+            continue
         if expert in experts_send_loc:
             continue
         experts_send_loc[expert] = src
@@ -180,6 +186,8 @@ def shuffle_layer(
         if is_received_locally[dst]:
             continue
         expert = new_indices[local2global(dst)]
+        if expert == -1:
+            continue
         if expert in experts_recv_loc:
             continue
         experts_recv_loc[expert] = dst
@@ -226,6 +234,8 @@ def shuffle_layer(
                 weight[dst].copy_(buffer[dst])
         else:
             expert = new_indices[local2global(dst)]
+            if expert == -1:
+                continue
             src = experts_recv_loc[expert]
             for weight, buffer in zip(expert_weights, expert_weights_buffer):
                 weight[dst].copy_(buffer[src])
@@ -237,6 +247,7 @@ def rearrange_expert_weights_inplace(
     expert_weights: Sequence[Iterable[torch.Tensor]],
     ep_group: ProcessGroup,
     is_profile: bool = False,
+    rank_mapping: Optional[dict[int, int]] = None,
 ) -> None:
     """
     Rearranges the expert weights in place according to the new expert indices.
@@ -255,7 +266,28 @@ def rearrange_expert_weights_inplace(
         is_profile (bool): If `True`, do not perform any actual weight copy.
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
+        rank_mapping: A dictionary mapping old rank to new rank.
     """
+    if rank_mapping is not None:
+        if len(rank_mapping) == ep_group.size():
+            # scale down
+            new_global_expert_indices = \
+                _map_new_expert_indices_with_rank_mapping(
+                new_global_expert_indices,
+                rank_mapping,
+            )
+        else:
+            # scale up
+            old_global_expert_indices = \
+                _map_old_expert_indices_with_rank_mapping(
+                old_global_expert_indices,
+                rank_mapping,
+                ep_group.size(),
+            )
+
+    assert old_global_expert_indices.shape[
+        1] == new_global_expert_indices.shape[1]
+
     num_moe_layers, num_physical_experts = old_global_expert_indices.shape
     assert len(expert_weights) == num_moe_layers
 
@@ -301,6 +333,92 @@ def rearrange_expert_weights_inplace(
             expert_weights_buffer,
             ep_group,
         )
+
+
+def _map_old_expert_indices_with_rank_mapping(
+    old_global_expert_indices: torch.Tensor,
+    rank_mapping: dict[int, int],
+    new_ep_size: int,
+) -> torch.Tensor:
+    """
+    Map the old global expert indices to the new global expert indices.
+    
+    Args:
+        old_global_expert_indices:
+            Shape (num_layers, old_ep_size * num_local_physical_experts).
+        rank_mapping: Mapping from old rank to new rank.
+        new_ep_size: New expert parallelism size.
+    
+    Returns:
+        Mapped expert indices with shape
+        (num_layers, new_ep_size * num_local_physical_experts).
+    """
+    num_layers, old_num_physical_experts = old_global_expert_indices.shape
+    assert rank_mapping, "Rank mapping is required"
+
+    # Get sizes from parameters and rank_mapping
+    old_ep_size = len(rank_mapping)
+    num_local_physical_experts = old_num_physical_experts // old_ep_size
+    new_num_physical_experts = new_ep_size * num_local_physical_experts
+
+    # Create mapped tensor with new shape, initialized to -1
+    mapped_expert_indices = torch.full(
+        (num_layers, new_num_physical_experts),
+        fill_value=-1,
+        dtype=old_global_expert_indices.dtype,
+        device=old_global_expert_indices.device,
+    )
+
+    # Handle rank mapping (scale up/down with rank changes)
+    for old_rank in range(old_ep_size):
+        new_rank = rank_mapping.get(old_rank)
+        if new_rank is not None and new_rank >= 0 and new_rank < new_ep_size:
+            # This old rank exists in the new configuration
+            old_start_idx = old_rank * num_local_physical_experts
+            old_end_idx = (old_rank + 1) * num_local_physical_experts
+            new_start_idx = new_rank * num_local_physical_experts
+            new_end_idx = (new_rank + 1) * num_local_physical_experts
+
+            mapped_expert_indices[:, new_start_idx:new_end_idx] = \
+                old_global_expert_indices[:, old_start_idx:old_end_idx]
+        # If new_rank is None or >= new_ep_size, the experts remain -1
+        # (scale down case)
+
+    return mapped_expert_indices
+
+
+def _map_new_expert_indices_with_rank_mapping(
+    new_global_expert_indices: torch.Tensor,
+    rank_mapping: dict[int, int],
+) -> torch.Tensor:
+    num_layers, new_num_physical_experts = new_global_expert_indices.shape
+    assert rank_mapping, "Rank mapping is required"
+
+    # Get sizes from parameters and rank_mapping
+    old_ep_size = len(rank_mapping)
+    new_ep_size = sum(new_rank != -1 for new_rank in rank_mapping.values())
+    num_local_physical_experts = new_num_physical_experts // new_ep_size
+    old_num_physical_experts = old_ep_size * num_local_physical_experts
+
+    mapped_expert_indices = torch.full(
+        (num_layers, old_num_physical_experts),
+        fill_value=-1,
+        dtype=new_global_expert_indices.dtype,
+        device=new_global_expert_indices.device,
+    )
+
+    for old_rank in range(old_ep_size):
+        new_rank = rank_mapping[old_rank]
+        if new_rank >= 0 and new_rank < new_ep_size:
+            old_start_idx = old_rank * num_local_physical_experts
+            old_end_idx = (old_rank + 1) * num_local_physical_experts
+            new_start_idx = new_rank * num_local_physical_experts
+            new_end_idx = (new_rank + 1) * num_local_physical_experts
+
+            mapped_expert_indices[:, old_start_idx:old_end_idx] = \
+                new_global_expert_indices[:, new_start_idx:new_end_idx]
+
+    return mapped_expert_indices
 
 
 __all__ = ["rearrange_expert_weights_inplace"]

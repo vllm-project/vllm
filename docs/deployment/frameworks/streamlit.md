@@ -1,7 +1,4 @@
----
-title: Streamlit
----
-[](){ #deployment-streamlit }
+# Streamlit
 
 [Streamlit](https://github.com/streamlit/streamlit) lets you transform Python scripts into interactive web apps in minutes, instead of weeks. Build dashboards, generate reports, or create chat apps.
 

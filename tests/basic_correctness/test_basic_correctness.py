@@ -236,13 +236,13 @@ def test_failed_model_execution(vllm_runner, monkeypatch) -> None:
     monkeypatch.setenv('VLLM_ENABLE_V1_MULTIPROCESSING', '0')
 
     with vllm_runner('facebook/opt-125m', enforce_eager=True) as vllm_model:
-        if isinstance(vllm_model.model.llm_engine, LLMEngineV1):
+        if isinstance(vllm_model.llm.llm_engine, LLMEngineV1):
             v1_test_failed_model_execution(vllm_model)
 
 
 def v1_test_failed_model_execution(vllm_model):
 
-    engine = vllm_model.model.llm_engine
+    engine = vllm_model.llm.llm_engine
     mocked_execute_model = Mock(
         side_effect=RuntimeError("Mocked Critical Error"))
     engine.engine_core.engine_core.model_executor.execute_model =\

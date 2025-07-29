@@ -125,7 +125,7 @@ class PaliGemmaMultiModalProcessor(
     ) -> BatchFeature:
         tokenizer = self.info.get_tokenizer()
         if not mm_data:
-            prompt_ids = tokenizer.encode(prompt)
+            prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         return super()._call_hf_processor(
@@ -239,6 +239,13 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
             "model.multi_modal_projector.": "multi_modal_projector.",
             "lm_head.": "language_model.lm_head.",
         })
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return None
+
+        raise ValueError("Only image modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

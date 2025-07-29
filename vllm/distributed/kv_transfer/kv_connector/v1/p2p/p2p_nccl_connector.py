@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
@@ -12,7 +13,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
     P2pNcclEngine)
 from vllm.distributed.parallel_state import get_world_group
-from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -192,8 +192,16 @@ class P2pNcclConnector(KVConnectorBase_V1):
         # Load the KV for each request each layer
         for request in metadata.requests:
             for layer_name in forward_context.no_compile_layers:
-                attn_layer = forward_context.no_compile_layers[layer_name]
-                kv_cache_layer = attn_layer.kv_cache[ \
+                layer = forward_context.no_compile_layers[layer_name]
+
+                # Only process layers that have kv_cache
+                # attribute (attention layers) Skip non-attention
+                # layers like FusedMoE
+                kv_cache = getattr(layer, 'kv_cache', None)
+                if kv_cache is None:
+                    continue
+
+                kv_cache_layer = kv_cache[ \
                     forward_context.virtual_engine]
 
                 kv_cache = self.p2p_nccl_engine.recv_tensor(
@@ -237,32 +245,16 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         assert self.p2p_nccl_engine is not None
 
-        def extract_kv_from_layer(
-            layer: torch.Tensor,
-            slot_mapping: torch.Tensor,
-        ) -> torch.Tensor:
-            """Extract the KV cache from the layer.
-
-            Assume the shape of the layer is (2, num_pages, page_size, xxx)
-            if MLA is not used, and (num_pages, page_size, xxx) otherwise.
-            """
-            if isinstance(attn_metadata, MLACommonMetadata):
-                num_pages, page_size = layer.shape[0], layer.shape[1]
-                return layer.reshape(num_pages * page_size, -1)[slot_mapping,
-                                                                ...]
-            num_pages, page_size = layer.shape[1], layer.shape[2]
-            return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping,
-                                                               ...]
-
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, P2pNcclConnectorMetadata)
         for request in connector_metadata.requests:
             request_id = request.request_id
             ip, port = self.parse_request_id(request_id, True)
             remote_address = ip + ":" + str(port + self._rank)
-            kv_cache = extract_kv_from_layer(kv_layer, request.slot_mapping)
-            self.p2p_nccl_engine.send_tensor(request_id + "#" + layer_name,
-                                             kv_cache, remote_address)
+            self.p2p_nccl_engine.send_tensor(
+                request_id + "#" + layer_name, kv_layer, remote_address,
+                request.slot_mapping,
+                isinstance(attn_metadata, MLACommonMetadata))
 
     def wait_for_save(self):
         if self.is_producer:
@@ -285,9 +277,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         assert self.p2p_nccl_engine is not None
 
-        forward_context: ForwardContext = get_forward_context()
+        no_compile_layers = (
+            self._vllm_config.compilation_config.static_forward_context)
         return self.p2p_nccl_engine.get_finished(finished_req_ids,
-                                                 forward_context)
+                                                 no_compile_layers)
 
     # ==============================
     # Scheduler-side methods
@@ -416,14 +409,6 @@ class P2pNcclConnector(KVConnectorBase_V1):
                                  token_ids=token_ids,
                                  block_ids=block_ids,
                                  block_size=self._block_size)
-
-        # Requests loaded asynchronously are not in the scheduler_output.
-        # for request_id in self._requests_need_load:
-        #     request, block_ids = self._requests_need_load[request_id]
-        #     meta.add_request(request_id=request.request_id,
-        #                      token_ids=request.prompt_token_ids,
-        #                      block_ids=block_ids,
-        #                      block_size=self._block_size)
 
         self._requests_need_load.clear()
         return meta

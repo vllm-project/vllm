@@ -145,7 +145,9 @@ try:
 
 except ImportError as e:
     ray = None  # type: ignore
-    ray_import_err = e
+    # only capture string to avoid variable references in the traceback that can
+    # prevent garbage collection in some cases
+    ray_import_err = str(e)
     RayWorkerWrapper = None  # type: ignore
 
 
@@ -157,8 +159,8 @@ def ray_is_available() -> bool:
 def assert_ray_available():
     """Raise an exception if Ray is not available."""
     if ray is None:
-        raise ValueError("Failed to import Ray, please install Ray with "
-                         "`pip install ray`.") from ray_import_err
+        raise ValueError(f"Failed to import Ray: {ray_import_err}."
+                         "Please install Ray with `pip install ray`.")
 
 
 def _verify_bundles(placement_group: "PlacementGroup",

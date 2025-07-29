@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/huggingface/transformers/blob/main/src/transformers/models/Glm4v/modeling_Glm4v.py
@@ -28,7 +29,7 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Any, Callable, Literal, Optional, TypedDict, Union
+from typing import Annotated, Any, Callable, Literal, Optional, Union
 
 import numpy as np
 import torch
@@ -55,9 +56,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.gptq import GPTQConfig
-from vllm.model_executor.layers.quantization.gptq_marlin import (
-    GPTQMarlinConfig)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -67,11 +65,12 @@ from vllm.multimodal.parse import (ImageSize, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate)
+                                        PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from ..layers.activation import SiluAndMul
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -90,80 +89,66 @@ _MAX_FRAMES_PER_VIDEO = 600
 # === Vision Inputs === #
 
 
-class Glm4vImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    pixel_values: torch.Tensor
-    """Shape:
-    `(num_patches, num_channels * patch_size * patch_size)`
+class Glm4vImagePixelInputs(TensorSchema):
     """
-
-    image_grid_thw: torch.Tensor
-    """Shape: `(num_images, 3)`
-    This should be in `(grid_t, grid_h, grid_w)` format.
+    Dimensions:
+        - np: Number of patches
+        - cpp: Number of channels * patch_size * patch_size
+        - ni: Number of images
+        - g: Grid dimensions (3 for grid_t, grid_h, grid_w)
     """
+    type: Literal["pixel_values"] = "pixel_values"
+
+    pixel_values: Annotated[torch.Tensor, TensorShape("np", "cpp")]
+    image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
-class Glm4vImageEmbeddingInputs(TypedDict):
-    type: Literal["image_embeds"]
-    image_embeds: torch.Tensor
-    """Supported types:
-    - List[`torch.Tensor`]: A list of tensors holding all images' features.
-        Each tensor holds an image's features.
-    - `torch.Tensor`: A tensor holding all images' features
-        (concatenation of all images' feature tensors).
-
-    Tensor shape: `(num_image_features, hidden_size)`
-    - `num_image_features` varies based on
-        the number and resolution of the images.
-    - `hidden_size` must match the hidden size of language model backbone.
+class Glm4vImageEmbeddingInputs(TensorSchema):
     """
-
-    image_grid_thw: torch.Tensor
-    """Shape: `(num_images, 3)`
-    This should be in `(grid_t, grid_h, grid_w)` format.
+    Dimensions:
+        - f: Number of image features (varies based on image resolution)
+        - h: Hidden size (must match language model backbone)
+        - n: Number of images
+        - g: Grid dimensions (3 for grid_t, grid_h, grid_w)
     """
+    type: Literal["image_embeds"] = "image_embeds"
+
+    image_embeds: Annotated[torch.Tensor, TensorShape("f", "h")]
+    image_grid_thw: Annotated[torch.Tensor, TensorShape("n", 3)]
 
 
 Glm4vImageInputs = Union[Glm4vImagePixelInputs, Glm4vImageEmbeddingInputs]
 
 
-class Glm4vVideoPixelInputs(TypedDict):
-    type: Literal["pixel_values_videos"]
-    pixel_values_videos: torch.Tensor
-    """Shape:
-    `(num_patches,
-      num_channels * temporal_patch_size * patch_size * patch_size)`
+class Glm4vVideoPixelInputs(TensorSchema):
     """
-    # video_metadata: Union[list[VideoMetadata], list[dict]]
-    video_grid_thw: Union[list[torch.Tensor], torch.Tensor]
-    """Shape: `(num_videos, num_frames, 3)` or `(1, num_frames, 3)` 
-    for single video.
-    Each entry represents [grid_t, grid_h, grid_w] format where:
-    - grid_t: Temporal grid size (usually 1 for processed video)
-    - grid_h: Height grid size  
-    - grid_w: Width grid size
-    This describes the grid structure of the video patches.
+    Dimensions:
+        - np: Number of patches
+        - ctpp: Number of channels * temporal_patch_size *
+            patch_size * patch_size
+        - f: Number of frames
+        - g: Grid dimensions (3 for grid_t which is usually 1 for processed 
+          video, grid_h, grid_w)
     """
+    type: Literal["pixel_values_videos"] = "pixel_values_videos"
+
+    pixel_values_videos: Annotated[torch.Tensor, TensorShape("np", "ctpp")]
+    video_grid_thw: Annotated[torch.Tensor, TensorShape("f", 3)]
 
 
-class Glm4vVideoEmbeddingInputs(TypedDict):
-    type: Literal["video_embeds"]
+class Glm4vVideoEmbeddingInputs(TensorSchema):
+    """
+    Dimensions:
+        - p: Number of video patches across all frames
+        - h: Hidden size (must match language model backbone)
+        - f: Number of frames
+        - g: Grid dimensions (3 for grid_t which is usually 1 for processed 
+          video, grid_h, grid_w)
+    """
+    type: Literal["video_embeds"] = "video_embeds"
 
-    video_embeds: torch.Tensor
-    """
-    Tensor shape: `(num_video_patches, hidden_size)`
-    - `num_video_patches`: Total number of video patches across all frames
-    - `hidden_size`: Must match the hidden size of language model backbone
-    """
-
-    video_grid_thw: torch.Tensor
-    """Shape: `(num_videos, 1, 3)` or `(1, 1, 3)` for single video
-    Each entry represents [grid_t, grid_h, grid_w] format where:
-    - grid_t: Temporal grid size (usually 1 for processed video)
-    - grid_h: Height grid size  
-    - grid_w: Width grid size
-    This describes the grid structure of the video patches.
-    """
+    video_embeds: Annotated[torch.Tensor, TensorShape("p", "h")]
+    video_grid_thw: Annotated[torch.Tensor, TensorShape("f", 3)]
 
 
 Glm4vVideoInputs = Union[Glm4vVideoPixelInputs, Glm4vVideoEmbeddingInputs]
@@ -179,6 +164,7 @@ class Glm4vVisionMLP(nn.Module):
         hidden_features: int,
         bias: bool = False,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -186,13 +172,12 @@ class Glm4vVisionMLP(nn.Module):
             output_sizes=[hidden_features] * 2,
             bias=bias,
             quant_config=quant_config,
-        )
-        self.down_proj = RowParallelLinear(
-            hidden_features,
-            in_features,
-            bias=bias,
-            quant_config=quant_config,
-        )
+            prefix=f"{prefix}.gate_up_proj")
+        self.down_proj = RowParallelLinear(hidden_features,
+                                           in_features,
+                                           bias=bias,
+                                           quant_config=quant_config,
+                                           prefix=f"{prefix}.down_proj")
         self.act_fn = SiluAndMul()
 
     def forward(self, x: torch.Tensor):
@@ -407,6 +392,7 @@ class Glm4vVisionBlock(nn.Module):
             mlp_hidden_dim,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
         )
 
     def forward(
@@ -1214,7 +1200,10 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 placeholder.append(eoi_token_id)
                 placeholder.extend(frame_idx)
             placeholder.append(eov_token_id)
-            return placeholder
+            return PromptUpdateDetails.select_token_id(
+                placeholder,
+                embed_token_id=hf_processor.video_token_id,
+            )
 
         return [
             PromptReplacement(
@@ -1257,6 +1246,15 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             "model.visual.": "visual.",
         })
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<|begin_of_image|><|image|><|end_of_image|>"
+        if modality.startswith("video"):
+            return "<|begin_of_video|><|video|><|end_of_video|>"
+
+        raise ValueError("Only image or video modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: Glm4vConfig = vllm_config.model_config.hf_config
@@ -1269,7 +1267,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.visual = Glm4vVisionTransformer(
             config.vision_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-5),
-            quant_config=self._maybe_ignore_quant_config(quant_config),
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "visual"),
         )
 
@@ -1281,13 +1279,6 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
-
-    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
-        # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
-        # seems to avoid vision encoder sections for some models.
-        if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
-            return None
-        return quant_config
 
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
                                         name: str) -> torch.Tensor:
@@ -1320,10 +1311,6 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             image_grid_thw = self._validate_and_reshape_mm_tensor(
                 image_grid_thw, "image grid_thw")
 
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
             return Glm4vImagePixelInputs(
                 type="pixel_values",
                 pixel_values=pixel_values,
@@ -1336,9 +1323,6 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             image_grid_thw = self._validate_and_reshape_mm_tensor(
                 image_grid_thw, "image grid_thw")
 
-            if not isinstance(image_embeds, torch.Tensor):
-                raise ValueError("Incorrect type of image embeddings. "
-                                 f"Got type: {type(image_embeds)}")
             return Glm4vImageEmbeddingInputs(
                 type="image_embeds",
                 image_embeds=image_embeds,
@@ -1350,8 +1334,10 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
         video_embeds = kwargs.pop("video_embeds", None)
         video_grid_thw = kwargs.pop("video_grid_thw", None)
+
         if pixel_values_videos is None and video_embeds is None:
             return None
+
         if pixel_values_videos is not None:
             pixel_values_videos = self._validate_and_reshape_mm_tensor(
                 pixel_values_videos, "video pixel values")
@@ -1360,7 +1346,6 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
 
             return Glm4vVideoPixelInputs(
                 type="pixel_values_videos",
-                # video_metadata=video_metadata,
                 pixel_values_videos=pixel_values_videos,
                 video_grid_thw=video_grid_thw,
             )
@@ -1371,9 +1356,6 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             video_grid_thw = self._validate_and_reshape_mm_tensor(
                 video_grid_thw, "video grid_thw")
 
-            if not isinstance(video_embeds, torch.Tensor):
-                raise ValueError("Incorrect type of video embeddings. "
-                                 f"Got type: {type(video_embeds)}")
             return Glm4vVideoEmbeddingInputs(
                 type="video_embeds",
                 video_embeds=video_embeds,

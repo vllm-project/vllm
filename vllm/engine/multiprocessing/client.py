@@ -20,8 +20,6 @@ from vllm.config import DecodingConfig, ModelConfig, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.engine.async_llm_engine import (
-    build_guided_decoding_logits_processor_async)
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, RPC_REQUEST_T,
@@ -45,7 +43,6 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import PoolingRequestOutput, RequestOutput
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import Device
@@ -98,11 +95,16 @@ class MQLLMEngineClient(EngineClient):
         self.model_config = engine_config.model_config
         self.decoding_config = engine_config.decoding_config
 
-        # Create the tokenizer group.
-        self.tokenizer = init_tokenizer_from_configs(
-            model_config=self.model_config,
-            scheduler_config=engine_config.scheduler_config,
-            lora_config=engine_config.lora_config)
+        if self.vllm_config.model_config.skip_tokenizer_init:
+            self.tokenizer = None
+
+        else:
+            # Create the tokenizer group.
+            self.tokenizer = init_tokenizer_from_configs(
+                model_config=self.model_config,
+                scheduler_config=engine_config.scheduler_config,
+                lora_config=engine_config.lora_config)
+
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer)
 
@@ -376,7 +378,10 @@ class MQLLMEngineClient(EngineClient):
         return self.input_preprocessor
 
     async def get_tokenizer(self, lora_request: Optional[LoRARequest] = None):
-        return await self.tokenizer.get_lora_tokenizer_async(lora_request)
+        if self.tokenizer is None:
+            return None
+        else:
+            return await self.tokenizer.get_lora_tokenizer_async(lora_request)
 
     async def get_vllm_config(self) -> VllmConfig:
         return self.vllm_config
@@ -448,7 +453,6 @@ class MQLLMEngineClient(EngineClient):
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request.
@@ -465,8 +469,6 @@ class MQLLMEngineClient(EngineClient):
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
             trace_headers: OpenTelemetry trace headers.
-            prompt_adapter_request: Prompt Adapter request to use
-                                            for generation, if any.
             priority: Priority of the request (lower means earlier handling).
                 Any priority other than 0 will lead to an error if the
                 scheduling policy is not "priority".
@@ -474,8 +476,7 @@ class MQLLMEngineClient(EngineClient):
         return cast(
             AsyncGenerator[RequestOutput, None],
             self._process_request(prompt, sampling_params, request_id,
-                                  lora_request, trace_headers,
-                                  prompt_adapter_request, priority))
+                                  lora_request, trace_headers, priority))
 
     def encode(
         self,
@@ -521,7 +522,6 @@ class MQLLMEngineClient(EngineClient):
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
             PoolingRequestOutput, None]]:
@@ -534,22 +534,6 @@ class MQLLMEngineClient(EngineClient):
         # Ensure the request id is unique among running requests
         if request_id in self.output_queues:
             raise ValueError(f"Request {request_id} already exists")
-
-        # Constructing guided decoding logits processors is expensive, so we do
-        # it here to avoid contending with cpu resources and the GIL on the
-        # backend process.
-        if isinstance(params, SamplingParams) and \
-            params.guided_decoding is not None:
-            params = await \
-                build_guided_decoding_logits_processor_async(
-                    sampling_params=params,
-                    tokenizer=await self.get_tokenizer(lora_request),
-                    default_guided_backend=(self.decoding_config.backend
-                        if self.decoding_config
-                        else DecodingConfig.backend),
-                    model_config=self.model_config,
-                    reasoning_backend=self.decoding_config.reasoning_backend,
-                )
 
         # 1) Create output queue for this requests.
         queue: asyncio.Queue[Union[RequestOutput,
@@ -575,7 +559,6 @@ class MQLLMEngineClient(EngineClient):
                     request_id=request_id,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    prompt_adapter_request=prompt_adapter_request,
                     priority=priority,
                 ))
 

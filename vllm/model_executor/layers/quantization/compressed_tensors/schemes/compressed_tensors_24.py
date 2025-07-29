@@ -15,6 +15,9 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise, sparse_cutlass_supported)
 from vllm.model_executor.parameter import (BasevLLMParameter,
@@ -23,6 +26,8 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
                                            PerTensorScaleParameter)
 
 __all__ = ["CompressedTensors24"]
+
+from vllm.platforms import current_platform
 
 
 class CompressedTensors24(CompressedTensorsScheme):
@@ -44,6 +49,12 @@ class CompressedTensors24(CompressedTensorsScheme):
             self.model_compressor is not None
             and self.model_compressor.sparsity_config.format
             == CompressionFormat.sparse_24_bitmask.value)
+
+        if quantized and input_quant is not None and \
+                self._get_quant_dtype() == current_platform.fp8_dtype():
+            static = not input_quant.dynamic
+            g_shape = GroupShape.PER_TENSOR if static else GroupShape.PER_TOKEN
+            self.quant_fp8 = QuantFP8(static, g_shape)
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -232,9 +243,7 @@ class CompressedTensors24(CompressedTensorsScheme):
         :return: The output tensor of the layer
         """
         if self.quantized:
-            scale = None
-            if hasattr(layer, "input_scale"):
-                scale = layer.input_scale
+            scale = getattr(layer, 'input_scale', None)
 
             if self.weights_dtype == torch.int8:
                 ops_output = ops.scaled_int8_quant(x, scale=scale)
@@ -242,11 +251,7 @@ class CompressedTensors24(CompressedTensorsScheme):
                 input_scale = ops_output[1]
             else:
                 assert self.weights_dtype == torch.float8_e4m3fn
-                if scale is not None:
-                    q_input, input_scale = ops.scaled_fp8_quant(x, scale=scale)
-                else:
-                    q_input, input_scale = ops.scaled_fp8_quant(
-                        x, use_per_token_if_dynamic=True)
+                q_input, input_scale = self.quant_fp8(x, scale=scale)
 
         else:
             # Not quantized, nothing to do with the input_scales, use as is
@@ -269,7 +274,10 @@ class CompressedTensors24(CompressedTensorsScheme):
     def _get_params_dtype(self, params_dtype: torch.dtype) -> torch.dtype:
         if not self.quantized:
             return params_dtype
+        return self._get_quant_dtype()
 
+    def _get_quant_dtype(self) -> torch.dtype:
+        assert self.quantized
         assert self.weight_quant is not None
         assert self.input_quant is not None
 

@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa
 import json
 from collections.abc import Sequence
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Optional, Union
 
 import regex as re
 
+from vllm.entrypoints.chat_utils import random_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
@@ -224,7 +226,7 @@ class xLAMToolParser(ToolParser):
                         function_name = name_match.group(1)
 
                         # The test expects us to send just the name first
-                        tool_id = f"chatcmpl-tool-{random_uuid()}"
+                        tool_id = random_tool_call_id()
                         delta = DeltaMessage(tool_calls=[
                             DeltaToolCall(
                                 index=0,

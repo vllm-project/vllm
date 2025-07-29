@@ -37,7 +37,7 @@ information, see [Storage options for Cloud TPU data](https://cloud.devsite.corp
 
 - Google Cloud TPU VM
 - TPU versions: v6e, v5e, v5p, v4
-- Python: 3.10 or newer
+- Python: 3.11 or newer
 
 ### Provision Cloud TPUs
 
@@ -58,9 +58,9 @@ assigned to your Google Cloud project for your immediate exclusive use.
 
 For more information about using TPUs with GKE, see:
 
-- <https://cloud.google.com/kubernetes-engine/docs/how-to/tpus>
-- <https://cloud.google.com/kubernetes-engine/docs/concepts/tpus>
-- <https://cloud.google.com/kubernetes-engine/docs/concepts/plan-tpus>
+- [About TPUs in GKE](https://cloud.google.com/kubernetes-engine/docs/concepts/tpus)
+- [Deploy TPU workloads in GKE Standard](https://cloud.google.com/kubernetes-engine/docs/how-to/tpus)
+- [Plan for TPUs in GKE](https://cloud.google.com/kubernetes-engine/docs/concepts/plan-tpus)
 
 ## Configure a new environment
 
@@ -117,7 +117,7 @@ source ~/.bashrc
 Create and activate a Conda environment for vLLM:
 
 ```bash
-conda create -n vllm python=3.10 -y
+conda create -n vllm python=3.12 -y
 conda activate vllm
 ```
 

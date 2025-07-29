@@ -410,29 +410,6 @@ class repackage_wheel(build_ext):
                 package_data[package_name].append(file_name)
 
 
-def _is_hpu() -> bool:
-    # if VLLM_TARGET_DEVICE env var was set explicitly, skip HPU autodetection
-    if os.getenv("VLLM_TARGET_DEVICE", None) == VLLM_TARGET_DEVICE:
-        return VLLM_TARGET_DEVICE == "hpu"
-
-    # if VLLM_TARGET_DEVICE was not set explicitly, check if hl-smi succeeds,
-    # and if it doesn't, check if habanalabs driver is loaded
-    is_hpu_available = False
-    try:
-        out = subprocess.run(["hl-smi"], capture_output=True, check=True)
-        is_hpu_available = out.returncode == 0
-    except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
-        if sys.platform.startswith("linux"):
-            try:
-                output = subprocess.check_output(
-                    'lsmod | grep habanalabs | wc -l', shell=True)
-                is_hpu_available = int(output) > 0
-            except (ValueError, FileNotFoundError, PermissionError,
-                    subprocess.CalledProcessError):
-                pass
-    return is_hpu_available
-
-
 def _no_device() -> bool:
     return VLLM_TARGET_DEVICE == "empty"
 
@@ -440,7 +417,7 @@ def _no_device() -> bool:
 def _is_cuda() -> bool:
     has_cuda = torch.version.cuda is not None
     return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
-            and not (_is_neuron() or _is_tpu() or _is_hpu()))
+            and not (_is_neuron() or _is_tpu()))
 
 
 def _is_hip() -> bool:
@@ -573,12 +550,6 @@ def get_vllm_version() -> str:
         if neuron_version != MAIN_CUDA_VERSION:
             neuron_version_str = neuron_version.replace(".", "")[:3]
             version += f"{sep}neuron{neuron_version_str}"
-    elif _is_hpu():
-        # Get the Intel Gaudi Software Suite version
-        gaudi_sw_version = str(get_gaudi_sw_version())
-        if gaudi_sw_version != MAIN_CUDA_VERSION:
-            gaudi_sw_version = gaudi_sw_version.replace(".", "")[:3]
-            version += f"{sep}gaudi{gaudi_sw_version}"
     elif _is_tpu():
         version += f"{sep}tpu"
     elif _is_cpu():
@@ -625,8 +596,6 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("rocm.txt")
     elif _is_neuron():
         requirements = _read_requirements("neuron.txt")
-    elif _is_hpu():
-        requirements = _read_requirements("hpu.txt")
     elif _is_tpu():
         requirements = _read_requirements("tpu.txt")
     elif _is_cpu():
@@ -635,8 +604,7 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("xpu.txt")
     else:
         raise ValueError(
-            "Unsupported platform, please use CUDA, ROCm, Neuron, HPU, "
-            "or CPU.")
+            "Unsupported platform, please use CUDA, ROCm, Neuron, or CPU.")
     return requirements
 
 
@@ -689,10 +657,12 @@ setup(
     install_requires=get_requirements(),
     extras_require={
         "bench": ["pandas", "datasets"],
-        "tensorizer": ["tensorizer>=2.9.0"],
+        "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
-        "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
-        "audio": ["librosa", "soundfile"],  # Required for audio processing
+        "runai":
+        ["runai-model-streamer >= 0.13.3", "runai-model-streamer-s3", "boto3"],
+        "audio": ["librosa", "soundfile",
+                  "mistral_common[audio]"],  # Required for audio processing
         "video": []  # Kept for backwards compatibility
     },
     cmdclass=cmdclass,

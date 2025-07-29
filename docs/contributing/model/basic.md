@@ -1,7 +1,4 @@
----
-title: Basic Model
----
-[](){ #new-model-basic }
+# Basic Model
 
 This guide walks you through the steps to implement a basic vLLM model.
 
@@ -27,7 +24,7 @@ All vLLM modules within the model must include a `prefix` argument in their cons
 
 The initialization code should look like this:
 
-??? Code
+??? code
 
     ```python
     from torch import nn
@@ -76,6 +73,8 @@ def forward(
     self,
     input_ids: torch.Tensor,
     positions: torch.Tensor,
+    intermediate_tensors: Optional[IntermediateTensors] = None,
+    inputs_embeds: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     ...
 ```
@@ -108,7 +107,7 @@ This method should load the weights from the HuggingFace's checkpoint file and a
 
 ## 5. Register your model
 
-See [this page][new-model-registration] for instructions on how to register your new model to be used by vLLM.
+See [this page](registration.md) for instructions on how to register your new model to be used by vLLM.
 
 ## Frequently Asked Questions
 

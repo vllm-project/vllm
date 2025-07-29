@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-from typing import Final, Optional, Union
+from dataclasses import dataclass
+from typing import Any, Final, Optional, Union
 
 import jinja2
 from fastapi import Request
@@ -17,11 +17,13 @@ from vllm.entrypoints.openai.protocol import (DetokenizeRequest,
                                               ErrorResponse,
                                               TokenizeChatRequest,
                                               TokenizeRequest,
-                                              TokenizeResponse)
+                                              TokenizeResponse,
+                                              TokenizerInfoResponse)
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = init_logger(__name__)
 
@@ -58,10 +60,7 @@ class OpenAIServingTokenization(OpenAIServing):
         request_id = f"tokn-{self._base_request_id(raw_request)}"
 
         try:
-            (
-                lora_request,
-                prompt_adapter_request,
-            ) = self._maybe_get_adapters(request)
+            lora_request = self._maybe_get_adapters(request)
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
@@ -102,11 +101,8 @@ class OpenAIServingTokenization(OpenAIServing):
             self._log_inputs(request_id,
                              request_prompts[i],
                              params=None,
-                             lora_request=lora_request,
-                             prompt_adapter_request=prompt_adapter_request)
+                             lora_request=lora_request)
 
-            # Silently ignore prompt adapter since it does not affect
-            # tokenization (Unlike in Embeddings API where an error is raised)
             if isinstance(engine_prompt,
                           dict) and "prompt_token_ids" in engine_prompt:
                 input_ids.extend(engine_prompt["prompt_token_ids"])
@@ -131,21 +127,14 @@ class OpenAIServingTokenization(OpenAIServing):
 
         request_id = f"tokn-{self._base_request_id(raw_request)}"
 
-        (
-            lora_request,
-            prompt_adapter_request,
-        ) = self._maybe_get_adapters(request)
+        lora_request = self._maybe_get_adapters(request)
 
         tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
         self._log_inputs(request_id,
                          request.tokens,
                          params=None,
-                         lora_request=lora_request,
-                         prompt_adapter_request=prompt_adapter_request)
-
-        # Silently ignore prompt adapter since it does not affect tokenization
-        # (Unlike in Embeddings API where an error is raised)
+                         lora_request=lora_request)
 
         prompt_input = await self._tokenize_prompt_input_async(
             request,
@@ -155,3 +144,49 @@ class OpenAIServingTokenization(OpenAIServing):
         input_text = prompt_input["prompt"]
 
         return DetokenizeResponse(prompt=input_text)
+
+    async def get_tokenizer_info(
+        self, ) -> Union[TokenizerInfoResponse, ErrorResponse]:
+        """Get comprehensive tokenizer information."""
+        try:
+            tokenizer = await self.engine_client.get_tokenizer()
+            info = TokenizerInfo(tokenizer, self.chat_template).to_dict()
+            return TokenizerInfoResponse(**info)
+        except Exception as e:
+            return self.create_error_response(
+                f"Failed to get tokenizer info: {str(e)}")
+
+
+@dataclass
+class TokenizerInfo:
+    tokenizer: AnyTokenizer
+    chat_template: Optional[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the tokenizer configuration."""
+        return self._get_tokenizer_config()
+
+    def _get_tokenizer_config(self) -> dict[str, Any]:
+        """Get tokenizer configuration directly from the tokenizer object."""
+        config = dict(getattr(self.tokenizer, "init_kwargs", None) or {})
+
+        # Remove file path fields
+        config.pop("vocab_file", None)
+        config.pop("merges_file", None)
+
+        config = self._make_json_serializable(config)
+        config["tokenizer_class"] = type(self.tokenizer).__name__
+        if self.chat_template:
+            config["chat_template"] = self.chat_template
+        return config
+
+    def _make_json_serializable(self, obj):
+        """Convert any non-JSON-serializable objects to serializable format."""
+        if hasattr(obj, "content"):
+            return obj.content
+        elif isinstance(obj, dict):
+            return {k: self._make_json_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._make_json_serializable(item) for item in obj]
+        else:
+            return obj

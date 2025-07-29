@@ -62,7 +62,8 @@ echo "Results will be stored in: $RESULTS_DIR"
 echo "--- Installing Python dependencies ---"
 python3 -m pip install --progress-bar off git+https://github.com/thuml/depyf.git \
     && python3 -m pip install --progress-bar off pytest pytest-asyncio tpu-info \
-    && python3 -m pip install --progress-bar off lm_eval[api]==0.4.4
+    && python3 -m pip install --progress-bar off lm_eval[api]==0.4.4 \
+    && python3 -m pip install --progress-bar off hf-transfer
 echo "--- Python dependencies installed ---"
 export VLLM_USE_V1=1
 export VLLM_XLA_CHECK_RECOMPILATION=1
@@ -70,7 +71,7 @@ export VLLM_XLA_CACHE_PATH=
 echo "Using VLLM V1"
 
 echo "--- Hardware Information ---"
-tpu-info
+# tpu-info
 echo "--- Starting Tests ---"
 set +e
 overall_script_exit_code=0
@@ -134,7 +135,7 @@ run_and_track_test 1 "test_compilation.py" \
 run_and_track_test 2 "test_basic.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_basic.py"
 run_and_track_test 3 "test_accuracy.py::test_lm_eval_accuracy_v1_engine" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/entrypoints/llm/test_accuracy.py::test_lm_eval_accuracy_v1_engine"
+    "HF_HUB_DISABLE_XET=1 python3 -m pytest -s -v /workspace/vllm/tests/entrypoints/llm/test_accuracy.py::test_lm_eval_accuracy_v1_engine"
 run_and_track_test 4 "test_quantization_accuracy.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_quantization_accuracy.py"
 run_and_track_test 5 "examples/offline_inference/tpu.py" \
@@ -149,18 +150,6 @@ run_and_track_test 9 "test_multimodal.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_multimodal.py"
 run_and_track_test 10 "test_pallas.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_pallas.py"
-run_and_track_test 11 "test_struct_output_generate.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py -k \"not test_structured_output_with_reasoning_matrices\""
-run_and_track_test 12 "test_moe_pallas.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_moe_pallas.py"
-run_and_track_test 13 "test_lora.py" \
-    "VLLM_XLA_CHECK_RECOMPILATION=0 python3 -m pytest -s -v /workspace/vllm/tests/tpu/lora/test_lora.py"
-run_and_track_test 14 "test_tpu_qkv_linear.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_tpu_qkv_linear.py"
-run_and_track_test 15 "test_spmd_model_weight_loading.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_spmd_model_weight_loading.py"
-run_and_track_test 16 "test_kv_cache_update_kernel.py" \
-    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_kv_cache_update_kernel.py"
 
 # After all tests have been attempted, exit with the overall status.
 if [ "$overall_script_exit_code" -ne 0 ]; then

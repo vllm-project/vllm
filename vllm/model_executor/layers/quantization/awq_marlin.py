@@ -493,11 +493,6 @@ class AWQMoEMethod(FusedMoEMethodBase):
 
         assert activation == "silu", "Only SiLU activation is supported."
 
-        if apply_router_weight_on_input:
-            raise NotImplementedError(
-                "Apply router weight on input is not supported for"
-                "fused Marlin MoE method.")
-
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -520,6 +515,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
             topk_weights,
             topk_ids,
             quant_type_id=self.quant_type.id,
+            apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             w1_zeros=layer.w13_qzeros,

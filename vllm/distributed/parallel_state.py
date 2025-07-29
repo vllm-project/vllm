@@ -240,6 +240,8 @@ class GroupCoordinator:
 
         if current_platform.is_cuda_alike():
             self.device = torch.device(f"cuda:{local_rank}")
+        elif current_platform.is_xpu():
+            self.device = torch.device(f"xpu:{local_rank}")
         elif current_platform.is_out_of_tree():
             self.device = torch.device(
                 f"{current_platform.device_name}:{local_rank}")
@@ -269,6 +271,9 @@ class GroupCoordinator:
         from vllm.platforms import current_platform
         self.use_custom_op_call = (current_platform.is_cuda_alike()
                                    or current_platform.is_tpu())
+
+        self.use_cpu_custom_send_recv = (current_platform.is_cpu() and hasattr(
+            torch.ops._C, "init_shm_manager"))
 
     @property
     def first_rank(self):
@@ -381,6 +386,12 @@ class GroupCoordinator:
                               dim: int) -> torch.Tensor:
         return self.device_communicator.all_gather(input_, dim)
 
+    def all_gatherv(self,
+                    input_: Union[torch.Tensor, list[torch.Tensor]],
+                    dim: int = 0,
+                    sizes: Optional[list[int]] = None):
+        return self.device_communicator.all_gatherv(input_, dim, sizes)
+
     def reduce_scatter(self,
                        input_: torch.Tensor,
                        dim: int = -1) -> torch.Tensor:
@@ -398,6 +409,12 @@ class GroupCoordinator:
                                                  group_name=self.unique_name)
         else:
             return self._reduce_scatter_out_place(input_, dim)
+
+    def reduce_scatterv(self,
+                        input_: torch.Tensor,
+                        dim: int = -1,
+                        sizes: Optional[list[int]] = None) -> torch.Tensor:
+        return self.device_communicator.reduce_scatterv(input_, dim, sizes)
 
     def _reduce_scatter_out_place(self, input_: torch.Tensor,
                                   dim: int) -> torch.Tensor:
@@ -649,6 +666,11 @@ class GroupCoordinator:
             dst = (self.rank_in_group + 1) % self.world_size
         assert dst < self.world_size, f"Invalid dst rank ({dst})"
 
+        if self.use_cpu_custom_send_recv:
+            self.device_communicator.send_tensor_dict(  # type: ignore
+                tensor_dict, dst)
+            return None
+
         metadata_list: list[tuple[Any, Any]] = []
         assert isinstance(
             tensor_dict,
@@ -703,6 +725,10 @@ class GroupCoordinator:
         if src is None:
             src = (self.rank_in_group - 1) % self.world_size
         assert src < self.world_size, f"Invalid src rank ({src})"
+
+        if self.use_cpu_custom_send_recv:
+            return self.device_communicator.recv_tensor_dict(  # type: ignore
+                src)
 
         recv_metadata_list = self.recv_object(src=src)
         tensor_dict: dict[str, Any] = {}
@@ -1317,13 +1343,13 @@ def in_the_same_node_as(pg: Union[ProcessGroup, StatelessProcessGroup],
 
 def is_global_first_rank() -> bool:
     """
-    Check if the current process is the first rank globally across all 
+    Check if the current process is the first rank globally across all
     parallelism strategies (PP, TP, DP, EP, etc.).
-    
+
     Unlike group-specific checks like `get_tensor_model_parallel_rank() == 0`
     or `get_pp_group().is_first_rank`, this function checks the global rank
     across all parallelism dimensions.
-    
+
     Returns:
         bool: True if this is the global first rank (rank 0), False otherwise.
               Returns True if distributed is not initialized (single process).
@@ -1352,7 +1378,7 @@ def _node_count(pg: Union[ProcessGroup, StatelessProcessGroup]) -> int:
 
     Args:
         pg: The process group to analyze
-        
+
     Returns:
         int: The total number of nodes
     """

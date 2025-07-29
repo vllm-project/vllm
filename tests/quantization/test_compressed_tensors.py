@@ -17,7 +17,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW4A4Fp4, CompressedTensorsW4A16Fp4,
     CompressedTensorsW4A16Sparse24, CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
-    CompressedTensorsWNA16, cutlass_fp4_supported)
+    CompressedTensorsWNA16)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    cutlass_fp4_supported)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     sparse_cutlass_supported)
 from vllm.platforms import current_platform
@@ -45,7 +47,8 @@ def use_v0_only(monkeypatch):
     """
     This module relies on V0 internals, so set VLLM_USE_V1=0.
     """
-    monkeypatch.setenv('VLLM_USE_V1', '0')
+    if not current_platform.is_cpu():
+        monkeypatch.setenv('VLLM_USE_V1', '0')
 
 
 @pytest.mark.parametrize(

@@ -13,7 +13,7 @@ def parse_args():
     # Set example specific arguments
     parser.set_defaults(
         model="intfloat/e5-mistral-7b-instruct",
-        task="embed",
+        runner="pooling",
         enforce_eager=True,
         max_model_len=1024,
     )
@@ -30,11 +30,11 @@ def main(args: Namespace):
     ]
 
     # Create an LLM.
-    # You should pass task="embed" for embedding models
-    model = LLM(**vars(args))
+    # You should pass runner="pooling" for embedding models
+    llm = LLM(**vars(args))
 
     # Generate embedding. The output is a list of EmbeddingRequestOutputs.
-    outputs = model.embed(prompts)
+    outputs = llm.embed(prompts)
 
     # Print the outputs.
     print("\nGenerated Outputs:\n" + "-" * 60)

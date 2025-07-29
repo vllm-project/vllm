@@ -1,7 +1,4 @@
----
-title: Using Docker
----
-[](){ #deployment-docker }
+# Using Docker
 
 [](){ #deployment-docker-pre-built-image }
 
@@ -32,7 +29,7 @@ podman run --gpus all \
   --model mistralai/Mistral-7B-v0.1
 ```
 
-You can add any other [engine-args][engine-args] you need after the image tag (`vllm/vllm-openai:latest`).
+You can add any other [engine-args](../configuration/engine_args.md) you need after the image tag (`vllm/vllm-openai:latest`).
 
 !!! note
     You can either use the `ipc=host` flag or `--shm-size` flag to allow the
@@ -97,7 +94,7 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
     flags to speed up build process. However, ensure your `max_jobs` is substantially larger than `nvcc_threads` to get the most benefits.
     Keep an eye on memory usage with parallel jobs as it can be substantial (see example below).
 
-??? Command
+??? console "Command"
 
     ```bash
     # Example of building on Nvidia GH200 server. (Memory usage: ~15GB, Build time: ~1475s / ~25 min, Image size: 6.93GB)

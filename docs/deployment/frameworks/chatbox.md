@@ -1,7 +1,4 @@
----
-title: Chatbox
----
-[](){ #deployment-chatbox }
+# Chatbox
 
 [Chatbox](https://github.com/chatboxai/chatbox) is a desktop client for LLMs, available on Windows, Mac, Linux.
 

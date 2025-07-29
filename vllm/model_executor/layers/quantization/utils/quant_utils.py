@@ -3,22 +3,41 @@
 """This file is used for /tests and /benchmarks"""
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Optional
+from typing import ClassVar, NamedTuple, Optional
 
 import numpy
 import torch
 
+from vllm._custom_ops import cutlass_scaled_mm_supports_fp4
 from vllm.model_executor.layers.quantization.qqq import (
     MARLIN_QQQ_SUPPORTED_NUM_BITS)
+from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
-SUPPORTED_GPTQ_QUANT_TYPES = [scalar_types.uint4b8, scalar_types.uint8b128]
-SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
+
+# Use proxy as NamedTuple direct subclasses cannot have static members
+class _GroupShape(NamedTuple):
+    row: int
+    col: int
+
+
+class GroupShape(_GroupShape):
+    """
+    This class describes the quantization group shape.
+    It includes static members for common shapes (per-tensor, per-token).
+    """
+
+    # Aliases for common quantization group shapes
+    PER_TENSOR: ClassVar['GroupShape']
+    PER_TOKEN: ClassVar['GroupShape']
+
+
+GroupShape.PER_TENSOR = GroupShape(-1, -1)
+GroupShape.PER_TOKEN = GroupShape(1, -1)
 
 
 # Normalize the group_shape to the full extent for any dims that are -1
-def _normalize_quant_group_shape(x: torch.Tensor, group_shape: tuple[int,
-                                                                     int]):
+def _normalize_quant_group_shape(x: torch.Tensor, group_shape: GroupShape):
     # -1 means full extent
     return (group_shape[0] if group_shape[0] > 0 else x.shape[-2],
             group_shape[1] if group_shape[1] > 0 else x.shape[-1])
@@ -58,7 +77,7 @@ def group_broadcast(t, shape):
 #               (i.e. per-token-per-group)
 def scaled_quantize(
     x: torch.Tensor,
-    group_shape: tuple[int, int],
+    group_shape: GroupShape,
     quant_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     group_shape = _normalize_quant_group_shape(x, group_shape)
@@ -99,7 +118,7 @@ def scaled_quantize(
 def scaled_dequantize(
     x_q: torch.Tensor,
     x_s: torch.Tensor,
-    group_shape: Optional[tuple[int, int]] = None,
+    group_shape: Optional[GroupShape] = None,
     out_dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if group_shape is not None:
@@ -330,6 +349,10 @@ def quantize_weights(w: torch.Tensor,
         w_s if group_size is not None else None,
         maybe_w_zp,
     )
+
+
+SUPPORTED_GPTQ_QUANT_TYPES = [scalar_types.uint4b8, scalar_types.uint8b128]
+SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 
 
 def gptq_quantize_weights(w: torch.Tensor,
@@ -571,3 +594,56 @@ def awq_pack(
     q_w = q_w.reshape((-1, size_n)).contiguous()
 
     return pack_cols(q_w, num_bits, size_k, size_n)
+
+
+def swizzle_blockscale(scale: torch.Tensor) -> torch.Tensor:
+    """
+    Pad and block-interleave the FP4 block-scales so that they match the data
+    layout expected by the CUTLASS / FlashInfer kernels.
+
+    Parameters
+    ----------
+    scale: torch.Tensor
+
+    Returns
+    -------
+    torch.Tensor
+        The swizzled tensor with the same logical shape as *scale*.
+    """
+    assert scale.dtype == torch.float8_e4m3fn, (
+        "swizzle_blockscale expects the input tensor to be in "
+        "torch.float8_e4m3fn format.")
+
+    scale_ndim = scale.ndim
+    if scale_ndim == 2:
+        scale = scale.unsqueeze(0)  # (1, M, K)
+    assert scale.ndim == 3, "Expected a 2-D or 3-D tensor for block scales."
+
+    B, M, K = scale.shape
+
+    def _round_up(x: int, m: int) -> int:
+        return (x + m - 1) // m * m
+
+    M_padded = _round_up(M, 128)
+    K_padded = _round_up(K, 4)
+
+    padded = torch.zeros((B, M_padded, K_padded),
+                         dtype=scale.dtype,
+                         device=scale.device)
+    padded[:B, :M, :K] = scale
+
+    # Reshape / permute to the layout required by the kernel.
+    padded = padded.reshape(B, M_padded // 128, 4, 32, K_padded // 4, 4)
+    swizzled = padded.permute(0, 1, 4, 3, 2, 5).contiguous().cuda()
+
+    if scale_ndim == 2:
+        return swizzled.reshape(M, K)
+    return swizzled.reshape(B, M, K)
+
+
+def cutlass_fp4_supported() -> bool:
+    if not current_platform.is_cuda():
+        return False
+    capability_tuple = current_platform.get_device_capability()
+    capability = -1 if capability_tuple is None else capability_tuple.to_int()
+    return cutlass_scaled_mm_supports_fp4(capability)

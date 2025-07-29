@@ -14,6 +14,8 @@ import torch
 
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.utils.machete_utils import (
+    query_machete_supported_group_sizes)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_rows, quantize_weights)
 from vllm.platforms import current_platform
@@ -45,8 +47,6 @@ MNK_SHAPES = [
     (1024, 4096, 8192),
     (1024, 8192, 4096),
 ]
-
-GROUP_SIZES_TO_TEST: list[Optional[int]] = [128, -1]
 
 
 @dataclass
@@ -270,7 +270,7 @@ def test_machete_all_schedules(shape, types: TypeConfig):
     if types.group_scale_type is None:
         group_sizes = [None]
     else:
-        group_sizes = GROUP_SIZES_TO_TEST
+        group_sizes = query_machete_supported_group_sizes(types.act_type)
 
     for group_size in group_sizes:
         if not group_size_valid(shape, group_size):
@@ -299,7 +299,7 @@ def test_machete_heuristic(shape, types: TypeConfig):
     if types.group_scale_type is None:
         group_sizes = [None]
     else:
-        group_sizes = GROUP_SIZES_TO_TEST
+        group_sizes = query_machete_supported_group_sizes(types.act_type)
 
     for group_size in group_sizes:
         if not group_size_valid(shape, group_size):

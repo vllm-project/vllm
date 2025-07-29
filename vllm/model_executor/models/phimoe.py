@@ -68,6 +68,7 @@ class PhiMoEConfig(PretrainedConfig):
         num_hidden_layers=32,
         num_attention_heads=32,
         num_key_value_heads=8,
+        head_dim=None,
         hidden_act="silu",
         max_position_embeddings=4096 * 32,
         initializer_range=0.02,
@@ -101,8 +102,11 @@ class PhiMoEConfig(PretrainedConfig):
         # for backward compatibility
         if num_key_value_heads is None:
             num_key_value_heads = num_attention_heads
+        if head_dim is None:
+            head_dim = hidden_size // num_attention_heads
 
         self.num_key_value_heads = num_key_value_heads
+        self.head_dim = head_dim
         self.hidden_act = hidden_act
         self.initializer_range = initializer_range
         self.rms_norm_eps = rms_norm_eps
@@ -294,6 +298,7 @@ class PhiMoEAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
+        head_dim: Optional[int] = None,
         max_position: int = 4096 * 32,
         rope_theta: float = 10000,
         cache_config: Optional[CacheConfig] = None,
@@ -317,7 +322,9 @@ class PhiMoEAttention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = hidden_size // self.total_num_heads
+        if head_dim is None:
+            head_dim = hidden_size // num_heads
+        self.head_dim = head_dim
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -387,6 +394,8 @@ class PhiMoEDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
+            head_dim=getattr(config, "head_dim",
+                             self.hidden_size // config.num_attention_heads),
             rope_theta=rope_theta,
             cache_config=cache_config,
             quant_config=quant_config,
@@ -507,6 +516,14 @@ class PhiMoEModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="w1",
+            ckpt_down_proj_name="w2",
+            ckpt_up_proj_name="w3",
+            num_experts=self.config.num_local_experts,
+        )
+
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -516,14 +533,9 @@ class PhiMoEModel(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
 
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="w1",
-            ckpt_down_proj_name="w2",
-            ckpt_up_proj_name="w3",
-            num_experts=self.config.num_local_experts)
-
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
             if (self.quant_config is not None and
                 (scale_name := self.quant_config.get_cache_scale(name))):
@@ -663,3 +675,6 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return self.model.get_expert_mapping()

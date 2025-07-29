@@ -735,6 +735,15 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     instantiated.
     """
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "(<image>./</image>)"
+        if modality.startswith("video"):
+            return "(<video>./</video>)"
+
+        raise ValueError("Only image or video modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config

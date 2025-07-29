@@ -7,7 +7,6 @@ from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId,
                                         DeviceAwareBlockAllocator)
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 from vllm.core.block.prefix_caching_block import PrefixCachingBlockAllocator
-from vllm.platforms import current_platform
 from vllm.utils import Device
 
 
@@ -56,8 +55,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             - The block IDs are assigned contiguously, with GPU block IDs coming
                 before CPU block IDs.
         """
-        # For HPU, block id 0 is used only for padding
-        reserved_blocks = 1 if current_platform.is_hpu() else 0
+        reserved_blocks = 0
         block_ids = list(
             range(reserved_blocks, num_gpu_blocks + num_cpu_blocks))
         num_gpu_blocks -= reserved_blocks

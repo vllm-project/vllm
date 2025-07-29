@@ -191,3 +191,32 @@ class TestModel:
         assert score_response.status_code == 400
         assert "Please, select a smaller truncation size." in \
             score_response.text
+
+    def test_invocations(self, server: RemoteOpenAIServer, model: dict[str,
+                                                                       Any]):
+        text_1 = "What is the capital of France?"
+        text_2 = "The capital of France is Paris."
+
+        request_args = {
+            "model": model["name"],
+            "text_1": text_1,
+            "text_2": text_2,
+        }
+
+        score_response = requests.post(server.url_for("score"),
+                                       json=request_args)
+        score_response.raise_for_status()
+
+        invocation_response = requests.post(server.url_for("invocations"),
+                                            json=request_args)
+        invocation_response.raise_for_status()
+
+        score_output = score_response.json()
+        invocation_output = invocation_response.json()
+
+        assert score_output.keys() == invocation_output.keys()
+        for score_data, invocation_data in zip(score_output["data"],
+                                               invocation_output["data"]):
+            assert score_data.keys() == invocation_data.keys()
+            assert score_data["score"] == pytest.approx(
+                invocation_data["score"], rel=0.01)

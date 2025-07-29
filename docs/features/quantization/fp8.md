@@ -1,7 +1,4 @@
----
-title: FP8 W8A8
----
-[](){ #fp8 }
+# FP8 W8A8
 
 vLLM supports FP8 (8-bit floating point) weight and activation quantization using hardware acceleration on GPUs such as Nvidia H100 and AMD MI300x.
 Currently, only Hopper and Ada Lovelace GPUs are officially supported for W8A8.
@@ -58,7 +55,7 @@ For FP8 quantization, we can recover accuracy with simple RTN quantization. We r
 
 Since simple RTN does not require data for weight quantization and the activations are quantized dynamically, we do not need any calibration data for this quantization flow.
 
-??? Code
+??? code
 
     ```python
     from llmcompressor.transformers import oneshot
@@ -89,8 +86,9 @@ Load and run the model in `vllm`:
 
 ```python
 from vllm import LLM
-model = LLM("./Meta-Llama-3-8B-Instruct-FP8-Dynamic")
-result = model.generate("Hello my name is")
+
+llm = LLM("./Meta-Llama-3-8B-Instruct-FP8-Dynamic")
+result = llm.generate("Hello my name is")
 print(result[0].outputs[0].text)
 ```
 
@@ -128,9 +126,10 @@ In this mode, all Linear modules (except for the final `lm_head`) have their wei
 
 ```python
 from vllm import LLM
-model = LLM("facebook/opt-125m", quantization="fp8")
+
+llm = LLM("facebook/opt-125m", quantization="fp8")
 # INFO 06-10 17:55:42 model_runner.py:157] Loading model weights took 0.1550 GB
-result = model.generate("Hello, my name is")
+result = llm.generate("Hello, my name is")
 print(result[0].outputs[0].text)
 ```
 
