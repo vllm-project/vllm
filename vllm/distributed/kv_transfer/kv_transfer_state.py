@@ -60,7 +60,7 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
     if (vllm_config.kv_transfer_config.is_kv_transfer_instance
             and _KV_CONNECTOR_AGENT is None):
         if envs.VLLM_USE_V1:
-            _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector_v1(
+            _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector(
                 config=vllm_config, role=KVConnectorRole.WORKER)
         else:
             raise ValueError("V0 is no longer supported")

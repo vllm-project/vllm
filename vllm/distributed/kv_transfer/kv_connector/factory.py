@@ -33,7 +33,7 @@ class KVConnectorFactory:
         cls._registry[name] = loader
 
     @classmethod
-    def create_connector_v1(
+    def create_connector(
         cls,
         config: "VllmConfig",
         role: KVConnectorRole,
