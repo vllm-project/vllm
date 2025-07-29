@@ -96,7 +96,7 @@ Although we try to have great default configs, we strongly recommend you check o
 
 #### Profiling
 
-The auto-tuner provides a profile of optimized configurations as its final step. However, interpreting this profile can be challenging for new users. We plan to expand this section in the future with more detailed guidance. In the meantime, you can learn how to collect a TPU profile using vLLM's native profiling tools [here](../examples/offline_inference/profiling_tpu/README.md). This profile can provide valuable insights into your workload's performance.
+The auto-tuner provides a profile of optimized configurations as its final step. However, interpreting this profile can be challenging for new users. We plan to expand this section in the future with more detailed guidance. In the meantime, you can learn how to collect a TPU profile using vLLM's native profiling tools [here](../examples/offline_inference/profiling_tpu.md). This profile can provide valuable insights into your workload's performance.
 
 #### SPMD
 More details to come.
