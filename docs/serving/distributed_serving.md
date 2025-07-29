@@ -62,7 +62,7 @@ If a single node lacks sufficient GPUs to hold the model, deploy vLLM across mul
 
 ### What is Ray?
 
-Ray is a distributed computing framework that makes your code scale-agnostic. Multi-node vLLM deployments require Ray as the runtime engine.
+Ray is a distributed computing framework for scaling Python programs. Multi-node vLLM deployments require Ray as the runtime engine.
 
 vLLM uses Ray to manage the distributed execution of tasks across multiple nodes and control where execution happens.
 
