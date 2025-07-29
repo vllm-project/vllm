@@ -8,8 +8,8 @@ before returning them.
 
 !!! note
     We currently support pooling models primarily as a matter of convenience.
-    As shown in the [Compatibility Matrix](../features/compatibility_matrix.md), most vLLM features are not applicable to
-    pooling models as they only work on the generation or decode stage, so performance may not improve as much.
+
+    We are now planning to optimize pooling models in vLLM. Please comment on <gh-issue:21796> if you have any suggestions!
 
 ## Configuration
 
