@@ -26,8 +26,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import SupportsPP
 # yapf: disable
-from vllm.model_executor.models.whisper import (
-    WhisperEncoder, WhisperForConditionalGeneration)
+from vllm.model_executor.models.whisper import WhisperEncoder
 # yapf: enable
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -49,6 +48,112 @@ from .utils import (flatten_bn, init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
+
+ISO639_1_SUPPORTED_LANGS = {
+    "ar": "Arabic",
+    "nl": "Dutch",
+    "en": "English",
+    "fr": "French",
+    "de": "German",
+    "hi": "Hindi",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "es": "Spanish",
+}
+
+ISO639_1_OTHER_LANGS = {
+    'zh': 'chinese',
+    'ru': 'russian',
+    'ko': 'korean',
+    'ja': 'japanese',
+    'tr': 'turkish',
+    'pl': 'polish',
+    'ca': 'catalan',
+    'sv': 'swedish',
+    'id': 'indonesian',
+    'fi': 'finnish',
+    'vi': 'vietnamese',
+    'he': 'hebrew',
+    'uk': 'ukrainian',
+    'el': 'greek',
+    'ms': 'malay',
+    'cs': 'czech',
+    'ro': 'romanian',
+    'da': 'danish',
+    'hu': 'hungarian',
+    'ta': 'tamil',
+    'no': 'norwegian',
+    'th': 'thai',
+    'ur': 'urdu',
+    'hr': 'croatian',
+    'bg': 'bulgarian',
+    'lt': 'lithuanian',
+    'la': 'latin',
+    'mi': 'maori',
+    'ml': 'malayalam',
+    'cy': 'welsh',
+    'sk': 'slovak',
+    'te': 'telugu',
+    'fa': 'persian',
+    'lv': 'latvian',
+    'bn': 'bengali',
+    'sr': 'serbian',
+    'az': 'azerbaijani',
+    'sl': 'slovenian',
+    'kn': 'kannada',
+    'et': 'estonian',
+    'mk': 'macedonian',
+    'br': 'breton',
+    'eu': 'basque',
+    'is': 'icelandic',
+    'hy': 'armenian',
+    'ne': 'nepali',
+    'mn': 'mongolian',
+    'bs': 'bosnian',
+    'kk': 'kazakh',
+    'sq': 'albanian',
+    'sw': 'swahili',
+    'gl': 'galician',
+    'mr': 'marathi',
+    'pa': 'punjabi',
+    'si': 'sinhala',
+    'km': 'khmer',
+    'sn': 'shona',
+    'yo': 'yoruba',
+    'so': 'somali',
+    'af': 'afrikaans',
+    'oc': 'occitan',
+    'ka': 'georgian',
+    'be': 'belarusian',
+    'tg': 'tajik',
+    'sd': 'sindhi',
+    'gu': 'gujarati',
+    'am': 'amharic',
+    'yi': 'yiddish',
+    'lo': 'lao',
+    'uz': 'uzbek',
+    'fo': 'faroese',  # codespell:ignore
+    'ht': 'haitian creole',
+    'ps': 'pashto',
+    'tk': 'turkmen',
+    'nn': 'nynorsk',
+    'mt': 'maltese',
+    'sa': 'sanskrit',
+    'lb': 'luxembourgish',
+    'my': 'myanmar',
+    'bo': 'tibetan',
+    'tl': 'tagalog',
+    'mg': 'malagasy',
+    'as': 'assamese',
+    'tt': 'tatar',
+    'haw': 'hawaiian',
+    'ln': 'lingala',
+    'ha': 'hausa',
+    'ba': 'bashkir',
+    'jw': 'javanese',
+    'su': 'sundanese',
+    'yue': 'cantonese'
+}
 
 
 class VoxtralProcessorAdapter:
@@ -441,7 +546,7 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     # for speech-to-text transcription
     def get_generation_prompt(cls, audio: np.ndarray,
                               model_config: ModelConfig,
-                              stt_config: SpeechToTextConfig, language: str,
+                              stt_config: SpeechToTextConfig, language: str | None,
                               task_type: str,
                               request_prompt: str) -> PromptType:
         tokenizer = cached_tokenizer_from_config(model_config)
@@ -459,8 +564,20 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     @classmethod
     def validate_language(cls, language: str) -> bool:
-        # same as whisper
-        return WhisperForConditionalGeneration.validate_language(language)
+        if language in ISO639_1_SUPPORTED_LANGS:
+            return True
+        elif language in ISO639_1_OTHER_LANGS:
+            logger.warning(
+                "The selected language %s is not natively supported "
+                "by Voxtral. Results may be less accurate for this choice. "
+                "Consider using an audio from the supported set of "
+                "languages: %s", language,
+                list(ISO639_1_SUPPORTED_LANGS.values()))
+            return True
+        else:
+            raise ValueError(
+                f"Unsupported language: {language}. Language should "
+                f"be one of: {list(ISO639_1_SUPPORTED_LANGS.values())}")
 
     @classmethod
     def get_num_audio_tokens(cls, audio_duration_s: float,
