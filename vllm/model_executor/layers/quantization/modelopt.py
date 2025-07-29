@@ -432,6 +432,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        num_share_fusion_replicas: int = 0,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
         if enable_eplb:
             raise NotImplementedError(
@@ -449,6 +451,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
+            num_share_fusion_replicas=num_share_fusion_replicas,
+            routed_scaling_factor=routed_scaling_factor,
         )
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_experts)

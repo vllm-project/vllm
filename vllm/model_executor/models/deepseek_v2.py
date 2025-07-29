@@ -135,6 +135,9 @@ class DeepseekV2MoE(nn.Module):
         parallel_config = vllm_config.parallel_config
         self.enable_eplb = enable_eplb
 
+        self.num_share_fusion_replicas = \
+            vllm_config.parallel_config.num_share_fusion_replicas
+
         self.n_redundant_experts = parallel_config.num_redundant_experts
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = (self.n_logical_experts +
@@ -147,8 +150,10 @@ class DeepseekV2MoE(nn.Module):
                                     self.n_local_physical_experts)
 
         self.experts = FusedMoE(
-            num_experts=config.n_routed_experts,
-            top_k=config.num_experts_per_tok,
+            num_experts=config.n_routed_experts +
+            self.num_share_fusion_replicas,
+            top_k=config.num_experts_per_tok +
+            min(self.num_share_fusion_replicas, 1),
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             reduce_results=False,
@@ -161,7 +166,9 @@ class DeepseekV2MoE(nn.Module):
             scoring_func=config.scoring_func,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
-            num_redundant_experts=self.n_redundant_experts)
+            num_redundant_experts=self.n_redundant_experts,
+            routed_scaling_factor=config.routed_scaling_factor,
+        )
 
         if config.n_shared_experts is not None:
             intermediate_size = (config.moe_intermediate_size *
@@ -179,8 +186,11 @@ class DeepseekV2MoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-        if self.n_shared_experts is not None:
+        if (self.n_shared_experts is not None
+                and self.num_share_fusion_replicas == 0):
             shared_output = self.shared_experts(hidden_states)
+        else:
+            shared_output = None
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
@@ -733,6 +743,8 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        self.num_share_fusion_replicas = \
+            vllm_config.parallel_config.num_share_fusion_replicas
         self.model = DeepseekV2Model(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
@@ -854,13 +866,52 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
 
+        if self.num_share_fusion_replicas > 0:
+            print("Enabling share expert fusion for DeepseekV2ForCausalLM",
+                  self.num_share_fusion_replicas)
+            weights_list = list(weights)
+            weights_dict = {k: v for (k, v) in weights_list}
+            ## We first check if share expert have identical
+            ## suffixes as routed experts, if no, we raise error
+            for moe_layer in range(self.config.num_hidden_layers):
+                if moe_layer < self.config.first_k_dense_replace:
+                    continue
+                share_prefix = f"model.layers.{moe_layer}.mlp.shared_experts."
+                routed_prefix = f"model.layers.{moe_layer}.mlp.experts.0."
+
+                share_suffixes = set()
+                routed_suffixes = set()
+                for k in weights_dict:
+                    if k.startswith(share_prefix):
+                        share_suffixes.add(k.replace(share_prefix, ""))
+                    if k.startswith(routed_prefix):
+                        routed_suffixes.add(k.replace(routed_prefix, ""))
+            if routed_suffixes != share_suffixes:
+                raise ValueError(
+                    "Share expert and routed experts are not identical"
+                    "thus cannot enable share expert fusion")
+
+            for moe_layer in range(self.config.num_hidden_layers):
+                if moe_layer < self.config.first_k_dense_replace:
+                    continue
+                for num_repeat in range(self.num_share_fusion_replicas):
+                    prefix = f"model.layers.{moe_layer}.mlp.shared_experts."
+                    for k in weights_dict:
+                        if k.startswith(prefix):
+                            weights_list.append((k.replace(
+                                "shared_experts", "experts."
+                                f"{self.config.n_routed_experts + num_repeat}"
+                            ), weights_dict[k].clone()))
+            weights = weights_list
+
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts,
+            num_experts=self.config.n_routed_experts +
+            self.num_share_fusion_replicas,
             num_redundant_experts=self.num_redundant_experts)
 
         params_dict = dict(self.named_parameters())
