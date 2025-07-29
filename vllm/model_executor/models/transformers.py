@@ -662,8 +662,9 @@ class TransformersModel(TransformersBase):
         orig_to_new_prefix={
             # Add `model.` prefix for base model checkpoints
             "": "model.",
-            # Remove duplicated `model.` if checkpoint was ModelForCausalLM
-            "model.model.": "model."
+            # Remove `model.` from places it should not be
+            "model.model.": "model.",
+            "model.score": "score",
         })
 
 
