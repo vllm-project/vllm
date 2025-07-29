@@ -9,7 +9,6 @@ from torch.nn.parameter import Parameter
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-from vllm.distributed import get_ep_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -867,32 +866,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def select_gemm_impl(self, prepare_finalize,
                          moe) -> mk.FusedMoEPermuteExpertsUnpermute:
 
-        assert moe is not None
-        assert prepare_finalize is not None
-        experts = None
-        all2all_manager = get_ep_group().device_communicator.all2all_manager
-        assert all2all_manager is not None
-        if self.allow_flashinfer_cutlass:
-            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
-                FlashInferExperts)
-            logger.debug_once("Using FlashInferExperts")
-            experts = FlashInferExperts(
-                use_nvfp4_w4a4=True,
-                use_dp=moe.moe_parallel_config.dp_size > 1,
-                ep_rank=moe.moe_parallel_config.ep_rank,
-                ep_size=moe.moe_parallel_config.ep_size,
-                tp_rank=moe.moe_parallel_config.tp_rank,
-                tp_size=moe.moe_parallel_config.tp_size,
-            )
-        else:
-            assert moe.dp_size > 1
-            logger.debug_once("Using CutlassExpertsFp4")
-            # Currently CutlassExpertsFp4 doesn't support DP
-            raise ValueError("CutlassExpertsFp4 doesn't support DP. "
-                             "Use flashinfer CUTLASS FusedMoE backend instead "
-                             "(set VLLM_USE_FLASHINFER_MOE_FP4=1)")
+        assert moe is not None and prepare_finalize is not None
+        from vllm.model_executor.layers.quantization.utils.nvfp4_support import (  # noqa: E501
+            select_nvfp4_gemm_impl)
 
-        return experts
+        return select_nvfp4_gemm_impl(self.allow_flashinfer_cutlass, moe,
+                                      logger)
 
     def uses_weight_scale_2_pattern(self) -> bool:
         """

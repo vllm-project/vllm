@@ -12,7 +12,6 @@ from compressed_tensors.quantization import (ActivationOrdering,
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.distributed import get_ep_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE, FusedMoEActivationFormat, FusedMoEConfig, FusedMoEMethodBase,
@@ -275,29 +274,11 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
     def select_gemm_impl(self, prepare_finalize, moe):
         """Return the appropriate GEMM experts implementation."""
         assert moe is not None and prepare_finalize is not None
+        from vllm.model_executor.layers.quantization.utils.nvfp4_support import (  # noqa: E501
+            select_nvfp4_gemm_impl)
 
-        all2all_manager = get_ep_group().device_communicator.all2all_manager
-        assert all2all_manager is not None
-
-        if self.allow_flashinfer_cutlass:
-            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa
-                FlashInferExperts)
-
-            experts = FlashInferExperts(
-                use_nvfp4_w4a4=True,
-                use_dp=moe.moe_parallel_config.dp_size > 1,
-                ep_rank=moe.moe_parallel_config.ep_rank,
-                ep_size=moe.moe_parallel_config.ep_size,
-                tp_rank=moe.moe_parallel_config.tp_rank,
-                tp_size=moe.moe_parallel_config.tp_size,
-            )
-            return experts
-
-        # Native CUTLASS experts currently don't support DP
-        # TP case won't call this function
-        raise ValueError(
-            "CutlassExpertsFp4 doesn't support DP. Use flashinfer CUTLASS "
-            "Fused MoE backend instead (set VLLM_USE_FLASHINFER_MOE_FP4=1)")
+        return select_nvfp4_gemm_impl(self.allow_flashinfer_cutlass, moe,
+                                      logger)
 
     def apply(
         self,
