@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -297,6 +298,10 @@ class repackage_wheel(build_ext):
             ]).decode("utf-8")
             upstream_main_commit = json.loads(resp_json)["sha"]
 
+            # In Docker build context, .git may be immutable or missing.
+            if envs.VLLM_DOCKER_BUILD_CONTEXT:
+                return upstream_main_commit
+
             # Check if the upstream_main_commit exists in the local repo
             try:
                 subprocess.check_output(
@@ -357,19 +362,48 @@ class repackage_wheel(build_ext):
             # create a temporary directory to store the wheel
             temp_dir = tempfile.mkdtemp(prefix="vllm-wheels")
             wheel_path = os.path.join(temp_dir, wheel_filename)
-
             print(f"Downloading wheel from {wheel_location} to {wheel_path}")
-
             from urllib.request import urlretrieve
-
             try:
                 urlretrieve(wheel_location, filename=wheel_path)
             except Exception as e:
                 from setuptools.errors import SetupError
-
                 raise SetupError(
                     f"Failed to get vLLM wheel from {wheel_location}") from e
 
+        # During a docker build: determine correct filename, copy wheel.
+        if envs.VLLM_DOCKER_BUILD_CONTEXT:
+            dist_dir = "/workspace/dist"
+            os.makedirs(dist_dir, exist_ok=True)
+            # Determine correct wheel filename from METADATA
+            with zipfile.ZipFile(wheel_path, "r") as z:
+                metadata_file = next(
+                    (n for n in z.namelist()
+                     if n.endswith(".dist-info/METADATA")),
+                    None,
+                )
+                if not metadata_file:
+                    raise RuntimeError(
+                        "Could not find METADATA in precompiled wheel.")
+                metadata = z.read(metadata_file).decode()
+                version_line = next((line for line in metadata.splitlines()
+                                     if line.startswith("Version: ")), None)
+                if not version_line:
+                    raise RuntimeError(
+                        "Could not determine version from METADATA.")
+                version = version_line.split(": ")[1].strip()
+
+            # Build correct filename using internal version
+            arch_tag = "cp38-abi3-manylinux1_x86_64"
+            corrected_wheel_name = f"vllm-{version}-{arch_tag}.whl"
+            final_wheel_path = os.path.join(dist_dir, corrected_wheel_name)
+
+            print(f"Docker build context detected, copying precompiled wheel "
+                  f"({version}) to {final_wheel_path}")
+            shutil.copy2(wheel_path, final_wheel_path)
+            return
+
+        # Unzip the wheel when not in Docker context
         with zipfile.ZipFile(wheel_path) as wheel:
             files_to_copy = [
                 "vllm/_C.abi3.so",
@@ -378,15 +412,9 @@ class repackage_wheel(build_ext):
                 "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                 "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                 "vllm/cumem_allocator.abi3.so",
-                # "vllm/_version.py", # not available in nightly wheels yet
             ]
-
             file_members = list(
                 filter(lambda x: x.filename in files_to_copy, wheel.filelist))
-
-            # vllm_flash_attn python code:
-            # Regex from
-            #  `glob.translate('vllm/vllm_flash_attn/**/*.py', recursive=True)`
             compiled_regex = re.compile(
                 r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py")
             file_members += list(
@@ -403,11 +431,8 @@ class repackage_wheel(build_ext):
                     package_data[package_name] = []
 
                 wheel.extract(file)
-                if file_name.endswith(".py"):
-                    # python files shouldn't be added to package_data
-                    continue
-
-                package_data[package_name].append(file_name)
+                if not file_name.endswith(".py"):
+                    package_data[package_name].append(file_name)
 
 
 def _no_device() -> bool:
@@ -415,6 +440,9 @@ def _no_device() -> bool:
 
 
 def _is_cuda() -> bool:
+    # Allow forced CUDA in Docker/precompiled builds, even without torch.cuda
+    if envs.VLLM_USE_PRECOMPILED and envs.VLLM_DOCKER_BUILD_CONTEXT:
+        return True
     has_cuda = torch.version.cuda is not None
     return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
             and not (_is_neuron() or _is_tpu()))
