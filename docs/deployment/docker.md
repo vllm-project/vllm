@@ -10,11 +10,11 @@ The image can be used to run OpenAI compatible server and is available on Docker
 ```bash
 docker run --runtime nvidia --gpus all \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
-    --env "HUGGING_FACE_HUB_TOKEN=<secret>" \
+    --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" \
     -p 8000:8000 \
     --ipc=host \
     vllm/vllm-openai:latest \
-    --model mistralai/Mistral-7B-v0.1
+    --model Qwen/Qwen-0.6B
 ```
 
 This image can also be used with other container engines such as [Podman](https://podman.io/).
@@ -25,8 +25,8 @@ podman run --gpus all \
   --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" \
   -p 8000:8000 \
   --ipc=host \
-  vllm/vllm-openai:latest \
-  --model mistralai/Mistral-7B-v0.1
+  docker.io/vllm/vllm-openai:latest \
+  --model Qwen/Qwen-0.6B
 ```
 
 You can add any other [engine-args](../configuration/engine_args.md) you need after the image tag (`vllm/vllm-openai:latest`).
