@@ -15,10 +15,9 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
                                                    MLACommonMetadata)
 
-FLASHINFER_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
-
 logger = init_logger(__name__)
 
+FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 
 class FlashInferMLABackend(MLACommonBackend):
 
@@ -30,6 +29,12 @@ class FlashInferMLABackend(MLACommonBackend):
     def get_impl_cls() -> type["FlashInferMLAImpl"]:
         return FlashInferMLAImpl
 
+
+g_fi_workspace = torch.empty(
+    FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE,
+    dtype=torch.uint8,
+    device="cuda",
+)
 
 class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
@@ -70,6 +75,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             raise NotImplementedError(
                 "FlashInferMLA V1 with FP8 KV cache not yet supported")
         
+        self._workspace_buffer = g_fi_workspace
 
     def _forward_decode(
         self,
@@ -87,30 +93,24 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         q = torch.cat([q_nope, q_pe], dim=-1)
         # trtllm API extras extra dimension for MTP
         q = q.unsqueeze(1)
-        o = torch.zeros(B,
-                        self.num_heads,
-                        self.kv_lora_rank,
-                        dtype=q.dtype,
-                        device=q.device)
+        # o = torch.empty(B,
+        #                 self.num_heads,
+        #                 self.kv_lora_rank,
+        #                 dtype=q.dtype,
+        #                 device=q.device)
 
         max_seq_len = attn_metadata.decode.seq_lens.max().item()
 
-        workspace_buffer = torch.empty(
-            FLASHINFER_WORKSPACE_BUFFER_SIZE,
-            dtype=torch.uint8,
-            device=q.device,
-        )
-        trtllm_batch_decode_with_kv_cache_mla(
+        o = trtllm_batch_decode_with_kv_cache_mla(
             query=q,
             kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
-            workspace_buffer=workspace_buffer,
+            workspace_buffer=self._workspace_buffer,
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
             block_tables=attn_metadata.decode.block_table,
             seq_lens=attn_metadata.decode.seq_lens,
             max_seq_len=max_seq_len,
-            out=o,
             bmm1_scale=self.scale,
         )
 
