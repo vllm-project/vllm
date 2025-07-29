@@ -642,6 +642,7 @@ steps:
 
 - label: Blackwell Test
   working_dir: "/vllm-workspace/"
+  gpu: b200
   # optional: true
   source_file_dependencies:
   - csrc/
