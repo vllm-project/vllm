@@ -1104,7 +1104,7 @@ class LLM:
                 "of `encode`:\n"
                 "  - For embeddings, use `LLM.embed(...)`.\n"
                 "  - For classification logits, use `LLM.classify(...)`.\n"
-                "  - For reward scores, use `LLM.reward(...)`.\n"
+                "  - For rewards, use `LLM.reward(...)`.\n"
                 "  - For similarity scores, use `LLM.score(...)`.",
                 pooling_task)
 

@@ -154,6 +154,8 @@ data = output.outputs.data
 print(f"Data: {data!r}")
 ```
 
+A code example can be found here: <gh-file:examples/offline_inference/basic/reward.py>
+
 ### `LLM.encode`
 
 The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
@@ -163,7 +165,7 @@ It returns the extracted hidden states directly.
     Please use one of the more specific methods instead of `encode`:
     - For embeddings, use `LLM.embed(...)`.
     - For classification logits, use `LLM.classify(...)`.
-    - For reward scores, use `LLM.reward(...)`.
+    - For rewards, use `LLM.reward(...)`.
     - For similarity scores, use `LLM.score(...)`.  
 
 ```python
