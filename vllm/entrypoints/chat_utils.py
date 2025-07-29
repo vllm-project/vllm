@@ -1374,8 +1374,6 @@ def apply_mistral_chat_template(
             "template")
         raise ValueError(str(e)) from e
 
-def random_tool_call_id() -> str:
-    return f"chatcmpl-tool-{random_uuid()}"
 
 def get_history_tool_calls_cnt(conversation: list[ConversationMessage]):
     idx = 0
@@ -1387,5 +1385,11 @@ def get_history_tool_calls_cnt(conversation: list[ConversationMessage]):
                     idx += 1
     return idx
 
-def make_kimi_k2_tool_id(func_name: str, idx: int):
-    return f"functions.{func_name}:{idx}"
+def make_tool_call_id(id_type: str = 'random', **kwargs: Any) -> str:
+    if id_type == 'random':
+        return f"chatcmpl-tool-{random_uuid()}"
+    elif id_type == 'kimi_k2':
+        assert 'func_name' in kwargs and 'idx' in kwargs
+        return f"functions.{kwargs['func_name']}:{kwargs['idx']}"
+    else:
+        raise ValueError(f"Invalid id_type: {id_type}")
