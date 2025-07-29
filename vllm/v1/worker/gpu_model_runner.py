@@ -1965,9 +1965,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
                 backend=backend)
             return
-        # for other compilation level, cudagraph behavior is controlled by 
-        # vllm cudagraph wraper and cudagraph dispatcher
-          
+        # for other compilation levels, cudagraph behavior is controlled by
+        # CudagraphWraper and CudagraphDispatcher of vllm.
+
         # wrap the model with full cudagraph wrapper if needed.
         if self.compilation_config.cudagraph_mode not in [
                 CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE

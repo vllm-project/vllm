@@ -4764,7 +4764,7 @@ class VllmConfig:
                 else:
                     self.compilation_config.level = \
                             CompilationLevel.NO_COMPILATION
-                    
+
             else:
                 # NB: Passing both --enforce-eager and a compilation level
                 # in V0 means the compilation level wins out.
@@ -4812,11 +4812,11 @@ class VllmConfig:
                 self.compilation_config.use_cudagraph = True
             # other cases, keep the cudagraph_mode as is
 
-        # disable cudagraph if model_config is None (may only happen in 
-        # tests) or enforce eager execution
+        # disable cudagraph if model_config is None (typically only happen
+        # during tests) or enforce eager execution
         if self.model_config is None or self.model_config.enforce_eager:
-            logger.info("Cudagraph is disabled under eager mode or no model
-                        "_config is provided.")
+            logger.info("Cudagraph is disabled under eager mode or when "
+                        "model_config is None.")
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         self._set_cudagraph_sizes()
