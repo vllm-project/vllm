@@ -3175,11 +3175,23 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
-        if self.method == "eagle3" and self.target_model_config and \
-            "llama" not in self.target_model_config.hf_text_config.model_type:
-            raise ValueError(
-                "Eagle3 is only supported for Llama models. "
-                f"Got {self.target_model_config.hf_text_config.model_type=}")
+        from vllm.transformers_utils.configs import SpeculatorsConfig
+
+        eagle3_target_supported = ["llama"]
+        if isinstance(self.draft_model_config.hf_config, SpeculatorsConfig):
+            eagle3_target_supported.append("qwen")
+
+        if self.method == "eagle3" and self.target_model_config:
+            found_match = False
+            for supported_model in eagle3_target_supported:
+                found_match = (
+                    supported_model
+                    in self.target_model_config.hf_text_config.model_type)
+            if not found_match:
+                raise ValueError(
+                    f"Eagle3 is only supported for {eagle3_target_supported} models. "  # noqa: E501
+                    f"Got {self.target_model_config.hf_text_config.model_type=}"
+                )
 
         return self
 
