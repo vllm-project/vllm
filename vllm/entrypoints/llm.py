@@ -1258,7 +1258,7 @@ class LLM:
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
     ) -> list[PoolingRequestOutput]:
         """
-        Generate reward scores for each prompt.
+        Generate rewards for each prompt.
 
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
