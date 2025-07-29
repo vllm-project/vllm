@@ -5,6 +5,7 @@ from importlib.util import find_spec
 import pytest
 import torch
 
+import vllm._custom_ops as ops
 import vllm.envs as envs
 from vllm.compilation.collective_fusion import AllReduceFusionPass
 from vllm.config import (CompilationConfig, CompilationLevel, DeviceConfig,
@@ -64,7 +65,7 @@ class TestAllReduceFusedAddRMSNormModel(torch.nn.Module):
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
 
 
-class TestAllReduceFusedAddRMSNormStaticQuantModel(torch.nn.Module):
+class TestAllReduceFusedAddRMSNormStaticQuantFP8Model(torch.nn.Module):
 
     def __init__(self, hidden_size=16, eps=1e-6):
         super().__init__()
@@ -92,13 +93,40 @@ class TestAllReduceFusedAddRMSNormStaticQuantModel(torch.nn.Module):
         ]
 
 
+class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
+
+    def __init__(self, hidden_size=16, eps=1e-6):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.eps = eps
+        self.norm = RMSNorm(hidden_size, eps)
+        self.scale = torch.rand(1, dtype=torch.float32)
+
+    def forward(self, hidden_states, residual):
+        view = hidden_states.reshape(-1, self.hidden_size)
+        all_reduce = tensor_model_parallel_all_reduce(view)
+        norm_output, residual_output = self.norm(all_reduce, residual)
+        fp4_result, fp4_scale = ops.scaled_fp4_quant(norm_output, self.scale)
+        return fp4_result, residual_output, fp4_scale
+
+    def ops_in_model_after(self):
+        return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
+
+    def ops_in_model_before(self):
+        return [
+            torch.ops.vllm.all_reduce.default,
+            torch.ops._C.scaled_fp4_quant.default
+        ]
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "test_model",
     [
         TestAllReduceRMSNormModel,
         TestAllReduceFusedAddRMSNormModel,
-        # TestAllReduceFusedAddRMSNormStaticQuantModel
+        # TestAllReduceFusedAddRMSNormStaticQuantFP8Model,
+        # TestAllReduceFusedAddRMSNormStaticQuantFP4Model,
     ])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [8])

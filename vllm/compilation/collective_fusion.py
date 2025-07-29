@@ -662,8 +662,8 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
                 output_scale=output_scale,
                 input_scale=input_global_scale)
 
-            # quant_out, allreduce_output
-            return quant_out_tuple[1], all_reduce
+            # quant_out, allreduce_output, output_scale
+            return quant_out_tuple[1], all_reduce, quant_out_tuple[2]
 
         def replacement(input: torch.Tensor, result_rms: torch.Tensor,
                         quant_result: torch.Tensor, weight: torch.Tensor,
@@ -771,7 +771,7 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
                 scale_factor=input_global_scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
-            # # quant_out, rms_norm_residual, output_scale
+            # quant_out, rms_norm_residual, output_scale
             return allreduce[4], allreduce[2], allreduce[5]
 
         pm.register_replacement(pattern, replacement, get_inputs(),
