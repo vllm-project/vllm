@@ -6,7 +6,7 @@ from typing import Any, Callable, Optional
 import torch
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
-from vllm.config import TaskOption
+from vllm.config import RunnerOption
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .....conftest import HfRunner, VllmRunner
@@ -37,7 +37,7 @@ def run_test(
     vllm_runner_kwargs: Optional[dict[str, Any]],
     hf_model_kwargs: Optional[dict[str, Any]],
     patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]],
-    task: TaskOption = "auto",
+    runner: RunnerOption = "auto",
     distributed_executor_backend: Optional[str] = None,
     tensor_parallel_size: int = 1,
     vllm_embeddings: Optional[torch.Tensor] = None,
@@ -83,7 +83,7 @@ def run_test(
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=enforce_eager,
-                     task=task,
+                     runner=runner,
                      **vllm_runner_kwargs_) as vllm_model:
         tokenizer = vllm_model.llm.get_tokenizer()
 

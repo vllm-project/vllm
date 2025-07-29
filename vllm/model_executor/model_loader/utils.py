@@ -9,9 +9,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import torch
-import transformers
 from torch import nn
-from transformers.dynamic_module_utils import get_class_from_dynamic_module
+from typing_extensions import assert_never
 
 from vllm.attention import Attention
 from vllm.config import (ModelConfig, ModelImpl, VllmConfig,
@@ -20,13 +19,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import QKVCrossParallelLinear
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.adapters import (as_embedding_model,
                                                  as_reward_model,
                                                  as_seq_cls_model)
 from vllm.model_executor.models.interfaces import SupportsQuant
-from vllm.model_executor.models.registry import (_PREVIOUSLY_SUPPORTED_MODELS,
-                                                 _TRANSFORMERS_BACKEND_MODELS)
 from vllm.utils import is_pin_memory_available
 
 logger = init_logger(__name__)
@@ -169,61 +165,6 @@ def device_loading_context(module: torch.nn.Module,
         # New parameters or parameters already on target device are untouched
 
 
-def resolve_transformers_arch(model_config: ModelConfig,
-                              architectures: list[str]):
-    if model_config.model_impl == ModelImpl.VLLM:
-        raise ValueError(
-            "Attempting to resolve architecture from the Transformers library "
-            "but the model implementation is set to vLLM. This should never "
-            "happen.")
-
-    for i, arch in enumerate(architectures):
-        if arch in _TRANSFORMERS_BACKEND_MODELS:
-            continue
-
-        if model_config.model_impl == ModelImpl.AUTO:
-            logger.warning(
-                "%s has no vLLM implementation, falling back to Transformers "
-                "implementation. Some features may not be supported and "
-                "performance may not be optimal.", arch)
-
-        auto_map: dict[str, str] = getattr(model_config.hf_config, "auto_map",
-                                           None) or dict()
-        # Make sure that config class is always initialized before model class,
-        # otherwise the model class won't be able to access the config class,
-        # the expected auto_map should have correct order like:
-        # "auto_map": {
-        #     "AutoConfig": "<your-repo-name>--<config-name>",
-        #     "AutoModel": "<your-repo-name>--<config-name>",
-        #     "AutoModelFor<Task>": "<your-repo-name>--<config-name>",
-        # },
-        auto_modules = {
-            name:
-            get_class_from_dynamic_module(module,
-                                          model_config.model,
-                                          revision=model_config.revision)
-            for name, module in sorted(auto_map.items(), key=lambda x: x[0])
-        }
-        model_module = getattr(transformers, arch, None)
-        if model_module is None:
-            if "AutoModel" not in auto_map:
-                raise ValueError(
-                    f"Cannot find model module. '{arch}' is not a registered "
-                    "model in the Transformers library (only relevant if the "
-                    "model is meant to be in Transformers) and 'AutoModel' is "
-                    "not present in the model config's 'auto_map' (relevant "
-                    "if the model is custom).")
-            model_module = auto_modules["AutoModel"]
-
-        if not model_module.is_backend_compatible():
-            raise ValueError(
-                f"The Transformers implementation of '{arch}' is not "
-                "compatible with vLLM.")
-
-        architectures[i] = model_config._get_transformers_backend_cls()
-    return architectures
-
-
 def get_model_architecture(
         model_config: ModelConfig) -> tuple[type[nn.Module], str]:
     architectures = getattr(model_config.hf_config, "architectures", [])
@@ -239,56 +180,38 @@ def get_model_architecture(
         "bitsandbytes",
     ]
 
-    vllm_supported_archs = ModelRegistry.get_supported_archs()
-    is_supported = lambda arch: (arch in vllm_supported_archs and arch not in
-                                 _TRANSFORMERS_BACKEND_MODELS)
-    vllm_not_supported = not any(is_supported(arch) for arch in architectures)
-
-    if vllm_not_supported:
-        # try automatic conversion in adapters.py
-        for arch in architectures:
-            if not arch.endswith("ForSequenceClassification"):
-                continue
-
-            assert model_config.task == "classify"
-            causal_lm_arch = arch.replace("ForSequenceClassification",
-                                          "ForCausalLM")
-            causal_lm_arch_vllm_supported = (causal_lm_arch
-                                             in vllm_supported_archs)
-            if not causal_lm_arch_vllm_supported:
-                continue
-
-            architectures = [causal_lm_arch]
-            vllm_not_supported = False
-            break
-
-    if any(arch in _PREVIOUSLY_SUPPORTED_MODELS for arch in architectures):
-        previous_version = _PREVIOUSLY_SUPPORTED_MODELS[architectures[0]]
-        raise ValueError(
-            f"Model architecture {architectures[0]} was supported"
-            f" in vLLM until version {previous_version}, and is "
-            "not supported anymore. Please use an older version"
-            " of vLLM if you want to use this model architecture.")
-
-    if (model_config.model_impl == ModelImpl.TRANSFORMERS or
-            model_config.model_impl == ModelImpl.AUTO and vllm_not_supported):
-        architectures = resolve_transformers_arch(model_config, architectures)
-        logger.debug_once("Resolve transformers arch %s", str(architectures))
-    elif (model_config.quantization is not None
-          and model_config.quantization not in mixtral_supported
-          and "MixtralForCausalLM" in architectures):
+    if (model_config.quantization is not None
+            and model_config.quantization not in mixtral_supported
+            and "MixtralForCausalLM" in architectures):
         architectures = ["QuantMixtralForCausalLM"]
 
-    model_cls, arch = ModelRegistry.resolve_model_cls(architectures)
-    if model_config.task == "embed":
-        logger.debug_once("Automatic conversion using `as_embedding_model`.")
+    model_cls, arch = model_config.registry.resolve_model_cls(
+        architectures,
+        model_config=model_config,
+    )
+
+    if arch == model_config._get_transformers_backend_cls():
+        assert model_config.model_impl != ModelImpl.VLLM
+        if model_config.model_impl == ModelImpl.AUTO:
+            logger.warning_once(
+                "%s has no vLLM implementation, falling back to Transformers "
+                "implementation. Some features may not be supported and "
+                "performance may not be optimal.", arch)
+
+    convert_type = model_config.convert_type
+    if convert_type == "none":
+        pass
+    elif convert_type == "embed":
+        logger.debug_once("Converting to embedding model.")
         model_cls = as_embedding_model(model_cls)
-    elif model_config.task == "classify":
-        logger.debug_once("Automatic conversion using `as_seq_cls_model`.")
+    elif convert_type == "classify":
+        logger.debug_once("Converting to sequence classification model.")
         model_cls = as_seq_cls_model(model_cls)
-    elif model_config.task == "reward":
-        logger.debug_once("Automatic conversion using `as_reward_model`.")
+    elif convert_type == "reward":
+        logger.debug_once("Converting to reward model.")
         model_cls = as_reward_model(model_cls)
+    else:
+        assert_never(convert_type)
 
     return model_cls, arch
 

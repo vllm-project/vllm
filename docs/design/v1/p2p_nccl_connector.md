@@ -3,14 +3,14 @@ An implementation of xPyD with dynamic scaling based on point-to-point communica
 # Detailed Design
 
 ## Overall Process
-As shown in Figure 1, the overall process of this **PD disaggregation** solution is described through a request flow:  
+As shown in Figure 1, the overall process of this **PD disaggregation** solution is described through a request flow:
 
-1. The client sends an HTTP request to the Proxy/Router's `/v1/completions` interface.  
-2. The Proxy/Router selects a **1P1D (1 Prefill instance + 1 Decode instance)** through either through round-robin or random selection, generates a `request_id` (rules to be introduced later), modifies the `max_tokens` in the HTTP request message to **1**, and then forwards the request to the **P instance**.  
-3. Immediately afterward, the Proxy/Router forwards the **original HTTP request** to the **D instance**.  
-4. The **P instance** performs **Prefill** and then **actively sends the generated KV cache** to the D instance (using **PUT_ASYNC** mode). The D instance's `zmq_addr` can be resolved through the `request_id`.  
-5. The **D instance** has a **dedicated thread** for receiving the KV cache (to avoid blocking the main process). The received KV cache is saved into the **GPU memory buffer**, the size of which is determined by the vLLM startup parameter `kv_buffer_size`. When the GPU buffer is full, the KV cache is stored in the **local Tensor memory pool**.  
-6. During the **Decode**, the D instance's main process retrieves the KV cache (transmitted by the P instance) from either the **GPU buffer** or the **memory pool**, thereby **skipping Prefill**.  
+1. The client sends an HTTP request to the Proxy/Router's `/v1/completions` interface.
+2. The Proxy/Router selects a **1P1D (1 Prefill instance + 1 Decode instance)** through either through round-robin or random selection, generates a `request_id` (rules to be introduced later), modifies the `max_tokens` in the HTTP request message to **1**, and then forwards the request to the **P instance**.
+3. Immediately afterward, the Proxy/Router forwards the **original HTTP request** to the **D instance**.
+4. The **P instance** performs **Prefill** and then **actively sends the generated KV cache** to the D instance (using **PUT_ASYNC** mode). The D instance's `zmq_addr` can be resolved through the `request_id`.
+5. The **D instance** has a **dedicated thread** for receiving the KV cache (to avoid blocking the main process). The received KV cache is saved into the **GPU memory buffer**, the size of which is determined by the vLLM startup parameter `kv_buffer_size`. When the GPU buffer is full, the KV cache is stored in the **local Tensor memory pool**.
+6. During the **Decode**, the D instance's main process retrieves the KV cache (transmitted by the P instance) from either the **GPU buffer** or the **memory pool**, thereby **skipping Prefill**.
 7. After completing **Decode**, the D instance returns the result to the **Proxy/Router**, which then forwards it to the **client**.
 
 ![image1](https://github.com/user-attachments/assets/fb01bde6-755b-49f7-ad45-48a94b1e10a7)
@@ -291,7 +291,7 @@ curl -X POST -s http://10.0.1.1:10001/v1/completions \
 ??? console "Command"
 
     ```shell
-    python3 benchmark_serving.py \
+    vllm bench serve \
         --backend vllm \
         --model base_model \
         --tokenizer meta-llama/Llama-3.1-8B-Instruct \

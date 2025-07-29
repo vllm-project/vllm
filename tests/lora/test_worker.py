@@ -38,13 +38,8 @@ def test_worker_apply_lora(sql_lora_files):
     vllm_config = VllmConfig(
         model_config=ModelConfig(
             "meta-llama/Llama-2-7b-hf",
-            task="auto",
-            tokenizer="meta-llama/Llama-2-7b-hf",
-            tokenizer_mode="auto",
-            trust_remote_code=False,
             seed=0,
             dtype="float16",
-            revision=None,
             enforce_eager=True,
         ),
         load_config=LoadConfig(

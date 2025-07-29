@@ -97,11 +97,16 @@ class MQLLMEngineClient(EngineClient):
         self.model_config = engine_config.model_config
         self.decoding_config = engine_config.decoding_config
 
-        # Create the tokenizer group.
-        self.tokenizer = init_tokenizer_from_configs(
-            model_config=self.model_config,
-            scheduler_config=engine_config.scheduler_config,
-            lora_config=engine_config.lora_config)
+        if self.vllm_config.model_config.skip_tokenizer_init:
+            self.tokenizer = None
+
+        else:
+            # Create the tokenizer group.
+            self.tokenizer = init_tokenizer_from_configs(
+                model_config=self.model_config,
+                scheduler_config=engine_config.scheduler_config,
+                lora_config=engine_config.lora_config)
+
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer)
 
@@ -375,7 +380,10 @@ class MQLLMEngineClient(EngineClient):
         return self.input_preprocessor
 
     async def get_tokenizer(self, lora_request: Optional[LoRARequest] = None):
-        return await self.tokenizer.get_lora_tokenizer_async(lora_request)
+        if self.tokenizer is None:
+            return None
+        else:
+            return await self.tokenizer.get_lora_tokenizer_async(lora_request)
 
     async def get_vllm_config(self) -> VllmConfig:
         return self.vllm_config

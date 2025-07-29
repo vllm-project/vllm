@@ -68,9 +68,6 @@ def create_vllm_config(
     )
     model_config = ModelConfig(
         model=model,
-        task="auto",
-        tokenizer=model,
-        tokenizer_mode="auto",
         trust_remote_code=True,
         dtype="float16",
         seed=42,

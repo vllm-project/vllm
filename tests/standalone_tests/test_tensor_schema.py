@@ -4,6 +4,8 @@
 import pytest
 import torch
 
+from vllm.model_executor.models.fuyu import FuyuImagePatchInputs
+from vllm.model_executor.models.glm4_1v import Glm4vImageEmbeddingInputs
 from vllm.model_executor.models.phi3v import Phi3VImagePixelInputs
 
 
@@ -123,4 +125,46 @@ def test_tensor_schema_with_invalid_resolve_binding_dims():
                 "h": 336,
                 "w": 336
             },
+        )
+
+
+def test_tensor_schema_with_list_of_symbolic_dim():
+    flat_data = torch.stack([torch.randn(768) for _ in range(3)])  # (bn=3, fn)
+    patches_per_image = [64, 64, 64]  # len = bn = 3
+
+    FuyuImagePatchInputs(
+        flat_data=flat_data,
+        patches_per_image=patches_per_image,
+    )
+
+
+def test_tensor_schema_with_list_of_symbolic_dim_mismatch_in_length():
+    flat_data = torch.stack([torch.randn(768) for _ in range(4)])  # (bn=4, fn)
+    patches_per_image = [64, 64, 64]  # len = 3 ≠ bn
+
+    with pytest.raises(ValueError, match="expected 'bn'=4, got 3"):
+        FuyuImagePatchInputs(
+            flat_data=flat_data,
+            patches_per_image=patches_per_image,
+        )
+
+
+def test_valid_tensor_schema_with_static_last_dim():
+    image_embeds = torch.randn(256, 1024)
+    image_grid_thw = torch.randint(0, 4, (2, 3))
+
+    Glm4vImageEmbeddingInputs(
+        image_embeds=image_embeds,
+        image_grid_thw=image_grid_thw,
+    )
+
+
+def test_invalid_tensor_schema_with_static_last_dim():
+    image_embeds = torch.randn(256, 1024)
+    image_grid_thw = torch.randint(0, 4, (2, 4))  # Wrong last dim
+
+    with pytest.raises(ValueError, match="dim\\[1\\] expected 3, got 4"):
+        Glm4vImageEmbeddingInputs(
+            image_embeds=image_embeds,
+            image_grid_thw=image_grid_thw,
         )

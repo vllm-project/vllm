@@ -21,6 +21,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.tasks import SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -210,6 +211,9 @@ class AsyncLLM(EngineClient):
 
         if handler := getattr(self, "output_handler", None):
             handler.cancel()
+
+    async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return await self.engine_core.get_supported_tasks_async()
 
     async def add_request(
         self,

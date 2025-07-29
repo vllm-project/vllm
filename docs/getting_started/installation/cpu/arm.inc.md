@@ -33,7 +33,7 @@ Testing has been conducted on AWS Graviton3 instances for compatibility.
 # --8<-- [end:pre-built-images]
 # --8<-- [start:build-image-from-source]
 ```bash
-docker build -f docker/Dockerfile.arm \
+docker build -f docker/Dockerfile.cpu \
         --tag vllm-cpu-env .
 
 # Launching OpenAI server

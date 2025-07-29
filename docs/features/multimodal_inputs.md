@@ -177,6 +177,70 @@ Multi-image input can be extended to perform video captioning. We show this with
 You can pass a list of NumPy arrays directly to the `'video'` field of the multi-modal dictionary
 instead of using multi-image input.
 
+Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown in this example using Qwen2.5-VL:
+
+??? code
+
+    ```python
+    from transformers import AutoProcessor
+    from vllm import LLM, SamplingParams
+    from qwen_vl_utils import process_vision_info
+
+    model_path = "Qwen/Qwen2.5-VL-3B-Instruct/"
+    video_path = "https://content.pexels.com/videos/free-videos.mp4"
+
+    llm = LLM(
+        model=model_path,
+        gpu_memory_utilization=0.8,
+        enforce_eager=True,
+        limit_mm_per_prompt={"video": 1},
+    )
+
+    sampling_params = SamplingParams(
+        max_tokens=1024,
+    )
+
+    video_messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": [
+                {"type": "text", "text": "describe this video."},
+                {
+                    "type": "video",
+                    "video": video_path,
+                    "total_pixels": 20480 * 28 * 28,
+                    "min_pixels": 16 * 28 * 28
+                }
+            ]
+        },
+    ]
+
+    messages = video_messages
+    processor = AutoProcessor.from_pretrained(model_path)
+    prompt = processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    image_inputs, video_inputs = process_vision_info(messages)
+    mm_data = {}
+    if video_inputs is not None:
+        mm_data["video"] = video_inputs
+
+    llm_inputs = {
+        "prompt": prompt,
+        "multi_modal_data": mm_data,
+    }
+
+    outputs = llm.generate([llm_inputs], sampling_params=sampling_params)
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
+    ```
+
+    !!! note
+        'process_vision_info' is only applicable to Qwen2.5-VL and similar models.
+
 Full example: <gh-file:examples/offline_inference/vision_language.py>
 
 ### Audio Inputs
@@ -279,7 +343,7 @@ Here is a simple example using Phi-3.5-Vision.
 First, launch the OpenAI-compatible server:
 
 ```bash
-vllm serve microsoft/Phi-3.5-vision-instruct --task generate \
+vllm serve microsoft/Phi-3.5-vision-instruct --runner generate \
   --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt '{"image":2}'
 ```
 
@@ -358,7 +422,7 @@ Instead of `image_url`, you can pass a video file via `video_url`. Here is a sim
 First, launch the OpenAI-compatible server:
 
 ```bash
-vllm serve llava-hf/llava-onevision-qwen2-0.5b-ov-hf --task generate --max-model-len 8192
+vllm serve llava-hf/llava-onevision-qwen2-0.5b-ov-hf --runner generate --max-model-len 8192
 ```
 
 Then, you can use the OpenAI client as follows:
