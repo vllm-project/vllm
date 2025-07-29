@@ -177,9 +177,8 @@ class AutoRoundConfig(QuantizationConfig):
             if moe_configs:
                 if len(set(moe_configs)) == 1:
                     return moe_configs[0]
-                raise ValueError(
-                    f"Fused MoE layer '{layer_name}' requires "
-                    f"consistent quant config for all sub-layers")
+                raise ValueError(f"Fused MoE layer '{layer_name}' requires "
+                                 f"consistent quant config for all sub-layers")
 
         # 5. Fallback
         return get_config(layer_name, quantized)
@@ -397,4 +396,3 @@ class AutoRoundConfig(QuantizationConfig):
             return self.apply_gptq_quant_layer(layer, prefix)
         if "awq" in self.packing_format or "awq" in self.backend:
             return self.apply_awq_quant_layer(layer, prefix)
-        
