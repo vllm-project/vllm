@@ -30,8 +30,8 @@ from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.executor.multiproc_worker_utils import (
     _add_prefix, set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
-from vllm.utils import (bind_process_name, get_distributed_init_method,
-                        get_loopback_ip, get_mp_context, get_open_port)
+from vllm.utils import (get_distributed_init_method, get_loopback_ip,
+                        get_mp_context, get_open_port, set_process_title)
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -376,10 +376,14 @@ class WorkerProc:
         }
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
-        bind_process_name(
-            self.worker.worker.__class__.__name__,
-            f"TP{self.rank}_DP{vllm_config.parallel_config.data_parallel_rank}"
-        )
+
+        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        pp_str = f"PP{rank // tp_size}" if pp_size > 1 else ""
+        tp_str = f"TP{rank % tp_size}" if tp_size > 1 else ""
+        suffix = f"{pp_str}{'_' if pp_str and tp_str else ''}{tp_str}"
+        if suffix:
+            set_process_title(suffix, append=True)
         pid = os.getpid()
         _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)
         _add_prefix(sys.stderr, f"VllmWorker rank={rank}", pid)
