@@ -22,7 +22,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models import SupportsV0Only
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.sequence import IntermediateTensors
@@ -466,7 +465,7 @@ class BertWithRope(nn.Module, SupportsQuant):
         return loaded_params
 
 
-class NomicBertModel(BertWithRope, SupportsV0Only):
+class NomicBertModel(BertWithRope):
     # for https://huggingface.co/nomic-ai/nomic-bert-2048
 
     hf_to_vllm_mapper = WeightsMapper(
