@@ -12,3 +12,5 @@ torchaudio==2.7.1
 torchvision==0.22.1 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
 # https://github.com/facebookresearch/xformers/releases/tag/v0.0.31
 xformers==0.0.31; platform_system == 'Linux' and platform_machine == 'x86_64'  # Requires PyTorch >= 2.7
+# FlashInfer should be updated together with the Dockerfile
+flashinfer_python==0.2.9rc2
