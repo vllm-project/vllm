@@ -62,8 +62,10 @@ ISO639_1_SUPPORTED_LANGS = {
     "es": "Spanish",
 }
 
-ISO639_1_OTHER_LANGS = {k: v for k,v  in LANGUAGES.items() if k not in ISO639_1_SUPPORTED_LANGS}
-
+ISO639_1_OTHER_LANGS = {
+    k: v
+    for k, v in LANGUAGES.items() if k not in ISO639_1_SUPPORTED_LANGS
+}
 
 class VoxtralProcessorAdapter:
     """
@@ -455,8 +457,8 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     # for speech-to-text transcription
     def get_generation_prompt(cls, audio: np.ndarray,
                               model_config: ModelConfig,
-                              stt_config: SpeechToTextConfig, language: str | None,
-                              task_type: str,
+                              stt_config: SpeechToTextConfig, 
+                              language: str | None, task_type: str,
                               request_prompt: str) -> PromptType:
         tokenizer = cached_tokenizer_from_config(model_config)
         audio = Audio(audio, int(stt_config.sample_rate),

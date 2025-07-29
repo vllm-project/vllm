@@ -110,7 +110,10 @@ ISO639_1_SUPPORTED_LANGS = {
     "vi": "Vietnamese",
     "cy": "Welsh"
 }
-ISO639_1_OTHER_LANGS = {k: v for k,v  in LANGUAGES.items() if k not in ISO639_1_SUPPORTED_LANGS}
+ISO639_1_OTHER_LANGS = {
+    k: v
+    for k, v in LANGUAGES.items() if k not in ISO639_1_SUPPORTED_LANGS
+}
 
 
 class WhisperAudioInputs(TypedDict):
