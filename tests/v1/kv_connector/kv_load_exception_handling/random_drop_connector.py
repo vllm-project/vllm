@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.base import (
+    KVConnectorBase, KVConnectorMetadata, KVConnectorRole)
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -26,7 +26,7 @@ class RandomDropConnectorMetadata(KVConnectorMetadata):
     req_meta: dict[str, list[int]]
 
 
-class RandomDropConnector(KVConnectorBase_V1):
+class RandomDropConnector(KVConnectorBase):
     """
     A connector designed for fault tolerance testing by randomly dropping 
     kv data during the process of loading or receiving KV cache.

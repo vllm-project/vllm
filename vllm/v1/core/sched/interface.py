@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Optional, Union
 
 if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
+    from vllm.distributed.kv_transfer.kv_connector import KVConnectorBase
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.metrics.stats import SchedulerStats
@@ -146,5 +146,5 @@ class SchedulerInterface(ABC):
         """Shutdown the scheduler."""
         raise NotImplementedError
 
-    def get_kv_connector(self) -> Optional["KVConnectorBase_V1"]:
+    def get_kv_connector(self) -> Optional["KVConnectorBase"]:
         return None

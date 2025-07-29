@@ -9,8 +9,8 @@ import safetensors
 import torch
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.base import (
+    KVConnectorBase, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -69,7 +69,7 @@ class SharedStorageConnectorMetadata(KVConnectorMetadata):
             ReqMeta.make_meta(token_ids, block_ids, block_size, is_store))
 
 
-class SharedStorageConnector(KVConnectorBase_V1):
+class SharedStorageConnector(KVConnectorBase):
     # NOTE: This is Simple debug implementation of the KV connector.
     # It save / load the KV cache to / from the disk.
     # It does extra work which will overwrite the existing prefix-cache in GPU

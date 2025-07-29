@@ -11,10 +11,10 @@ from typing import Any, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
+from vllm.distributed.kv_transfer.kv_connector import (KVConnectorBase,
+                                                       KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
-from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
-                                                          KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
@@ -1080,7 +1080,7 @@ class Scheduler(SchedulerInterface):
     # KV Connector Related Methods
     ########################################################################
 
-    def get_kv_connector(self) -> Optional[KVConnectorBase_V1]:
+    def get_kv_connector(self) -> Optional[KVConnectorBase]:
         return self.connector
 
     def _connector_finished(

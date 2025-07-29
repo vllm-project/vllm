@@ -6,8 +6,8 @@ import torch
 from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.base import (
+    KVConnectorBase, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class LMCacheConnectorV1(KVConnectorBase_V1):
+class LMCacheConnectorV1(KVConnectorBase):
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
