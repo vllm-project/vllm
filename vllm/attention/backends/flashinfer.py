@@ -1106,7 +1106,8 @@ class FlashInferImpl(AttentionImpl):
         prefill_output: Optional[torch.Tensor] = None
         if num_decode_tokens > 0:
             decode_output = torch.empty(decode_query.shape,
-                                        dtype=decode_query.dtype)
+                                        dtype=decode_query.dtype,
+                                        device=decode_query.device)
         else:
             decode_output = None
         stride_order = FlashInferBackend.get_kv_cache_stride_order()
