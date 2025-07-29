@@ -146,6 +146,7 @@ class EngineCore:
             self.batch_queue = queue.Queue(self.batch_queue_size)
 
         if envs.VLLM_TORCH_PROFILER_DIR:
+            # Reuse torch profiler's directory for simplicity.
             self.tracer = VizTracer()
             self.tracer_output_file = os.path.join(
                 envs.VLLM_TORCH_PROFILER_DIR,
