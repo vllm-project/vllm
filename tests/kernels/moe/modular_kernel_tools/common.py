@@ -593,7 +593,7 @@ def make_modular_kernel(config: Config,
     # make modular kernel
     prepare_finalize = None
     if config.needs_all2all():
-        prepare_finalize = FusedMoEMethodBase.maybe_make_prepare_finalize(moe)
+        prepare_finalize = FusedMoEMethodBase._maybe_make_prepare_finalize(moe)
         assert prepare_finalize is not None
     else:
         prepare_finalize = MoEPrepareAndFinalizeNoEP()
