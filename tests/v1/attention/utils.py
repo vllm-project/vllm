@@ -16,8 +16,6 @@ from vllm.utils import resolve_obj_by_qualname
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-MAX_BLOCK_IDX = 1000
-
 
 @dataclass
 class BatchSpec:
@@ -42,7 +40,8 @@ def create_common_attn_metadata(
         batch_spec: BatchSpec,
         block_size: int,
         device: torch.device,
-        random_block_indices: bool = True) -> CommonAttentionMetadata:
+        max_block_idx: int = 1000,
+        arange_block_indices: bool = False) -> CommonAttentionMetadata:
     """Create CommonAttentionMetadata from a BatchSpec and ModelParams."""
     # Create query start locations
     query_start_loc = torch.zeros(batch_spec.batch_size + 1,
@@ -69,17 +68,7 @@ def create_common_attn_metadata(
 
     # Create block table and slot mapping
     max_blocks = (max(batch_spec.seq_lens) + block_size - 1) // block_size
-    if random_block_indices:
-        block_table_tensor = torch.randint(0,
-                                           MAX_BLOCK_IDX,
-                                           (batch_spec.batch_size, max_blocks),
-                                           dtype=torch.int32,
-                                           device=device)
-        slot_mapping = torch.randint(0,
-                                     MAX_BLOCK_IDX, (num_tokens, ),
-                                     dtype=torch.int64,
-                                     device=device)
-    else:
+    if arange_block_indices:
         num_blocks = batch_spec.batch_size * max_blocks
         block_table_tensor = torch.arange(num_blocks,
                                           dtype=torch.int32,
@@ -89,6 +78,16 @@ def create_common_attn_metadata(
         slot_mapping = torch.arange(num_tokens,
                                     dtype=torch.int64,
                                     device=device).view(num_tokens)
+    else:
+        block_table_tensor = torch.randint(0,
+                                           max_block_idx,
+                                           (batch_spec.batch_size, max_blocks),
+                                           dtype=torch.int32,
+                                           device=device)
+        slot_mapping = torch.randint(0,
+                                     max_block_idx, (num_tokens, ),
+                                     dtype=torch.int64,
+                                     device=device)
 
     # Calculate max query length
     max_query_len = max(batch_spec.query_lens)
