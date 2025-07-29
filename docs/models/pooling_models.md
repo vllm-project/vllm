@@ -66,11 +66,11 @@ you can override some of its attributes via the `--override-pooler-config` optio
 If the model has been converted via `--convert` (see above),
 the pooler assigned to each task has the following attributes by default:
 
-| Task       | Pooling Type   | Normalization | Softmax |
-|------------|----------------|---------------|---------|
-| `reward`   | `ALL`          | ❌            | ❌      |
-| `embed`    | `LAST`         | ✅︎            | ❌      |
-| `classify` | `LAST`         | ❌            | ✅︎      |
+| Task       | Pooling Type | Normalization | Softmax |
+|------------|--------------|---------------|---------|
+| `reward`   | `ALL`        | ❌             | ❌       |
+| `embed`    | `LAST`       | ✅︎            | ❌       |
+| `classify` | `LAST`       | ❌             | ✅︎      |
 
 When loading [Sentence Transformers](https://huggingface.co/sentence-transformers) models,
 its Sentence Transformers configuration file (`modules.json`) takes priority over the model's defaults.
@@ -141,8 +141,8 @@ A code example can be found here: <gh-file:examples/offline_inference/basic/scor
 
 ### `LLM.reward`
 
-The [reward][vllm.LLM.reward] method is available to all pooling models in vLLM.
-It returns the extracted hidden states directly, which is useful for reward models.
+The [reward][vllm.LLM.reward] method is available to all reward models in vLLM.
+It returns the extracted hidden states directly.
 
 ```python
 from vllm import LLM
@@ -172,7 +172,7 @@ It returns the extracted hidden states directly.
 from vllm import LLM
 
 llm = LLM(model="intfloat/e5-small", runner="pooling")
-(output,) = llm.encode("Hello, my name is")
+(output,) = llm.encode("Hello, my name is", task="embed")
 
 data = output.outputs.data
 print(f"Data: {data!r}")
