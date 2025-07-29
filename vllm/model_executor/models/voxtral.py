@@ -486,7 +486,7 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         else:
             raise ValueError(
                 f"Unsupported language: {language}. Language should "
-                f"be one of: {list(ISO639_1_SUPPORTED_LANGS.values())}")
+                f"be one of: {list(ISO639_1_SUPPORTED_LANGS.keys())}")
 
     @classmethod
     def get_num_audio_tokens(cls, audio_duration_s: float,
