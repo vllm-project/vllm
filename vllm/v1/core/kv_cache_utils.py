@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV-Cache Utilities."""
 
+import gc
 import os
-from collections import defaultdict, deque
+import time
+from collections import Counter, defaultdict, deque
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Callable, NamedTuple, Optional
@@ -524,10 +526,29 @@ def generate_block_hash_extra_keys(
     return tuple(extra_keys), new_start_mm_idx
 
 
+def detailed_type(v: Any) -> str:
+    if type(v) is list:
+        if len(v) == 0:
+            return "list_0"
+        return f"list_{len(v)}[{detailed_type(v[0])}]"
+    if type(v) is dict:
+        if len(v) == 0:
+            return "dict_0"
+        item = next(iter(v.items()))
+        return f"dict_{len(v)}[{detailed_type(item[0]), detailed_type(item[1])}]"
+    if type(v) is tuple:
+        if len(v) == 0:
+            return "tuple_0"
+        return f"tuple_{len(v)}[{detailed_type(v[0])}]"
+    return str(type(v))
+
+
 def hash_block_tokens(
         hash_function: Callable,
         parent_block_hash: Optional[int],
         curr_block_token_ids: Sequence[int],
+        req_id: str,
+        position: int,
         extra_keys: Optional[tuple[Any, ...]] = None) -> BlockHash:
     """Computes a hash value corresponding to the contents of a block and
     the contents of the preceding block(s). The hash value is used for
@@ -545,14 +566,27 @@ def hash_block_tokens(
         The hash value of the block and the token ids in the block.
         The entire tuple is used as the hash key of the block.
     """
+    ns = time.monotonic_ns()
+    gc1 = gc.get_count()
+    types = None
+    if gc1[0] == 700:
+        types = [detailed_type(o) for o in gc.get_objects(0)]
+
     if not parent_block_hash:
         parent_block_hash = NONE_HASH
 
     curr_block_token_ids_tuple = tuple(curr_block_token_ids)
-    return BlockHash(
+    block_hash = BlockHash(
         hash_function(
             (parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
         curr_block_token_ids_tuple, extra_keys)
+    ns = time.monotonic_ns() - ns
+    gc2 = gc.get_count()
+    if ns > 10 * 1000000:
+        logger.info(
+            f"===big regression! GC occured! {ns/1000000.0:.2f}ms {gc.get_threshold()} {gc1=} {gc2=}\n{'\n'.join(f'{item[1]:>4}:{item[0]}' for item in Counter(types).most_common(20))}"
+        )
+    return block_hash
 
 
 def hash_request_tokens(hash_function: Any, block_size: int,
@@ -588,7 +622,8 @@ def hash_request_tokens(hash_function: Any, block_size: int,
                 request, start, end, curr_mm_idx)
 
         block_hash = hash_block_tokens(hash_function, parent_block_hash_value,
-                                       block_token_ids, req_extra_keys)
+                                       block_token_ids, request.request_id,
+                                       start, req_extra_keys)
         ret.append(block_hash)
         parent_block_hash_value = block_hash.hash_value
     return ret
