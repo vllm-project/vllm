@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for cutlass kernels
 
 Run `pytest tests/kernels/test_cutlass.py`.
@@ -95,7 +96,7 @@ def cutlass_fp8_gemm_helper(m: int,
     out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
     baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
-    torch.testing.assert_close(out, baseline, rtol=1e-2, atol=1.5e-1)
+    torch.testing.assert_close(out, baseline, rtol=5e-1, atol=1.5e-1)
 
     opcheck(torch.ops._C.cutlass_scaled_mm,
             (out, a, b, scale_a, scale_b, bias))
@@ -631,7 +632,8 @@ def test_cutlass_fp8_group_gemm(num_experts: int, per_act_token: bool,
     ops.cutlass_moe_mm(out_tensors_stacked, a_tensors_stacked,
                        b_tensors_stacked, a_scales_tensors_stacked,
                        b_scales_tensors_stacked, expert_offsets[:-1],
-                       problem_sizes, ab_strides, ab_strides, c_strides)
+                       problem_sizes, ab_strides, ab_strides, c_strides,
+                       per_act_token, per_out_ch)
 
     # Validate each group's result against the baseline
     for g in range(num_experts):

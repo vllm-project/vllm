@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
 
@@ -147,9 +148,6 @@ def async_tp_pass_on_test_model(local_rank: int, world_size: int,
     # in the vllm_config, it's not really used.
     model_name = "nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8-e2e"
     vllm_config.model_config = ModelConfig(model=model_name,
-                                           task="auto",
-                                           tokenizer=model_name,
-                                           tokenizer_mode="auto",
                                            trust_remote_code=True,
                                            dtype=dtype,
                                            seed=42)
@@ -168,8 +166,7 @@ def async_tp_pass_on_test_model(local_rank: int, world_size: int,
 
     # In pre-nodes, all gather or reduce scatter should exist,
     # fused_matmul_reduce_scatter or fused_all_gather_matmul should not
-    backend.check_before_ops(model.ops_in_model_before(),
-                             ops_fully_replaced=False)
+    backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
 
     # In post-nodes, fused_matmul_reduce_scatter or \
     # fused_all_gather_matmul should exist
@@ -222,7 +219,7 @@ def test_async_tp_pass_correctness(
         "VLLM_USE_V1": "1",
     }
 
-    aysnc_tp_args = [
+    async_tp_args = [
         *common_args,
         "--tensor-parallel-size",
         str(tp_size),
@@ -241,7 +238,7 @@ def test_async_tp_pass_correctness(
     ]
 
     compare_two_settings(model_id,
-                         aysnc_tp_args,
+                         async_tp_args,
                          tp_args,
                          async_tp_env,
                          tp_env,

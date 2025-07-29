@@ -19,6 +19,9 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 - OS: Linux
 - Python: 3.9 -- 3.12
 
+!!! note
+    vLLM does not support Windows natively. To run vLLM on Windows, you can use the Windows Subsystem for Linux (WSL) with a compatible Linux distribution, or use some community-maintained forks, e.g. [https://github.com/SystemPanic/vllm-windows](https://github.com/SystemPanic/vllm-windows).
+
 === "NVIDIA CUDA"
 
     --8<-- "docs/getting_started/installation/gpu/cuda.inc.md:requirements"
@@ -39,15 +42,15 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
 === "NVIDIA CUDA"
 
-    --8<-- "docs/getting_started/installation/gpu/cuda.inc.md:create-a-new-python-environment"
+    --8<-- "docs/getting_started/installation/gpu/cuda.inc.md:set-up-using-python"
 
 === "AMD ROCm"
 
-    There is no extra information on creating a new Python environment for this device.
+    --8<-- "docs/getting_started/installation/gpu/rocm.inc.md:set-up-using-python"
 
 === "Intel XPU"
 
-    There is no extra information on creating a new Python environment for this device.
+    --8<-- "docs/getting_started/installation/gpu/xpu.inc.md:set-up-using-python"
 
 ### Pre-built wheels
 

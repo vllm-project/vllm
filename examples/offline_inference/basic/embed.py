@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from argparse import Namespace
 
@@ -11,7 +12,10 @@ def parse_args():
     parser = EngineArgs.add_cli_args(parser)
     # Set example specific arguments
     parser.set_defaults(
-        model="intfloat/e5-mistral-7b-instruct", task="embed", enforce_eager=True
+        model="intfloat/e5-mistral-7b-instruct",
+        runner="pooling",
+        enforce_eager=True,
+        max_model_len=1024,
     )
     return parser.parse_args()
 
@@ -26,11 +30,11 @@ def main(args: Namespace):
     ]
 
     # Create an LLM.
-    # You should pass task="embed" for embedding models
-    model = LLM(**vars(args))
+    # You should pass runner="pooling" for embedding models
+    llm = LLM(**vars(args))
 
     # Generate embedding. The output is a list of EmbeddingRequestOutputs.
-    outputs = model.embed(prompts)
+    outputs = llm.embed(prompts)
 
     # Print the outputs.
     print("\nGenerated Outputs:\n" + "-" * 60)

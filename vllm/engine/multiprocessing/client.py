@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import copy
 import pickle
 from contextlib import contextmanager, suppress
 from typing import (Any, AsyncGenerator, Dict, Iterator, List, Mapping,
-                    Optional, Union, cast, overload)
+                    Optional, Union, cast)
 
 import cloudpickle
 import psutil
 import zmq
 import zmq.asyncio
-from typing_extensions import deprecated
 from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
@@ -45,10 +45,9 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import PoolingRequestOutput, RequestOutput
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
-from vllm.utils import Device, deprecate_kwargs
+from vllm.utils import Device
 
 logger = init_logger(__name__)
 
@@ -98,11 +97,16 @@ class MQLLMEngineClient(EngineClient):
         self.model_config = engine_config.model_config
         self.decoding_config = engine_config.decoding_config
 
-        # Create the tokenizer group.
-        self.tokenizer = init_tokenizer_from_configs(
-            model_config=self.model_config,
-            scheduler_config=engine_config.scheduler_config,
-            lora_config=engine_config.lora_config)
+        if self.vllm_config.model_config.skip_tokenizer_init:
+            self.tokenizer = None
+
+        else:
+            # Create the tokenizer group.
+            self.tokenizer = init_tokenizer_from_configs(
+                model_config=self.model_config,
+                scheduler_config=engine_config.scheduler_config,
+                lora_config=engine_config.lora_config)
+
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer)
 
@@ -376,7 +380,10 @@ class MQLLMEngineClient(EngineClient):
         return self.input_preprocessor
 
     async def get_tokenizer(self, lora_request: Optional[LoRARequest] = None):
-        return await self.tokenizer.get_lora_tokenizer_async(lora_request)
+        if self.tokenizer is None:
+            return None
+        else:
+            return await self.tokenizer.get_lora_tokenizer_async(lora_request)
 
     async def get_vllm_config(self) -> VllmConfig:
         return self.vllm_config
@@ -441,7 +448,6 @@ class MQLLMEngineClient(EngineClient):
     def dead_error(self) -> BaseException:
         return ENGINE_DEAD_ERROR(self._errored_with)
 
-    @overload
     def generate(
         self,
         prompt: PromptType,
@@ -449,41 +455,7 @@ class MQLLMEngineClient(EngineClient):
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> AsyncGenerator[RequestOutput, None]:
-        ...
-
-    @overload
-    @deprecated("'inputs' will be renamed to 'prompt")
-    def generate(
-        self,
-        *,
-        inputs: PromptType,
-        sampling_params: SamplingParams,
-        request_id: str,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        priority: int = 0,
-    ) -> AsyncGenerator[RequestOutput, None]:
-        ...
-
-    @deprecate_kwargs(
-        "inputs",
-        additional_message="Please use the 'prompt' parameter instead.",
-    )
-    def generate(
-        self,
-        prompt: Optional[PromptType] = None,
-        sampling_params: Optional[SamplingParams] = None,
-        request_id: Optional[str] = None,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        priority: int = 0,
-        *,
-        inputs: Optional[PromptType] = None  # DEPRECATED
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request.
 
@@ -499,22 +471,15 @@ class MQLLMEngineClient(EngineClient):
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
             trace_headers: OpenTelemetry trace headers.
-            prompt_adapter_request: Prompt Adapter request to use
-                                            for generation, if any.
             priority: Priority of the request (lower means earlier handling).
                 Any priority other than 0 will lead to an error if the
                 scheduling policy is not "priority".
         """
-        if inputs is not None:
-            prompt = inputs
-        assert (prompt is not None and sampling_params is not None
-                and request_id is not None)
+        return cast(
+            AsyncGenerator[RequestOutput, None],
+            self._process_request(prompt, sampling_params, request_id,
+                                  lora_request, trace_headers, priority))
 
-        return self._process_request(prompt, sampling_params, request_id,
-                                     lora_request, trace_headers,
-                                     prompt_adapter_request, priority)
-
-    @overload
     def encode(
         self,
         prompt: PromptType,
@@ -523,37 +488,6 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
-    ) -> AsyncGenerator[PoolingRequestOutput, None]:
-        ...
-
-    @overload
-    @deprecated("'inputs' will be renamed to 'prompt")
-    def encode(
-        self,
-        *,
-        inputs: PromptType,
-        pooling_params: PoolingParams,
-        request_id: str,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        priority: int = 0,
-    ) -> AsyncGenerator[PoolingRequestOutput, None]:
-        ...
-
-    @deprecate_kwargs(
-        "inputs",
-        additional_message="Please use the 'prompt' parameter instead.",
-    )
-    def encode(
-        self,
-        prompt: Optional[PromptType] = None,
-        pooling_params: Optional[PoolingParams] = None,
-        request_id: Optional[str] = None,
-        lora_request: Optional[LoRARequest] = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        priority: int = 0,
-        *,
-        inputs: Optional[PromptType] = None  # DEPRECATED
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Generate outputs for a request from a pooling model.
 
@@ -574,11 +508,6 @@ class MQLLMEngineClient(EngineClient):
             The output `PoolingRequestOutput` objects from the LLMEngine
             for the request.
         """
-        if inputs is not None:
-            prompt = inputs
-        assert (prompt is not None and pooling_params is not None
-                and request_id is not None)
-
         return cast(
             AsyncGenerator[PoolingRequestOutput, None],
             self._process_request(prompt,
@@ -595,7 +524,6 @@ class MQLLMEngineClient(EngineClient):
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
             PoolingRequestOutput, None]]:
@@ -649,7 +577,6 @@ class MQLLMEngineClient(EngineClient):
                     request_id=request_id,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    prompt_adapter_request=prompt_adapter_request,
                     priority=priority,
                 ))
 
