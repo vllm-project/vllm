@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_utils import (
+from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_kernel,
     flashinfer_fp4_cutlass_moe_forward, reorder_w1w3_to_w3w1)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
