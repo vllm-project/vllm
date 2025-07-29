@@ -625,23 +625,28 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
              .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
 
-    # Enable torch profiler to record shapes if set VLLM_TORCH_PROFILER_RECORD_SHAPES=1.
-    # If not set, torch profiler will not record shapes.
+    # Enable torch profiler to record shapes if set
+    # VLLM_TORCH_PROFILER_RECORD_SHAPES=1. If not set, torch profiler will
+    # not record shapes.
     "VLLM_TORCH_PROFILER_RECORD_SHAPES":
     lambda: bool(os.getenv("VLLM_TORCH_PROFILER_RECORD_SHAPES", "0") != "0"),
 
-    # Enable torch profiler to profile memory if set VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY=1.
-    # If not set, torch profiler will not profile memory.
+    # Enable torch profiler to profile memory if set
+    # VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY=1. If not set, torch profiler
+    # will not profile memory.
     "VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY":
-    lambda: bool(os.getenv("VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY", "0") != "0"),
+    lambda: bool(
+        os.getenv("VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY", "0") != "0"),
 
-    # Enable torch profiler to profile stack if set VLLM_TORCH_PROFILER_WITH_STACK=1.
-    # If not set, torch profiler WILL profile stack by default.
+    # Enable torch profiler to profile stack if set
+    # VLLM_TORCH_PROFILER_WITH_STACK=1. If not set, torch profiler WILL
+    # profile stack by default.
     "VLLM_TORCH_PROFILER_WITH_STACK":
     lambda: bool(os.getenv("VLLM_TORCH_PROFILER_WITH_STACK", "1") != "0"),
 
-    # Enable torch profiler to profile flops if set VLLM_TORCH_PROFILER_WITH_FLOPS=1.
-    # If not set, torch profiler will not profile flops.
+    # Enable torch profiler to profile flops if set
+    # VLLM_TORCH_PROFILER_WITH_FLOPS=1. If not set, torch profiler will
+    # not profile flops.
     "VLLM_TORCH_PROFILER_WITH_FLOPS":
     lambda: bool(os.getenv("VLLM_TORCH_PROFILER_WITH_FLOPS", "0") != "0"),
 
