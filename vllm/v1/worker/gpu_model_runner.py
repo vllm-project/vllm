@@ -46,8 +46,8 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
 from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionBackend
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
-    make_local_attention_virtual_batches,
-    make_truncated_prefill_attention_metadata)
+    make_kv_sharing_fast_prefill_attention_metadata,
+    make_local_attention_virtual_batches)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         ChunkedLocalAttentionSpec,
@@ -319,10 +319,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # means this layer will perform attention using the keys and values
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
-        self.truncated_prefill_eligible_layers: set[str] = set()
+        self.fast_prefill_eligible_layers: set[str] = set()
 
         self.logits_indices = None
-        if self.cache_config.enable_kv_sharing_truncated_prefill:
+        if self.cache_config.kv_sharing_fast_prefill:
             self.logits_indices = torch.zeros(self.max_num_tokens,
                                               dtype=torch.int32,
                                               device=self.device)
@@ -766,7 +766,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logits_indices = spec_decode_metadata.logits_indices
 
         logits_indices_padded = None
-        if self.cache_config.enable_kv_sharing_truncated_prefill:
+        if self.cache_config.kv_sharing_fast_prefill:
             assert self.logits_indices is not None
             num_logits = logits_indices.shape[0]
             assert num_logits > 0
@@ -841,26 +841,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_attn_metadata=common_attn_metadata,
             ))
 
-            truncated_prefill_metadata = attn_metadata_i
-            if (self.cache_config.enable_kv_sharing_truncated_prefill
-                    and self.truncated_prefill_eligible_layers):
+            fast_prefill_metadata = attn_metadata_i
+            if (self.cache_config.kv_sharing_fast_prefill
+                    and self.fast_prefill_eligible_layers):
                 # Dynamically create a a dataclass type that inherits
                 # from attention metadata type but includes additional
                 # fields logits_indices_padded and num_logits_indices
                 # which are required for prefill truncation
-                truncated_prefill_metadata_type = (
-                    make_truncated_prefill_attention_metadata(
+                fast_prefill_metadata_type = (
+                    make_kv_sharing_fast_prefill_attention_metadata(
                         metadata_cls=type(attn_metadata_i), ))
-                truncated_prefill_metadata = truncated_prefill_metadata_type(
+                fast_prefill_metadata = fast_prefill_metadata_type(
                     **dataclasses.asdict(attn_metadata_i),
                     logits_indices_padded=logits_indices_padded,
                     num_logits_indices=logits_indices.size(0),
                 )
 
             for layer_name in kv_cache_group_spec.layer_names:
-                if (self.cache_config.enable_kv_sharing_truncated_prefill and
-                        layer_name in self.truncated_prefill_eligible_layers):
-                    attn_metadata[layer_name] = truncated_prefill_metadata
+                if (self.cache_config.kv_sharing_fast_prefill
+                        and layer_name in self.fast_prefill_eligible_layers):
+                    attn_metadata[layer_name] = fast_prefill_metadata
                     continue
 
                 attn_metadata[layer_name] = attn_metadata_i
@@ -2748,7 +2748,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # e.g. in YOCO-like KV sharing setups (e.g. Gemma3n)
             for layer_name in reversed(attn_layers):
                 if layer_name in self.shared_kv_cache_layers:
-                    self.truncated_prefill_eligible_layers.add(layer_name)
+                    self.fast_prefill_eligible_layers.add(layer_name)
                 else:
                     break
 

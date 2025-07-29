@@ -503,7 +503,7 @@ def reorder_batch_to_split_decodes_and_prefills(
     return modified_batch
 
 
-TRUNCATED_PREFILL_METADATA_FIELDS = [
+FAST_PREFILL_METADATA_FIELDS = [
     ('logits_indices_padded', Optional[torch.Tensor], None),
     ('num_logits_indices', int, 0),
 ]
@@ -522,12 +522,13 @@ def subclass_attention_metadata(
     return Wrapped
 
 
-def make_truncated_prefill_attention_metadata(metadata_cls: Any, ) -> Any:
+def make_kv_sharing_fast_prefill_attention_metadata(
+    metadata_cls: Any, ) -> Any:
     """
-    Return a new subclass of `metadata_cls` for truncated prefill
+    Return a new subclass of `metadata_cls` for fast prefill
     """
     return subclass_attention_metadata(
-        name_prefix="TruncatedPrefill",
+        name_prefix="FastPrefill",
         metadata_cls=metadata_cls,
-        fields=TRUNCATED_PREFILL_METADATA_FIELDS,
+        fields=FAST_PREFILL_METADATA_FIELDS,
     )

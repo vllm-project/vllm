@@ -34,7 +34,7 @@ class TestGemma3nForConditionalGeneration(Gemma3nForConditionalGeneration):
         attn_metadata = get_forward_context().attn_metadata
         # attn_metadata is None during dummy runs
         if (attn_metadata is not None
-                and self.cache_config.enable_kv_sharing_truncated_prefill):
+                and self.cache_config.kv_sharing_fast_prefill):
             assert isinstance(attn_metadata, dict)  # true in V1
             # Gemma3n-E2B has 30 layers, with last 20 layers being
             # cross-decoder layers. Check attention metadata is correct
@@ -97,7 +97,7 @@ def test_prompts():
 
 @fork_new_process_for_each_test
 @pytest.mark.parametrize("enforce_eager", [True, False])
-def test_kv_sharing_truncated_prefill(
+def test_kv_sharing_fast_prefill(
     monkeypatch: pytest.MonkeyPatch,
     enforce_eager: bool,
     test_prompts: list[str],
@@ -129,7 +129,7 @@ def test_kv_sharing_truncated_prefill(
         llm = LLM(model="google/gemma-3n-E2B-it",
                   enforce_eager=enforce_eager,
                   compilation_config=compilation_config,
-                  enable_kv_sharing_truncated_prefill=True)
+                  kv_sharing_fast_prefill=True)
         optimized_responses = llm.generate(test_prompts, sampling_params)
 
         misses = 0

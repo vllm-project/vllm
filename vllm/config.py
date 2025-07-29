@@ -1684,7 +1684,7 @@ class CacheConfig:
     num_cpu_blocks: Optional[int] = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
 
-    enable_kv_sharing_truncated_prefill: bool = False
+    kv_sharing_fast_prefill: bool = False
     """This feature is work in progress and no prefill optimization takes place
     with this flag enabled currently.
 
@@ -1735,7 +1735,7 @@ class CacheConfig:
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
 
-        if self.enable_kv_sharing_truncated_prefill:
+        if self.kv_sharing_fast_prefill:
             logger.warning_once(
                 "This feature is currently work in progress "
                 "and not functional yet (i.e. no prefill savings)")
