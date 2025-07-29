@@ -144,12 +144,13 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1")
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        if quant_config.per_act_token_quant:
+        if quant_config.per_act_token_quant or quant_config.is_block_quantized:
+            # Quant and Dispatch
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
                 a1_scale,
                 quant_dtype=quant_config.quant_dtype,
-                per_act_token_quant=True,
+                per_act_token_quant=quant_config.per_act_token_quant,
                 block_shape=quant_config.block_shape,
             )
             if a1q_scale is not None and a1q_scale.numel() == 1:
@@ -162,6 +163,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                  rank_topk_weights=topk_weights,
                  num_experts=num_experts)
         else:
+            # Dispatch and Quant
             # DeepEP kernels only support dispatching per-token-quant
             # quantization. dispatch in bfloat16.
             (expert_x, _, expert_tokens_meta, expert_topk_ids,
