@@ -19,14 +19,16 @@ sampling_params = SamplingParams(temperature=0, max_tokens=100)
 MODEL_PATH = os.environ.get(
     "MODEL_PATH", "/data/zhang-chen/os-mini/models/real-weights-2/pytorch-rc-120b/hf-converted-60af84"
 )
+TP=os.environ.get("VLLM_TENSOR_PARALLEL_SIZE", "4")
 
 def main():
+    
     # Create an LLM.
     llm = LLM(
         model=MODEL_PATH,
-        tensor_parallel_size=4,
+        tensor_parallel_size=int(TP), #use TP from env variable,
         # Set these to make dummy run faster
-        enforce_eager=True,
+        enforce_eager=False, #enable cuda graph mode after torch.compile is supported
         # max_num_seqs=1,
         # max_num_batched_tokens=100,
     )

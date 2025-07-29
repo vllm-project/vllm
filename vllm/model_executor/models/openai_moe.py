@@ -23,6 +23,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import OpenAIMoeConfig
+from vllm.compilation.decorators import support_torch_compile
 
 from .utils import extract_layer_index, maybe_prefix
 
@@ -208,6 +209,7 @@ class OpenAIModel(nn.Module):
         x = self.norm(x)
         return x
 
+@support_torch_compile
 class OpenAIMoeForCausalLM(nn.Module):
 
     def __init__(
