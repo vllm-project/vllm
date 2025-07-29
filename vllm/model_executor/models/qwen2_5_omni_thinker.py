@@ -569,6 +569,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
     ) -> MultiModalKwargs:
         mm_counts = mm_items.get_all_counts()
 
@@ -582,6 +583,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             prompt_text=self.dummy_inputs.get_dummy_text(mm_counts),
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         return mm_kwargs

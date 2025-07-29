@@ -981,20 +981,25 @@ class InternVLMultiModalProcessor(
         BaseInternVLMultiModalProcessor[InternVLProcessingInfo]):
     """InternVL MultiModalProcessor extended for video support"""
 
-    def _call_hf_processor(
+    def _postprocess_hf(
         self,
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> Mapping[str, NestedTensors]:
-        processed_outputs = super()._call_hf_processor(prompt, mm_data,
-                                                       mm_kwargs, tok_kwargs)
+        processed_outputs: BatchFeature,
+    ) -> BatchFeature:
+        processed_outputs = super()._postprocess_hf(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            processed_outputs=processed_outputs,
+        )
 
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
         if self.info.supports_video and (
                 video_token_id := hf_processor.video_token_id) is not None:
             processed_outputs["video_token_id"] = torch.tensor(video_token_id)
+
         return processed_outputs
 
     def _get_mm_fields_config(

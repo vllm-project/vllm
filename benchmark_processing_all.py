@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 import subprocess
 import sys
@@ -14,7 +15,7 @@ MODELS = [
     "adept/fuyu-8b",
     "google/gemma-3-4b-it",
     "THUDM/glm-4v-9b",
-    # "ibm-granite/granite-speech-3.3-8b",
+    "ibm-granite/granite-speech-3.3-8b",
     "h2oai/h2ovl-mississippi-800m",
     "OpenGVLab/InternVL2-1B",
     "HuggingFaceTB/SmolVLM-256M-Instruct",
@@ -34,7 +35,7 @@ MODELS = [
     # "allenai/Molmo-7B-D-0924",
     # "allenai/Molmo-7B-O-0924",
     "nvidia/NVLM-D-72B",
-    # "AIDC-AI/Ovis2-1B",
+    "AIDC-AI/Ovis2-1B",
     "google/paligemma-3b-mix-224",
     "google/paligemma2-3b-ft-docci-448",
     "microsoft/Phi-3.5-vision-instruct",
@@ -45,7 +46,7 @@ MODELS = [
     "Qwen/Qwen2-VL-2B-Instruct",
     "Qwen/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen2-Audio-7B-Instruct",
-    # "Qwen/Qwen2.5-Omni-7B",
+    "Qwen/Qwen2.5-Omni-7B",
     "Skywork/Skywork-R1V-38B",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
     # "openai/whisper-large-v3",

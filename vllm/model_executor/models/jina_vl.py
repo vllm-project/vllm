@@ -53,15 +53,40 @@ class JinaVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-
         # NOTE: We should reverse the order of the mm_data because the
         # query prompt is placed after the document prompt in the score
         # template for JinaVLForRanking model, but in mm_data they are
         # stored in the opposite order (query first, then document).
         for _, value in mm_data.items():
             value.reverse()
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs,
-                                          tok_kwargs)
+
+        return super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
+
+    async def _call_hf_processor_async(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # NOTE: We should reverse the order of the mm_data because the
+        # query prompt is placed after the document prompt in the score
+        # template for JinaVLForRanking model, but in mm_data they are
+        # stored in the opposite order (query first, then document).
+        for _, value in mm_data.items():
+            value.reverse()
+
+        return await super()._call_hf_processor_async(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(JinaVLMultiModalProcessor,

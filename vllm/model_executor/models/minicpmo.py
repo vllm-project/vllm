@@ -306,6 +306,7 @@ class MiniCPMOMultiModalProcessor(
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         if (audios := mm_data.get("audios")) is None:
             return {}
@@ -325,6 +326,7 @@ class MiniCPMOMultiModalProcessor(
                     **mm_kwargs,
                     "chunk_input": True,
                 },
+                tok_kwargs=tok_kwargs,
                 out_keys={"audio_features", "audio_feature_lens"},
             )
 
@@ -359,10 +361,11 @@ class MiniCPMOMultiModalProcessor(
         self,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
         base_inputs, audio_inputs = await asyncio.gather(
-            super().process_mm_inputs_async(mm_data, mm_kwargs),
-            self.process_audios_async(mm_data, mm_kwargs),
+            super().process_mm_inputs_async(mm_data, mm_kwargs, tok_kwargs),
+            self.process_audios_async(mm_data, mm_kwargs, tok_kwargs),
         )
 
         return {**base_inputs, **audio_inputs}

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 import asyncio
 import csv
@@ -100,18 +101,18 @@ def get_prompt(model_config: ModelConfig, modality: ModalityStr) -> str:
     tools = None
 
     chat_template = resolve_hf_chat_template(
-        model_config,
         tokenizer,
         chat_template,
         tools,
+        model_config=model_config,
     )
 
     content_format = resolve_chat_template_content_format(
-        model_config,
         chat_template,
         tools,
         "auto",
         tokenizer,
+        model_config=model_config,
     )
 
     rng = np.random.RandomState(0)
@@ -168,11 +169,11 @@ def get_prompt(model_config: ModelConfig, modality: ModalityStr) -> str:
                     content[content["type"]] = None
 
     return apply_hf_chat_template(
-        model_config,
         tokenizer,
         conversation,
         chat_template,
         tools,
+        model_config=model_config,
     )
 
 

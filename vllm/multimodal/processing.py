@@ -1912,7 +1912,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
+    ) -> "BatchFeature":
         return await self.info.ctx.call_hf_processor_async(
             self.info.get_hf_processor(**mm_kwargs),
             dict(text=prompt, **mm_data),

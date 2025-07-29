@@ -994,9 +994,57 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         if audio_data:
             mm_data['audio'] = audio_data
 
-        processed_outputs = super()._call_hf_processor(prompt, mm_data,
-                                                       mm_kwargs, tok_kwargs)
+        processed_outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
 
+        return self._postprocess_hf(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            processed_outputs=processed_outputs,
+        )
+
+    async def _call_hf_processor_async(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        if not mm_data:
+            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
+        audio_data = mm_data.pop("audios", [])
+        if audio_data:
+            mm_data['audio'] = audio_data
+
+        processed_outputs = await super()._call_hf_processor_async(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
+
+        return self._postprocess_hf(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            processed_outputs=processed_outputs,
+        )
+
+    def _postprocess_hf(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        processed_outputs: BatchFeature,
+    ) -> BatchFeature:
         if "image_pixel_values" in processed_outputs:
             num_img_tokens = [
                 self.info.get_num_image_tokens(image_width=img_size[0],
@@ -1005,7 +1053,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             ]
             processed_outputs["num_img_tokens"] = num_img_tokens
 
-        if audio_data:
+        if audio_data := mm_data.get("audio", []):
             audio_features = processed_outputs['audio_input_features']
             sr = self.info.get_feature_extractor().sampling_rate
             feature_sizes = [
