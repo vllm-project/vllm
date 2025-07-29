@@ -1,6 +1,6 @@
 #include "common.cuh"
 #include "dispatch_utils.h"
-
+#include "../vectorization_utils.cuh"
 #include <c10/cuda/CUDAGuard.h>
 
 #ifndef USE_ROCM
@@ -21,8 +21,12 @@ __global__ void scaled_fp8_quant_kernel(fp8_type* __restrict__ out,
   // Invert the scale so that we can use multiplications to avoid expensive
   // division.
   const float inverted_scale = 1.0f / (*scale);
-  scaled_fp8_conversion_vec<scalar_t, true>(
-      out, input, inverted_scale, num_elems, tid, blockDim.x * gridDim.x);
+  vectorize_with_alignment<16>(
+      input, out, num_elems, tid, blockDim.x * gridDim.x,
+      [=] __device__(fp8_type & dst, const scalar_t& src) {
+        dst = scaled_fp8_conversion<true, fp8_type>(static_cast<float>(src),
+                                                    inverted_scale);
+      });
 }
 
 template <typename scalar_t, typename fp8_type>
@@ -38,19 +42,14 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
   scalar_t const* __restrict__ token_input = &input[offset];
   fp8_type* __restrict__ token_output = &out[offset];
 
-  // For vectorization, token_input and token_output pointers need to be
-  // aligned at 32-byte and 16-byte addresses respectively.
-  bool const can_vectorize = hidden_size % 16 == 0;
-
+  // 1) compute per-token absmax
   float absmax_val = 0.0f;
-  if (can_vectorize) {
-    absmax_val = thread_max_vec(token_input, hidden_size, tid, blockDim.x);
-  } else {
-    for (int i = tid; i < hidden_size; i += blockDim.x) {
-      float const x = static_cast<float>(token_input[i]);
-      absmax_val = fmaxf(absmax_val, fabsf(x));
-    }
-  }
+  vectorize_read_with_alignment<16>(token_input, hidden_size, tid, blockDim.x,
+                                    [&] __device__(const scalar_t& src) {
+                                      const float v =
+                                          fabsf(static_cast<float>(src));
+                                      absmax_val = fmaxf(absmax_val, v);
+                                    });
 
   using BlockReduce = cub::BlockReduce<float, 256>;
   __shared__ typename BlockReduce::TempStorage reduceStorage;
@@ -70,16 +69,14 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
   }
   __syncthreads();
 
+  // 2) quantize
   // Note that we don't use inverted scales so we can match FBGemm impl.
-  if (can_vectorize) {
-    scaled_fp8_conversion_vec<scalar_t, false>(
-        token_output, token_input, token_scale, hidden_size, tid, blockDim.x);
-  } else {
-    for (int i = tid; i < hidden_size; i += blockDim.x) {
-      token_output[i] = scaled_fp8_conversion<false, fp8_type>(
-          static_cast<float>(token_input[i]), token_scale);
-    }
-  }
+  vectorize_with_alignment<16>(
+      token_input, token_output, hidden_size, tid, blockDim.x,
+      [=] __device__(fp8_type & dst, const scalar_t& src) {
+        dst = scaled_fp8_conversion<false, fp8_type>(static_cast<float>(src),
+                                                     token_scale);
+      });
 }
 
 }  // namespace vllm
