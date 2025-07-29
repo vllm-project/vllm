@@ -98,6 +98,7 @@ def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         tokenization_kwargs=processor_inputs.tokenization_kwargs,
     )["mm_kwargs"]
+    mm_kwargs = {k: [v] for k, v in mm_kwargs.items()}
 
     # Avoid calling model.forward()
     def _initialize_kv_caches_v0(self) -> None:
