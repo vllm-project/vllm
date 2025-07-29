@@ -1073,7 +1073,8 @@ class OpenAIServingChat(OpenAIServing):
                                                       tool_call.parameters,
                                                       ensure_ascii=False)))
                         for i, tool_call in enumerate(tool_calls)
-                    ])
+                    ],
+                    reasoning_content=reasoning_content)
 
             # if the request doesn't use tool choice
             # OR specifies to not use a tool
