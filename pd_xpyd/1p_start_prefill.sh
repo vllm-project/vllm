@@ -2,20 +2,24 @@
 
 BASH_DIR=$(dirname "${BASH_SOURCE[0]}")
 
-DEBUG_MODE=0
+BENCHMARK_MODE=0
 
-if [ "$2" == "debug" ]; then
-    DEBUG_MODE=1
-    echo " Debug mode enabled"
+if [ "$2" == "benchmark" ]; then
+    BENCHMARK_MODE=1
+    sed -i 's/export VLLM_USE_ASYNC_PD=.*/export VLLM_USE_ASYNC_PD=0/' $BASH_DIR/pd_env.sh
+    echo " Benchmark mode enabled"
+else
+    sed -i 's/export VLLM_USE_ASYNC_PD=.*/export VLLM_USE_ASYNC_PD=1/' $BASH_DIR/pd_env.sh
+    echo " Normal mode enabled"
 fi
 
 if [ -z "$1" ] || [ "$1" == "g10" ] || [ "$1" == "pcie4" ]; then
-    if [ "$DEBUG_MODE" == "1" ]; then
-    	source "$BASH_DIR"/start_etc_mooncake_master.sh debug
-    	echo "source "$BASH_DIR"/start_etc_mooncake_master.sh debug"
+    if [ "$BENCHMARK_MODE" == "1" ]; then
+	source "$BASH_DIR"/start_etc_mooncake_master.sh benchmark
+	echo "source "$BASH_DIR"/start_etc_mooncake_master.sh benchmark"
     else
 	source "$BASH_DIR"/start_etc_mooncake_master.sh
-        echo "source "$BASH_DIR"/start_etc_mooncake_master.sh"
+	echo "source "$BASH_DIR"/start_etc_mooncake_master.sh"
     fi
 fi
 

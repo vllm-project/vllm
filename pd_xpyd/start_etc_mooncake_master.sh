@@ -18,18 +18,18 @@ has_arg() {
   return 1
 }
 
-DEBUG_MODE=0
+BENCHMARK_MODE=0
 
-if has_arg debug "$@"; then
-  echo "Debug mode enabled"
-  DEBUG_MODE=1
+if has_arg benchmark "$@"; then
+  echo "Benchmark mode enabled"
+  BENCHMARK_MODE=1
 fi
 
 etcd --listen-client-urls http://0.0.0.0:2379 \
      --advertise-client-urls http://localhost:2379 \
      >etcd.log 2>&1 &
 
-if [ "$DEBUG_MODE" == "1" ]; then
+if [ "$BENCHMARK_MODE" == "1" ]; then
   mooncake_master -max_threads 64 -port 50001 --v=1 >mooncake_master.log 2>&1 &
 else
   mooncake_master -enable_gc true -max_threads 64 -port 50001 --v=1 >mooncake_master.log 2>&1 &

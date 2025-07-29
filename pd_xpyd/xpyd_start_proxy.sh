@@ -42,11 +42,11 @@ else
     FIRST_TOKEN_FROM_P=$4
 fi
 
-DEBUG_MODE=0
+BENCHMARK_MODE=0
 
-if [ "$5" == "debug" ]; then
-    DEBUG_MODE=1
-    echo " Debug mode enabled"
+if [ "$5" == "benchmark" ]; then
+    BENCHMARK_MODE=1
+    echo " Benchmark mode enabled"
 fi
 
 #For OAM
@@ -79,15 +79,15 @@ for ((i=0; i<P_INSTANCE_NUMBER; i++)); do
     PREFILL_ARGS="$PREFILL_ARGS ${IP}:${PORT}"
 done
 
-if [ "$DEBUG_MODE" == "1" ]; then
-    CMD="python3 ./examples/online_serving/disagg_examples/disagg_proxy_demo_debugmode.py \
+if [ "$BENCHMARK_MODE" == "1" ]; then
+    CMD="python3 ./examples/online_serving/disagg_examples/disagg_proxy_demo_benchmark.py \
         --model $MODEL_PATH \
         --prefill $PREFILL_ARGS \
         --decode $DECODE_ARGS \
         --port 8868 \
         --repeat_p_request 1 \
         --repeat_d_times 639 \
-        --debug_mode"
+        --benchmark_mode"
 
 else
 
