@@ -515,19 +515,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         new_token_ids[-num_new_tokens:])
 
             # Update the block IDs.
-            # Transform block IDs for giant tensor layout
-            transformed_new_block_ids = (
-                self._transform_block_ids_for_giant_tensor(new_block_ids))
-            
             if not resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
                 for block_ids, new_ids in zip(req_state.block_ids,
-                                              transformed_new_block_ids):
+                                              new_block_ids):
                     block_ids.extend(new_ids)
             else:
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
-                req_state.block_ids = transformed_new_block_ids
+                req_state.block_ids = new_block_ids
 
             req_index = self.input_batch.req_id_to_index.get(req_id)
             if req_index is None:
@@ -540,8 +536,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
-            self.input_batch.block_table.append_row(transformed_new_block_ids, 
-                                                    req_index)
+            self.input_batch.block_table.append_row(new_block_ids, req_index)
 
             # For the last rank, we don't need to update the token_ids_cpu
             # because the sampled tokens are already cached.
@@ -2697,80 +2692,33 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                               kv_cache_spec.page_size_bytes)
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
-                    
-                    # Check if using giant tensor for hybrid attention+mamba models
-                    kv_cache_tensor = next((t for t in kv_cache_config.kv_cache_tensors 
-                                          if layer_name in t.shared_by), None)
-                    has_mamba_groups = any(isinstance(g.kv_cache_spec, MambaSpec) 
-                                         for g in kv_cache_config.kv_cache_groups)
-                    is_giant_tensor = (len(kv_cache_config.kv_cache_tensors) == 1 and 
-                                     has_mamba_groups and
-                                     len([g for g in kv_cache_config.kv_cache_groups 
-                                         if isinstance(g.kv_cache_spec, AttentionSpec)]) > 0)
-                    
-                    if is_giant_tensor:
-                        # Giant tensor: use pointer arithmetic for layer offset
-                        # Find this layer's attention layer index (0-based among attention layers only)
-                        attention_layer_idx = 0
-                        for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
-                            if group_idx == i:
-                                break
-                            if isinstance(group.kv_cache_spec, AttentionSpec):
-                                attention_layer_idx += 1
-                        
-                        page_size = kv_cache_spec.page_size_bytes
-                        
-                        # Screenshot formula: ki → tensor + 2 × i × page_size
-                        key_offset = kv_cache_tensor.get_attention_key_offset(attention_layer_idx, page_size)
-                        layer_size = 2 * page_size  # key + value for this layer
-                        
-                        # Create tensor slice at the calculated offset  
-                        layer_tensor = raw_tensor.narrow(0, key_offset, layer_size)
-                        
-                        # Apply standard reshaping to the layer slice
-                        kv_cache_shape = self.attn_backends[i].get_kv_cache_shape(
-                            num_blocks, kv_cache_spec.block_size,
-                            kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
-                        dtype = kv_cache_spec.dtype
-                        try:
-                            kv_cache_stride_order = self.attn_backends[
-                                i].get_kv_cache_stride_order()
-                            assert len(kv_cache_stride_order) == len(
-                                kv_cache_shape)
-                        except (AttributeError, NotImplementedError):
-                            kv_cache_stride_order = tuple(
-                                range(len(kv_cache_shape)))
-                        kv_cache_shape = tuple(kv_cache_shape[i]
-                                               for i in kv_cache_stride_order)
-                        inv_order = [
-                            kv_cache_stride_order.index(i)
-                            for i in range(len(kv_cache_stride_order))
-                        ]
-                        kv_caches[layer_name] = layer_tensor.view(dtype).view(
-                            kv_cache_shape).permute(*inv_order)
-                    else:
-                        # Standard tensor processing
-                        kv_cache_shape = self.attn_backends[i].get_kv_cache_shape(
-                            num_blocks, kv_cache_spec.block_size,
-                            kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
-                        dtype = kv_cache_spec.dtype
-                        try:
-                            kv_cache_stride_order = self.attn_backends[
-                                i].get_kv_cache_stride_order()
-                            assert len(kv_cache_stride_order) == len(
-                                kv_cache_shape)
-                        except (AttributeError, NotImplementedError):
-                            kv_cache_stride_order = tuple(
-                                range(len(kv_cache_shape)))
-                        kv_cache_shape = tuple(kv_cache_shape[i]
-                                               for i in kv_cache_stride_order)
-                        inv_order = [
-                            kv_cache_stride_order.index(i)
-                            for i in range(len(kv_cache_stride_order))
-                        ]
-                        kv_caches[layer_name] = kv_cache_raw_tensors[
-                            layer_name].view(dtype).view(kv_cache_shape).permute(
-                                *inv_order)
+                    kv_cache_shape = self.attn_backends[i].get_kv_cache_shape(
+                        num_blocks, kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
+                    dtype = kv_cache_spec.dtype
+                    try:
+                        kv_cache_stride_order = self.attn_backends[
+                            i].get_kv_cache_stride_order()
+                        assert len(kv_cache_stride_order) == len(
+                            kv_cache_shape)
+                    except (AttributeError, NotImplementedError):
+                        kv_cache_stride_order = tuple(
+                            range(len(kv_cache_shape)))
+                    # The allocation respects the backend-defined stride order
+                    # to ensure the semantic remains consistent for each
+                    # backend. We first obtain the generic kv cache shape and
+                    # then permute it according to the stride order which could
+                    # result in a non-contiguous tensor.
+                    kv_cache_shape = tuple(kv_cache_shape[i]
+                                           for i in kv_cache_stride_order)
+                    # Maintain original KV shape view.
+                    inv_order = [
+                        kv_cache_stride_order.index(i)
+                        for i in range(len(kv_cache_stride_order))
+                    ]
+                    kv_caches[layer_name] = kv_cache_raw_tensors[
+                        layer_name].view(dtype).view(kv_cache_shape).permute(
+                            *inv_order)
                 elif isinstance(kv_cache_spec, MambaSpec):
                     has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
@@ -2801,36 +2749,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                        kv_cache_raw_tensors)
 
         return kv_caches
-
-    def _transform_block_ids_for_giant_tensor(
-            self, block_ids: list[list[int]]) -> list[list[int]]:
-        """Transform block IDs for giant tensor layout.
-        
-        Screenshot formula: block_id = block_id_alloc × num_attention_layer × 2
-        """
-        # Check if using giant tensor layout
-        has_mamba_groups = any(isinstance(g.kv_cache_spec, MambaSpec) 
-                              for g in self.kv_cache_config.kv_cache_groups)
-        is_giant_tensor = (len(self.kv_cache_config.kv_cache_tensors) == 1 and 
-                          has_mamba_groups and
-                          len([g for g in self.kv_cache_config.kv_cache_groups 
-                              if isinstance(g.kv_cache_spec, AttentionSpec)]) > 0)
-        
-        if not is_giant_tensor:
-            return block_ids
-            
-        # Count attention layers for transformation
-        num_attention_layers = sum(1 for g in self.kv_cache_config.kv_cache_groups 
-                                  if isinstance(g.kv_cache_spec, AttentionSpec))
-        
-        # Apply transformation: block_id = block_id_alloc × num_attention_layer × 2
-        transformed_block_ids = []
-        for group_block_ids in block_ids:
-            transformed_group = [block_id * num_attention_layers * 2 
-                               for block_id in group_block_ids]
-            transformed_block_ids.append(transformed_group)
-            
-        return transformed_block_ids
 
     def _verify_hybrid_attention_mamba_layout(
             self, kv_cache_config: KVCacheConfig,
