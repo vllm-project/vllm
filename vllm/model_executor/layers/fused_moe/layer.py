@@ -98,8 +98,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         """
         return False
 
-    @staticmethod
-    def maybe_make_prepare_finalize(
+    def maybe_make_prepare_finalize(self,
             moe: FusedMoEConfig) -> Optional[FusedMoEPrepareAndFinalize]:
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
@@ -190,7 +189,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     def init_prepare_finalize(self, moe: FusedMoEConfig):
         self.moe = moe
-        prepare_finalize = FusedMoEMethodBase.maybe_make_prepare_finalize(
+        prepare_finalize = self.maybe_make_prepare_finalize(
             self.moe)
 
         self.topk_indices_dtype = None
@@ -868,8 +867,6 @@ class FusedMoE(CustomOp):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
-        if isinstance(self.quant_method, FusedMoEMethodBase):
-            self.quant_method.maybe_swap_experts_impl(self.moe_parallel_config)
 
         # Chunked all2all staging tensor
         self.batched_hidden_states: Optional[torch.Tensor] = None

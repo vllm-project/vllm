@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 
@@ -9,7 +9,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
-from vllm.model_executor.layers.fused_moe.utils import extract_required_args
 from vllm.utils.flashinfer import (flashinfer_cutlass_fused_moe,
                                    has_flashinfer_cutlass_fused_moe)
 
@@ -43,8 +42,12 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
-        use_nvfp4_w4a4: bool = False,
-        use_fp8_w8a8: bool = False,
+        g1_alphas: torch.Tensor,
+        g2_alphas: torch.Tensor,
+        a1_gscale: torch.Tensor,
+        a2_gscale: torch.Tensor,
+        out_dtype: torch.dtype, # Optional?
+        use_nvfp4_w4a4: bool = False,  # undo defaults?
         use_dp: bool = False,
         ep_rank: int = 0,
         ep_size: int = 1,
@@ -60,7 +63,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 block_shape=None,
             ))
         self.use_nvfp4_w4a4 = use_nvfp4_w4a4
-        self.use_fp8_w8a8 = use_fp8_w8a8
+        self.use_fp8_w8a8 = False
         self.ep_rank = ep_rank
         self.ep_size = ep_size
         self.tp_rank = tp_rank
@@ -68,6 +71,11 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.use_dp = use_dp
         assert not use_batched_format or num_dispatchers is not None
         self.num_dispatchers = num_dispatchers
+        self.g1_alphas = g1_alphas
+        self.g2_alphas = g2_alphas
+        self.a1_gscale = a1_gscale
+        self.a2_gscale = a2_gscale
+        self.out_dtype = out_dtype
 
     @property
     def activation_formats(
@@ -149,17 +157,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: Optional[torch.Tensor],
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: Optional[bool],
-        extra_expert_args: Optional[dict[str, Any]],
     ):
-        assert extra_expert_args is not None, \
-            "extra_expert_args must be provided"
-        required_keys = [
-            'g1_alphas', 'g2_alphas', 'a1_gscale', 'a2_gscale', 'out_dtype'
-        ]
-
-        g1_alphas, g2_alphas, a1_gscale, a2_gscale, out_dtype = (
-            extract_required_args(extra_expert_args, required_keys))
-
         # Flashinfer CUTLASS kernel takes scalar global scales,
         # min because inv_scale.
         assert self.use_nvfp4_w4a4 is True, ("Only nvfp4 quantization is "
@@ -171,12 +169,12 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "be None for FlashInferExperts")
 
         quant_scales = [
-            a1_gscale,
+            self.a1_gscale,
             w1_scale.view(torch.int32),
-            g1_alphas,
-            a2_gscale,
+            self.g1_alphas,
+            self.a2_gscale,
             w2_scale.view(torch.int32),
-            g2_alphas,
+            self.g2_alphas,
         ]
         _ = flashinfer_cutlass_fused_moe(
             input=hidden_states,
@@ -185,7 +183,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             # FlashInfer API requires weight to be long for nvfp4
             fc1_expert_weights=w1.view(torch.long),
             fc2_expert_weights=w2.view(torch.long),
-            output_dtype=out_dtype,
+            output_dtype=self.out_dtype,
             quant_scales=quant_scales,
             input_sf=a1q_scale,
             tp_size=self.tp_size,

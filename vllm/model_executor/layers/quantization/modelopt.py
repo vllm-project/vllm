@@ -913,14 +913,35 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.fused_experts: Optional[
             mk.FusedMoEModularKernel] = None  # type: ignore[assignment]
 
-    def maybe_swap_experts_impl(
+    # TODO: merge with select? move to layer or turn into select_prepare_finalize
+    def maybe_make_prepare_finalize(
         self,
-        moe_parallel_config: FusedMoEParallelConfig,
-    ):
+        moe: FusedMoEConfig,
+    ) -> Optional[FusedMoEPrepareAndFinalize]:
+        moe_parallel_config = moe.parallel_config
         if not self.allow_flashinfer:
-            return
-        self.fused_experts = build_flashinfer_fp4_cutlass_moe_kernel(
-            moe_parallel_config)
+            return super().maybe_make_prepare_finalize(moe)
+
+        logger.debug_once("FlashInferExperts")
+
+        XXXXXXX build_flashinfer_fp4_cutlass_moe_kernel,
+
+        # default to TP/EP case only
+
+        use_nvfp4_w4a4 = True
+        use_dp = moe_parallel_config.dp_size > 1
+        # ep_rank = moe_parallel_config.ep_rank
+        # ep_size = moe_parallel_config.ep_size
+        # tp_rank = moe_parallel_config.tp_rank
+        # tp_size = moe_parallel_config.tp_size
+        a1_gscale = layer.w13_input_scale_quant
+
+        return FlashInferCutlassMoEPrepareAndFinalize(
+            use_dp,
+            a1_gscale,
+            quant_dtype=None, #torch.uint8,
+            #meaning 2x e2m1 packed in one, kernel requirement
+        )
 
     # This method update self.fused_experts
     # only prepare_finalize is not None call select_gemm_impl
@@ -929,9 +950,44 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def select_gemm_impl(self, prepare_finalize,
                          moe) -> mk.FusedMoEPermuteExpertsUnpermute:
 
-        assert moe is not None and prepare_finalize is not None
-        from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (  # noqa: E501
-            select_nvfp4_gemm_impl)
+        assert False, "fixme"
+        # assert moe is not None and prepare_finalize is not None
+        # from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (  # noqa: E501
+        #     select_nvfp4_gemm_impl)
+
+        # return select_nvfp4_gemm_impl(self.allow_flashinfer_cutlass, moe,
+        #                               logger)
+
+        assert moe is not None
+        assert prepare_finalize is not None
+        experts = None
+        all2all_manager = get_ep_group().device_communicator.all2all_manager
+        assert all2all_manager is not None
+
+        if self.allow_flashinfer_cutlass:
+            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
+                FlashInferExperts)
+            logger.debug_once("Using FlashInferExperts")
+            experts = FlashInferExperts(
+                g1_alphas=layer.g1_alphas,
+                g2_alphas=layer.g2_alphas,
+                a1_gscale=layer.w13_input_scale_quant,
+                a2_gscale=layer.w2_input_scale_quant,
+                out_dtype=moe.in_dtype,  # TODO: double check
+                use_nvfp4_w4a4=True,
+                use_dp=moe.moe_parallel_config.dp_size > 1,
+                ep_rank=moe.moe_parallel_config.ep_rank,
+                ep_size=moe.moe_parallel_config.ep_size,
+                tp_rank=moe.moe_parallel_config.tp_rank,
+                tp_size=moe.moe_parallel_config.tp_size,
+            )
+        else:
+            assert moe.dp_size > 1
+            logger.debug_once("Using CutlassExpertsFp4")
+            # Currently CutlassExpertsFp4 doesn't support DP
+            raise ValueError("CutlassExpertsFp4 doesn't support DP. "
+                             "Use flashinfer CUTLASS FusedMoE backend instead "
+                             "(set VLLM_USE_FLASHINFER_MOE_FP4=1)")
 
         return select_nvfp4_gemm_impl(self.allow_flashinfer, moe, logger)
 
@@ -1369,14 +1425,27 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 expert_map=expert_map,
                 apply_router_weight_on_input=apply_router_weight_on_input)
         else:
+
+            assert False, "fixme"
+            #out = flashinfer_fp4_cutlass_moe_forward(
+
+            # TP or DP case
+            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
+                is_valid_flashinfer_cutlass_fused_moe)
             assert self.allow_flashinfer and \
                self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
-            out = flashinfer_fp4_cutlass_moe_forward(
-                self.fused_experts,
-                layer,
-                x,
-                topk_weights,
-                topk_ids,
+
+            assert is_valid_flashinfer_cutlass_fused_moe(
+                x, layer.w13_weight, layer.w2_weight), (
+                    "Flashinfer CUTLASS Fused MoE not applicable!")
+
+            out = self.fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=False,  # TODO(shuw): fix later, now output is high prec
                 activation=activation,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,

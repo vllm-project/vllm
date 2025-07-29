@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 
@@ -9,7 +9,7 @@ from vllm.distributed import get_dp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
-    extract_required_args, moe_kernel_quantize_input)
+    moe_kernel_quantize_input)
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
@@ -21,6 +21,8 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def __init__(
         self,
+        use_dp: bool,
+        a1_gscale: torch.Tensor,
         quant_dtype: Optional[torch.dtype] = None,
         per_channel_quant: bool = False,
         block_shape: Optional[list[int]] = None,
@@ -31,6 +33,8 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.block_shape = block_shape
         self.quant_dtype = quant_dtype
         self.num_dispatchers_ = num_dispatchers
+        self.use_dp = use_dp
+        self.a1_gscale = a1_gscale
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -56,7 +60,6 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-        extra_prepare_args: Optional[dict[str, Any]]
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor], Optional[torch.Tensor]]:
 
@@ -67,22 +70,23 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1"
             a1.mul_(topk_weights.to(a1.dtype))
 
-        (a1_gscale, use_dp, local_tokens) = extract_required_args(
-            extra_prepare_args, ['a1_gscale', 'use_dp', 'local_tokens'])
+        local_tokens = a1.shape[0]
 
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
-            a1_gscale,
+            self.a1_gscale,
             quant_config.quant_dtype,
             self.per_channel_quant,
             self.block_shape,
-            is_fp4_scale_swizzled=not use_dp,  # Swizzling after communication
+            is_fp4_scale_swizzled=not self.use_dp  # Swizzling after communication
         )
-        if use_dp:
+        if self.use_dp:
             topk_weights, topk_ids, a1q, a1q_scale = \
-                get_dp_group().all_gatherv([topk_weights, topk_ids, a1q, a1q_scale], # noqa: E501
-                                           dim=0,
-                                           sizes=get_local_sizes())
+                get_dp_group().all_gatherv(
+                    [topk_weights, topk_ids, a1q, a1q_scale],
+                    dim=0,
+                    sizes=get_local_sizes(),
+                )
             a1_m, a1_n = a1q.shape
             a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
@@ -91,13 +95,9 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
                  topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                  apply_router_weight_on_input: bool,
-                 weight_and_reduce_impl: mk.TopKWeightAndReduce,
-                 extra_finalize_args: Optional[dict[str, Any]]) -> None:
+                 weight_and_reduce_impl: mk.TopKWeightAndReduce) -> None:
 
-        (use_dp,
-         local_tokens) = extract_required_args(extra_finalize_args,
-                                               ['use_dp', 'local_tokens'])
-        if use_dp:
+        if self.use_dp:
             fused_expert_output = get_dp_group().reduce_scatterv(
                 fused_expert_output, dim=0, sizes=get_local_sizes())
         output.copy_(fused_expert_output)
