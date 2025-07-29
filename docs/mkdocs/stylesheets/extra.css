@@ -183,3 +183,69 @@ body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .
 .md-typeset .tabbed-content {
   padding: 0 0.6em;
 }
+
+/* Search results improvements */
+/* Limit height of code blocks in search results and add scroll */
+.md-search-result__article pre,
+.md-search-result__article .highlight {
+  max-height: 8rem;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border-radius: 0.2rem;
+  margin: 0.5rem 0;
+}
+
+/* Add fade-out gradient for truncated code blocks */
+.md-search-result__article pre::after,
+.md-search-result__article .highlight::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 1rem;
+  background: linear-gradient(transparent, var(--md-default-bg-color));
+  pointer-events: none;
+}
+
+/* Position container for gradient overlay */
+.md-search-result__article pre,
+.md-search-result__article .highlight {
+  position: relative;
+}
+
+/* Truncate very long single lines in search results */
+.md-search-result__article code {
+  max-width: 100%;
+  overflow-wrap: break-word;
+  word-break: break-all;
+}
+
+/* Limit overall height of search result items with large content */
+.md-search-result__item {
+  max-height: 20rem;
+  overflow: hidden;
+}
+
+/* Add subtle indicator for truncated content */
+.md-search-result__article .highlight::-webkit-scrollbar,
+.md-search-result__article pre::-webkit-scrollbar {
+  width: 4px;
+}
+
+.md-search-result__article .highlight::-webkit-scrollbar-track,
+.md-search-result__article pre::-webkit-scrollbar-track {
+  background: var(--md-default-fg-color--lightest);
+  border-radius: 2px;
+}
+
+.md-search-result__article .highlight::-webkit-scrollbar-thumb,
+.md-search-result__article pre::-webkit-scrollbar-thumb {
+  background: var(--md-default-fg-color--light);
+  border-radius: 2px;
+}
+
+.md-search-result__article .highlight::-webkit-scrollbar-thumb:hover,
+.md-search-result__article pre::-webkit-scrollbar-thumb:hover {
+  background: var(--md-default-fg-color);
+}
