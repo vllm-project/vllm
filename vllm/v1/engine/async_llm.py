@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import os
+import socket
 import time
 from collections.abc import AsyncGenerator, Mapping
 from copy import copy
 from typing import Any, Optional, Union
 
 import numpy as np
+from viztracer import VizTracer
 
 import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
@@ -140,6 +143,14 @@ class AsyncLLM(EngineClient):
             self._run_output_handler()
         except RuntimeError:
             pass
+
+        if envs.VLLM_TORCH_PROFILER_DIR:
+            self.tracer = VizTracer()
+            self.tracer_output_file = os.path.join(
+                envs.VLLM_TORCH_PROFILER_DIR,
+                f"{socket.gethostname()}_{os.getpid()}.async_llm.trace.json")
+        else:
+            self.tracer = None
 
     @classmethod
     def from_vllm_config(
@@ -550,9 +561,16 @@ class AsyncLLM(EngineClient):
             raise self.dead_error
 
     async def start_profile(self) -> None:
+        if self.tracer is not None:
+            self.tracer.start()
         await self.engine_core.profile_async(True)
 
     async def stop_profile(self) -> None:
+        if self.tracer is not None:
+            self.tracer.stop()
+            self.tracer.save(self.tracer_output_file)
+            logger.info("Saved AsyncLLM CPU trace to %s",
+                        self.tracer_output_file)
         await self.engine_core.profile_async(False)
 
     async def reset_mm_cache(self) -> None:
