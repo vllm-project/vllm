@@ -64,6 +64,7 @@ def _listen_for_register(poller, router_socket):
                     )
                     _remove_oldest_instances(decode_instances)
             else:
+                node = None
                 print(
                     "Unexpected, Received message from %s, data: %s",
                     remote_address,
