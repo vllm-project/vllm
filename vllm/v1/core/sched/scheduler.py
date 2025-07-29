@@ -782,20 +782,12 @@ class Scheduler(SchedulerInterface):
         # Calculate total existing tokens (prompt + already generated tokens)
         # request.num_tokens includes both prompt and generated tokens
         total_existing_tokens = request.num_tokens
-
-        # Get the new computed blocks in the right format
-        if new_computed_blocks is not None:
-            new_computed_block_list = new_computed_blocks.blocks
-        else:
-            new_computed_block_list = tuple([] for _ in range(
-                len(self.kv_cache_manager.kv_cache_config.kv_cache_groups)))
-
         # Check how many blocks would be needed for the full existing context
         num_blocks_needed = (
             self.kv_cache_manager.coordinator.get_num_blocks_to_allocate(
                 request_id=request.request_id,
                 num_tokens=total_existing_tokens,
-                new_computed_blocks=new_computed_block_list))
+                new_computed_blocks=new_computed_blocks.blocks))
 
         # Check if we have enough free blocks
         num_free_blocks = self.kv_cache_manager.block_pool.get_num_free_blocks(
