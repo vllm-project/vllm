@@ -949,9 +949,12 @@ class ModelConfig:
 
         runner_type = self._get_default_runner_type(architectures)
 
-        logger.info(
-            "Resolved `--runner auto` to `--runner %s`. "
-            "Pass the value explicitly to silence this message.", runner_type)
+        # Don't log the most common case
+        if runner_type != "generate":
+            logger.info(
+                "Resolved `--runner auto` to `--runner %s`. "
+                "Pass the value explicitly to silence this message.",
+                runner_type)
 
         return runner_type
 
@@ -998,9 +1001,12 @@ class ModelConfig:
         convert_type = self._get_default_convert_type(architectures,
                                                       runner_type)
 
-        logger.info(
-            "Resolved `--convert auto` to `--convert %s`. "
-            "Pass the value explicitly to silence this message.", convert_type)
+        # Don't log the most common case
+        if convert_type != "none":
+            logger.info(
+                "Resolved `--convert auto` to `--convert %s`. "
+                "Pass the value explicitly to silence this message.",
+                convert_type)
 
         return convert_type
 
@@ -4763,12 +4769,23 @@ class VllmConfig:
                 # Hybrid KV cache manager is not compatible with KV events.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.model_config is not None and \
-                self.model_config.attention_chunk_size is not None and \
-                self.speculative_config is not None and \
-                self.speculative_config.use_eagle():
-                # Hybrid KV cache manager is not yet supported with chunked
-                # local attention + eagle.
-                self.scheduler_config.disable_hybrid_kv_cache_manager = True
+                self.model_config.attention_chunk_size is not None:
+                if self.speculative_config is not None and \
+                    self.speculative_config.use_eagle():
+                    # Hybrid KV cache manager is not yet supported with chunked
+                    # local attention + eagle.
+                    self.scheduler_config.disable_hybrid_kv_cache_manager = True
+                elif \
+                    not envs.VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE:
+                    logger.warning(
+                        "There is a latency regression when using chunked local"
+                        " attention with the hybrid KV cache manager. Disabling"
+                        " it, by default. To enable it, set the environment "
+                        "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE=1."
+                    )
+                    # Hybrid KV cache manager is not yet supported with chunked
+                    # local attention.
+                    self.scheduler_config.disable_hybrid_kv_cache_manager = True
 
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:

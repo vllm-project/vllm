@@ -403,17 +403,18 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/kernels/quantization
   commands:
-    - pytest -v -s kernels/quantization  --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
 
-- label: Kernels MoE Test
+- label: Kernels MoE Test %N
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - csrc/moe/
   - tests/kernels/moe
   - vllm/model_executor/layers/fused_moe/
   commands:
-    - pytest -v -s kernels/moe
+    - pytest -v -s kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 2
 
 - label: Kernels Mamba Test
   mirror_hardwares: [amdexperimental, amdproduction]
