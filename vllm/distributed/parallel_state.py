@@ -358,6 +358,7 @@ class GroupCoordinator:
             return input_
 
         if self.use_custom_op_call:
+            assert output_ is None, "output_ is not supported for custom op"
             return torch.ops.vllm.all_reduce(input_,
                                              group_name=self.unique_name)
         else:

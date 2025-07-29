@@ -18,6 +18,8 @@ from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.distributed.communication_op import( 
+    tensor_model_parallel_use_symmetric_memory,)
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
 
@@ -415,8 +417,10 @@ class VocabParallelEmbedding(torch.nn.Module):
         else:
             masked_input = input_
         # Get the embeddings.
-        output_parallel = self.quant_method.embedding(self,
+        with tensor_model_parallel_use_symmetric_memory() as sm:
+            output_parallel = self.quant_method.embedding(self,
                                                       masked_input.long())
+            sm.tag(output_parallel)
         # Mask the output embedding.
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)

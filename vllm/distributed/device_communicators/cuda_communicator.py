@@ -98,10 +98,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.pynccl_comm is not None
             and hasattr(input_, "symmetric_memory")
             and input_.symmetric_memory
+            and output_ is not None
         ):
             # TODO(asamani): this is under change_state in sglang, double check!
-            input_ = self.pynccl_comm.all_reduce(input_, input_)
-            return input_
+            output_ = self.pynccl_comm.all_reduce(input_, output_)
+            return output_
         # always try quick reduce first, then custom allreduce,
         # and then pynccl. (quick reduce just for ROCM MI3*)
         qr_comm = self.qr_comm

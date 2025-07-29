@@ -37,7 +37,8 @@ from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
                          get_current_vllm_config)
 from vllm.distributed import (get_ep_group, get_pp_group,
                               get_tensor_model_parallel_world_size)
-from vllm.distributed.device_communicators.pynccl_allocator import use_symmetric_memory
+from vllm.distributed.device_communicators.pynccl_allocator import( 
+    is_symmetric_memory_enabled,)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -204,7 +205,6 @@ class DeepseekV2MoE(nn.Module):
                     out=final_hidden_states_out,
                 )
                 final_hidden_states = final_hidden_states_out
-                final_hidden_states.symmetric_memory = True
             else:
                 # Fix FP16 overflow
                 # See DeepseekV2DecoderLayer for more details.
@@ -214,13 +214,11 @@ class DeepseekV2MoE(nn.Module):
                     out=final_hidden_states_out,
                 )
                 final_hidden_states = final_hidden_states_out
-                final_hidden_states.symmetric_memory = True
             sm.tag(final_hidden_states)
         if self.tp_size > 1:
             final_hidden_states = (
                 self.experts.maybe_all_reduce_tensor_model_parallel(
-                    final_hidden_states))
-        final_hidden_states.symmetric_memory = False
+                    final_hidden_states, is_symm=is_symmetric_memory_enabled()))
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 
@@ -615,8 +613,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        # TODO(asamani): add back when fixed
-        #with tensor_model_parallel_use_symmetric_memory():
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,

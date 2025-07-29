@@ -5,6 +5,7 @@ import torch
 from torch.cuda.memory import CUDAPluggableAllocator
 
 from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.config import ParallelConfig
 
 nccl_allocator_source = """
 #include <nccl.h>
@@ -27,8 +28,7 @@ _graph_pool_id = None
 
 
 def is_symmetric_memory_enabled():
-    # TODO(asaman): make this configurable
-    return True
+    return ParallelConfig.enable_nccl_symm_mem
 
 
 def set_graph_pool_id(graph_pool_id):

@@ -34,7 +34,8 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import direct_register_custom_op, has_deep_ep, has_pplx
-
+from vllm.distributed.communication_op import( 
+    tensor_model_parallel_use_symmetric_memory,)
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
     from .fused_moe import TritonExperts, fused_experts
@@ -1417,26 +1418,28 @@ class FusedMoE(torch.nn.Module):
             staged_router_logits.copy_(router_logits, non_blocking=True)
 
             # Matrix multiply.
-            final_hidden_states = self.quant_method.apply(
-                layer=self,
-                x=staged_hidden_states,
-                router_logits=staged_router_logits,
-                top_k=self.top_k,
-                renormalize=self.renormalize,
-                use_grouped_topk=self.use_grouped_topk,
-                global_num_experts=self.global_num_experts,
-                expert_map=self.expert_map,
-                topk_group=self.topk_group,
-                num_expert_group=self.num_expert_group,
-                custom_routing_function=self.custom_routing_function,
-                scoring_func=self.scoring_func,
-                e_score_correction_bias=self.e_score_correction_bias,
-                activation=self.activation,
-                enable_eplb=self.enable_eplb,
-                expert_load_view=self.expert_load_view,
-                logical_to_physical_map=self.logical_to_physical_map,
-                logical_replica_count=self.logical_replica_count,
-            )
+            with tensor_model_parallel_use_symmetric_memory() as sm:
+                final_hidden_states = self.quant_method.apply(
+                    layer=self,
+                    x=staged_hidden_states,
+                    router_logits=staged_router_logits,
+                    top_k=self.top_k,
+                    renormalize=self.renormalize,
+                    use_grouped_topk=self.use_grouped_topk,
+                    global_num_experts=self.global_num_experts,
+                    expert_map=self.expert_map,
+                    topk_group=self.topk_group,
+                    num_expert_group=self.num_expert_group,
+                    custom_routing_function=self.custom_routing_function,
+                    scoring_func=self.scoring_func,
+                    e_score_correction_bias=self.e_score_correction_bias,
+                    activation=self.activation,
+                    enable_eplb=self.enable_eplb,
+                    expert_load_view=self.expert_load_view,
+                    logical_to_physical_map=self.logical_to_physical_map,
+                    logical_replica_count=self.logical_replica_count,
+                )
+                sm.tag(final_hidden_states)
 
             if not skip_result_store:
                 full_final_hidden_states[chunk_start:chunk_end, :].copy_(

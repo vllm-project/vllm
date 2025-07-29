@@ -46,6 +46,8 @@ def broadcast_tensor_dict(tensor_dict: Optional[dict[Any, Union[torch.Tensor,
 
 
 def tensor_model_parallel_use_symmetric_memory():
-    # if torch.compiler.is_compiling():
-    #     return nullcontext()
+    # TODO(asamani): remove this once we have a way to torch compile with 
+    # mempool or break the graph.
+    if torch.compiler.is_compiling():
+        return nullcontext()
     return use_symmetric_memory(get_tp_group())
