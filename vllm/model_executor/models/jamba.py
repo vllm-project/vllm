@@ -396,7 +396,6 @@ class JambaModel(nn.Module):
                     continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
-
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 # Skip layers on other devices.
