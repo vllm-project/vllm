@@ -11,11 +11,8 @@
         "types": [],
         "names": [
             "lm_head",
-            "mlp\\.gate\\b",
-            "latent_cache_k_nodeq",
-            "latent_cache_v_nodeq",
-            "latent_cache_v"
+            "mlp\\.gate\\b"
         ]
     },
-    "dump_stats_path": "./scripts/nc_workspace_measure_fp8_mla/inc_measure_output"
+    "dump_stats_path": "./scripts/quantization/DeepSeek-R1-G2/g2/inc_output"
 }
