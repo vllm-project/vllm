@@ -71,7 +71,6 @@ ARG INSTALL_KV_CONNECTORS=false
 FROM ${BUILD_BASE_IMAGE} AS base
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
-ARG torch_cuda_arch_list
 ARG TARGETPLATFORM
 ARG INSTALL_KV_CONNECTORS=false
 ENV DEBIAN_FRONTEND=noninteractive
@@ -79,8 +78,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
-
-ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 # Install Python and other dependencies
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
