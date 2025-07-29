@@ -2461,6 +2461,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.encoder_cache.clear()
         gc.collect()
 
+    def maybe_flashinfer_autotune_model(self) -> None:
+        from vllm.utils.flashinfer import has_flashinfer
+        if has_flashinfer():
+            from flashinfer.autotuner import autotune
+            with torch.inference_mode(), autotune():
+                # We skip EPLB here since we don't want to record dummy metrics
+                TODO(shuw): only need max batch size
+                num_tokens = 16384
+                hs, last_hs = self._dummy_run(num_tokens,
+                                              skip_eplb=True,
+                                              is_profile=True)
+                del hs, last_hs
+
     def capture_model(self) -> None:
         if not self.use_cuda_graph:
             logger.warning(
