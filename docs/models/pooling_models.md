@@ -162,17 +162,17 @@ The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
 It returns the extracted hidden states directly.
 
 !!! note
-    Please use one of the more specific methods instead of `encode`:
-    - For embeddings, use `LLM.embed(...)`.
-    - For classification logits, use `LLM.classify(...)`.
-    - For rewards, use `LLM.reward(...)`.
+    Please use one of the more specific methods or set the task directly when using `LLM.encode`:
+    - For embeddings, use `LLM.embed(...)` or `task="embed".
+    - For classification logits, use `LLM.classify(...)` or `task="classify"`.
+    - For rewards, use `LLM.reward(...)` or `task="reward"`.
     - For similarity scores, use `LLM.score(...)`.  
 
 ```python
 from vllm import LLM
 
 llm = LLM(model="intfloat/e5-small", runner="pooling")
-(output,) = llm.encode("Hello, my name is", task="embed")
+(output,) = llm.encode("Hello, my name is", pooling_task="embed")
 
 data = output.outputs.data
 print(f"Data: {data!r}")

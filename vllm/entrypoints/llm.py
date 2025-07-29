@@ -1100,11 +1100,12 @@ class LLM:
 
             logger.warning_once(
                 "`LLM.encode` is currently using `pooling_task = %s`.\n"
-                "Please use one of the more specific methods instead "
-                "of `encode`:\n"
-                "  - For embeddings, use `LLM.embed(...)`.\n"
-                "  - For classification logits, use `LLM.classify(...)`.\n"
-                "  - For rewards, use `LLM.reward(...)`.\n"
+                "Please use one of the more specific methods or set the "
+                "task directly when using `LLM.encode`:\n"
+                "  - For embeddings, use `LLM.embed(...)` or `task=\"embed\".\n"
+                "  - For classification logits, use `LLM.classify(...)` "
+                "or `task=\"classify\"`.\n"
+                "  - For rewards, use `LLM.reward(...)` or `task=\"reward\"`\n"
                 "  - For similarity scores, use `LLM.score(...)`.",
                 pooling_task)
 
