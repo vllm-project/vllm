@@ -10,7 +10,8 @@ import torch.nn as nn
 from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
+from vllm.compilation.wrapper import (CudaGraphWrapper,
+                                      TorchCompileWrapperWithCustomDispatcher)
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
@@ -169,11 +170,15 @@ def _support_torch_compile(
     if TorchCompileWrapperWithCustomDispatcher in cls.__bases__:
         # support decorating multiple times
         return cls
+    if CudaGraphWrapper in cls.__bases__:
+        # support decorating multiple times
+        return cls
 
     # take care of method resolution order
     # make sure super().__init__ is called on the base class
     #  other than TorchCompileWrapperWithCustomDispatcher
-    cls.__bases__ = cls.__bases__ + (TorchCompileWrapperWithCustomDispatcher, )
+    cls.__bases__ = cls.__bases__ + (TorchCompileWrapperWithCustomDispatcher,
+                                     CudaGraphWrapper)
 
     old_init = cls.__init__
 
@@ -190,6 +195,8 @@ def _support_torch_compile(
         ] or not supports_dynamo() or _should_ignore_torch_compile(
             self.__class__)
         if self.do_not_compile:
+            if vllm_config.compilation_config.simple_cuda_graph:
+                CudaGraphWrapper.__init__(self)
             return
 
         compilation_counter.num_models_seen += 1
@@ -202,8 +209,13 @@ def _support_torch_compile(
         # torch.compiler.is_compiling() means we are inside the compilation
         # e.g. TPU has the compilation logic in model runner, so we don't
         # need to compile the model inside.
-        if self.do_not_compile or torch.compiler.is_compiling():
+        if torch.compiler.is_compiling():
             return self.forward(*args, **kwargs)
+
+        if self.do_not_compile:
+            if not self.vllm_config.compilation_config.simple_cuda_graph:
+                return self.forward(*args, **kwargs)
+            return self.forward_graph(*args, **kwargs)
 
         # the first compilation needs to have dynamic shapes marked
         if len(self.compiled_codes) < 1:
