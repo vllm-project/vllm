@@ -71,7 +71,9 @@ class AttentionStaticQuantPattern(AttentionQuantPattern):
         attn_impl = self.layer.impl
         if (hasattr(attn_impl, "use_triton_flash_attn")
                 and attn_impl.use_triton_flash_attn
-                and attn_impl.fused_output_quant_supported(self.quant_key)):
+                and attn_impl.fused_output_quant_supported(
+                    self.quant_key.dtype, self.quant_key.static,
+                    self.quant_key.group_shape)):
             self._register(pm_pass)
 
     def _register(self, pm_pass: PatternMatcherPass):
@@ -170,8 +172,12 @@ class QuantAttentionQuantPattern(AttentionQuantPattern):
     def register_if_supported(self, pm_pass: PatternMatcherPass):
         attn_impl = self.layer.impl
         if (hasattr(attn_impl, "use_trtllm_attn") and attn_impl.use_trtllm_attn
-                and attn_impl.fused_output_quant_supported(self.quant_key) and
-                attn_impl.inserted_input_quant_supported(self.pre_quant_key)):
+                and attn_impl.fused_output_quant_supported(
+                    self.quant_key.dtype, self.quant_key.static,
+                    self.quant_key.group_shape)
+                and attn_impl.inserted_input_quant_supported(
+                    self.pre_quant_key.dtype, self.pre_quant_key.static,
+                    self.pre_quant_key.group_shape)):
             self._register(pm_pass)
 
     def _register(self, pm_pass: PatternMatcherPass):

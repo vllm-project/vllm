@@ -16,7 +16,6 @@ from flashinfer.decode import (_get_range_buf, get_seq_lens,
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
-from vllm.compilation.fusion import QuantKey
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
@@ -668,19 +667,19 @@ class FlashInferImpl(AttentionImpl):
                                       "are not implemented for "
                                       "FlashInferImpl")
 
-    def inserted_input_quant_supported(self, quant_key: QuantKey):
+    def inserted_input_quant_supported(self, dtype: torch.dtype, static: bool,
+                                       group_shape: GroupShape):
         if self.use_trtllm_attn:
-            return (quant_key.dtype == current_platform.fp8_dtype()
-                    and quant_key.static
-                    and quant_key.group_shape == GroupShape.PER_TENSOR)
+            return dtype == current_platform.fp8_dtype(
+            ) and static and group_shape == GroupShape.PER_TENSOR
 
         return False
 
-    def fused_output_quant_supported(self, quant_key: QuantKey):
+    def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
+                                     group_shape: GroupShape):
         if self.use_trtllm_attn:
-            return (quant_key.dtype == current_platform.fp8_dtype()
-                    and quant_key.static
-                    and quant_key.group_shape == GroupShape.PER_TENSOR)
+            return dtype == current_platform.fp8_dtype(
+            ) and static and group_shape == GroupShape.PER_TENSOR
 
         return False
 

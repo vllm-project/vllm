@@ -9,7 +9,8 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional,
 
 import torch
 
-from vllm.compilation.fusion import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 from vllm.multimodal import MultiModalPlaceholderMap
 
 if TYPE_CHECKING:
@@ -288,7 +289,8 @@ class AttentionImpl(ABC, Generic[T]):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def fused_output_quant_supported(self, quant_key: QuantKey):
+    def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
+                                     group_shape: GroupShape):
         """
         Does this attention implementation support fused output quantization.
         This is used by the AttnFusionPass to only fuse output quantization
@@ -302,7 +304,8 @@ class AttentionImpl(ABC, Generic[T]):
         """
         return False
 
-    def inserted_input_quant_supported(self, quant_key: QuantKey):
+    def inserted_input_quant_supported(self, dtype: torch.dtype, static: bool,
+                                       group_shape: GroupShape):
         return False
 
 
