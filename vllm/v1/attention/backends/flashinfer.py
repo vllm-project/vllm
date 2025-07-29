@@ -446,23 +446,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         paged_kv_indptr_cpu = torch.zeros(len(block_table_bounds_cpu) + 1,
                                           dtype=torch.int32,
                                           device='cpu')
-        paged_kv_indptr_cpu[1:] = block_table_bounds_cpu.cumsum(
-            dim=0, dtype=torch.int32)
+        torch.cumsum(block_table_bounds_cpu, 0, out=paged_kv_indptr_cpu[1:])
 
         paged_kv_indptr = torch.zeros(len(block_table_bounds) + 1,
                                       dtype=torch.int32,
                                       device=self.device)
-        paged_kv_indptr[1:] = block_table_bounds.cumsum(dim=0,
-                                                        dtype=torch.int32)
+        torch.cumsum(block_table_bounds, 0, out=paged_kv_indptr[1:])
 
-        paged_kv_last_page_len_cpu = seq_lens_cpu % page_size
-        paged_kv_last_page_len_cpu = torch.where(
-            paged_kv_last_page_len_cpu == 0, page_size,
-            paged_kv_last_page_len_cpu)
-
-        paged_kv_last_page_len = seq_lens % page_size
-        paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
-                                             page_size, paged_kv_last_page_len)
+        paged_kv_last_page_len_cpu = (seq_lens_cpu % -page_size) + page_size
+        paged_kv_last_page_len = (seq_lens % -page_size) + page_size
 
         cache_dtype = self.cache_config.cache_dtype
         if cache_dtype.startswith("fp8"):
