@@ -24,8 +24,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
     WNA16_SUPPORTED_BITS, WNA16_SUPPORTED_TYPES_MAP)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_utils import (
-    build_flashinfer_kernel, flashinfer_fp4_forward,
-    is_flashinfer_fp4_available, reorder_w1w3_to_w3w1)
+    build_flashinfer_fp4_cutlass_moe_kernel,
+    flashinfer_fp4_cutlass_moe_forward,
+    is_flashinfer_fp4_cutlass_moe_available, reorder_w1w3_to_w3w1)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer, marlin_make_workspace_new,
     marlin_moe_permute_scales)
@@ -104,8 +105,9 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
     def __init__(self):
         self.cutlass_nvfp4_supported = cutlass_fp4_supported()
         self.use_marlin: bool = False
-        self.allow_flashinfer_cutlass: bool = (self.cutlass_nvfp4_supported and
-                                               is_flashinfer_fp4_available())
+        self.allow_flashinfer_cutlass: bool = (
+            self.cutlass_nvfp4_supported
+            and is_flashinfer_fp4_cutlass_moe_available())
 
         if self.allow_flashinfer_cutlass:
             logger.info_once(
@@ -285,7 +287,8 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
     def maybe_swap_experts_impl(self, moe_parallel_config):
         if not self.allow_flashinfer_cutlass:
             return
-        self.fused_experts = build_flashinfer_kernel(moe_parallel_config)
+        self.fused_experts = build_flashinfer_fp4_cutlass_moe_kernel(
+            moe_parallel_config)
         logger.debug_once("FlashInferExperts (util)")
 
     def select_gemm_impl(self, prepare_finalize, moe):
@@ -374,7 +377,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
 
         # FlashInfer fused experts path
         if self.fused_experts is not None:
-            return flashinfer_fp4_forward(
+            return flashinfer_fp4_cutlass_moe_forward(
                 self.fused_experts,
                 layer,
                 x,

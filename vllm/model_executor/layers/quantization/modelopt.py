@@ -22,8 +22,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_utils import (
-    build_flashinfer_kernel, flashinfer_fp4_forward,
-    is_flashinfer_fp4_available, reorder_w1w3_to_w3w1)
+    build_flashinfer_fp4_cutlass_moe_kernel,
+    flashinfer_fp4_cutlass_moe_forward,
+    is_flashinfer_fp4_cutlass_moe_available, reorder_w1w3_to_w3w1)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear, is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin, prepare_moe_fp4_layer_for_marlin)
@@ -846,8 +847,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self.cutlass_nvfp4_supported = cutlass_fp4_supported()
         self.use_marlin = False
         # enable flashinfer when both hardware + env ready
-        self.allow_flashinfer_cutlass = (self.cutlass_nvfp4_supported
-                                         and is_flashinfer_fp4_available())
+        self.allow_flashinfer_cutlass = (
+            self.cutlass_nvfp4_supported
+            and is_flashinfer_fp4_cutlass_moe_available())
 
         if self.allow_flashinfer_cutlass:
             logger.info_once(
@@ -877,7 +879,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if not self.allow_flashinfer_cutlass:
             return
 
-        self.fused_experts = build_flashinfer_kernel(moe_parallel_config)
+        self.fused_experts = build_flashinfer_fp4_cutlass_moe_kernel(
+            moe_parallel_config)
         logger.debug_once("FlashInferExperts (util)")
 
     # This method update self.fused_experts
@@ -905,6 +908,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 tp_size=moe.moe_parallel_config.tp_size,
             )
         else:
+            assert moe.dp_size > 1
+            logger.debug_once("Using CutlassExpertsFp4")
             # Currently CutlassExpertsFp4 doesn't support DP
             raise ValueError("CutlassExpertsFp4 doesn't support DP. "
                              "Use flashinfer CUTLASS FusedMoE backend instead "
@@ -1161,7 +1166,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 expert_map=expert_map,
                 apply_router_weight_on_input=apply_router_weight_on_input)
         else:
-            out = flashinfer_fp4_forward(
+            out = flashinfer_fp4_cutlass_moe_forward(
                 self.fused_experts,
                 layer,
                 x,

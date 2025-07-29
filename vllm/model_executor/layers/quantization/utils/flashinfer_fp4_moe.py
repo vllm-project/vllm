@@ -20,14 +20,14 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 __all__ = [
-    "is_flashinfer_fp4_available",
+    "is_flashinfer_fp4_cutlass_moe_available",
     "reorder_w1w3_to_w3w1",
-    "build_flashinfer_kernel",
-    "flashinfer_fp4_forward",
+    "build_flashinfer_fp4_cutlass_moe_kernel",
+    "flashinfer_fp4_cutlass_moe_forward",
 ]
 
 
-def is_flashinfer_fp4_available() -> bool:
+def is_flashinfer_fp4_cutlass_moe_available() -> bool:
     """Return ``True`` when FlashInfer CUTLASS NV-FP4 kernels can be used."""
     return (envs.VLLM_USE_FLASHINFER_MOE_FP4 and current_platform.is_cuda()
             and current_platform.is_device_capability(100))
@@ -49,7 +49,7 @@ def reorder_w1w3_to_w3w1(weight: torch.Tensor,
                                                        dim=dim).contiguous())
 
 
-def build_flashinfer_kernel(
+def build_flashinfer_fp4_cutlass_moe_kernel(
     moe_parallel_config: FusedMoEParallelConfig, ) -> mk.FusedMoEModularKernel:
     """Create *and return* a FlashInfer CUTLASS fused-MoE modular kernel"""
     experts = FlashInferExperts(
@@ -66,13 +66,12 @@ def build_flashinfer_kernel(
     )
 
 
-def flashinfer_fp4_forward(
+def flashinfer_fp4_cutlass_moe_forward(
     fused_experts: mk.FusedMoEModularKernel,
     layer: torch.nn.Module,
     x: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    *,
     activation: str,
     global_num_experts: int,
     expert_map: Optional[torch.Tensor],
@@ -90,6 +89,8 @@ def flashinfer_fp4_forward(
     extra_expert_args = {
         "g1_alphas": layer.g1_alphas,
         "g2_alphas": layer.g2_alphas,
+        # Avoid confusion with a1_scale and a2_scale
+        # where are batch size related.
         "a1_gscale": a1_gscale,
         "a2_gscale": a2_gscale,
         "out_dtype": x.dtype,
@@ -110,7 +111,7 @@ def flashinfer_fp4_forward(
         w2=layer.w2_weight,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        inplace=False,
+        inplace=False,  # TODO(shuw): fix later, now output is high prec
         activation=activation,
         global_num_experts=global_num_experts,
         expert_map=expert_map,
