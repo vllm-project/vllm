@@ -1,13 +1,15 @@
 # Fused MoE Modular Kernel
 
 ## Introduction
-FusedMoEModularKernel is implemented [here](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/modular_kernel.py)
+FusedMoEModularKernel is implemented [here](gh-file:/vllm/model_executor/layers/fused_moe/modular_kernel.py)
 
 Based on the format of the input activations, FusedMoE implementations are broadly classified into 2 types.
+
 * Contiguous / Standard / Non-Batched, and
 * Batched
 
-*Note that the terms Contiguous, Standard, and Non-Batched are used interchangeably throughout the document.*
+!!! note
+    The terms Contiguous, Standard, and Non-Batched are used interchangeably throughout the document.
 
 The input activation format completely depends on the All2All Dispatch being used.
 
@@ -20,7 +22,8 @@ The FusedMoE operation is generally made of multiple operations, in both the Con
 
 ![](../assets/design/fused_moe_modular_kernel/fused_moe_batched.png "FusedMoE Batched")
 
-Note that the main difference, in terms of operations, between the Batched and Non-Batched cases is the Permute / Unpermute operations. All other operations remain.
+!!! note
+    The main difference, in terms of operations, between the Batched and Non-Batched cases is the Permute / Unpermute operations. All other operations remain.
 
 ## Motivation
 
@@ -30,6 +33,7 @@ The rest of the document will focus on the Contiguous / Non-Batched case. Extrap
 
 ## ModularKernel Components:
 FusedMoEModularKernel splits the FusedMoE operation into 3 parts,
+
 1. TopKWeightAndReduce
 2. FusedMoEPrepareAndFinalize
 3. FusedMoEPermuteExpertsUnpermute
@@ -37,7 +41,7 @@ FusedMoEModularKernel splits the FusedMoE operation into 3 parts,
 ### TopKWeightAndReduce
 The TopK Weight Application and Reduction components happen right after the Unpermute operation and before the All2All Combine. Note that the `FusedMoEPermuteExpertsUnpermute` is responsible for the Unpermute and `FusedMoEPrepareAndFinalize` is responsible for the All2All Combine. There is value in doing the TopK Weight Application and Reduction in the `FusedMoEPermuteExpertsUnpermute`. But some implementations choose to do it `FusedMoEPrepareAndFinalize`. In order to enable this flexibility, we have a TopKWeightAndReduce abstract class.
 
-Please find the implementations of TopKWeightAndReduce [here](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/topk_weight_and_reduce.py).
+Please find the implementations of TopKWeightAndReduce [here](gh-file:vllm/model_executor/layers/fused_moe/topk_weight_and_reduce.py).
 
 `FusedMoEPrepareAndFinalize::finalize()` method accepts a `TopKWeightAndReduce` argument that is invoked inside the method.
 The `FusedMoEModularKernel` acts as a bridge between the `FusedMoEPermuteExpertsUnpermute` and `FusedMoEPerpareAndFinalize` implementations to determine where the TopK Weight Application and Reduction happens.
@@ -53,12 +57,14 @@ The `prepare` function is responsible for input activation Quantization and All2
 
 ### FusedMoEPermuteExpertsUnpermute
 The `FusedMoEPermuteExpertsUnpermute` class is where the crux of the MoE operations happen. The `FusedMoEPermuteExpertsUnpermute` abstract class exposes a few important functions,
+
 * apply()
 * workspace_shapes()
 * finalize_weight_and_reduce_impl()
 
 #### apply()
 The `apply` method is where the implementations perform
+
 * Permute
 * Matmul with weight W1
 * Act + Mul
@@ -113,12 +119,13 @@ FusedMoEModularKernel::forward(self, DP_A):
 
 ### How To Add a FusedMoEPrepareAndFinalize Type
 Typically a FusedMoEPrepareAndFinalize type is backed by an All2All Dispatch & Combine implementation / kernel. For example,
+
 * PplxPrepareAndFinalize type is backed by Pplx All2All kernels,
 * DeepEPHTPrepareAndFinalize type is backed by DeepEP High-Throughtput All2All kernels, and
 * DeepEPLLPrepareAndFinalize type is backed by DeepEP Low-Latency All2All kernels.
 
 #### Step 1: Add an All2All manager
-The purpose of the All2All Manager is to setup the All2All kernel implementations. The `FusedMoEPrepareAndFinalize` implementations typically fetch a kernel-implementation "handle" from the All2All Manager to invoke the Dispatch and Combine functions. Please look at the All2All Manager implementations [here](https://github.com/vllm-project/vllm/blob/main/vllm/distributed/device_communicators/all2all.py).
+The purpose of the All2All Manager is to setup the All2All kernel implementations. The `FusedMoEPrepareAndFinalize` implementations typically fetch a kernel-implementation "handle" from the All2All Manager to invoke the Dispatch and Combine functions. Please look at the All2All Manager implementations [here](gh-file:vllm/distributed/device_communicators/all2all.py).
 
 #### Step 2: Add a FusedMoEPrepareAndFinalize Type
 This section describes the significance of the various functions exposed by the `FusedMoEPrepareAndFinalize` abstract class.
@@ -153,12 +160,14 @@ implementations that input `FusedMoEActivationFormat.Standard` support chunking 
 
 ### FusedMoEModularKernel Initialization
 `FusedMoEMethodBase` class has 2 methods that are collectively responsible in creating the `FusedMoEModularKernel` object. They are,
+
 * select_gemm_impl, and
 * init_prepare_finalize
 
 #### select_gemm_impl
 The `select_gemm_impl` method is undefined in the base class. It is the responsibility of the derived class to implement a method that constructs a valid/appropriate `FusedMoEPermuteExpertsUnpermute` object.
 Please refer to the implementations in,
+
 * `UnquantizedFusedMoEMethod`
 * `CompressedTensorsW8A8Fp8MoEMethod`
 * `CompressedTensorsW8A8Fp8MoECutlassMethod`
@@ -173,26 +182,27 @@ Please take a look at [init_prepare_finalize](https://github.com/vllm-project/vl
 **Important**: The `FusedMoEMethodBase` derived classes use the `FusedMoEMethodBase::fused_experts` object in their `apply` methods. When settings permit the construction of a valid `FusedMoEModularKernel` object, we override `FusedMoEMethodBase::fused_experts` with it. This essentially makes the derived classes agnostic to what FusedMoE implementation is used.
 
 ### How To Unit Test
-We have `FusedMoEModularKernel` unit tests at [test_modular_kernel_combinations.py](https://github.com/vllm-project/vllm/blob/5ac3168ee342f4cae17b0b67375e647bd5dd9151/tests/kernels/moe/test_modular_kernel_combinations.py).
+We have `FusedMoEModularKernel` unit tests at [test_modular_kernel_combinations.py](gh-file:tests/kernels/moe/test_modular_kernel_combinations.py).
 
 The unit test iterates through all combinations of `FusedMoEPrepareAndFinalize` and `FusedMoEPremuteExpertsUnpermute` types and if they are
 compatible, runs some correctness tests.
 If you are adding some `FusedMoEPrepareAndFinalize` / `FusedMoEPermuteExpertsUnpermute` implementations,
-1. Add the implementation type to `MK_ALL_PREPARE_FINALIZE_TYPES` and `MK_FUSED_EXPERT_TYPES` in [mk_objects.py](https://github.com/vllm-project/vllm/blob/main/tests/kernels/moe/modular_kernel_tools/mk_objects.py) respectively.
+
+1. Add the implementation type to `MK_ALL_PREPARE_FINALIZE_TYPES` and `MK_FUSED_EXPERT_TYPES` in [mk_objects.py](gh-file:tests/kernels/moe/modular_kernel_tools/mk_objects.py) respectively.
 2. Update `Config::is_batched_prepare_finalize()`, `Config::is_batched_fused_experts()`, `Config::is_standard_fused_experts()`,
 `Config::is_fe_16bit_supported()`,  `Config::is_fe_fp8_supported()`, `Config::is_fe_block_fp8_supported()`,
-`Config::is_fe_supports_chunking()` methods in [/tests/kernels/moe/modular_kernel_tools/common.py](https://github.com/vllm-project/vllm/blob/main/tests/kernels/moe/modular_kernel_tools/common.py)
+`Config::is_fe_supports_chunking()` methods in [/tests/kernels/moe/modular_kernel_tools/common.py](gh-file:tests/kernels/moe/modular_kernel_tools/common.py)
 
 Doing this will add the new implementation to the test suite.
 
 ### How To Check `FusedMoEPrepareAndFinalize` & `FusedMoEPermuteExpertsUnpermute` Compatibility
-The unit test file [test_modular_kernel_combinations.py](https://github.com/vllm-project/vllm/blob/5ac3168ee342f4cae17b0b67375e647bd5dd9151/tests/kernels/moe/test_modular_kernel_combinations.py) can also be executed as a standalone script.
+The unit test file [test_modular_kernel_combinations.py](gh-file:tests/kernels/moe/test_modular_kernel_combinations.py) can also be executed as a standalone script.
 Example: `python3 -m tests.kernels.moe.test_modular_kernel_combinations --pf-type PplxPrepareAndFinalize --experts-type BatchedTritonExperts`
 As a side-effect, this script can be used to test `FusedMoEPrepareAndFinalize` & `FusedMoEPermuteExpertsUnpermute` compatibility. When invoked
 with incompatible types, the script will error.
 
 ### How To Profile
-Please take a look at [profile_modular_kernel.py](https://github.com/vllm-project/vllm/blob/main/tests/kernels/moe/modular_kernel_tools/profile_modular_kernel.py)
+Please take a look at [profile_modular_kernel.py](gh-file:tests/kernels/moe/modular_kernel_tools/profile_modular_kernel.py)
 The script can be used to generate Torch traces for a single `FusedMoEModularKernel::forward()` call for any compatible
 `FusedMoEPrepareAndFinalize` and `FusedMoEPermuteExpertsUnpermute` types.
 Example: `python3 -m tests.kernels.moe.modular_kernel_tools.profile_modular_kernel --pf-type PplxPrepareAndFinalize --experts-type BatchedTritonExperts`
