@@ -66,6 +66,16 @@ def cutlass_group_gemm_supported() -> bool:
     return ops.cutlass_group_gemm_supported(capability)
 
 
+def cutlass_blockwise_group_gemm_supported() -> bool:
+    if not current_platform.is_cuda():
+        return False
+
+    capability_tuple = current_platform.get_device_capability()
+    capability = -1 if capability_tuple is None else capability_tuple.to_int()
+
+    return ops.cutlass_blockwise_group_gemm_supported(capability)
+
+
 CUTLASS_FP8_SUPPORTED = cutlass_fp8_supported()
 CUTLASS_BLOCK_FP8_SUPPORTED = cutlass_block_fp8_supported()
 
