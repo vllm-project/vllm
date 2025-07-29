@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from argparse import Namespace
 
@@ -10,9 +11,11 @@ def parse_args():
     parser = FlexibleArgumentParser()
     parser = EngineArgs.add_cli_args(parser)
     # Set example specific arguments
-    parser.set_defaults(model="jinaai/jina-embeddings-v3",
-                        task="embed",
-                        trust_remote_code=True)
+    parser.set_defaults(
+        model="jinaai/jina-embeddings-v3",
+        runner="pooling",
+        trust_remote_code=True,
+    )
     return parser.parse_args()
 
 
@@ -28,12 +31,12 @@ def main(args: Namespace):
     ]
 
     # Create an LLM.
-    # You should pass task="embed" for embedding models
-    model = LLM(**vars(args))
+    # You should pass runner="pooling" for embedding models
+    llm = LLM(**vars(args))
 
     # Generate embedding. The output is a list of EmbeddingRequestOutputs.
     # Only text matching task is supported for now. See #16120
-    outputs = model.embed(prompts)
+    outputs = llm.embed(prompts)
 
     # Print the outputs.
     print("\nGenerated Outputs:")
@@ -41,11 +44,14 @@ def main(args: Namespace):
     print("-" * 60)
     for prompt, output in zip(prompts, outputs):
         embeds = output.outputs.embedding
-        embeds_trimmed = ((str(embeds[:16])[:-1] +
-                           ", ...]") if len(embeds) > 16 else embeds)
-        print(f"Prompt: {prompt!r} \n"
-              f"Embeddings for text matching: {embeds_trimmed} "
-              f"(size={len(embeds)})")
+        embeds_trimmed = (
+            (str(embeds[:16])[:-1] + ", ...]") if len(embeds) > 16 else embeds
+        )
+        print(
+            f"Prompt: {prompt!r} \n"
+            f"Embeddings for text matching: {embeds_trimmed} "
+            f"(size={len(embeds)})"
+        )
         print("-" * 60)
 
 

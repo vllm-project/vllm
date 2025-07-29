@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Union, cast
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 from transformers.processing_utils import ProcessorMixin
 from typing_extensions import TypeVar
@@ -54,6 +55,7 @@ def _merge_mm_kwargs(model_config: "ModelConfig", **kwargs):
 def get_processor(
     processor_name: str,
     *args: Any,
+    revision: Optional[str] = None,
     trust_remote_code: bool = False,
     processor_cls: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
     **kwargs: Any,
@@ -70,6 +72,7 @@ def get_processor(
         processor = processor_factory.from_pretrained(
             processor_name,
             *args,
+            revision=revision,
             trust_remote_code=trust_remote_code,
             **kwargs,
         )
@@ -106,6 +109,7 @@ def cached_processor_from_config(
 ) -> _P:
     return cached_get_processor(
         model_config.model,
+        revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
         **_merge_mm_kwargs(model_config, **kwargs),
@@ -115,6 +119,7 @@ def cached_processor_from_config(
 def get_feature_extractor(
     processor_name: str,
     *args: Any,
+    revision: Optional[str] = None,
     trust_remote_code: bool = False,
     **kwargs: Any,
 ):
@@ -128,6 +133,7 @@ def get_feature_extractor(
         feature_extractor = AutoFeatureExtractor.from_pretrained(
             processor_name,
             *args,
+            revision=revision,
             trust_remote_code=trust_remote_code,
             **kwargs)
     except ValueError as e:
@@ -156,6 +162,7 @@ def cached_feature_extractor_from_config(
 ):
     return cached_get_feature_extractor(
         model_config.model,
+        revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
         **_merge_mm_kwargs(model_config, **kwargs),
     )
@@ -164,6 +171,7 @@ def cached_feature_extractor_from_config(
 def get_image_processor(
     processor_name: str,
     *args: Any,
+    revision: Optional[str] = None,
     trust_remote_code: bool = False,
     **kwargs: Any,
 ):
@@ -177,6 +185,7 @@ def get_image_processor(
         processor = AutoImageProcessor.from_pretrained(
             processor_name,
             *args,
+            revision=revision,
             trust_remote_code=trust_remote_code,
             **kwargs)
     except ValueError as e:
@@ -206,6 +215,7 @@ def cached_image_processor_from_config(
 ):
     return cached_get_image_processor(
         model_config.model,
+        revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
         **_merge_mm_kwargs(model_config, **kwargs),
     )

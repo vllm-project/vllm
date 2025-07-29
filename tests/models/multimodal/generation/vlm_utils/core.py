@@ -1,24 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Core test implementation to be shared across modalities."""
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional
 
 import torch
-from PIL.Image import Image
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
-from vllm.config import TaskOption
+from vllm.config import RunnerOption
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .....conftest import HfRunner, VllmRunner
 from ....registry import HF_EXAMPLE_MODELS
-from .types import RunnerOutput
+from .types import PromptWithMultiModalInput, RunnerOutput
 
 
 def run_test(
     *,
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
-    inputs: list[tuple[list[str], list[Union[list[Image], Image]]]],
+    inputs: list[PromptWithMultiModalInput],
     model: str,
     dtype: str,
     max_tokens: int,
@@ -37,8 +37,7 @@ def run_test(
     vllm_runner_kwargs: Optional[dict[str, Any]],
     hf_model_kwargs: Optional[dict[str, Any]],
     patch_hf_runner: Optional[Callable[[HfRunner], HfRunner]],
-    task: TaskOption = "auto",
-    runner_mm_key: str = "images",
+    runner: RunnerOption = "auto",
     distributed_executor_backend: Optional[str] = None,
     tensor_parallel_size: int = 1,
     vllm_embeddings: Optional[torch.Tensor] = None,
@@ -84,9 +83,9 @@ def run_test(
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=enforce_eager,
-                     task=task,
+                     runner=runner,
                      **vllm_runner_kwargs_) as vllm_model:
-        tokenizer = vllm_model.model.get_tokenizer()
+        tokenizer = vllm_model.llm.get_tokenizer()
 
         vllm_kwargs: dict[str, Any] = {}
         if get_stop_token_ids is not None:
@@ -94,10 +93,16 @@ def run_test(
         if stop_str:
             vllm_kwargs["stop"] = stop_str
 
-        for prompts, media in vllm_inputs:
-            vllm_kwargs[runner_mm_key] = media
+        for prompts, image_data, video_data, audio_data in vllm_inputs:
+            mm_data = dict(images=image_data,
+                           videos=video_data,
+                           audios=audio_data)
+            vllm_kwargs_with_mm_data = vllm_kwargs | mm_data
             vllm_output = vllm_model.generate_greedy_logprobs(
-                prompts, max_tokens, num_logprobs=num_logprobs, **vllm_kwargs)
+                prompts,
+                max_tokens,
+                num_logprobs=num_logprobs,
+                **vllm_kwargs_with_mm_data)
             vllm_outputs_per_mm.append(vllm_output)
 
     hf_model = hf_runner(model,
@@ -122,14 +127,17 @@ def run_test(
         if stop_str:
             hf_kwargs["stop_strings"] = stop_str
 
-        for prompts, media in inputs:
-            hf_kwargs[runner_mm_key] = media
+        for prompts, image_data, video_data, audio_data in inputs:
+            mm_data = dict(images=image_data,
+                           videos=video_data,
+                           audios=audio_data)
+            hf_kwargs_with_mm_data = hf_kwargs | mm_data
             hf_output = hf_model.generate_greedy_logprobs_limit(
                 prompts,
                 max_tokens,
                 num_logprobs=num_logprobs,
                 tokenizer=tokenizer,
-                **hf_kwargs)
+                **hf_kwargs_with_mm_data)
             hf_outputs_per_mm.append(hf_output)
 
     # Apply output processing / sanitation to the vLLM and HF runner results

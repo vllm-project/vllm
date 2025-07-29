@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from .data import (DecoderOnlyInputs, EmbedsInputs, EncoderDecoderInputs,
                    ExplicitEncoderDecoderPrompt, ProcessorInputs, PromptType,
@@ -10,8 +11,9 @@ from .registry import (DummyData, InputContext, InputProcessingContext,
 
 INPUT_REGISTRY = InputRegistry()
 """
-The global {class}`~InputRegistry` which is used by {class}`~vllm.LLMEngine`
-to dispatch data processing according to the target model.
+The global [`InputRegistry`][vllm.inputs.registry.InputRegistry] which is used
+by [`LLMEngine`][vllm.LLMEngine] to dispatch data processing according to the
+target model.
 """
 
 __all__ = [

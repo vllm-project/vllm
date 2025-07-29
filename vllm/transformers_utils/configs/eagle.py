@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
 from typing import Optional, Union
 
 from transformers import AutoConfig, PretrainedConfig
 
-import vllm.envs as envs
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekV2Config
 
 
@@ -43,32 +43,31 @@ class EAGLEConfig(PretrainedConfig):
             self.truncated_vocab_size = self.model.vocab_size if \
                 truncated_vocab_size is None else truncated_vocab_size
 
-        if not envs.VLLM_USE_V1:
-            kwargs["architectures"] = ["EAGLEModel"]
+        # Eagle model name should follow naming convention of
+        # LlamaForCausalLM -> EagleLlamaForCausalLM
+        if method == "eagle":
+            assert self.model is not None, \
+                "model should not be None when method is eagle"
+            kwargs["architectures"] = [
+                f"Eagle{arch}" if not arch.startswith("Eagle") \
+                    else arch for arch in self.model.architectures
+            ]
+        elif method == "eagle3":
+            assert self.model is not None, \
+                "model should not be None when method is eagle3"
+            kwargs["architectures"] = [
+                f"Eagle3{arch}" if not arch.startswith("Eagle3") \
+                    else arch for arch in self.model.architectures
+            ]
         else:
-            # Eagle model name should follow naming convention of
-            # LlamaForCausalLM -> EagleLlamaForCausalLM
-            if method == "eagle":
-                assert self.model is not None, \
-                    "model should not be None when method is eagle"
-                kwargs["architectures"] = [
-                    f"Eagle{arch}" for arch in self.model.architectures
-                ]
-            elif method == "eagle3":
-                assert self.model is not None, \
-                    "model should not be None when method is eagle3"
-                kwargs["architectures"] = [
-                    f"Eagle3{arch}" for arch in self.model.architectures
-                ]
-            else:
-                raise ValueError(f"Invalid method {method}. \
-                    Supported methods are eagle and eagle3.")
+            raise ValueError(f"Invalid method {method}. \
+                Supported methods are eagle and eagle3.")
 
         super().__init__(**kwargs)
 
         if self.model is not None:
             for k, v in self.model.to_dict().items():
-                if not hasattr(self, k):
+                if k not in kwargs:
                     setattr(self, k, v)
 
     @classmethod

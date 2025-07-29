@@ -1,21 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 import glob
 import os
 import time
-from typing import Generator, Iterable, List, Optional, Tuple, cast
+from collections.abc import Generator, Iterable
+from typing import Optional, cast
 
 import huggingface_hub
 import torch
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from vllm.config import LoadConfig, LoadFormat, ModelConfig, VllmConfig
-from vllm.envs import VLLM_USE_MODELSCOPE
+from vllm import envs
+from vllm.config import LoadConfig, ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.utils import (
-    initialize_model, process_weights_after_loading, set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     fastsafetensors_weights_iterator, filter_duplicate_safetensors_files,
@@ -63,16 +63,16 @@ class DefaultModelLoader(BaseModelLoader):
 
         Returns the path to the downloaded model, or None if the model is not
         downloaded from ModelScope."""
-        if VLLM_USE_MODELSCOPE:
+        if envs.VLLM_USE_MODELSCOPE:
             # download model from ModelScope hub,
             # lazy import so that modelscope is not required for normal use.
             # pylint: disable=C.
             from modelscope.hub.snapshot_download import snapshot_download
 
-            if not os.path.exists(model):
-                # Use file lock to prevent multiple processes from
-                # downloading the same model weights at the same time.
-                with get_lock(model, self.load_config.download_dir):
+            # Use file lock to prevent multiple processes from
+            # downloading the same model weights at the same time.
+            with get_lock(model, self.load_config.download_dir):
+                if not os.path.exists(model):
                     model_path = snapshot_download(
                         model_id=model,
                         cache_dir=self.load_config.download_dir,
@@ -81,8 +81,8 @@ class DefaultModelLoader(BaseModelLoader):
                         revision=revision,
                         ignore_file_pattern=self.load_config.ignore_patterns,
                     )
-            else:
-                model_path = model
+                else:
+                    model_path = model
             return model_path
         return None
 
@@ -92,7 +92,7 @@ class DefaultModelLoader(BaseModelLoader):
         revision: Optional[str],
         fall_back_to_pt: bool,
         allow_patterns_overrides: Optional[list[str]],
-    ) -> Tuple[str, List[str], bool]:
+    ) -> tuple[str, list[str], bool]:
         """Prepare weights for the model.
 
         If the model is not local, it will be downloaded."""
@@ -104,19 +104,19 @@ class DefaultModelLoader(BaseModelLoader):
         use_safetensors = False
         index_file = SAFE_WEIGHTS_INDEX_NAME
         # Some quantized models use .pt files for storing the weights.
-        if load_format == LoadFormat.AUTO:
+        if load_format == "auto":
             allow_patterns = ["*.safetensors", "*.bin"]
-        elif (load_format == LoadFormat.SAFETENSORS
-              or load_format == LoadFormat.FASTSAFETENSORS):
+        elif (load_format == "safetensors"
+              or load_format == "fastsafetensors"):
             use_safetensors = True
             allow_patterns = ["*.safetensors"]
-        elif load_format == LoadFormat.MISTRAL:
+        elif load_format == "mistral":
             use_safetensors = True
             allow_patterns = ["consolidated*.safetensors"]
             index_file = "consolidated.safetensors.index.json"
-        elif load_format == LoadFormat.PT:
+        elif load_format == "pt":
             allow_patterns = ["*.pt"]
-        elif load_format == LoadFormat.NPCACHE:
+        elif load_format == "npcache":
             allow_patterns = ["*.bin"]
         else:
             raise ValueError(f"Unknown load_format: {load_format}")
@@ -138,7 +138,7 @@ class DefaultModelLoader(BaseModelLoader):
         else:
             hf_folder = model_name_or_path
 
-        hf_weights_files: List[str] = []
+        hf_weights_files: list[str] = []
         for pattern in allow_patterns:
             hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
             if len(hf_weights_files) > 0:
@@ -173,12 +173,12 @@ class DefaultModelLoader(BaseModelLoader):
 
     def _get_weights_iterator(
             self, source: "Source"
-    ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights based on the load format."""
         hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
             source.model_or_path, source.revision, source.fall_back_to_pt,
             source.allow_patterns_overrides)
-        if self.load_config.load_format == LoadFormat.NPCACHE:
+        if self.load_config.load_format == "npcache":
             # Currently np_cache only support *.bin checkpoints
             assert use_safetensors is False
             weights_iterator = np_cache_weights_iterator(
@@ -189,7 +189,7 @@ class DefaultModelLoader(BaseModelLoader):
                 self.load_config.use_tqdm_on_load,
             )
         elif use_safetensors:
-            if self.load_config.load_format == LoadFormat.FASTSAFETENSORS:
+            if self.load_config.load_format == "fastsafetensors":
                 weights_iterator = fastsafetensors_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
@@ -218,16 +218,6 @@ class DefaultModelLoader(BaseModelLoader):
 
             weights_iterator = _xla_weights_iterator(weights_iterator)
 
-        elif current_platform.is_hpu():
-            import habana_frameworks.torch.core as htcore
-
-            def _hpu_weights_iterator(iterator: Generator):
-                for weights in iterator:
-                    yield weights
-                    htcore.mark_step()
-
-            weights_iterator = _hpu_weights_iterator(weights_iterator)
-
         if self.counter_before_loading_weights == 0.0:
             self.counter_before_loading_weights = time.perf_counter()
         # Apply the prefix.
@@ -238,7 +228,7 @@ class DefaultModelLoader(BaseModelLoader):
         self,
         model_config: ModelConfig,
         model: nn.Module,
-    ) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
         primary_weights = DefaultModelLoader.Source(
             model_config.model,
             model_config.revision,
@@ -263,31 +253,20 @@ class DefaultModelLoader(BaseModelLoader):
                               fall_back_to_pt=True,
                               allow_patterns_overrides=None)
 
-    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
-        device_config = vllm_config.device_config
-        model_config = vllm_config.model_config
-        target_device = torch.device(device_config.device)
-        with set_default_torch_dtype(model_config.dtype):
-            with target_device:
-                model = initialize_model(vllm_config=vllm_config)
-
-            weights_to_load = {name for name, _ in model.named_parameters()}
-            loaded_weights = model.load_weights(
-                self.get_all_weights(model_config, model))
-            self.counter_after_loading_weights = time.perf_counter()
-            logger.info(
-                "Loading weights took %.2f seconds",
-                self.counter_after_loading_weights -
-                self.counter_before_loading_weights)
-            # We only enable strict check for non-quantized models
-            # that have loaded weights tracking currently.
-            if model_config.quantization is None and loaded_weights is not None:
-                weights_not_loaded = weights_to_load - loaded_weights
-                if weights_not_loaded:
-                    raise ValueError(
-                        "Following weights were not initialized from "
-                        f"checkpoint: {weights_not_loaded}")
-
-            process_weights_after_loading(model, model_config, target_device)
-
-        return model.eval()
+    def load_weights(self, model: nn.Module,
+                     model_config: ModelConfig) -> None:
+        weights_to_load = {name for name, _ in model.named_parameters()}
+        loaded_weights = model.load_weights(
+            self.get_all_weights(model_config, model))
+        self.counter_after_loading_weights = time.perf_counter()
+        logger.info(
+            "Loading weights took %.2f seconds",
+            self.counter_after_loading_weights -
+            self.counter_before_loading_weights)
+        # We only enable strict check for non-quantized models
+        # that have loaded weights tracking currently.
+        if model_config.quantization is None and loaded_weights is not None:
+            weights_not_loaded = weights_to_load - loaded_weights
+            if weights_not_loaded:
+                raise ValueError("Following weights were not initialized from "
+                                 f"checkpoint: {weights_not_loaded}")

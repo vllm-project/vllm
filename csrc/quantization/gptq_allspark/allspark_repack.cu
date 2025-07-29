@@ -100,9 +100,9 @@ void rearrange_kn_weight_as_n32k16_order_ldg16(
 
 void rearrange_kn_weight_as_n32k16_order(
     torch::Tensor const& b_qweight, torch::Tensor const& b_scales,
-    c10::optional<torch::Tensor> const& b_zeros, bool has_zp,
+    std::optional<torch::Tensor> const& b_zeros, bool has_zp,
     torch::Tensor& b_qweight_reorder, torch::Tensor& b_scales_reorder,
-    c10::optional<torch::Tensor> const& b_zeros_reorder, const int64_t K,
+    std::optional<torch::Tensor> const& b_zeros_reorder, const int64_t K,
     const int64_t N, const int64_t N_32align) {
   // Verify device and strides
   TORCH_CHECK(b_qweight.device().is_cuda(), "b_qweight is not on GPU");

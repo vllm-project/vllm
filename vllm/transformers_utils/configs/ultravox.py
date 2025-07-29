@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_config.py
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import transformers
 
@@ -44,12 +45,13 @@ class UltravoxConfig(transformers.PretrainedConfig):
     """
 
     model_type = "ultravox"
+    audio_token = "<|audio|>"
     is_composition = False
 
     def __init__(
         self,
-        audio_config: Optional[Dict[str, Any]] = None,
-        text_config: Optional[Dict[str, Any]] = None,
+        audio_config: Optional[dict[str, Any]] = None,
+        text_config: Optional[dict[str, Any]] = None,
         audio_model_id: Optional[str] = None,
         text_model_id: Optional[str] = None,
         ignore_index: int = -100,
@@ -58,8 +60,8 @@ class UltravoxConfig(transformers.PretrainedConfig):
         stack_factor: int = 8,
         norm_init: float = 0.4,
         projector_act: str = "swiglu",
-        text_model_lora_config: Optional[Dict[str, Any]] = None,
-        audio_model_lora_config: Optional[Dict[str, Any]] = None,
+        text_model_lora_config: Optional[dict[str, Any]] = None,
+        audio_model_lora_config: Optional[dict[str, Any]] = None,
         projector_ln_mid: bool = False,
         **kwargs,
     ):
@@ -79,29 +81,32 @@ class UltravoxConfig(transformers.PretrainedConfig):
             # Avoid circular import
             from vllm.transformers_utils.config import get_config
 
-            self.text_config = get_config(text_model_id,
-                                          trust_remote_code=False)
+            text_config_obj = get_config(text_model_id,
+                                         trust_remote_code=False)
         else:
             text_config = text_config or {}
-            self.text_config = transformers.CONFIG_MAPPING[text_config.get(
+            text_config_obj = transformers.CONFIG_MAPPING[text_config.get(
                 "model_type", "llama")](**text_config)
+
+        inner_text_config = text_config_obj.get_text_config()
 
         if audio_model_id is not None:
             # Avoid circular import
             from vllm.transformers_utils.config import get_config
 
-            self.audio_config = get_config(audio_model_id,
-                                           trust_remote_code=False)
+            audio_config = get_config(audio_model_id, trust_remote_code=False)
         else:
             audio_config = audio_config or {}
-            self.audio_config = transformers.CONFIG_MAPPING[audio_config.get(
+            audio_config = transformers.CONFIG_MAPPING[audio_config.get(
                 "model_type", "whisper")](**audio_config)
 
+        self.text_config = text_config_obj
+        self.audio_config = audio_config
         self.text_model_lora_config = text_model_lora_config or {}
         self.audio_model_lora_config = audio_model_lora_config or {}
 
-        self.vocab_size = self.text_config.vocab_size
-
-        self.initializer_range = self.text_config.initializer_range
+        self.vocab_size = inner_text_config.vocab_size
+        self.initializer_range = inner_text_config.initializer_range
+        self.text_hidden_size = inner_text_config.hidden_size
 
         super().__init__(**kwargs)

@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import List, Optional, Type
+from typing import Optional
 
 import vllm.envs as envs
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.allspark import (  # noqa: E501
     AllSparkLinearKernel)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.bitblas import (  # noqa: E501
     BitBLASLinearKernel)
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.conch import (  # noqa: E501
+    ConchLinearKernel)
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.dynamic_4bit import (  # noqa: E501
+    Dynamic4bitLinearKernel)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.exllama import (  # noqa: E501
     ExllamaLinearKernel)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.machete import (  # noqa: E501
@@ -18,18 +23,20 @@ from vllm.model_executor.layers.quantization.kernels.mixed_precision.MPLinearKer
 from vllm.platforms import current_platform
 
 # in priority/performance order (when available)
-_POSSIBLE_KERNELS: List[Type[MPLinearKernel]] = [
+_POSSIBLE_KERNELS: list[type[MPLinearKernel]] = [
     MacheteLinearKernel,
     AllSparkLinearKernel,
     MarlinLinearKernel,
+    Dynamic4bitLinearKernel,
     BitBLASLinearKernel,
+    ConchLinearKernel,
     ExllamaLinearKernel,
 ]
 
 
 def choose_mp_linear_kernel(
         config: MPLinearLayerConfig,
-        compute_capability: Optional[int] = None) -> Type[MPLinearKernel]:
+        compute_capability: Optional[int] = None) -> type[MPLinearKernel]:
     """
     Choose an MPLinearKernel that can implement the given config for the given
      compute capability. Attempts to choose the best kernel in terms of 
@@ -46,13 +53,14 @@ def choose_mp_linear_kernel(
         ValueError: If no kernel can implement the given config.
 
     Returns:
-        Type[MPLinearKernel]: Chosen kernel.
+        type[MPLinearKernel]: Chosen kernel.
     """
     if compute_capability is None:
         if current_platform is None:
             raise ValueError("Cannot determine compute capability")
         _cc = current_platform.get_device_capability()
-        compute_capability = _cc[0] * 10 + _cc[1]
+        if _cc is not None:
+            compute_capability = _cc[0] * 10 + _cc[1]
 
     failure_reasons = []
     for kernel in _POSSIBLE_KERNELS:
@@ -60,12 +68,12 @@ def choose_mp_linear_kernel(
             failure_reasons.append(
                 f' {kernel.__name__} disabled by environment variable')
             continue
-
-        if kernel.get_min_capability() > compute_capability:
+        if (compute_capability is not None
+                and kernel.get_min_capability() > compute_capability):
             failure_reasons.append(
                 f"{kernel.__name__} requires capability "
-                f"{kernel.get_min_capability()}, current compute capability "
-                f"is {compute_capability}")
+                f"{kernel.get_min_capability()}, current compute "
+                f" capability is {compute_capability}")
             continue
 
         can_implement, failure_reason = kernel.can_implement(config)

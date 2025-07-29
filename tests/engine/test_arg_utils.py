@@ -1,45 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from argparse import ArgumentError, ArgumentTypeError
+from argparse import ArgumentError
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
 import pytest
 
-from vllm.config import config
+from vllm.config import CompilationConfig, config
 from vllm.engine.arg_utils import (EngineArgs, contains_type, get_kwargs,
-                                   get_type, is_not_builtin, is_type,
-                                   literal_to_kwargs, nullable_kvs,
-                                   optional_type)
+                                   get_type, get_type_hints, is_not_builtin,
+                                   is_type, literal_to_kwargs, optional_type,
+                                   parse_type)
 from vllm.utils import FlexibleArgumentParser
 
 
 @pytest.mark.parametrize(("type", "value", "expected"), [
     (int, "42", 42),
-    (int, "None", None),
     (float, "3.14", 3.14),
-    (float, "None", None),
     (str, "Hello World!", "Hello World!"),
-    (str, "None", None),
     (json.loads, '{"foo":1,"bar":2}', {
         "foo": 1,
         "bar": 2
     }),
-    (json.loads, "foo=1,bar=2", {
-        "foo": 1,
-        "bar": 2
-    }),
-    (json.loads, "None", None),
 ])
-def test_optional_type(type, value, expected):
-    optional_type_func = optional_type(type)
-    context = nullcontext()
-    if value == "foo=1,bar=2":
-        context = pytest.warns(DeprecationWarning)
-    with context:
-        assert optional_type_func(value) == expected
+def test_parse_type(type, value, expected):
+    parse_type_func = parse_type(type)
+    assert parse_type_func(value) == expected
+
+
+def test_optional_type():
+    optional_type_func = optional_type(int)
+    assert optional_type_func("None") is None
+    assert optional_type_func("42") == 42
 
 
 @pytest.mark.parametrize(("type_hint", "type", "expected"), [
@@ -77,6 +72,10 @@ def test_get_type(type_hints, type, expected):
         "type": int,
         "choices": [1, 2]
     }),
+    ({str, Literal["x", "y"]}, {
+        "type": str,
+        "metavar": ["x", "y"]
+    }),
     ({Literal[1, "a"]}, Exception),
 ])
 def test_literal_to_kwargs(type_hints, expected):
@@ -89,7 +88,40 @@ def test_literal_to_kwargs(type_hints, expected):
 
 @config
 @dataclass
-class DummyConfigClass:
+class NestedConfig:
+    field: int = 1
+    """field"""
+
+
+@config
+@dataclass
+class FromCliConfig1:
+    field: int = 1
+    """field"""
+
+    @classmethod
+    def from_cli(cls, cli_value: str):
+        inst = cls(**json.loads(cli_value))
+        inst.field += 1
+        return inst
+
+
+@config
+@dataclass
+class FromCliConfig2:
+    field: int = 1
+    """field"""
+
+    @classmethod
+    def from_cli(cls, cli_value: str):
+        inst = cls(**json.loads(cli_value))
+        inst.field += 2
+        return inst
+
+
+@config
+@dataclass
+class DummyConfig:
     regular_bool: bool = True
     """Regular bool with default True"""
     optional_bool: Optional[bool] = None
@@ -108,18 +140,36 @@ class DummyConfigClass:
     """Literal of literals with default 1"""
     json_tip: dict = field(default_factory=dict)
     """Dict which will be JSON in CLI"""
+    nested_config: NestedConfig = field(default_factory=NestedConfig)
+    """Nested config"""
+    from_cli_config1: FromCliConfig1 = field(default_factory=FromCliConfig1)
+    """Config with from_cli method"""
+    from_cli_config2: FromCliConfig2 = field(default_factory=FromCliConfig2)
+    """Different config with from_cli method"""
 
 
 @pytest.mark.parametrize(("type_hint", "expected"), [
     (int, False),
-    (DummyConfigClass, True),
+    (DummyConfig, True),
 ])
 def test_is_not_builtin(type_hint, expected):
     assert is_not_builtin(type_hint) == expected
 
 
+@pytest.mark.parametrize(
+    ("type_hint", "expected"), [
+        (Annotated[int, "annotation"], {int}),
+        (Optional[int], {int, type(None)}),
+        (Annotated[Optional[int], "annotation"], {int, type(None)}),
+        (Optional[Annotated[int, "annotation"]], {int, type(None)}),
+    ],
+    ids=["Annotated", "Optional", "Annotated_Optional", "Optional_Annotated"])
+def test_get_type_hints(type_hint, expected):
+    assert get_type_hints(type_hint) == expected
+
+
 def test_get_kwargs():
-    kwargs = get_kwargs(DummyConfigClass)
+    kwargs = get_kwargs(DummyConfig)
     print(kwargs)
 
     # bools should not have their type set
@@ -140,36 +190,45 @@ def test_get_kwargs():
     # literals of literals should have merged choices
     assert kwargs["literal_literal"]["choices"] == [1, 2]
     # dict should have json tip in help
-    json_tip = "\n\nShould be a valid JSON string."
-    assert kwargs["json_tip"]["help"].endswith(json_tip)
+    json_tip = "Should either be a valid JSON string or JSON keys"
+    assert json_tip in kwargs["json_tip"]["help"]
+    # nested config should should construct the nested config
+    assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)
+    # from_cli configs should be constructed with the correct method
+    assert kwargs["from_cli_config1"]["type"]('{"field": 2}').field == 3
+    assert kwargs["from_cli_config2"]["type"]('{"field": 2}').field == 4
 
 
-@pytest.mark.parametrize(("arg", "expected"), [
-    (None, dict()),
-    ("image=16", {
-        "image": 16
-    }),
-    ("image=16,video=2", {
-        "image": 16,
-        "video": 2
-    }),
-    ("Image=16, Video=2", {
-        "image": 16,
-        "video": 2
-    }),
-])
-def test_limit_mm_per_prompt_parser(arg, expected):
-    """This functionality is deprecated and will be removed in the future.
-    This argument should be passed as JSON string instead.
-    
-    TODO: Remove with nullable_kvs."""
+@pytest.mark.parametrize(
+    ("arg", "expected"),
+    [
+        (None, dict()),
+        ('{"video": {"num_frames": 123} }', {
+            "video": {
+                "num_frames": 123
+            }
+        }),
+        (
+            '{"video": {"num_frames": 123, "fps": 1.0, "foo": "bar"}, "image": {"foo": "bar"} }',  # noqa
+            {
+                "video": {
+                    "num_frames": 123,
+                    "fps": 1.0,
+                    "foo": "bar"
+                },
+                "image": {
+                    "foo": "bar"
+                }
+            }),
+    ])
+def test_media_io_kwargs_parser(arg, expected):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     if arg is None:
         args = parser.parse_args([])
     else:
-        args = parser.parse_args(["--limit-mm-per-prompt", arg])
+        args = parser.parse_args(["--media-io-kwargs", arg])
 
-    assert args.limit_mm_per_prompt == expected
+    assert args.media_io_kwargs == expected
 
 
 def test_compilation_config():
@@ -177,35 +236,43 @@ def test_compilation_config():
 
     # default value
     args = parser.parse_args([])
-    assert args.compilation_config is None
+    assert args.compilation_config == CompilationConfig()
 
     # set to O3
-    args = parser.parse_args(["-O3"])
-    assert args.compilation_config.level == 3
+    args = parser.parse_args(["-O0"])
+    assert args.compilation_config.level == 0
 
     # set to O 3 (space)
-    args = parser.parse_args(["-O", "3"])
-    assert args.compilation_config.level == 3
+    args = parser.parse_args(["-O", "1"])
+    assert args.compilation_config.level == 1
 
     # set to O 3 (equals)
-    args = parser.parse_args(["-O=3"])
+    args = parser.parse_args(["-O=2"])
+    assert args.compilation_config.level == 2
+
+    # set to O.level 3
+    args = parser.parse_args(["-O.level", "3"])
     assert args.compilation_config.level == 3
 
     # set to string form of a dict
     args = parser.parse_args([
-        "--compilation-config",
-        "{'level': 3, 'cudagraph_capture_sizes': [1, 2, 4, 8]}",
+        "-O",
+        '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+        '"use_inductor": false}',
     ])
     assert (args.compilation_config.level == 3 and
-            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
+            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
+            and not args.compilation_config.use_inductor)
 
     # set to string form of a dict
     args = parser.parse_args([
         "--compilation-config="
-        "{'level': 3, 'cudagraph_capture_sizes': [1, 2, 4, 8]}",
+        '{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8], '
+        '"use_inductor": true}',
     ])
     assert (args.compilation_config.level == 3 and
-            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8])
+            args.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
+            and args.compilation_config.use_inductor)
 
 
 def test_prefix_cache_default():
@@ -225,18 +292,6 @@ def test_prefix_cache_default():
     args = parser.parse_args(["--no-enable-prefix-caching"])
     engine_args = EngineArgs.from_cli_args(args=args)
     assert not engine_args.enable_prefix_caching
-
-
-@pytest.mark.parametrize(
-    ("arg"),
-    [
-        "image",  # Missing =
-        "image=4,image=5",  # Conflicting values
-        "image=video=4"  # Too many = in tokenized arg
-    ])
-def test_bad_nullable_kvs(arg):
-    with pytest.raises(ArgumentTypeError):
-        nullable_kvs(arg)
 
 
 # yapf: disable

@@ -584,23 +584,6 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "vllm:num_requests_swapped{model_name=\"$model_name\"}",
-          "fullMetaSearch": false,
-          "hide": false,
-          "includeNullMetadata": true,
-          "instant": false,
-          "legendFormat": "Num Swapped",
-          "range": true,
-          "refId": "B",
-          "useBackend": false
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "disableTextWrap": false,
-          "editorMode": "builder",
           "expr": "vllm:num_requests_waiting{model_name=\"$model_name\"}",
           "fullMetaSearch": false,
           "hide": false,
@@ -874,19 +857,6 @@
           "legendFormat": "GPU Cache Usage",
           "range": true,
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "editorMode": "code",
-          "expr": "vllm:cpu_cache_usage_perc{model_name=\"$model_name\"}",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "CPU Cache Usage",
-          "range": true,
-          "refId": "B"
         }
       ],
       "title": "Cache Utilization",

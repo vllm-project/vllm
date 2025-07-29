@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from https://github.com/sgl-project/sglang/blob/4cb53ecd0cffceb6dee5c011a58f65997a86f151/python/sglang/srt/layers/quantization/int8_kernel.py
 import functools
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import torch
 
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 def apply_w8a8_block_int8_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
-    block_size: List[int],
+    block_size: list[int],
     weight_scale: torch.Tensor,
     input_scale: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
@@ -43,7 +44,7 @@ def apply_w8a8_block_int8_linear(
 
 def input_to_int8(
         x: torch.Tensor,
-        dtype: torch.dtype = torch.int8) -> Tuple[torch.Tensor, torch.Tensor]:
+        dtype: torch.dtype = torch.int8) -> tuple[torch.Tensor, torch.Tensor]:
     """This function quantizes input values to int8 values with
     tensor-wise quantization."""
     iinfo = torch.iinfo(dtype)
@@ -58,7 +59,7 @@ def input_to_int8(
 def block_dequant(
     x_q_block: torch.Tensor,
     x_s: torch.Tensor,
-    block_size: List[int],
+    block_size: list[int],
 ) -> torch.Tensor:
     """This function conducts block-wise dequantization.
     The inputs are block-wise quantization tensor `x_q_block`,
@@ -211,21 +212,21 @@ def per_token_group_quant_int8(
     group_size: int,
     eps: float = 1e-10,
     dtype: torch.dtype = torch.int8,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Function to perform per-token-group quantization on an input tensor `x`.
 
     It converts the tensor values into signed int8 values and returns the
     quantized tensor along with the scaling factor used for quantization.
 
     Args:
-        x: The input tenosr with ndim >= 2.
+        x: The input tensor with ndim >= 2.
         group_size: The group size used for quantization.
         eps: The minimum to avoid dividing zero.
         dtype: The dype of output tensor. Note that only `torch.int8`
             is supported for now.
 
     Returns:
-        Tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
+        tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
             scaling factor for quantization.
     """
     assert (x.shape[-1] % group_size == 0
@@ -237,13 +238,20 @@ def per_token_group_quant_int8(
     int8_min = iinfo.min
 
     x_q = torch.empty_like(x, device=x.device, dtype=dtype)
-    M = x.numel() // group_size
-    N = group_size
     x_s = torch.empty(
         x.shape[:-1] + (x.shape[-1] // group_size, ),
         device=x.device,
         dtype=torch.float32,
     )
+    # prefer CUDA kernel if available
+    if current_platform.is_cuda():
+        torch.ops._C.per_token_group_quant_int8(x, x_q, x_s, group_size, eps,
+                                                float(int8_min),
+                                                float(int8_max))
+        return x_q, x_s
+
+    M = x.numel() // group_size
+    N = group_size
 
     BLOCK = triton.next_power_of_2(N)
     # heuristics for number of warps
@@ -358,7 +366,7 @@ def _w8a8_block_int8_matmul(
 
 @functools.lru_cache
 def get_w8a8_block_int8_configs(N: int, K: int, block_n: int,
-                                block_k: int) -> Optional[Dict[int, Any]]:
+                                block_k: int) -> Optional[dict[int, Any]]:
     """
     Return optimized configurations for the w8a8 block fp8 kernel.
 
@@ -399,7 +407,7 @@ def w8a8_block_int8_matmul(
     B: torch.Tensor,
     As: torch.Tensor,
     Bs: torch.Tensor,
-    block_size: List[int],
+    block_size: list[int],
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     """This function performs matrix multiplication with block-wise

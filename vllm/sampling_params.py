@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sampling parameters for text generation."""
 import copy
 from dataclasses import dataclass
@@ -8,7 +9,6 @@ from typing import Annotated, Any, Optional, Union
 
 import msgspec
 from pydantic import BaseModel
-from typing_extensions import deprecated
 
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
@@ -83,27 +83,6 @@ class GuidedDecodingParams:
                 "You can only use one kind of guided decoding but multiple are "
                 f"specified: {self.__dict__}")
 
-        if self.backend is not None and ":" in self.backend:
-            self._extract_backend_options()
-
-    @deprecated(
-        "Passing guided decoding backend options inside backend in the format "
-        "'backend:...' is deprecated. This will be removed in v0.10.0. Please "
-        "use the dedicated arguments '--disable-fallback', "
-        "'--disable-any-whitespace' and '--disable-additional-properties' "
-        "instead.")
-    def _extract_backend_options(self):
-        """Extract backend options from the backend string."""
-        assert isinstance(self.backend, str)
-        self.backend, options = self.backend.split(":")
-        options_set = set(options.strip().split(","))
-        if "no-fallback" in options_set:
-            self.disable_fallback = True
-        if "disable-any-whitespace" in options_set:
-            self.disable_any_whitespace = True
-        if "no-additional-properties" in options_set:
-            self.disable_additional_properties = True
-
 
 class RequestOutputKind(Enum):
     # Return entire output so far in every RequestOutput
@@ -149,7 +128,7 @@ class SamplingParams(
         top_p: Float that controls the cumulative probability of the top tokens
             to consider. Must be in (0, 1]. Set to 1 to consider all tokens.
         top_k: Integer that controls the number of top tokens to consider. Set
-            to -1 to consider all tokens.
+            to 0 (or -1) to consider all tokens.
         min_p: Float that represents the minimum probability for a token to be
             considered, relative to the probability of the most likely token.
             Must be in [0, 1]. Set to 0 to disable this.
@@ -197,8 +176,8 @@ class SamplingParams(
             processor which only retains scores for the given token ids.
             Defaults to None.
         extra_args: Arbitrary additional args, that can be used by custom
-            sampling implementations. Not used by any in-tree sampling
-            implementations.
+            sampling implementations, plugins, etc. Not used by any in-tree
+            sampling implementations.
     """
 
     n: int = 1
@@ -209,7 +188,7 @@ class SamplingParams(
     repetition_penalty: float = 1.0
     temperature: float = 1.0
     top_p: float = 1.0
-    top_k: int = -1
+    top_k: int = 0
     min_p: float = 0.0
     seed: Optional[int] = None
     stop: Optional[Union[str, list[str]]] = None
@@ -256,7 +235,7 @@ class SamplingParams(
         repetition_penalty: Optional[float] = 1.0,
         temperature: Optional[float] = 1.0,
         top_p: Optional[float] = 1.0,
-        top_k: int = -1,
+        top_k: int = 0,
         min_p: float = 0.0,
         seed: Optional[int] = None,
         stop: Optional[Union[str, list[str]]] = None,
@@ -376,7 +355,7 @@ class SamplingParams(
         if self.temperature < _SAMPLING_EPS:
             # Zero temperature means greedy sampling.
             self.top_p = 1.0
-            self.top_k = -1
+            self.top_k = 0
             self.min_p = 0.0
             self._verify_greedy_sampling()
 
@@ -389,6 +368,17 @@ class SamplingParams(
                              f"type {type(self.n)}")
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
+        if self.best_of is not None:
+            if not isinstance(self.best_of, int):
+                raise ValueError(
+                    f"best_of must be an integer, got {type(self.best_of)}")
+            if self.best_of < 1:
+                raise ValueError(
+                    f"best_of must be at least 1, got {self.best_of}")
+            if self.best_of < self.n:
+                raise ValueError(
+                    f"best_of must be greater than or equal to n, "
+                    f"got n={self.n} and best_of={self.best_of}.")
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise ValueError("presence_penalty must be in [-2, 2], got "
                              f"{self.presence_penalty}.")
@@ -404,8 +394,9 @@ class SamplingParams(
                 f"temperature must be non-negative, got {self.temperature}.")
         if not 0.0 < self.top_p <= 1.0:
             raise ValueError(f"top_p must be in (0, 1], got {self.top_p}.")
-        if self.top_k < -1 or self.top_k == 0:
-            raise ValueError(f"top_k must be -1 (disable), or at least 1, "
+        # quietly accept -1 as disabled, but prefer 0
+        if self.top_k < -1:
+            raise ValueError(f"top_k must be 0 (disable), or at least 1, "
                              f"got {self.top_k}.")
         if not isinstance(self.top_k, int):
             raise TypeError(

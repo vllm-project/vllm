@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Run `pytest tests/entrypoints/openai/test_embedding_dimensions.py`.
 """
@@ -11,7 +12,9 @@ import pytest
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
 
 from ...conftest import HfRunner
-from ...models.utils import EmbedModelInfo, run_embedding_correctness_test
+from ...models.language.pooling.embed_utils import (
+    run_embedding_correctness_test)
+from ...models.utils import EmbedModelInfo
 from ...utils import RemoteOpenAIServer
 
 MODELS = [
@@ -39,8 +42,8 @@ def dtype(request):
 @pytest.fixture(scope="module")
 def server(model_info, dtype: str):
     args = [
-        "--task",
-        "embed",
+        "--runner",
+        "pooling",
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         dtype,

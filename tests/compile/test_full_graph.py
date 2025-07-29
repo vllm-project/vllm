@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from __future__ import annotations
 
+import tempfile
 from typing import Any, Optional, Union
 
 import pytest
@@ -9,7 +11,7 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
-from vllm.config import CompilationConfig, CompilationLevel
+from vllm.config import CompilationConfig, CompilationLevel, PassConfig
 from vllm.platforms import current_platform
 
 from ..utils import create_new_process_for_each_test
@@ -95,9 +97,6 @@ def test_full_graph(
         run_model(optimization_level, model, model_kwargs)
 
 
-PassConfig = CompilationConfig.PassConfig
-
-
 # TODO(luka) add other supported compilation config scenarios here
 @pytest.mark.parametrize(
     "compilation_config, model_info",
@@ -113,6 +112,11 @@ PassConfig = CompilationConfig.PassConfig
                            pass_config=PassConfig(enable_fusion=True,
                                                   enable_noop=True)), model)
         for model in models_list(keywords=["FP8-dynamic", "quantized.w8a8"])
+    ] + [
+        # Test depyf integration works
+        (CompilationConfig(level=CompilationLevel.PIECEWISE,
+                           debug_dump_path=tempfile.gettempdir()),
+         ("facebook/opt-125m", {})),
     ])
 # only test some of the models
 @create_new_process_for_each_test()

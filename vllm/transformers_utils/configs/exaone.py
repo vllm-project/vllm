@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copied from
 # https://huggingface.co/LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct/blob/main/configuration_exaone.py
@@ -17,14 +18,12 @@
 # limitations under the License.
 """Exaone model configuration"""
 
-from typing import Dict
-
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
-EXAONE_PRETRAINED_CONFIG_ARCHIVE_MAP: Dict[str, str] = {}
+EXAONE_PRETRAINED_CONFIG_ARCHIVE_MAP: dict[str, str] = {}
 
 
 class ExaoneConfig(PretrainedConfig):

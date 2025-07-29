@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 
@@ -56,14 +57,6 @@ def unsupported_array_schemas():
         {
             "type": "array",
             "maxContains": 5
-        },
-        {
-            "type": "array",
-            "minItems": 1
-        },
-        {
-            "type": "array",
-            "maxItems": 10
         },
     ]
 

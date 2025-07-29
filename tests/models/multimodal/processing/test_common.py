@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import partial
 from typing import Optional, Union
@@ -9,40 +10,58 @@ from mistral_common.protocol.instruct.messages import (ImageChunk, TextChunk,
                                                        UserMessage)
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from PIL import Image
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.config import ModelConfig
 from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.inputs import MultiModalInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor, ProcessingCache
-from vllm.transformers_utils.tokenizer import (MistralTokenizer,
-                                               cached_tokenizer_from_config)
+from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
+                                               cached_tokenizer_from_config,
+                                               encode_tokens)
 
 from ....multimodal.utils import random_audio, random_image, random_video
 from ...registry import HF_EXAMPLE_MODELS
 
 
+def glm4_1v_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
+    """
+    Patch the multimodal data for GLM4.1V model.
+    """
+    # Ensure video metadata is included
+    if "video" in mm_data:
+        video = mm_data["video"]
+        mm_data["video"] = (video, {
+            "total_num_frames": len(video),
+            "fps": len(video),
+            "duration": 1,
+            "video_backend": "opencv"
+        })
+    return mm_data
+
+
 async def _test_processing_correctness(
-    model_id: str,
+    model_id_or_arch: str,
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
-    ignore_mm_keys: Optional[set[str]] = None,
 ):
-    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
+    if model_id_or_arch in HF_EXAMPLE_MODELS.get_supported_archs():
+        # Use model architecture to get the default model id
+        model_info = HF_EXAMPLE_MODELS.get_hf_info(model_id_or_arch)
+        model_id = model_info.default
+    else:
+        model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id_or_arch)
+        model_id = model_id_or_arch
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
     model_config = ModelConfig(
         model_id,
-        task="auto",
         tokenizer=model_info.tokenizer or model_id,
         tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
-        seed=0,
-        dtype="float16",
-        revision=None,
         hf_overrides=model_info.hf_overrides,
     )
 
@@ -99,10 +118,23 @@ async def _test_processing_correctness(
         }
 
         mm_counts = {k: len(vs) for k, vs in mm_data.items()}
-        prompt = dummy_inputs.get_dummy_processor_inputs(
-            model_config.max_model_len,
-            mm_counts,
-        ).prompt_text
+
+        # Mistral chat outputs tokens directly, rather than text prompts
+        if isinstance(tokenizer, MistralTokenizer):
+            images = mm_data.get("image", [])
+            request = ChatCompletionRequest(messages=[
+                UserMessage(content=[
+                    TextChunk(text=""),
+                    *(ImageChunk(image=image) for image in images),
+                ]),
+            ])
+            res = tokenizer.mistral.encode_chat_completion(request)
+            prompt = res.tokens
+        else:
+            prompt = dummy_inputs.get_dummy_processor_inputs(
+                model_config.max_model_len,
+                mm_counts,
+            ).prompt
 
         # Drop unnecessary keys and test single -> multi conversion
         if rng.rand() < simplify_rate:
@@ -112,78 +144,72 @@ async def _test_processing_correctness(
                 elif len(mm_data[k]) == 1:
                     mm_data[k] = mm_data[k][0]
 
-        if isinstance(tokenizer, MistralTokenizer):
-            await _test_processing_correctness_mistral(
-                model_config,
-                tokenizer,
-                prompt,
-                mm_data,
-                baseline_processor,
-                cached_processor,
-                batch_idx,
-                ignore_mm_keys=ignore_mm_keys,
-            )
-        else:
-            await _test_processing_correctness_hf(
-                model_config,
-                tokenizer,
-                prompt,
-                mm_data,
-                baseline_processor,
-                cached_processor,
-                batch_idx,
-                ignore_mm_keys=ignore_mm_keys,
-            )
+        await _test_processing_correctness_one(
+            model_config,
+            tokenizer,
+            prompt,
+            mm_data,
+            baseline_processor,
+            cached_processor,
+            batch_idx,
+        )
 
 
-async def _test_processing_correctness_hf(
+# For some multimodal models, tokenizer will always add bos_token
+# at the beginning of prompt by default, causing hf_processor outputs
+# incorrect token ids. So we need use `add_special_tokens=False` here
+# to leave bos_token to be added by the processor.
+_ADD_SPECIAL_TOKENS_OVERRIDES = {
+    "mllama": False,
+    "ovis": False,
+    "paligemma": False,
+    "ultravox": False,
+    "whisper": False,
+}
+
+_IGNORE_MM_KEYS = {
+    # In Ultravox, the audio_features can be different depending on padding
+    # The slight difference should not be a problem though, since
+    # attention_mask lets us ignore the difference.
+    "ultravox": {"audio_features"},
+}
+
+MM_DATA_PATCHES = {
+    # GLM4.1V requires video metadata to be included in the input
+    "glm4v": glm4_1v_patch_mm_data,
+}
+
+
+async def _test_processing_correctness_one(
     model_config: ModelConfig,
-    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-    prompt: str,
+    tokenizer: AnyTokenizer,
+    prompt: Union[str, list[int]],
     mm_data: MultiModalDataDict,
     baseline_processor: BaseMultiModalProcessor,
     cached_processor: BaseMultiModalProcessor,
     batch_idx: int,
-    ignore_mm_keys: Optional[set[str]] = None,
 ):
-    if model_config.hf_config.model_type in ("mllama", "whisper", "ultravox"):
-        # For some multimodal models, tokenizer will always add bos_token
-        # at the beginning of prompt by default, causing hf_processor outputs
-        # incorrect token ids. So we need use `add_special_tokens=False` here
-        # to leave bos_token to be added by the processor.
-        token_prompt = tokenizer.encode(prompt, add_special_tokens=False)
+    model_type = model_config.hf_config.model_type
+    ignore_mm_keys = _IGNORE_MM_KEYS.get(model_type, set[str]())
+    if model_type in MM_DATA_PATCHES:
+        mm_data = MM_DATA_PATCHES[model_type](mm_data)
+
+    if isinstance(prompt, str):
+        text_prompt = prompt
+        token_prompt = encode_tokens(
+            tokenizer,
+            prompt,
+            add_special_tokens=_ADD_SPECIAL_TOKENS_OVERRIDES.get(model_type),
+        )
     else:
-        token_prompt = tokenizer.encode(prompt)
-
-    baseline_result = baseline_processor.apply(
-        prompt,
-        mm_data=mm_data,
-        hf_processor_mm_kwargs={},
-    )
-    cached_result = cached_processor.apply(
-        prompt,
-        mm_data=mm_data,
-        hf_processor_mm_kwargs={},
-    )
-
-    _assert_inputs_equal(
-        baseline_result,
-        cached_result,
-        ignore_mm_keys=ignore_mm_keys,
-        msg=f"Failed ({batch_idx=}, {prompt=}, {mm_data=})",
-    )
+        # Mistral does not support decode_tokens with skip_special_tokens=False
+        text_prompt = None
+        token_prompt = prompt
 
     baseline_tokenized_result = baseline_processor.apply(
         token_prompt,
         mm_data=mm_data,
         hf_processor_mm_kwargs={},
-    )
-
-    _assert_inputs_equal(
-        baseline_result,
-        baseline_tokenized_result,
-        ignore_mm_keys=ignore_mm_keys,
-        msg=f"Failed ({batch_idx=}, {prompt=}, {mm_data=})",
     )
 
     cached_tokenized_result = cached_processor.apply(
@@ -193,39 +219,13 @@ async def _test_processing_correctness_hf(
     )
 
     _assert_inputs_equal(
-        cached_result,
+        baseline_tokenized_result,
         cached_tokenized_result,
         ignore_mm_keys=ignore_mm_keys,
-        msg=f"Failed ({batch_idx=}, {prompt=}, {mm_data=})",
+        msg=f"Failed ({batch_idx=}, {token_prompt=}, {mm_data=})",
     )
 
     # [Async tests]
-    baseline_result_async = await baseline_processor.apply_async(
-        prompt,
-        mm_data=mm_data,
-        hf_processor_mm_kwargs={},
-    )
-
-    _assert_inputs_equal(
-        baseline_result,
-        baseline_result_async,
-        ignore_mm_keys=ignore_mm_keys,
-        msg=f"Failed ({batch_idx=}, {prompt=}, {mm_data=})",
-    )
-
-    cached_result_async = await cached_processor.apply_async(
-        prompt,
-        mm_data=mm_data,
-        hf_processor_mm_kwargs={},
-    )
-
-    _assert_inputs_equal(
-        cached_result,
-        cached_result_async,
-        ignore_mm_keys=ignore_mm_keys,
-        msg=f"Failed ({batch_idx=}, {prompt=}, {mm_data=})",
-    )
-
     baseline_tokenized_result_async = await baseline_processor.apply_async(
         token_prompt,
         mm_data=mm_data,
@@ -252,75 +252,67 @@ async def _test_processing_correctness_hf(
         msg=f"Failed ({batch_idx=}, {prompt=}, {mm_data=})",
     )
 
+    if text_prompt is not None:
+        baseline_text_result = baseline_processor.apply(
+            text_prompt,
+            mm_data=mm_data,
+            hf_processor_mm_kwargs={},
+        )
+        cached_text_result = cached_processor.apply(
+            text_prompt,
+            mm_data=mm_data,
+            hf_processor_mm_kwargs={},
+        )
 
-async def _test_processing_correctness_mistral(
-    model_config: ModelConfig,
-    tokenizer: MistralTokenizer,
-    prompt: str,
-    mm_data: MultiModalDataDict,
-    baseline_processor: BaseMultiModalProcessor,
-    cached_processor: BaseMultiModalProcessor,
-    batch_idx: int,
-    ignore_mm_keys: Optional[set[str]] = None,
-):
-    images = mm_data.get("image", [])
-    if not isinstance(images, list):
-        images = [images]
+        _assert_inputs_equal(
+            baseline_text_result,
+            cached_text_result,
+            ignore_mm_keys=ignore_mm_keys,
+            msg=f"Failed ({batch_idx=}, {text_prompt=}, {mm_data=})",
+        )
 
-    request = ChatCompletionRequest(messages=[
-        UserMessage(content=[
-            TextChunk(text=prompt),
-            *(ImageChunk(image=image) for image in images),
-        ]),
-    ])
-    res = tokenizer.mistral.encode_chat_completion(request)
-    token_prompt = res.tokens
+        _assert_inputs_equal(
+            baseline_text_result,
+            baseline_tokenized_result,
+            ignore_mm_keys=ignore_mm_keys,
+            msg=f"Failed ({batch_idx=}, {text_prompt=}, "
+            f"{token_prompt=}, {mm_data=})",
+        )
 
-    # Mistral chat outputs tokens directly, rather than text prompts
-    baseline_tokenized_result = baseline_processor.apply(
-        token_prompt,
-        mm_data=mm_data,
-        hf_processor_mm_kwargs={},
-    )
-    cached_tokenized_result = cached_processor.apply(
-        token_prompt,
-        mm_data=mm_data,
-        hf_processor_mm_kwargs={},
-    )
+        _assert_inputs_equal(
+            cached_text_result,
+            cached_tokenized_result,
+            ignore_mm_keys=ignore_mm_keys,
+            msg=f"Failed ({batch_idx=}, {text_prompt=}, "
+            f"{token_prompt=}, {mm_data=})",
+        )
 
-    # [Async tests]
-    _assert_inputs_equal(
-        baseline_tokenized_result,
-        cached_tokenized_result,
-        ignore_mm_keys=ignore_mm_keys,
-        msg=f"Failed ({batch_idx=}, {prompt=}, {mm_data=})",
-    )
+        # [Async tests]
+        baseline_text_result_async = await baseline_processor.apply_async(
+            prompt,
+            mm_data=mm_data,
+            hf_processor_mm_kwargs={},
+        )
 
-    baseline_tokenized_result_async = await baseline_processor.apply_async(
-        token_prompt,
-        mm_data=mm_data,
-        hf_processor_mm_kwargs={},
-    )
+        _assert_inputs_equal(
+            baseline_text_result,
+            baseline_text_result_async,
+            ignore_mm_keys=ignore_mm_keys,
+            msg=f"Failed ({batch_idx=}, {prompt=}, {mm_data=})",
+        )
 
-    _assert_inputs_equal(
-        baseline_tokenized_result,
-        baseline_tokenized_result_async,
-        ignore_mm_keys=ignore_mm_keys,
-        msg=f"Failed ({batch_idx=}, {prompt=}, {mm_data=})",
-    )
+        cached_text_result_async = await cached_processor.apply_async(
+            prompt,
+            mm_data=mm_data,
+            hf_processor_mm_kwargs={},
+        )
 
-    cached_tokenized_result_async = await cached_processor.apply_async(
-        token_prompt,
-        mm_data=mm_data,
-        hf_processor_mm_kwargs={},
-    )
-
-    _assert_inputs_equal(
-        cached_tokenized_result,
-        cached_tokenized_result_async,
-        ignore_mm_keys=ignore_mm_keys,
-        msg=f"Failed ({batch_idx=}, {prompt=}, {mm_data=})",
-    )
+        _assert_inputs_equal(
+            cached_text_result,
+            cached_text_result_async,
+            ignore_mm_keys=ignore_mm_keys,
+            msg=f"Failed ({batch_idx=}, {prompt=}, {mm_data=})",
+        )
 
 
 # yapf: disable
@@ -335,13 +327,17 @@ async def _test_processing_correctness_mistral(
     "adept/fuyu-8b",
     "google/gemma-3-4b-it",
     "THUDM/glm-4v-9b",
-    "ibm-granite/granite-speech-3.3-8b",
+    "THUDM/GLM-4.1V-9B-Thinking",
+    "ibm-granite/granite-speech-3.3-2b",
     "h2oai/h2ovl-mississippi-800m",
+    "internlm/Intern-S1",
     "OpenGVLab/InternVL2-1B",
+    "OpenGVLab/InternVL3-1B",
     "HuggingFaceM4/Idefics3-8B-Llama3",
     "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
     "moonshotai/Kimi-VL-A3B-Instruct",
     "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+    "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
     "llava-hf/llava-1.5-7b-hf",
     "llava-hf/llava-v1.6-mistral-7b-hf",
     "llava-hf/LLaVA-NeXT-Video-7B-hf",
@@ -355,6 +351,9 @@ async def _test_processing_correctness_mistral(
     "allenai/Molmo-7B-D-0924",
     "allenai/Molmo-7B-O-0924",
     "nvidia/NVLM-D-72B",
+    "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1",
+    "AIDC-AI/Ovis1.6-Gemma2-9B",
+    "AIDC-AI/Ovis1.6-Llama3.2-3B",
     "AIDC-AI/Ovis2-1B",
     "google/paligemma-3b-mix-224",
     "google/paligemma2-3b-ft-docci-448",
@@ -370,6 +369,8 @@ async def _test_processing_correctness_mistral(
     "Skywork/Skywork-R1V-38B",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
     "openai/whisper-large-v3",
+    "omni-research/Tarsier-7b",
+    "omni-research/Tarsier2-Recap-7b"
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
@@ -381,19 +382,34 @@ async def test_processing_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
-    ignore_mm_keys = None
-    if 'ultravox' in model_id:
-        # In Ultravox, the audio_features can be different depending on padding
-        # The slight difference should not be a problem though, since
-        # attention_mask lets us ignore the difference.
-        ignore_mm_keys = {"audio_features"}
-
     await _test_processing_correctness(
         model_id,
         hit_rate=hit_rate,
         num_batches=num_batches,
         simplify_rate=simplify_rate,
-        ignore_mm_keys=ignore_mm_keys,
+    )
+
+
+# Phi4MultimodalForCausalLM share same model repo with original format
+# Phi4MMForCausalLM, so we add it as a separate test case
+# Remove this test after conversion PR merged:
+# https://huggingface.co/microsoft/Phi-4-multimodal-instruct/discussions/70
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_arch", ["Phi4MultimodalForCausalLM"])
+@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
+@pytest.mark.parametrize("num_batches", [32])
+@pytest.mark.parametrize("simplify_rate", [1.0])
+async def test_processing_correctness_phi4_multimodal(
+    model_arch: str,
+    hit_rate: float,
+    num_batches: int,
+    simplify_rate: float,
+):
+    await _test_processing_correctness(
+        model_arch,
+        hit_rate=hit_rate,
+        num_batches=num_batches,
+        simplify_rate=simplify_rate,
     )
 
 

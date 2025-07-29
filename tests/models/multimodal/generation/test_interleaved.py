@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
+from vllm.multimodal.image import convert_image_mode
 
 models = ["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"]
 
@@ -26,8 +28,9 @@ def test_models(vllm_runner, model, dtype: str, max_tokens: int) -> None:
     give the same result.
     """
 
-    image_cherry = ImageAsset("cherry_blossom").pil_image.convert("RGB")
-    image_stop = ImageAsset("stop_sign").pil_image.convert("RGB")
+    image_cherry = convert_image_mode(
+        ImageAsset("cherry_blossom").pil_image, "RGB")
+    image_stop = convert_image_mode(ImageAsset("stop_sign").pil_image, "RGB")
     images = [image_cherry, image_stop]
     video = VideoAsset(name="baby_reading", num_frames=16).np_ndarrays
 
@@ -45,7 +48,7 @@ def test_models(vllm_runner, model, dtype: str, max_tokens: int) -> None:
     ]
 
     with vllm_runner(model,
-                     task="generate",
+                     runner="generate",
                      dtype=dtype,
                      limit_mm_per_prompt={"image": 2},
                      max_model_len=32768,

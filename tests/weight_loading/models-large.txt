@@ -5,3 +5,4 @@ compressed-tensors, nm-testing/test-w4a16-mixtral-actorder-group, main
 gptq_marlin, TheBloke/Mixtral-8x7B-v0.1-GPTQ, main
 gptq_marlin, TheBloke/Mixtral-8x7B-v0.1-GPTQ, gptq-8bit-128g-actorder_True
 awq_marlin, casperhansen/deepseek-coder-v2-instruct-awq, main
+compressed-tensors, RedHatAI/Llama-4-Scout-17B-16E-Instruct-quantized.w4a16, main

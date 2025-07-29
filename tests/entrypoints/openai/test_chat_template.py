@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 
@@ -15,7 +16,7 @@ chatml_jinja_path = VLLM_PATH / "examples/template_chatml.jinja"
 assert chatml_jinja_path.exists()
 
 # Define models, templates, and their corresponding expected outputs
-MODEL_TEMPLATE_GENERATON_OUTPUT = [
+MODEL_TEMPLATE_GENERATION_OUTPUT = [
     ("facebook/opt-125m", chatml_jinja_path, True, False, """<|im_start|>user
 Hello<|im_end|>
 <|im_start|>assistant
@@ -90,7 +91,7 @@ def test_no_load_chat_template_literallike():
 
 @pytest.mark.parametrize(
     "model,template,add_generation_prompt,continue_final_message,expected_output",
-    MODEL_TEMPLATE_GENERATON_OUTPUT)
+    MODEL_TEMPLATE_GENERATION_OUTPUT)
 def test_get_gen_prompt(model, template, add_generation_prompt,
                         continue_final_message, expected_output):
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
@@ -101,6 +102,7 @@ def test_get_gen_prompt(model, template, add_generation_prompt,
         tokenizer=model_info.tokenizer or model,
         tokenizer_mode=model_info.tokenizer_mode,
         trust_remote_code=model_info.trust_remote_code,
+        revision=model_info.revision,
         hf_overrides=model_info.hf_overrides,
     )
 
@@ -122,10 +124,10 @@ def test_get_gen_prompt(model, template, add_generation_prompt,
 
     # Call the function and get the result
     result = apply_hf_chat_template(
-        model_config,
-        tokenizer,
+        tokenizer=tokenizer,
         conversation=mock_request.messages,
         chat_template=mock_request.chat_template or template_content,
+        model_config=model_config,
         tools=None,
         add_generation_prompt=mock_request.add_generation_prompt,
         continue_final_message=mock_request.continue_final_message,

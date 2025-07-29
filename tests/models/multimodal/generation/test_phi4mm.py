@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-import re
 from collections.abc import Sequence
 from typing import Optional
 
 import librosa
 import pytest
+import regex as re
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.image import rescale_image_size
+from vllm.multimodal.image import convert_image_mode, rescale_image_size
 from vllm.platforms import current_platform
 from vllm.sequence import SampleLogprobs
 
@@ -98,7 +99,7 @@ def run_test(
     # max_model_len should be greater than image_feature_size
     with vllm_runner(
             model,
-            task="generate",
+            runner="generate",
             max_model_len=max_model_len,
             max_num_seqs=2,
             dtype=dtype,
@@ -120,6 +121,10 @@ def run_test(
                                                 lora_request=lora_request)
             for prompts, images, audios in inputs
         ]
+
+    # This error occurs inside `get_peft_model`
+    # FIXME: https://huggingface.co/microsoft/Phi-4-multimodal-instruct/discussions/75
+    pytest.skip("HF impl is not compatible with current transformers")
 
     hf_model_kwargs = {"_attn_implementation": "sdpa"}
     with hf_runner(model, dtype=dtype,
@@ -267,7 +272,7 @@ def test_vision_speech_models(hf_runner, vllm_runner, model, dtype: str,
 
     # use the example speech question so that the model outputs are reasonable
     audio = librosa.load(speech_question, sr=None)
-    image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
+    image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
 
     inputs_vision_speech = [
         (

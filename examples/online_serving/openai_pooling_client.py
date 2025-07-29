@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Example online usage of Pooling API.
 
-Run `vllm serve <model> --task <embed|classify|reward|score>`
+Run `vllm serve <model> --runner pooling`
 to start up the server in vLLM.
 """
+
 import argparse
 import pprint
 
@@ -21,9 +23,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--model",
-                        type=str,
-                        default="jason9693/Qwen2.5-1.5B-apeach")
+    parser.add_argument("--model", type=str, default="jason9693/Qwen2.5-1.5B-apeach")
 
     return parser.parse_args()
 
@@ -42,15 +42,13 @@ def main(args):
 
     # Input like Chat API
     prompt = {
-        "model":
-        model_name,
-        "messages": [{
-            "role": "user",
-            "content": [{
-                "type": "text",
-                "text": "vLLM is great!"
-            }],
-        }]
+        "model": model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "vLLM is great!"}],
+            }
+        ],
     }
     pooling_response = post_http_request(prompt=prompt, api_url=api_url)
     print("Pooling Response:")

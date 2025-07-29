@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from itertools import accumulate, product
 from typing import Callable, Optional
@@ -29,12 +30,20 @@ def _get_flat_tensor_shape(batch_size: int, seq_len: int, num_heads: int,
     return (batch_size, seq_len, num_heads * head_size)
 
 
+# For testing sliced tensors
+def _get_padded_tensor_shape(batch_size: int, seq_len: int, num_heads: int,
+                             head_size: int) -> tuple[int, ...]:
+    return (batch_size, seq_len, num_heads, head_size + 64)
+
+
 def _get_batch_tensor_shape(batch_size: int, seq_len: int, num_heads: int,
                             head_size: int) -> tuple[int, ...]:
     return (batch_size, seq_len, num_heads, head_size)
 
 
-TENSORS_SHAPES_FN = [_get_batch_tensor_shape, _get_flat_tensor_shape]
+TENSORS_SHAPES_FN = [
+    _get_batch_tensor_shape, _get_flat_tensor_shape, _get_padded_tensor_shape
+]
 
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
@@ -62,7 +71,7 @@ def test_rotary_embedding(
     device: str,
     use_key: bool,
     max_position: int = 8192,
-    base: int = 10000,
+    base: float = 10000,
 ) -> None:
     if rotary_dim is None:
         rotary_dim = head_size
@@ -78,6 +87,10 @@ def test_rotary_embedding(
     query_shape = tensor_shape_fn(batch_size, seq_len, num_heads, head_size)
     query = torch.randn(query_shape, dtype=dtype)
     key = torch.randn_like(query) if use_key else None
+
+    # slice tensor if required, noop otherwise
+    query = query[..., :head_size]
+    key = key[..., :head_size] if use_key else None
 
     # NOTE(woosuk): The reference implementation should be executed first
     # because the custom kernel is in-place.
@@ -123,7 +136,7 @@ def test_batched_rotary_embedding(
     device: str,
     use_key: bool,
     max_position: int = 8192,
-    base: int = 10000,
+    base: float = 10000,
 ) -> None:
     current_platform.seed_everything(seed)
     torch.set_default_device(device)
@@ -139,6 +152,10 @@ def test_batched_rotary_embedding(
     query_shape = tensor_shape_fn(batch_size, seq_len, num_heads, head_size)
     query = torch.randn(query_shape, dtype=dtype)
     key = torch.randn_like(query) if use_key else None
+
+    # slice tensor if required, noop otherwise
+    query = query[..., :head_size]
+    key = key[..., :head_size] if use_key else None
 
     # NOTE(woosuk): The reference implementation should be executed first
     # because the custom kernel is in-place.
@@ -187,7 +204,7 @@ def test_batched_rotary_embedding_multi_lora(
     device: str,
     use_key: bool,
     max_position: int = 8192,
-    base: int = 10000,
+    base: float = 10000,
 ) -> None:
     current_platform.seed_everything(seed)
     torch.set_default_device(device)

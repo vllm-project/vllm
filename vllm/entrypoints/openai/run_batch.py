@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import tempfile
+from argparse import Namespace
 from collections.abc import Awaitable
 from http import HTTPStatus
 from io import StringIO
@@ -12,30 +14,34 @@ import torch
 from prometheus_client import start_http_server
 from tqdm import tqdm
 
+import vllm.envs as envs
+from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
-from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.logger import RequestLogger, logger
+from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.logger import RequestLogger
 # yapf: disable
+from vllm.entrypoints.openai.api_server import build_async_engine_client
 from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               BatchRequestOutput,
                                               BatchResponseData,
                                               ChatCompletionResponse,
                                               EmbeddingResponse, ErrorResponse,
-                                              ScoreResponse)
+                                              RerankResponse, ScoreResponse)
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.entrypoints.openai.serving_score import ServingScores
+from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
 
+logger = init_logger(__name__)
 
-def parse_args():
-    parser = FlexibleArgumentParser(
-        description="vLLM OpenAI-Compatible batch runner.")
+
+def make_arg_parser(parser: FlexibleArgumentParser):
     parser.add_argument(
         "-i",
         "--input-file",
@@ -98,7 +104,13 @@ def parse_args():
         default=False,
         help="If set to True, enable prompt_tokens_details in usage.")
 
-    return parser.parse_args()
+    return parser
+
+
+def parse_args():
+    parser = FlexibleArgumentParser(
+        description="vLLM OpenAI-Compatible batch runner.")
+    return make_arg_parser(parser).parse_args()
 
 
 # explicitly use pure text format, with a newline at the end
@@ -196,13 +208,16 @@ async def upload_data(output_url: str, data_or_file: str,
         except Exception as e:
             if attempt < max_retries:
                 logger.error(
-                    f"Failed to upload data (attempt {attempt}). "
-                    f"Error message: {str(e)}.\nRetrying in {delay} seconds..."
+                    "Failed to upload data (attempt %d). Error message: %s.\nRetrying in %d seconds...",  # noqa: E501
+                    attempt,
+                    e,
+                    delay,
                 )
                 await asyncio.sleep(delay)
             else:
-                raise Exception(f"Failed to upload data (attempt {attempt}). "
-                                f"Error message: {str(e)}.") from e
+                raise Exception(
+                    f"Failed to upload data (attempt {attempt}). Error message: {str(e)}."  # noqa: E501
+                ) from e
 
 
 async def write_file(path_or_url: str, batch_outputs: list[BatchRequestOutput],
@@ -270,8 +285,11 @@ async def run_request(serving_engine_func: Callable,
                       tracker: BatchProgressTracker) -> BatchRequestOutput:
     response = await serving_engine_func(request.body)
 
-    if isinstance(response,
-                  (ChatCompletionResponse, EmbeddingResponse, ScoreResponse)):
+    if isinstance(
+            response,
+        (ChatCompletionResponse, EmbeddingResponse, ScoreResponse,
+         RerankResponse),
+    ):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
@@ -296,37 +314,45 @@ async def run_request(serving_engine_func: Callable,
     return batch_output
 
 
-async def main(args):
+async def run_batch(
+    engine_client: EngineClient,
+    vllm_config: VllmConfig,
+    args: Namespace,
+) -> None:
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
     else:
         served_model_names = [args.model]
-
-    engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine = AsyncLLMEngine.from_engine_args(
-        engine_args, usage_context=UsageContext.OPENAI_BATCH_RUNNER)
-
-    model_config = await engine.get_model_config()
-    base_model_paths = [
-        BaseModelPath(name=name, model_path=args.model)
-        for name in served_model_names
-    ]
 
     if args.disable_log_requests:
         request_logger = None
     else:
         request_logger = RequestLogger(max_log_len=args.max_log_len)
 
+    base_model_paths = [
+        BaseModelPath(name=name, model_path=args.model)
+        for name in served_model_names
+    ]
+
+    model_config = vllm_config.model_config
+
+    if envs.VLLM_USE_V1:
+        supported_tasks = await engine_client \
+            .get_supported_tasks()  # type: ignore
+    else:
+        supported_tasks = model_config.supported_tasks
+
+    logger.info("Supported_tasks: %s", supported_tasks)
+
     # Create the openai serving objects.
     openai_serving_models = OpenAIServingModels(
-        engine_client=engine,
+        engine_client=engine_client,
         model_config=model_config,
         base_model_paths=base_model_paths,
         lora_modules=None,
-        prompt_adapters=None,
     )
     openai_serving_chat = OpenAIServingChat(
-        engine,
+        engine_client,
         model_config,
         openai_serving_models,
         args.response_role,
@@ -334,21 +360,25 @@ async def main(args):
         chat_template=None,
         chat_template_content_format="auto",
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-    ) if model_config.runner_type == "generate" else None
+    ) if "generate" in supported_tasks else None
     openai_serving_embedding = OpenAIServingEmbedding(
-        engine,
+        engine_client,
         model_config,
         openai_serving_models,
         request_logger=request_logger,
         chat_template=None,
         chat_template_content_format="auto",
-    ) if model_config.task == "embed" else None
-    openai_serving_scores = (ServingScores(
-        engine,
+    ) if "embed" in supported_tasks else None
+
+    enable_serving_reranking = ("classify" in supported_tasks and getattr(
+        model_config.hf_config, "num_labels", 0) == 1)
+
+    openai_serving_scores = ServingScores(
+        engine_client,
         model_config,
         openai_serving_models,
         request_logger=request_logger,
-    ) if model_config.task == "score" else None)
+    ) if ("embed" in supported_tasks or enable_serving_reranking) else None
 
     tracker = BatchProgressTracker()
     logger.info("Reading batch from %s...", args.input_file)
@@ -365,8 +395,8 @@ async def main(args):
 
         # Determine the type of request and run it.
         if request.url == "/v1/chat/completions":
-            chat_handler_fn = (None if openai_serving_chat is None else
-                               openai_serving_chat.create_chat_completion)
+            chat_handler_fn = openai_serving_chat.create_chat_completion if \
+                openai_serving_chat is not None else None
             if chat_handler_fn is None:
                 response_futures.append(
                     make_async_error_request_output(
@@ -380,8 +410,8 @@ async def main(args):
                 run_request(chat_handler_fn, request, tracker))
             tracker.submitted()
         elif request.url == "/v1/embeddings":
-            embed_handler_fn = (None if openai_serving_embedding is None else
-                                openai_serving_embedding.create_embedding)
+            embed_handler_fn = openai_serving_embedding.create_embedding if \
+                openai_serving_embedding is not None else None
             if embed_handler_fn is None:
                 response_futures.append(
                     make_async_error_request_output(
@@ -393,9 +423,9 @@ async def main(args):
             response_futures.append(
                 run_request(embed_handler_fn, request, tracker))
             tracker.submitted()
-        elif request.url == "/v1/score":
-            score_handler_fn = (None if openai_serving_scores is None else
-                                openai_serving_scores.create_score)
+        elif request.url.endswith("/score"):
+            score_handler_fn = openai_serving_scores.create_score if \
+                openai_serving_scores is not None else None
             if score_handler_fn is None:
                 response_futures.append(
                     make_async_error_request_output(
@@ -407,19 +437,46 @@ async def main(args):
             response_futures.append(
                 run_request(score_handler_fn, request, tracker))
             tracker.submitted()
+        elif request.url.endswith("/rerank"):
+            rerank_handler_fn = openai_serving_scores.do_rerank if \
+                openai_serving_scores is not None else None
+            if rerank_handler_fn is None:
+                response_futures.append(
+                    make_async_error_request_output(
+                        request,
+                        error_msg="The model does not support Rerank API",
+                    ))
+                continue
+
+            response_futures.append(
+                run_request(rerank_handler_fn, request, tracker))
+            tracker.submitted()
         else:
             response_futures.append(
                 make_async_error_request_output(
                     request,
-                    error_msg=
-                    "Only /v1/chat/completions, /v1/embeddings, and /v1/score "
-                    "are supported in the batch endpoint.",
+                    error_msg=f"URL {request.url} was used. "
+                    "Supported endpoints: /v1/chat/completions, /v1/embeddings,"
+                    " /score, /rerank ."
+                    "See vllm/entrypoints/openai/api_server.py for supported "
+                    "score/rerank versions.",
                 ))
 
     with tracker.pbar():
         responses = await asyncio.gather(*response_futures)
 
     await write_file(args.output_file, responses, args.output_tmp_dir)
+
+
+async def main(args: Namespace):
+    async with build_async_engine_client(
+            args,
+            usage_context=UsageContext.OPENAI_BATCH_RUNNER,
+            disable_frontend_multiprocessing=False,
+    ) as engine_client:
+        vllm_config = await engine_client.get_vllm_config()
+
+        await run_batch(engine_client, vllm_config, args)
 
 
 if __name__ == "__main__":

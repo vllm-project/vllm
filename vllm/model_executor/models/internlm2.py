@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterable
 from functools import partial
-from typing import Any, Dict, Iterable, Optional, Set, Tuple, Type, Union
+from typing import Any, Optional, Union
 
 import torch
 from torch import nn
@@ -20,15 +22,14 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.pooler import Pooler, PoolingType
+from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (is_pp_missing_parameter,
@@ -81,7 +82,7 @@ class InternLM2Attention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
+        rope_scaling: Optional[dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -225,7 +226,7 @@ class InternLMDecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -252,7 +253,7 @@ class InternLM2Model(nn.Module):
             *,
             vllm_config: VllmConfig,
             prefix: str = "",
-            layer_type: Type[InternLMDecoderLayer] = InternLMDecoderLayer):
+            layer_type: type[InternLMDecoderLayer] = InternLMDecoderLayer):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -316,7 +317,7 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
                  *,
                  vllm_config: VllmConfig,
                  prefix: str = "",
-                 model_type: Type[InternLM2Model] = InternLM2Model):
+                 model_type: type[InternLM2Model] = InternLM2Model):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -361,15 +362,15 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
                                        sampling_metadata)
         return logits
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "w1", 0),
             ("gate_up_proj", "w3", 1),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -402,12 +403,14 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
 
 class InternLM2ForRewardModel(InternLM2ForCausalLM):
 
+    is_pooling_model = True
+
     def __init__(
         self,
         *,
         vllm_config: VllmConfig,
         prefix: str = "",
-        model_type: Type[InternLM2Model] = InternLM2Model,
+        model_type: type[InternLM2Model] = InternLM2Model,
     ):
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,
@@ -426,12 +429,10 @@ class InternLM2ForRewardModel(InternLM2ForCausalLM):
         )
 
         pooler_config = vllm_config.model_config.pooler_config
-        self._pooler = Pooler.from_config_with_defaults(
-            pooler_config,
-            pooling_type=PoolingType.ALL,
-            normalize=False,
-            softmax=False,
-        )
+        assert pooler_config is not None
+
+        self.pooler = DispatchPooler(
+            {"encode": Pooler.for_encode(pooler_config)}, )
 
     def forward(
         self,
@@ -444,10 +445,3 @@ class InternLM2ForRewardModel(InternLM2ForCausalLM):
                                    inputs_embeds)
         logits, _ = self.v_head(hidden_states)
         return logits
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)

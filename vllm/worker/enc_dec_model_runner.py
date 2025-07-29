@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
 import itertools
@@ -90,10 +91,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         '''
         EncoderDecoderModelRunner constructor.
 
-        `lora_config` and `prompt_adapter_config` are
-        unused (since these features are not yet supported for encoder/decoder
-        models) but these arguments are present here for compatibility with 
-        the base-class constructor.
+        `lora_config` is unused (since these features are not yet supported
+        for encoder/decoder models) but these arguments are present here for
+        compatibility with the base-class constructor.
         '''
         self._maybe_force_supported_attention_backend()
 
@@ -202,9 +202,12 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 encoder_input_ids=model_input.encoder_input_tokens,
                 encoder_positions=model_input.encoder_input_positions,
                 intermediate_tensors=intermediate_tensors,
-                **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
-                                             device=self.device),
-                **seqlen_agnostic_kwargs)
+                **MultiModalKwargs.as_kwargs(
+                    multi_modal_kwargs,
+                    device=self.device,
+                ),
+                **seqlen_agnostic_kwargs,
+            )
 
         logits = self.model.compute_logits(hidden_or_intermediate_states,
                                            model_input.sampling_metadata)

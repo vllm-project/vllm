@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Set
 from dataclasses import dataclass, field
-from typing import AbstractSet, Dict, Optional
+from typing import Optional
 
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -40,9 +42,9 @@ class LoRAResolver(ABC):
 
 @dataclass
 class _LoRAResolverRegistry:
-    resolvers: Dict[str, LoRAResolver] = field(default_factory=dict)
+    resolvers: dict[str, LoRAResolver] = field(default_factory=dict)
 
-    def get_supported_resolvers(self) -> AbstractSet[str]:
+    def get_supported_resolvers(self) -> Set[str]:
         """Get all registered resolver names."""
         return self.resolvers.keys()
 

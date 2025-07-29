@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
 import pickle
@@ -40,6 +41,11 @@ MMF_CLASS_TO_FACTORY: dict[type[BaseMultiModalField], str] = {
 bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
 
 
+def _log_insecure_serialization_warning():
+    logger.warning_once("Allowing insecure serialization using pickle due to "
+                        "VLLM_ALLOW_INSECURE_SERIALIZATION=1")
+
+
 class MsgpackEncoder:
     """Encoder with custom torch tensor and numpy array serialization.
 
@@ -60,9 +66,7 @@ class MsgpackEncoder:
         self.aux_buffers: Optional[list[bytestr]] = None
         self.size_threshold = size_threshold
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
-            logger.warning(
-                "Allowing insecure serialization using pickle due to "
-                "VLLM_ALLOW_INSECURE_SERIALIZATION=1")
+            _log_insecure_serialization_warning()
 
     def encode(self, obj: Any) -> Sequence[bytestr]:
         try:
@@ -119,7 +123,9 @@ class MsgpackEncoder:
                     for item in itemlist]
 
         if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
-            raise TypeError(f"Object of type {type(obj)} is not serializable")
+            raise TypeError(f"Object of type {type(obj)} is not serializable"
+                            "Set VLLM_ALLOW_INSECURE_SERIALIZATION=1 to allow "
+                            "fallback to pickle-based serialization.")
 
         if isinstance(obj, FunctionType):
             # `pickle` is generally faster than cloudpickle, but can have
@@ -134,7 +140,7 @@ class MsgpackEncoder:
     ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
         assert self.aux_buffers is not None
         # If the array is non-contiguous, we need to copy it first
-        arr_data = obj.data if obj.data.c_contiguous else obj.tobytes()
+        arr_data = obj.data if obj.flags.c_contiguous else obj.tobytes()
         if not obj.shape or obj.nbytes < self.size_threshold:
             # Encode small arrays and scalars inline. Using this extension type
             # ensures we can avoid copying when decoding.
@@ -153,10 +159,8 @@ class MsgpackEncoder:
         self, obj: torch.Tensor
     ) -> tuple[str, tuple[int, ...], Union[int, memoryview]]:
         assert self.aux_buffers is not None
-        # this creates a copy of the tensor if it's not already contiguous
-        obj = obj.contiguous()
-        #  view the tensor as a 1D array of bytes
-        arr = obj.view((obj.numel(), )).view(torch.uint8).numpy()
+        # view the tensor as a contiguous 1D array of bytes
+        arr = obj.flatten().contiguous().view(torch.uint8).numpy()
         if obj.nbytes < self.size_threshold:
             # Smaller tensors are encoded inline, just like ndarrays.
             data = msgpack.Ext(CUSTOM_TYPE_RAW_VIEW, arr.data)
@@ -164,7 +168,7 @@ class MsgpackEncoder:
             # Otherwise encode index of backing buffer to avoid copy.
             data = len(self.aux_buffers)
             self.aux_buffers.append(arr.data)
-        dtype = str(obj.dtype)[6:]  # remove 'torch.' prefix
+        dtype = str(obj.dtype).removeprefix("torch.")
         return dtype, obj.shape, data
 
     def _encode_nested_tensors(self, nt: NestedTensors) -> Any:
@@ -202,9 +206,7 @@ class MsgpackDecoder:
                                        dec_hook=self.dec_hook)
         self.aux_buffers: Sequence[bytestr] = ()
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
-            logger.warning(
-                "Allowing insecure deserialization using pickle due to "
-                "VLLM_ALLOW_INSECURE_SERIALIZATION=1")
+            _log_insecure_serialization_warning()
 
     def decode(self, bufs: Union[bytestr, Sequence[bytestr]]) -> Any:
         if isinstance(bufs, (bytes, bytearray, memoryview, zmq.Frame)):
@@ -242,7 +244,7 @@ class MsgpackDecoder:
         # zero-copy decode. We assume the ndarray will not be kept around,
         # as it now locks the whole received message buffer in memory.
         buffer = self.aux_buffers[data] if isinstance(data, int) else data
-        return np.ndarray(buffer=buffer, dtype=np.dtype(dtype), shape=shape)
+        return np.frombuffer(buffer, dtype=dtype).reshape(shape)
 
     def _decode_tensor(self, arr: Any) -> torch.Tensor:
         dtype, shape, data = arr
@@ -251,12 +253,15 @@ class MsgpackDecoder:
         # not complain about a readonly memoryview.
         buffer = self.aux_buffers[data] if isinstance(data, int) \
             else bytearray(data)
-        # Create numpy wrapper around the bytes
-        arr = np.ndarray(buffer=buffer, dtype=np.uint8, shape=(len(buffer), ))
         torch_dtype = getattr(torch, dtype)
         assert isinstance(torch_dtype, torch.dtype)
+        if not buffer:  # torch.frombuffer doesn't like empty buffers
+            assert 0 in shape
+            return torch.empty(shape, dtype=torch_dtype)
+        # Create uint8 array
+        arr = torch.frombuffer(buffer, dtype=torch.uint8)
         # Convert back to proper shape & type
-        return torch.from_numpy(arr).view(torch_dtype).view(shape)
+        return arr.view(torch_dtype).view(shape)
 
     def _decode_mm_items(self, obj: list) -> list[MultiModalKwargsItem]:
         decoded_items = []

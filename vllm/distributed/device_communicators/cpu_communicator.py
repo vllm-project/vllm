@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import List, Optional
+from typing import Any, Optional, Union
 
 import torch
 from torch.distributed import ProcessGroup
 
+from vllm.distributed.utils import pickle
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 
@@ -22,7 +24,11 @@ class CpuCommunicator(DeviceCommunicatorBase):
         super().__init__(cpu_group, device, device_group, unique_name)
         self.dist_module = torch.distributed
 
-        if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
+        if (current_platform.get_cpu_architecture()
+                == CpuArchEnum.X86) and hasattr(
+                    torch.ops._C,
+                    "init_shm_manager") and (unique_name.startswith("tp")
+                                             or unique_name.startswith("pp")):
             self.dist_module = _CPUSHMDistributed(self)
 
     def all_reduce(self, input_):
@@ -90,11 +96,26 @@ class CpuCommunicator(DeviceCommunicatorBase):
                                               input_size[dim + 1:])
         return output_tensor
 
+    def send_tensor_dict(
+        self,
+        tensor_dict: dict[str, Union[torch.Tensor, Any]],
+        dst: int,
+    ) -> None:
+        return self.dist_module.send_tensor_dict(tensor_dict, dst)
+
+    def recv_tensor_dict(
+        self,
+        src: int,
+    ) -> dict[str, Union[torch.Tensor, Any]]:
+        return self.dist_module.recv_tensor_dict(src)
+
 
 class _CPUSHMDistributed:
 
     def __init__(self, communicator: CpuCommunicator):
         instance_identifier = os.environ["VLLM_DIST_IDENT"]
+        unique_name = communicator.unique_name
+        instance_identifier = f"{instance_identifier}-{unique_name}"
         self.communicator = communicator
 
         group_ranks = [str(rank) for rank in self.communicator.ranks]
@@ -125,7 +146,7 @@ class _CPUSHMDistributed:
 
     def gather(self,
                input: torch.Tensor,
-               gather_list: Optional[List[torch.Tensor]],
+               gather_list: Optional[list[torch.Tensor]],
                dst: int = -1,
                group: Optional[ProcessGroup] = None) -> None:
         # Note: different from the torch gather, here we use local dst rank.
@@ -137,3 +158,44 @@ class _CPUSHMDistributed:
                                input: torch.Tensor,
                                group: Optional[ProcessGroup] = None) -> None:
         torch.ops._C.shm_all_gather(self.handle, input, output)
+
+    def send_tensor_dict(
+        self,
+        tensor_dict: dict[str, Union[torch.Tensor, Any]],
+        dst: int,
+    ) -> None:
+        key_list = list(tensor_dict.keys())
+        value_list = list(tensor_dict.values())
+        size_list = []
+        for v in value_list:
+            if not isinstance(v, torch.Tensor):
+                raise RuntimeError(
+                    "CpuCommunicator only supports sending tensors.")
+            size_list.append(v.size())
+        key_size_tensor = torch.frombuffer(pickle.dumps([key_list, size_list]),
+                                           dtype=torch.uint8)
+        value_list.append(key_size_tensor)
+
+        torch.ops._C.shm_send_tensor_list(self.handle, value_list, dst)
+
+        return None
+
+    def recv_tensor_dict(
+        self,
+        src: int,
+    ) -> dict[str, Union[torch.Tensor, Any]]:
+        tensor_list = torch.ops._C.shm_recv_tensor_list(self.handle, src)
+
+        value_list: list[torch.Tensor] = tensor_list[:-1]
+        key_size_tensor = tensor_list[-1]
+
+        key_size = pickle.loads(key_size_tensor.numpy().tobytes())
+        key_list = key_size[0]
+        size_list = key_size[1]
+        assert len(key_list) == len(size_list)
+        assert len(key_list) == len(value_list)
+
+        tensor_dict: dict[str, torch.Tensor] = {}
+        for key, size, t in zip(key_list, size_list, value_list):
+            tensor_dict[key] = t.view(size)
+        return tensor_dict

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 
@@ -72,12 +73,16 @@ def sample_json_schema():
                             "type": "string"
                         }
                     },
-                    "required": ["company", "duration", "position"]
-                }
+                    "required": ["company", "duration", "position"],
+                    "additionalProperties": False
+                },
+                "minItems": 0,
+                "maxItems": 3
             }
         },
         "required":
-        ["name", "age", "skills", "grade", "email", "work_history"]
+        ["name", "age", "skills", "grade", "email", "work_history"],
+        "additionalProperties": False
     }
 
 
@@ -100,7 +105,8 @@ def unsupported_json_schema():
                 }
             }
         },
-        "required": ["score", "tags"]
+        "required": ["score", "tags"],
+        "additionalProperties": False
     }
 
 
@@ -139,7 +145,8 @@ def sample_definition_json_schema():
         },
         'required': ['steps', 'final_answer'],
         'title': 'MathReasoning',
-        'type': 'object'
+        'type': 'object',
+        "additionalProperties": False
     }
 
 
