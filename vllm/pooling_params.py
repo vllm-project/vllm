@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, Optional
 
 import msgspec
 
 from vllm.sampling_params import RequestOutputKind
+from vllm.tasks import PoolingTask
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-
-PoolingTask = Literal["encode", "embed", "classify", "score"]
 
 
 class PoolingParams(
