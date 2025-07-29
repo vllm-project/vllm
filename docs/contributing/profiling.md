@@ -9,7 +9,7 @@ We support tracing vLLM workers using the `torch.profiler` module. You can enabl
 
 `VLLM_TORCH_PROFILER_RECORD_SHAPES=1` to enable recording Tensor Shapes, off by default
 
-`VLLM_TORCH_PROFILER_PROFILE_MEMORY=1` to record memory, off by default
+`VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY=1` to record memory, off by default
 
 `VLLM_TORCH_PROFILER_WITH_STACK=1` to enable recording stack information, on by default
 
