@@ -184,7 +184,7 @@ class MultiModalProfiler(Generic[_I]):
         placeholders_by_modality = mm_inputs["mm_placeholders"]
 
         return {
-            modality: sum(item.get_num_embeds() for item in placeholders)
+            modality: sum(item.length for item in placeholders)
             for modality, placeholders in placeholders_by_modality.items()
         }
 
