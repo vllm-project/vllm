@@ -3184,9 +3184,10 @@ class SpeculativeConfig:
         if self.method == "eagle3" and self.target_model_config:
             found_match = False
             for supported_model in eagle3_target_supported:
-                found_match = (
-                    supported_model
-                    in self.target_model_config.hf_text_config.model_type)
+                if (supported_model
+                        in self.target_model_config.hf_text_config.model_type):
+                    found_match = True
+
             if not found_match:
                 raise ValueError(
                     f"Eagle3 is only supported for {eagle3_target_supported} models. "  # noqa: E501
