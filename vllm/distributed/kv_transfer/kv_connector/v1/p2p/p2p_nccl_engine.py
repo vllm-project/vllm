@@ -492,7 +492,8 @@ class P2pNcclEngine:
         # TODO:Retrieve requests that have already received the KV cache.
         finished_recving: set[str] = set()
 
-        return finished_sending or None, finished_recving or None
+        # TODO: Stats not supported yet.
+        return finished_sending or None, finished_recving or None, None
 
     def ping(self):
         sock = self.context.socket(zmq.DEALER)

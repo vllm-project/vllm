@@ -22,7 +22,8 @@ from vllm import envs
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    CopyBlocksOp, KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+    CopyBlocksOp, KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole, KVConnectorType)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVTransferStats, NixlKVTransferStats
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
@@ -201,7 +202,7 @@ class NixlConnector(KVConnectorBase_V1):
         self.connector_worker.set_host_xfer_buffer_ops(copy_operation)
 
     def get_finished(self,
-                     finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
+                     finished_req_ids: set[str]) -> tuple[set[str], set[str], Optional[dict[KVConnectorType, KVTransferStats]]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
@@ -550,6 +551,7 @@ class NixlConnectorWorker:
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
+        self.xfer_stats = NixlKVTransferStats()
 
     def __del__(self):
         """Cleanup background threads on destruction."""
@@ -1015,7 +1017,7 @@ class NixlConnectorWorker:
             self.copy_blocks(self.device_kv_caches, self.host_xfer_buffers,
                              meta.local_block_ids, meta.local_block_ids, "d2h")
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
+    def get_finished(self) -> tuple[set[str], set[str], Optional[dict[KVConnectorType, KVTransferStats]]]:
         """
         Get requests that are done sending or recving on this specific worker.
         The scheduler process (via the MultiprocExecutor) will use this output
@@ -1050,7 +1052,9 @@ class NixlConnectorWorker:
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
 
-        return done_sending, done_recving
+        # Clear stats for next iteration
+        xfer_stats = self.xfer_stats.clone_and_reset()
+        return done_sending, done_recving, {KVConnectorType.NIXL: xfer_stats}
 
     def _get_new_notifs(self) -> set[str]:
         """
@@ -1094,6 +1098,11 @@ class NixlConnectorWorker:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
                     self.nixl_wrapper.release_xfer_handle(handle)
+                    # TODO get from nixl telemetry once integrated
+                    transfer_duration = 11.0
+                    bytes_transferred = 1111
+                    num_blocks_transferred = 1111
+                    self.xfer_stats.record_transfer(transfer_duration, bytes_transferred, num_blocks_transferred)
                 elif xfer_state == "PROC":
                     in_progress = True
                     continue

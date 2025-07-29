@@ -971,6 +971,7 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
+                        kv_transfer_stats=model_runner_output.kv_transfer_stats,
                     ))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.

@@ -536,7 +536,8 @@ class OutputProcessor:
                                            engine_core_timestamp,
                                            req_state.is_prefilling,
                                            req_state.prompt_len,
-                                           req_state.stats, lora_stats)
+                                           req_state.stats, lora_stats, 
+                                           engine_core_output.kv_transfer_stats)
 
     def _update_stats_from_finished(self, req_state: RequestState,
                                     finish_reason: Optional[FinishReason],

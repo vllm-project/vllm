@@ -10,6 +10,8 @@ from typing import Literal, Optional, Union, cast
 
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorType
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVTransferStats
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -133,23 +135,33 @@ class KVOutputAggregator:
 
         def update_finished_set(req_ids: Optional[set[str]],
                                 remaining_count_dict: dict[str, int],
-                                finished_set: set[str]) -> None:
+                                finished_set: set[str],
+                                kv_transfer_stats: Optional[dict[KVConnectorType, Optional[KVTransferStats]]],
+                                aggregated_kv_transfer_stats: dict[KVConnectorType, Optional[KVTransferStats]]) -> None:
             for req_id in req_ids or ():
                 remaining_count_dict[req_id] -= 1
                 if remaining_count_dict[req_id] == 0:
                     finished_set.add(req_id)
                     del remaining_count_dict[req_id]
+            # Aggregate kv_transfer_stats from all workers, by connector type.
+            if kv_transfer_stats is not None:
+                for connector_id, xfer_stats in kv_transfer_stats.items():
+                    if connector_id not in aggregated_kv_transfer_stats:
+                        aggregated_kv_transfer_stats[connector_id] = xfer_stats
+                    else:
+                        aggregated_kv_transfer_stats[connector_id].aggregate(xfer_stats)
 
         finished_sending = set[str]()
         finished_recving = set[str]()
+        aggregated_kv_transfer_stats: dict[KVConnectorType, Optional[KVTransferStats]] = {}
         for output in outputs:
             output = output.kv_connector_output
             if not output:
                 continue
             update_finished_set(output.finished_sending,
-                                self._send_remaining_count, finished_sending)
+                                self._send_remaining_count, finished_sending, output.kv_transfer_stats, aggregated_kv_transfer_stats)
             update_finished_set(output.finished_recving,
-                                self._recv_remaining_count, finished_recving)
+                                self._recv_remaining_count, finished_recving, output.kv_transfer_stats, aggregated_kv_transfer_stats)
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
@@ -158,6 +170,7 @@ class KVOutputAggregator:
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
         )
+        output.kv_transfer_stats = aggregated_kv_transfer_stats
 
         return output
 
