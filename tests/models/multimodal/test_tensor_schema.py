@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 import pytest
+import torch
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig
@@ -98,7 +99,10 @@ def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         tokenization_kwargs=processor_inputs.tokenization_kwargs,
     )["mm_kwargs"]
-    mm_kwargs = {k: [v] for k, v in mm_kwargs.items()}
+    mm_kwargs = {
+        k: v.unsqueeze(0) if isinstance(v, torch.Tensor) else [v]
+        for k, v in mm_kwargs.items()
+    }
 
     # Avoid calling model.forward()
     def _initialize_kv_caches_v0(self) -> None:
