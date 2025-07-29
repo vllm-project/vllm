@@ -41,7 +41,7 @@ th:not(:first-child) {
 | [LoRA](lora.md) | ✅ | ✅ | ✅ | | | | | | | | | | | | |
 | [SD](spec_decode.md) | ✅ | ✅ | ❌ | ✅ | | | | | | | | | | |
 | CUDA graph | ✅ | ✅ | ✅ | ✅ | ✅ | | | | | | | | | |
-| [pooling](../models/pooling_models.md) | \* | \* | ✅ | ❌ | ✅ | ✅ | | | | | | | | |
+| [pooling](../models/pooling_models.md) | ✅\* | ✅\* | ✅ | ❌ | ✅ | ✅ | | | | | | | | |
 | <abbr title="Encoder-Decoder Models">enc-dec</abbr> | ❌ | [❌](gh-issue:7366) | ❌ | [❌](gh-issue:7366) | ✅ | ✅ | ✅ | | | | | | | |
 | <abbr title="Logprobs">logP</abbr> | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | | | | | | |
 | <abbr title="Prompt Logprobs">prmpt logP</abbr> | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | | | | | |
