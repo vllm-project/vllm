@@ -56,12 +56,16 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         else:
             self._residual_norm = self._norm_after_residual
 
-    def _norm_before_residual(self, hidden_states: torch.Tensor):
+    def _norm_before_residual(
+            self,
+            hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         hidden_states = self.hidden_norm(hidden_states)
         residual = hidden_states
         return hidden_states, residual
 
-    def _norm_after_residual(self, hidden_states: torch.Tensor):
+    def _norm_after_residual(
+            self,
+            hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         residual = hidden_states
         hidden_states = self.hidden_norm(hidden_states)
         return hidden_states, residual

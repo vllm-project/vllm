@@ -305,7 +305,7 @@ def maybe_override_with_speculators_target_model(
         model: str,
         tokenizer: str,
         trust_remote_code: bool,
-        revision: Optional[str] = None):
+        revision: Optional[str] = None) -> tuple[str, str]:
     """
     If running a speculators config, override running model with target model
     """
