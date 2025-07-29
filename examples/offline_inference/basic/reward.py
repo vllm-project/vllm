@@ -16,7 +16,7 @@ def parse_args():
         runner="pooling",
         enforce_eager=True,
         max_model_len=1024,
-        trust_remote_code=True
+        trust_remote_code=True,
     )
     return parser.parse_args()
 
