@@ -274,7 +274,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
     def select_gemm_impl(self, prepare_finalize, moe):
         """Return the appropriate GEMM experts implementation."""
         assert moe is not None and prepare_finalize is not None
-        from vllm.model_executor.layers.quantization.utils.nvfp4_support import (  # noqa: E501
+        from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (  # noqa: E501
             select_nvfp4_gemm_impl)
 
         return select_nvfp4_gemm_impl(self.allow_flashinfer_cutlass, moe,

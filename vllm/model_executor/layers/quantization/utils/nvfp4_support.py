@@ -60,39 +60,3 @@ def detect_nvfp4_support(class_name: str = "", logger=None) -> NvFp4Support:
         allow_flashinfer_cutlass=allow_flashinfer,
         use_marlin=use_marlin,
     )
-
-
-def select_nvfp4_gemm_impl(
-        allow_flashinfer_cutlass: bool,
-        moe,  # FusedMoEConfig
-        logger=None):
-    """Return a GEMM *experts* implementation for NV-FP4 fused-MoE layers"""
-
-    # lazy import
-    from vllm.distributed import get_ep_group
-
-    if logger is None:
-        logger = _logger
-
-    all2all_manager = get_ep_group().device_communicator.all2all_manager
-    assert all2all_manager is not None
-
-    if allow_flashinfer_cutlass:
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
-            FlashInferExperts)
-
-        logger.debug_once("Using FlashInferExperts")
-
-        return FlashInferExperts(
-            use_nvfp4_w4a4=True,
-            use_dp=moe.moe_parallel_config.dp_size > 1,
-            ep_rank=moe.moe_parallel_config.ep_rank,
-            ep_size=moe.moe_parallel_config.ep_size,
-            tp_rank=moe.moe_parallel_config.tp_rank,
-            tp_size=moe.moe_parallel_config.tp_size,
-        )
-
-    # native cutlass experts currently don't support DP; TP case won't call this
-    raise ValueError(
-        "CutlassExpertsFp4 doesn't support DP. Use flashinfer CUTLASS "
-        "Fused MoE backend instead (set VLLM_USE_FLASHINFER_MOE_FP4=1)")
