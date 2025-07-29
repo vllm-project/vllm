@@ -30,7 +30,7 @@ class VllmMtebEncoder(mteb.Encoder):
 
     def __init__(self, vllm_model):
         super().__init__()
-        self.model = vllm_model
+        self.llm = vllm_model
         self.rng = np.random.default_rng(seed=42)
 
     def encode(
@@ -43,7 +43,7 @@ class VllmMtebEncoder(mteb.Encoder):
         # issues by randomizing the order.
         r = self.rng.permutation(len(sentences))
         sentences = [sentences[i] for i in r]
-        outputs = self.model.embed(sentences, use_tqdm=False)
+        outputs = self.llm.embed(sentences, use_tqdm=False)
         embeds = np.array(outputs)
         embeds = embeds[np.argsort(r)]
         return embeds
@@ -61,10 +61,10 @@ class VllmMtebEncoder(mteb.Encoder):
         queries = [s[0] for s in sentences]
         corpus = [s[1] for s in sentences]
 
-        outputs = self.model.score(queries,
-                                   corpus,
-                                   truncate_prompt_tokens=-1,
-                                   use_tqdm=False)
+        outputs = self.llm.score(queries,
+                                 corpus,
+                                 truncate_prompt_tokens=-1,
+                                 use_tqdm=False)
         scores = np.array(outputs)
         scores = scores[np.argsort(r)]
         return scores
@@ -172,17 +172,17 @@ def mteb_test_embed_models(hf_runner,
     vllm_extra_kwargs["dtype"] = model_info.dtype
 
     with vllm_runner(model_info.name,
-                     task="embed",
+                     runner="pooling",
                      max_model_len=None,
                      **vllm_extra_kwargs) as vllm_model:
 
         if model_info.architecture:
             assert (model_info.architecture
-                    in vllm_model.model.llm_engine.model_config.architectures)
+                    in vllm_model.llm.llm_engine.model_config.architectures)
 
         vllm_main_score = run_mteb_embed_task(VllmMtebEncoder(vllm_model),
                                               MTEB_EMBED_TASKS)
-        vllm_dtype = vllm_model.model.llm_engine.model_config.dtype
+        vllm_dtype = vllm_model.llm.llm_engine.model_config.dtype
 
     with hf_runner(model_info.name,
                    is_sentence_transformer=True,
@@ -279,15 +279,12 @@ def mteb_test_rerank_models(hf_runner,
     vllm_extra_kwargs["dtype"] = model_info.dtype
 
     with vllm_runner(model_info.name,
-                     task="score",
+                     runner="pooling",
                      max_model_len=None,
                      max_num_seqs=8,
                      **vllm_extra_kwargs) as vllm_model:
 
-        model_config = vllm_model.model.llm_engine.model_config
-
-        if model_info.architecture:
-            assert (model_info.architecture in model_config.architectures)
+        model_config = vllm_model.llm.llm_engine.model_config
         assert model_config.hf_config.num_labels == 1
 
         vllm_main_score = run_mteb_rerank(vllm_mteb_encoder(vllm_model),

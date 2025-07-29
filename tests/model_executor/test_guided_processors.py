@@ -69,10 +69,7 @@ async def test_guided_logits_processor_black_box(backend: str, is_local: bool,
 
     config = ModelConfig(
         MODEL_NAME,
-        task="generate",
-        tokenizer=MODEL_NAME,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
+        runner="generate",
         seed=0,
         dtype="bfloat16",
     )
@@ -113,10 +110,7 @@ async def test_guided_logits_processor_with_reasoning(
 
     config = ModelConfig(
         REASONING_MODEL_NAME,
-        task="generate",
-        tokenizer=REASONING_MODEL_NAME,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
+        runner="generate",
         seed=0,
         dtype="bfloat16",
     )
@@ -187,19 +181,6 @@ def test_multiple_guided_options_not_allowed(sample_json_schema, sample_regex):
     with pytest.raises(ValueError,
                        match="You can only use one kind of guided"):
         GuidedDecodingParams(json=sample_json_schema, grammar="test grammar")
-
-
-def test_guided_decoding_backend_options():
-    """Test backend-specific options"""
-    with pytest.warns(DeprecationWarning):
-        guided_decoding_params = GuidedDecodingParams(
-            backend=
-            "xgrammar:no-fallback,disable-any-whitespace,no-additional-properties"
-        )
-    assert guided_decoding_params.backend == "xgrammar"
-    assert guided_decoding_params.disable_fallback
-    assert guided_decoding_params.disable_any_whitespace
-    assert guided_decoding_params.disable_additional_properties
 
 
 def test_pickle_xgrammar_tokenizer_data():

@@ -20,10 +20,12 @@ from vllm.utils import direct_register_custom_op
 from .vllm_inductor_pass import VllmInductorPass
 
 if find_spec("flashinfer"):
-    import flashinfer.comm as flashinfer_comm
-
-    flashinfer_comm = (flashinfer_comm if hasattr(
-        flashinfer_comm, "trtllm_allreduce_fusion") else None)
+    try:
+        import flashinfer.comm as flashinfer_comm
+        flashinfer_comm = (flashinfer_comm if hasattr(
+            flashinfer_comm, "trtllm_allreduce_fusion") else None)
+    except ImportError:
+        flashinfer_comm = None
 else:
     flashinfer_comm = None
 from vllm.platforms import current_platform
@@ -157,6 +159,9 @@ if flashinfer_comm is not None:
         6: MiB // 2,  # 512KB
         8: MiB // 2,  # 512KB
     }
+    # opt for a more conservative default value
+    # when world size is not in _FI_MAX_SIZES
+    _DEFAULT_FI_MAX_SIZE = MiB // 2
 
     def call_trtllm_fused_allreduce_norm(
         allreduce_in: torch.Tensor,
@@ -171,12 +176,16 @@ if flashinfer_comm is not None:
         max_token_num: int,
         norm_out: Optional[torch.Tensor] = None,
     ) -> None:
-        use_flashinfer = allreduce_in.shape[0] * allreduce_in.shape[
-            1] * allreduce_in.element_size() <= min(
-                _FI_MAX_SIZES[world_size],
-                max_token_num * allreduce_in.shape[0] *
-                allreduce_in.element_size(),
-            )
+
+        num_tokens, hidden_size = allreduce_in.shape
+        element_size = allreduce_in.element_size()
+        current_tensor_size = num_tokens * hidden_size * element_size
+        max_fusion_size = max_token_num * hidden_size * element_size
+        use_flashinfer = current_tensor_size <= min(
+            _FI_MAX_SIZES.get(world_size, _DEFAULT_FI_MAX_SIZE),
+            max_fusion_size,
+        )
+
         if use_flashinfer:
             assert (_FI_WORKSPACE_TENSOR is not None
                     ), "Flashinfer must be enabled when using flashinfer"
@@ -395,7 +404,7 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
 
 class AllReduceFusionPass(VllmInductorPass):
 
-    def __init__(self, config: VllmConfig, max_token_num: int):
+    def __init__(self, config: VllmConfig):
         super().__init__(config)
         self.disabled = True
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -411,7 +420,8 @@ class AllReduceFusionPass(VllmInductorPass):
         use_fp32_lamport = self.model_dtype == torch.float32
         if flashinfer_comm is None:
             logger.warning(
-                "Flashinfer is not installed, skipping allreduce fusion pass")
+                "Flashinfer is not installed or comm module not found, "
+                "skipping allreduce fusion pass")
             return
         # Check if the world size is supported
         if self.tp_size not in _FI_MAX_SIZES:
@@ -426,7 +436,8 @@ class AllReduceFusionPass(VllmInductorPass):
             flashinfer_comm.trtllm_create_ipc_workspace_for_all_reduce_fusion(
                 tp_rank=rank,
                 tp_size=self.tp_size,
-                max_token_num=max_token_num,
+                max_token_num=config.compilation_config.pass_config.
+                fi_allreduce_fusion_max_token_num,
                 hidden_dim=self.hidden_dim,
                 group=self.group,
                 use_fp32_lamport=use_fp32_lamport,
@@ -438,7 +449,8 @@ class AllReduceFusionPass(VllmInductorPass):
             rank=rank,
             world_size=self.tp_size,
             use_fp32_lamport=use_fp32_lamport,
-            max_token_num=max_token_num,
+            max_token_num=config.compilation_config.pass_config.
+            fi_allreduce_fusion_max_token_num,
         )
 
         for epsilon in [1e-5, 1e-6]:
