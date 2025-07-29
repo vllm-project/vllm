@@ -174,7 +174,8 @@ class FlashInferMetadata:
     # [0, 3, 6, 8]
     # The indptr of the paged kv cache, shape: [batch_size + 1] (CPU for plan)
     paged_kv_indptr_cpu: torch.Tensor
-    # The indptr of the paged kv cache, shape: [batch_size + 1] (on device for plan)
+    # The indptr of the paged kv cache, shape: [batch_size + 1]
+    # (on device for plan)
     paged_kv_indptr: torch.Tensor
     # The page indices of the paged kv cache (on device for plan)
     paged_kv_indices: torch.Tensor
@@ -371,7 +372,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         self.cache_config.cache_dtype,
                         attn_metadata.num_qo_heads, attn_metadata.num_kv_heads,
                         attn_metadata.head_dim):
-                    fast_decode_plan(
+                    _fast_decode_plan(
                         attn_metadata.decode_wrapper,
                         attn_metadata.paged_kv_indptr[:num_decodes + 1],
                         attn_metadata.paged_kv_indptr_cpu[:num_decodes + 1],
@@ -716,8 +717,13 @@ class FlashInferImpl(AttentionImpl):
         return output_padded
 
 
-def fast_decode_plan(
-    self,
+# This function is a modified version of flashinfer's
+# BatchDecodeWithPagedKVCacheWrapper.plan method. It's been refactored
+# to accept pre-allocated device tensors (indptr, last_page_len) to
+# avoid unnecessary H2D copies within the planning phase.
+# TODO: Consider upstreaming this change to flashinfer.
+def _fast_decode_plan(
+    wrapper,
     indptr: torch.Tensor,
     indptr_host: torch.Tensor,
     indices: torch.Tensor,
@@ -758,40 +764,40 @@ def fast_decode_plan(
     if isinstance(kv_data_type, str):
         kv_data_type = getattr(torch, kv_data_type, None)
 
-    if self.use_tensor_cores:
+    if wrapper.use_tensor_cores:
         qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
 
-    if self.is_cuda_graph_enabled:
-        if batch_size != self._fixed_batch_size:
+    if wrapper.is_cuda_graph_enabled:
+        if batch_size != wrapper._fixed_batch_size:
             raise ValueError(
-                "The batch size should be fixed in cudagraph mode, the runtime batch size {} "
-                " mismatches the batch size set during initialization {}".
-                format(batch_size, self._fixed_batch_size))
-        if len(indices) > len(self._paged_kv_indices_buf):
-            raise ValueError(
-                "The size of indices should be less than or equal to the allocated buffer"
-            )
+                "The batch size should be fixed in cudagraph mode, the runtime "
+                "batch size {} mismatches the batch size "
+                "set during initialization {}".format(
+                    batch_size, wrapper._fixed_batch_size))
+        if len(indices) > len(wrapper._paged_kv_indices_buf):
+            raise ValueError("The size of indices should be less than or "
+                             "equal to the allocated buffer")
     else:
-        self._paged_kv_indptr_buf = indptr
-        self._paged_kv_indices_buf = indices
-        self._paged_kv_last_page_len_buf = last_page_len
-        if self.use_tensor_cores:
-            self._qo_indptr_buf = qo_indptr_host.to(self.device,
-                                                    non_blocking=non_blocking)
+        wrapper._paged_kv_indptr_buf = indptr
+        wrapper._paged_kv_indices_buf = indices
+        wrapper._paged_kv_last_page_len_buf = last_page_len
+        if wrapper.use_tensor_cores:
+            wrapper._qo_indptr_buf = qo_indptr_host.to(
+                wrapper.device, non_blocking=non_blocking)
 
-    with torch.cuda.device(self.device):
+    with torch.cuda.device(wrapper.device):
 
-        self._cached_q_data_type = q_data_type
-        self._cached_kv_data_type = kv_data_type
-        if self.use_tensor_cores:
+        wrapper._cached_q_data_type = q_data_type
+        wrapper._cached_kv_data_type = kv_data_type
+        if wrapper.use_tensor_cores:
             last_page_len_host = last_page_len.cpu()
             kv_lens_arr_host = get_seq_lens(indptr_host, last_page_len_host,
                                             page_size)
 
-            if self._jit_module is not None:
-                self._cached_module = self._jit_module
+            if wrapper._jit_module is not None:
+                wrapper._cached_module = wrapper._jit_module
             else:
-                self._cached_module = get_batch_prefill_module(
+                wrapper._cached_module = get_batch_prefill_module(
                     "fa2",
                     q_data_type,
                     kv_data_type,
@@ -805,10 +811,10 @@ def fast_decode_plan(
                     False,  # use_fp16_qk_reduction
                 )
 
-            self._plan_info = self._cached_module.plan(
-                self._float_workspace_buffer,
-                self._int_workspace_buffer,
-                self._pin_memory_int_workspace_buffer,
+            wrapper._plan_info = wrapper._cached_module.plan(
+                wrapper._float_workspace_buffer,
+                wrapper._int_workspace_buffer,
+                wrapper._pin_memory_int_workspace_buffer,
                 qo_indptr_host,
                 indptr_host,
                 kv_lens_arr_host,
@@ -817,17 +823,17 @@ def fast_decode_plan(
                 num_qo_heads,
                 num_kv_heads,
                 page_size,
-                self.is_cuda_graph_enabled,
+                wrapper.is_cuda_graph_enabled,
                 head_dim,
                 head_dim,
                 False,  # causal
             )
 
         else:
-            if self._jit_module is not None:
-                self._cached_module = self._jit_module
+            if wrapper._jit_module is not None:
+                wrapper._cached_module = wrapper._jit_module
             else:
-                self._cached_module = get_batch_decode_module(
+                wrapper._cached_module = get_batch_decode_module(
                     q_data_type,
                     kv_data_type,
                     q_data_type,
@@ -839,16 +845,16 @@ def fast_decode_plan(
                     logits_soft_cap > 0,  # use_logits_soft_cap
                 )
 
-            self._plan_info = self._cached_module.plan(
-                self._float_workspace_buffer,
-                self._int_workspace_buffer,
-                self._pin_memory_int_workspace_buffer,
+            wrapper._plan_info = wrapper._cached_module.plan(
+                wrapper._float_workspace_buffer,
+                wrapper._int_workspace_buffer,
+                wrapper._pin_memory_int_workspace_buffer,
                 indptr_host,
                 batch_size,
                 num_qo_heads,
                 num_kv_heads,
                 page_size,
-                self.is_cuda_graph_enabled,
+                wrapper.is_cuda_graph_enabled,
                 window_left,
                 logits_soft_cap,
                 head_dim,
@@ -857,9 +863,9 @@ def fast_decode_plan(
                 torch.empty(0, dtype=kv_data_type),
             )
 
-    self._pos_encoding_mode = pos_encoding_mode
-    self._window_left = window_left
-    self._logits_soft_cap = logits_soft_cap
-    self._sm_scale = sm_scale
-    self._rope_scale = rope_scale
-    self._rope_theta = rope_theta
+    wrapper._pos_encoding_mode = pos_encoding_mode
+    wrapper._window_left = window_left
+    wrapper._logits_soft_cap = logits_soft_cap
+    wrapper._sm_scale = sm_scale
+    wrapper._rope_scale = rope_scale
+    wrapper._rope_theta = rope_theta
