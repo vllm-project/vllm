@@ -64,9 +64,9 @@ th:not(:first-child) {
 | [LoRA](lora.md)                                           | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ✅ |
 | [SD](spec_decode.md)                                      | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ |
 | CUDA graph                                                | ✅                  | ✅        | ✅        | ✅     | ✅        | ❌                  | ✅     | ❌ |
-| [pooling](../models/pooling_models.md)               | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ |
+| [pooling](../models/pooling_models.md)                    | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ |
 | <abbr title="Encoder-Decoder Models">enc-dec</abbr>       | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ❌     | ❌ |
-| [mm](multimodal_inputs.md)                           | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ |
+| [mm](multimodal_inputs.md)                                | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ |
 | <abbr title="Logprobs">logP</abbr>                        | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ |
 | <abbr title="Prompt Logprobs">prmpt logP</abbr>           | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ |
 | <abbr title="Async Output Processing">async output</abbr> | ✅                  | ✅        | ✅        | ✅     | ✅        | ❌                  | ❌     | ❌ |
