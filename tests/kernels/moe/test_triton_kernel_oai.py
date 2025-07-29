@@ -14,8 +14,13 @@ from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
 from triton_kernels.tensor_details import layout
 from triton_kernels.testing import assert_close
 
+from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+    BatchedPrepareAndFinalize)
+from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEModularKernel)
 from vllm.model_executor.layers.fused_moe.triton_kernels_moe import (
-    triton_kernel_moe_forward)
+    BatchedOAITritonExperts, triton_kernel_moe_forward)
 from vllm.model_executor.layers.utils import shuffle_weight
 from vllm.utils import round_up
 
@@ -26,6 +31,124 @@ def deshuffle(w: torch.Tensor):
 
     deshuffled = torch.concat((first, second), dim=-1)
     return deshuffled
+
+
+def init_compute_data(M, K, N, E, a_dtype: str, w_dtype: str, num_warps: int):
+    randbits = [torch.randperm(E) for _ in range(M)]
+    x = [(-1)**i *
+         ((16384 +
+           ((i * 512) % 4096) + bits).to(torch.int16).view(torch.bfloat16))
+         for i, bits in enumerate(randbits)]
+    exp_data = torch.stack(x).to(
+        device="cuda")  # simulating gate_output (M, E)
+
+    # create input tensor
+    x = torch.randn((M, K), dtype=torch.bfloat16, device="cuda")
+    w1 = torch.randn((E, 2 * N, K), dtype=torch.bfloat16, device="cuda")
+    w1_bias = torch.randn((E, 2 * N), dtype=torch.bfloat16, device="cuda")
+
+    w2 = torch.randn((E, K, N), dtype=torch.bfloat16, device="cuda")
+    w2_bias = torch.randn((E, K), dtype=torch.bfloat16, device="cuda")
+
+    exp_data_tri = exp_data.clone()
+    x_tri = x.clone()
+    w1_tri = w1.clone()
+    w2_tri = w2.clone()
+
+    w1_bias_tri = w1_bias.clone()
+    w2_bias_tri = w2_bias.clone()
+    w1_bias_tri = w1_bias_tri.to(torch.float32)
+    w2_bias_tri = w2_bias_tri.to(torch.float32)
+
+    dtype_dict = {
+        "bf16": torch.bfloat16,
+        "fp8_e4m3": torch.float8_e4m3fn,
+        "fp8_e5m2": torch.float8_e5m2
+    }
+
+    x = x.to(dtype_dict[a_dtype]).to(torch.bfloat16)
+    if w_dtype != "mx4":
+        # simulate quantization support on reference impl
+        w1 = w1.to(dtype_dict[w_dtype]).to(torch.bfloat16)
+        w2 = w2.to(dtype_dict[w_dtype]).to(torch.bfloat16)
+
+    # triton moe kernel use transposed shape for matmul
+    w1_tri = w1_tri.transpose(-2, -1)
+    w2_tri = w2_tri.transpose(-2, -1)
+
+    # shuffle weights
+    w1_tri = shuffle_weight(w1_tri)
+    w1_bias_tri = shuffle_weight(w1_bias_tri)
+
+    # quant triton_weights
+    x_tri = x.to(dtype_dict[a_dtype])
+    if w_dtype != "mx4":
+        pytest.skip("NYI")
+    else:  # quantize to mx4
+        # careful on the padding here, the activation padding need to be
+        # multiple of 64, the actual engine is not implemented
+        w1_bottom_pad = round_up(w1_tri.shape[1], 64) - w1_tri.shape[1]
+        w1_right_pad = round_up(w1_tri.shape[2], 128) - w1_tri.shape[2]
+
+        w2_bottom_pad = w1_right_pad // 2
+        w2_right_pad = w1_bottom_pad
+
+        x_pad = w1_bottom_pad
+
+        w1_tri = F.pad(w1_tri, (0, w1_right_pad, 0, w1_bottom_pad, 0, 0),
+                       mode="constant",
+                       value=0)
+        w2_tri = F.pad(w2_tri, (0, w2_right_pad, 0, w2_bottom_pad, 0, 0),
+                       mode="constant",
+                       value=0)
+
+        w1_bias_tri = F.pad(w1_bias_tri, (0, w1_right_pad, 0, 0),
+                            mode="constant",
+                            value=0)
+        w2_bias_tri = F.pad(w2_bias_tri, (0, w2_right_pad, 0, 0),
+                            mode="constant",
+                            value=0)
+
+        x_tri = F.pad(x_tri, (0, x_pad, 0, 0), mode="constant", value=0)
+
+        w_layout, w_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
+            mx_axis=1)
+        w_scale_layout, w_scale_layout_opts = (
+            layout.make_default_matmul_mxfp4_w_scale_layout(
+                mx_axis=1, num_warps=num_warps))
+
+        w1_tri, w1_scale_tri = downcast_to_mxfp(w1_tri, torch.uint8, axis=1)
+        w1 = upcast_from_mxfp(w1_tri, w1_scale_tri, torch.bfloat16, axis=1)
+
+        w2_tri, w2_scale_tri = downcast_to_mxfp(w2_tri, torch.uint8, axis=1)
+        w2 = upcast_from_mxfp(w2_tri, w2_scale_tri, torch.bfloat16, axis=1)
+
+        w1_tri = convert_layout(wrap_torch_tensor(w1_tri, FP4), w_layout,
+                                **w_layout_opts)
+        w1_scale_tri = convert_layout(wrap_torch_tensor(w1_scale_tri),
+                                      w_scale_layout, **w_scale_layout_opts)
+
+        w2_tri = convert_layout(wrap_torch_tensor(w2_tri, FP4), w_layout,
+                                **w_layout_opts)
+        w2_scale_tri = convert_layout(wrap_torch_tensor(w2_scale_tri),
+                                      w_scale_layout, **w_scale_layout_opts)
+
+        pc1 = PrecisionConfig(weight_scale=w1_scale_tri,
+                              flex_ctx=FlexCtx(rhs_data=InFlexData()))
+        pc2 = PrecisionConfig(weight_scale=w2_scale_tri,
+                              flex_ctx=FlexCtx(rhs_data=InFlexData()))
+
+        # tucuate so the rest can run properly
+        w1 = w1[..., :K, :2 * N]
+        w2 = w2[..., :N, :K]
+
+        w1 = deshuffle(w1)
+
+        w1 = w1.transpose(-1, -2).contiguous()
+        w2 = w2.transpose(-1, -2).contiguous()
+
+        return (x, w1, w1_bias, w2, w2_bias, exp_data, x_tri, w1_tri, w2_tri,
+                exp_data_tri, w1_bias_tri, w2_bias_tri, pc1, pc2)
 
 
 @dataclass
@@ -115,120 +238,13 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
     N = ModelConfig.intermediate_size // tp
     topk = ModelConfig.experts_per_token
 
-    randbits = [torch.randperm(E) for _ in range(M)]
-    x = [(-1)**i *
-         ((16384 +
-           ((i * 512) % 4096) + bits).to(torch.int16).view(torch.bfloat16))
-         for i, bits in enumerate(randbits)]
-    exp_data = torch.stack(x).to(
-        device="cuda")  # simulating gate_output (M, E)
-
-    # create input tensor
-    x = torch.randn((M, K), dtype=torch.bfloat16, device="cuda")
-    w1 = torch.randn((E, 2 * N, K), dtype=torch.bfloat16, device="cuda")
-    w1_bias = torch.randn((E, 2 * N), dtype=torch.bfloat16, device="cuda")
-
-    w2 = torch.randn((E, K, N), dtype=torch.bfloat16, device="cuda")
-    w2_bias = torch.randn((E, K), dtype=torch.bfloat16, device="cuda")
-
-    exp_data_tri = exp_data.clone()
-    x_tri = x.clone()
-    w1_tri = w1.clone()
-    w2_tri = w2.clone()
-
-    w1_bias_tri = w1_bias.clone()
-    w2_bias_tri = w2_bias.clone()
-    w1_bias_tri = w1_bias_tri.to(torch.float32)
-    w2_bias_tri = w2_bias_tri.to(torch.float32)
-
-    dtype_dict = {
-        "bf16": torch.bfloat16,
-        "fp8_e4m3": torch.float8_e4m3fn,
-        "fp8_e5m2": torch.float8_e5m2
-    }
-
-    x = x.to(dtype_dict[a_dtype]).to(torch.bfloat16)
-    if w_dtype != "mx4":
-        # simulate quantization support on reference impl
-        w1 = w1.to(dtype_dict[w_dtype]).to(torch.bfloat16)
-        w2 = w2.to(dtype_dict[w_dtype]).to(torch.bfloat16)
-
-    # triton moe kernel use transposed shape for matmul
-    w1_tri = w1_tri.transpose(-2, -1)
-    w2_tri = w2_tri.transpose(-2, -1)
-
-    # shuffle weights
-    w1_tri = shuffle_weight(w1_tri)
-    w1_bias_tri = shuffle_weight(w1_bias_tri)
-
-    # quant triton_weights
-    x_tri = x.to(dtype_dict[a_dtype])
-    if w_dtype != "mx4":
-        pytest.skip("NYI")
-    else:  # quantize to mx4
-        # careful on the padding here, the activation padding need to be
-        # multiple of 64, the actual engine is not implemented
-        w1_bottom_pad = round_up(w1_tri.shape[1], 64) - w1_tri.shape[1]
-        w1_right_pad = round_up(w1_tri.shape[2], 128) - w1_tri.shape[2]
-
-        w2_bottom_pad = w1_right_pad // 2
-        w2_right_pad = w1_bottom_pad
-
-        x_pad = w1_bottom_pad
-
-        w1_tri = F.pad(w1_tri, (0, w1_right_pad, 0, w1_bottom_pad, 0, 0),
-                       mode="constant",
-                       value=0)
-        w2_tri = F.pad(w2_tri, (0, w2_right_pad, 0, w2_bottom_pad, 0, 0),
-                       mode="constant",
-                       value=0)
-
-        w1_bias_tri = F.pad(w1_bias_tri, (0, w1_right_pad, 0, 0),
-                            mode="constant",
-                            value=0)
-        w2_bias_tri = F.pad(w2_bias_tri, (0, w2_right_pad, 0, 0),
-                            mode="constant",
-                            value=0)
-
-        x_tri = F.pad(x_tri, (0, x_pad, 0, 0), mode="constant", value=0)
-
-        w_layout, w_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
-            mx_axis=1)
-        w_scale_layout, w_scale_layout_opts = (
-            layout.make_default_matmul_mxfp4_w_scale_layout(mx_axis=1,
-                                                            num_warps=8))
-
-        w1_tri, w1_scale_tri = downcast_to_mxfp(w1_tri, torch.uint8, axis=1)
-        w1 = upcast_from_mxfp(w1_tri, w1_scale_tri, torch.bfloat16, axis=1)
-
-        w2_tri, w2_scale_tri = downcast_to_mxfp(w2_tri, torch.uint8, axis=1)
-        w2 = upcast_from_mxfp(w2_tri, w2_scale_tri, torch.bfloat16, axis=1)
-
-        w1_tri = convert_layout(wrap_torch_tensor(w1_tri, FP4), w_layout,
-                                **w_layout_opts)
-        w1_scale_tri = convert_layout(wrap_torch_tensor(w1_scale_tri),
-                                      w_scale_layout, **w_scale_layout_opts)
-
-        w2_tri = convert_layout(wrap_torch_tensor(w2_tri, FP4), w_layout,
-                                **w_layout_opts)
-        w2_scale_tri = convert_layout(wrap_torch_tensor(w2_scale_tri),
-                                      w_scale_layout, **w_scale_layout_opts)
-
-        pc1 = PrecisionConfig(weight_scale=w1_scale_tri,
-                              flex_ctx=FlexCtx(rhs_data=InFlexData()))
-        pc2 = PrecisionConfig(weight_scale=w2_scale_tri,
-                              flex_ctx=FlexCtx(rhs_data=InFlexData()))
-
-        # tucuate so the rest can run properly
-        w1 = w1[..., :K, :2 * N]
-        w2 = w2[..., :N, :K]
-
-        w1 = deshuffle(w1)
-
-        w1 = w1.transpose(-1, -2).contiguous()
-        w2 = w2.transpose(-1, -2).contiguous()
+    x, w1, w1_bias, w2, w2_bias, exp_data, \
+        x_tri, w1_tri, w2_tri, exp_data_tri, w1_bias_tri,\
+        w2_bias_tri, pc1, pc2 = init_compute_data(
+        M, K, N, E, a_dtype, w_dtype, num_warps=8)
 
     out_triton_monolithic = triton_kernel_moe_forward(
+        output_tensor=None,
         hidden_states=x_tri,
         w1=w1_tri,
         w2=w2_tri,
@@ -252,6 +268,85 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
                  tri=out_triton_monolithic,
                  maxtol=0.025,
                  rmstol=0.005)
+
+
+def batched_moe(a: torch.Tensor, w1, w2, gating_output: torch.Tensor,
+                topk: int, renormalize: bool, w1_bias: torch.Tensor,
+                w2_bias: torch.Tensor, w1_precision: PrecisionConfig,
+                w2_precision: PrecisionConfig) -> torch.Tensor:
+    max_num_tokens = round_up(a.shape[0], 64)
+
+    fused_experts = FusedMoEModularKernel(
+        BatchedPrepareAndFinalize(max_num_tokens,
+                                  num_dispatchers=1,
+                                  num_local_experts=w1.shape[0],
+                                  rank=0),
+        BatchedOAITritonExperts(
+            None,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=1,
+            w1_precision=w1_precision,
+            w2_precision=w2_precision,
+        ),
+    )
+
+    topk_weight, topk_ids, _ = fused_topk(a, gating_output, topk, renormalize)
+
+    return fused_experts(
+        a,
+        w1,
+        w2,
+        topk_weight,
+        topk_ids,
+        w1_bias=w1_bias,
+        w2_bias=w2_bias,
+    )
+
+
+@pytest.mark.parametrize(
+    ", ".join(f.name for f in fields(Case)),
+    [
+        tuple(getattr(case, f.name) for f in fields(Case)) for case in [
+            # Case(a_dtype="bf16", w_dtype="bf16"),
+            # Case(a_dtype="fp8_e4m3", w_dtype="fp8_e5m2"),
+            Case(a_dtype="bf16", w_dtype="mx4")
+        ]
+    ],
+)
+@pytest.mark.parametrize("num_token", [64])
+@pytest.mark.parametrize("ep", [1, 2, 4, 8])
+def test_triton_kernel_batched_moe(num_token, a_dtype, w_dtype, ep):
+    M = num_token
+    E = ModelConfig.num_experts // ep
+    K = ModelConfig.hidden_size
+    N = ModelConfig.intermediate_size
+    topk = ModelConfig.experts_per_token
+
+    x, w1, w1_bias, w2, w2_bias, exp_data, \
+        x_tri, w1_tri, w2_tri, exp_data_tri, w1_bias_tri, \
+            w2_bias_tri, pc1, pc2 = init_compute_data(
+        M, K, N, E, a_dtype, w_dtype, num_warps=4)
+
+    out_tri = batched_moe(a=x_tri,
+                          w1=w1_tri,
+                          w2=w2_tri,
+                          gating_output=exp_data_tri,
+                          topk=topk,
+                          renormalize=True,
+                          w1_bias=w1_bias_tri,
+                          w2_bias=w2_bias_tri,
+                          w1_precision=pc1,
+                          w2_precision=pc2)
+    out_tri = out_tri[..., :K]
+
+    out_ref = oai_moe_forward(hidden_states=x,
+                              w1=w1,
+                              w1_bias=w1_bias,
+                              w2=w2,
+                              w2_bias=w2_bias,
+                              gating_output=exp_data,
+                              topk=topk)
+    assert_close(ref=out_ref, tri=out_tri, maxtol=0.025, rmstol=0.005)
 
 
 def test_unit_shuffle():
