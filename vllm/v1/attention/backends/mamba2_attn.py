@@ -42,6 +42,7 @@ class Mamba2AttentionMetadata:
     seq_idx_p: Optional[torch.Tensor]
     chunk_indices_p: Optional[torch.Tensor]
     chunk_offsets_p: Optional[torch.Tensor]
+    chunk_inv_start_p: Optional[torch.Tensor]
 
     state_indices_tensor: torch.Tensor  # shape: [batch,]
 
@@ -70,7 +71,7 @@ class Mamba2AttentionMetadataBuilder(
         seq_lens = common_attn_metadata.seq_lens
 
         seq_idx_p = None
-        chunk_indices_p, chunk_offsets_p = None, None
+        chunk_indices_p, chunk_offsets_p, chunk_inv_start = None, None, None
         # Need flags to indicate if there are initial states
         # currently we really only support the FlashAttention backend
         has_initial_states_p = None
@@ -106,7 +107,7 @@ class Mamba2AttentionMetadataBuilder(
             # model forward and reuse them in mamba layers. If not needed,
             # they will be ignored inside mamba kernels.
             if prep_initial_states:
-                chunk_indices_p, chunk_offsets_p = (
+                chunk_indices_p, chunk_offsets_p, chunk_inv_start = (
                     _query_start_loc_to_chunk_indices_offsets(
                         query_start_loc_p, self.chunk_size,
                         num_prefill_tokens))
@@ -132,6 +133,7 @@ class Mamba2AttentionMetadataBuilder(
             seq_idx_p=seq_idx_p,
             chunk_indices_p=chunk_indices_p,
             chunk_offsets_p=chunk_offsets_p,
+            chunk_inv_start_p=chunk_inv_start,
             state_indices_tensor=state_indices_tensor,
         )
         return update_metadata(
@@ -171,7 +173,24 @@ def _query_start_loc_to_chunk_indices_offsets(query_start_loc: torch.Tensor,
         chunk_indices[_s:_e] -= p
         chunk_offsets[_s] = s % chunk_size
 
-    return chunk_indices, chunk_offsets
+    # TODO: optimize, could be a Triton kernel with atomic add
+    nchunks = math.ceil(total_seqlens / chunk_size)
+    chunk_indices_cpu = chunk_indices.to('cpu').numpy()
+    # need offset by 1 because a logical chunk corresponding to a
+    # physical chunk should push the next physical chunk boundry,
+    # not the current
+    chunk_inv_start = torch.zeros((nchunks + 1, ),
+                                  dtype=torch.int32,
+                                  device='cpu')
+    for chunk_idx in chunk_indices_cpu:
+        chunk_inv_start[chunk_idx + 1] += 1
+    # now we have a map from physical chunk index to how many logical
+    # chunk indices cumsum gives us the start logical chunk for each
+    # physical chunk
+    chunk_inv_start = chunk_inv_start.to('cuda')
+    chunk_inv_start = chunk_inv_start.cumsum(dim=0)
+
+    return chunk_indices, chunk_offsets, chunk_inv_start
 
 
 # update_metadata computes metadata required by triton conv1d kernel

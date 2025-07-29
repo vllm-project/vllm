@@ -16,6 +16,7 @@ from .ssd_bmm import _bmm_chunk_fwd
 from .ssd_chunk_scan import _chunk_scan_fwd
 from .ssd_chunk_state import (_chunk_cumsum_fwd, _chunk_state_fwd,
                               chunk_state_varlen)
+from .ssd_fused5 import _fused5_ssd
 from .ssd_state_passing import _state_passing_fwd
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse('2.2.0')
@@ -39,9 +40,11 @@ def _mamba_chunk_scan_combined_fwd(x,
                                    seq_idx=None,
                                    chunk_indices=None,
                                    chunk_offsets=None,
+                                   chunk_inv_start=None,
                                    cu_seqlens=None,
                                    dt_softplus=False,
                                    dt_limit=(0.0, float("inf")),
+                                   fused=False,
                                    state_dtype=None):
     assert is_int_pow_2(chunk_size), "chunk_size must be integer power of 2"
     seqlen, nheads, headdim = x.shape
@@ -75,86 +78,109 @@ def _mamba_chunk_scan_combined_fwd(x,
         assert initial_states.shape == (len(cu_seqlens) - 1, nheads, headdim,
                                         dstate)
 
-    # This function executes 5 sub-functions for computing mamba
-    # - a good resource is the blog https://goombalab.github.io/blog/2024/mamba2-part3-algorithm/
-    #   which has a minimal implementation to understand the below operations
-    # - as explained by the blog, mamba is a special case of causal attention
-    # - the idea is to chunk the attention matrix and compute each
-    #   submatrix separately using different optimizations.
-    # - see the blog and paper for a visualization of the submatrices
-    #   which we refer to in the comments below
+    if fused:  # all 5 kernels fused
+        _, states, _, dA_cumsum, dt = _fused5_ssd(
+            x,
+            dt,
+            A,
+            B,
+            C,
+            D,
+            out,
+            chunk_size=chunk_size,
+            initial_states=initial_states,
+            seq_idx=seq_idx,
+            z=z,
+            states_in_fp32=False,
+            dt_bias=dt_bias,
+            dt_softplus=dt_softplus,
+            dt_limit=dt_limit,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
+            chunk_inv_start=chunk_inv_start,
+        )
+    else:  # original
+        # This function executes 5 sub-functions for computing mamba
+        # - a good resource is the blog https://goombalab.github.io/blog/2024/mamba2-part3-algorithm/
+        #   which has a minimal implementation to understand the below operations
+        # - as explained by the blog, mamba is a special case of causal attention
+        # - the idea is to chunk the attention matrix and compute each
+        #   submatrix separately using different optimizations.
+        # - see the blog and paper for a visualization of the submatrices
+        #   which we refer to in the comments below
 
-    # 1. Compute chunked cumsum of A * dt
-    # - here dt may go through a softplus activation
-    dA_cumsum, dt = _chunk_cumsum_fwd(dt,
-                                      A,
-                                      chunk_size,
-                                      dt_bias=dt_bias,
-                                      dt_softplus=dt_softplus,
-                                      dt_limit=dt_limit)
+        # 1. Compute chunked cumsum of A * dt
+        # - here dt may go through a softplus activation
+        dA_cumsum, dt = _chunk_cumsum_fwd(dt,
+                                          A,
+                                          chunk_size,
+                                          dt_bias=dt_bias,
+                                          dt_softplus=dt_softplus,
+                                          dt_limit=dt_limit)
 
-    # 2. Compute the state for each intra-chunk
-    # (right term of low-rank factorization of off-diagonal blocks; B terms)
-    states = _chunk_state_fwd(B,
-                              x,
-                              dt,
-                              dA_cumsum,
-                              seq_idx=seq_idx,
-                              states_in_fp32=True)
+        # 2. Compute the state for each intra-chunk
+        # (right term of low-rank factorization of off-diagonal blocks; B terms)
+        states = _chunk_state_fwd(B,
+                                  x,
+                                  dt,
+                                  dA_cumsum,
+                                  seq_idx=seq_idx,
+                                  states_in_fp32=True)
 
-    # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
-    # (middle term of factorization of off-diag blocks; A terms)
-    # - for handling chunked prefill, this requires i) initial_states
-    #   ii) seq_idx and iii) is_cont_batched to be all specified.
-    # - When a new seq_idx is detected, we will stop passing the prev_state
-    #   and switch accordingly to the init_state corresponding to the new seq_idx.
-    # - this will ensure that states will be updated with the rightmost flushed seq_idx
-    #   of the previous chunk. This implies that the first chunk of states is either 0
-    #   or equal to init_states of the first example.
-    states = _state_passing_fwd(
-        rearrange(states,
-                  "... p n -> ... (p n)"),  # (nchunks, nheads, headdim*dstate)
-        dA_cumsum[:, :, -1],  # (nheads, nchunks)
-        initial_states=rearrange(initial_states, "... p n -> ... (p n)")
-        if initial_states is not None else
-        None,  # (batch, nheads, headdim*dstate)
-        seq_idx=seq_idx,
-        chunk_size=chunk_size,
-        out_dtype=state_dtype if state_dtype is not None else C.dtype)
-    states = rearrange(states, "... (p n) -> ... p n", n=dstate)
+        # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
+        # (middle term of factorization of off-diag blocks; A terms)
+        # - for handling chunked prefill, this requires i) initial_states
+        #   ii) seq_idx and iii) is_cont_batched to be all specified.
+        # - When a new seq_idx is detected, we will stop passing the prev_state
+        #   and switch accordingly to the init_state corresponding to the new seq_idx.
+        # - this will ensure that states will be updated with the rightmost flushed seq_idx
+        #   of the previous chunk. This implies that the first chunk of states is either 0
+        #   or equal to init_states of the first example.
+        states = _state_passing_fwd(
+            rearrange(
+                states,
+                "... p n -> ... (p n)"),  # (nchunks, nheads, headdim*dstate)
+            dA_cumsum[:, :, -1],  # (nheads, nchunks)
+            initial_states=rearrange(initial_states, "... p n -> ... (p n)")
+            if initial_states is not None else
+            None,  # (batch, nheads, headdim*dstate)
+            seq_idx=seq_idx,
+            chunk_size=chunk_size,
+            out_dtype=state_dtype if state_dtype is not None else C.dtype)
+        states = rearrange(states, "... (p n) -> ... p n", n=dstate)
 
-    # 4. Compute batched matrix multiply for C_j^T B_i terms
-    CB = _bmm_chunk_fwd(C,
-                        B,
-                        chunk_size,
-                        seq_idx=seq_idx,
-                        output_dtype=torch.float32)
+        # 4. Compute batched matrix multiply for C_j^T B_i terms
+        CB = _bmm_chunk_fwd(C,
+                            B,
+                            chunk_size,
+                            seq_idx=seq_idx,
+                            output_dtype=torch.float32)
 
-    # 5. Scan and compute the diagonal blocks, taking into
-    #    account past causal states.
-    # - if initial states are provided, then states information will be
-    #   augmented with initial_states.
-    # - to do this properly, we need to account for example changes in
-    #   the continuous batch, therefore we introduce pseudo chunks, which is
-    #   a chunk that is split up each time an example changes.
-    # - in each (pseudo) chunk, we detect if the previous (pseudo) chunk had
-    #   a seq_idx change, in which case we take states information from
-    #   init_states.
-    _chunk_scan_fwd(
-        CB,
-        x,
-        dt,
-        dA_cumsum,
-        C,
-        states,
-        out,  # in-place update
-        seq_idx,
-        D=D,
-        z=z,
-        chunk_indices=chunk_indices,
-        chunk_offsets=chunk_offsets,
-        initial_states=initial_states,
-    )
+        # 5. Scan and compute the diagonal blocks, taking into
+        #    account past causal states.
+        # - if initial states are provided, then states information will be
+        #   augmented with initial_states.
+        # - to do this properly, we need to account for example changes in
+        #   the continuous batch, therefore we introduce pseudo chunks, which is
+        #   a chunk that is split up each time an example changes.
+        # - in each (pseudo) chunk, we detect if the previous (pseudo) chunk had
+        #   a seq_idx change, in which case we take states information from
+        #   init_states.
+        _chunk_scan_fwd(
+            CB,
+            x,
+            dt,
+            dA_cumsum,
+            C,
+            states,
+            out,  # in-place update
+            seq_idx,
+            D=D,
+            z=z,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
+            initial_states=initial_states,
+        )
 
     varlen_states = chunk_state_varlen(
         B,
@@ -185,6 +211,7 @@ def mamba_chunk_scan_combined_varlen(
         initial_states=None,
         chunk_indices=None,
         chunk_offsets=None,
+        chunk_inv_start=None,
         dt_softplus=False,
         dt_limit=(0.0, float("inf")),
         state_dtype=None,
@@ -229,6 +256,7 @@ def mamba_chunk_scan_combined_varlen(
         seq_idx=seq_idx,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
+        chunk_inv_start=chunk_inv_start,
         cu_seqlens=cu_seqlens,
         dt_softplus=dt_softplus,
         dt_limit=dt_limit,

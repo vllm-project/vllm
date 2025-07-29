@@ -484,6 +484,8 @@ class MambaMixer2(MambaBase, CustomOp):
                 chunk_indices_p = attn_metadata.chunk_indices_p
                 chunk_offsets_p = attn_metadata.chunk_offsets_p
                 query_start_loc_p = attn_metadata.query_start_loc_p
+                chunk_inv_start_p = attn_metadata.chunk_inv_start_p
+
         else:
             conv_state = mamba_cache_params.conv_state
             ssm_state = mamba_cache_params.ssm_state
@@ -494,6 +496,7 @@ class MambaMixer2(MambaBase, CustomOp):
             seq_idx_p = mamba2_metadata.seq_idx
             chunk_indices_p = mamba2_metadata.chunk_indices
             chunk_offsets_p = mamba2_metadata.chunk_offsets
+            chunk_inv_start_p = mamba2_metadata.chunk_inv_start_p
             query_start_loc_p = mamba2_metadata.query_start_loc_p
 
         groups_time_state_size = self.n_groups * self.ssm_state_size
@@ -652,6 +655,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 seq_idx=seq_idx_p,
                 chunk_indices=chunk_indices_p,
                 chunk_offsets=chunk_offsets_p,
+                chunk_inv_start=chunk_inv_start_p,
                 cu_seqlens=query_start_loc_p,
                 initial_states=initial_states,
                 dt_softplus=True,
