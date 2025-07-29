@@ -50,16 +50,20 @@ class RayPPCommunicator(Communicator):
                 participant of the RayPPCommunicator group (e.g., the Ray
                 driver).
             actor_handles: A list of actor handles.
-            cuda_stream: A CUDA stream to dispatch communication ops to.
-                This is ignored since Ray always passes in the current stream
-                and vLLM device communicator does not allow passing in a stream
-                and uses the current stream by default.
+            cuda_stream: A CUDA stream to dispatch communication ops to. This
+                is not supported.
+            use_communication_streams: Whether to use communication streams.
+                This is not supported.
         """
         self._world_size = world_size
         self._rank: Optional[int] = None
         self._actor_handles = actor_handles
-        assert not use_communication_streams, (
-            "use_communication_streams is not yet supported")
+        if use_communication_streams:
+            raise NotImplementedError(
+                "use_communication_streams is not supported")
+        if cuda_stream is not None and cuda_stream != current_stream():
+            raise ValueError(
+                "cuda_stream other than the current stream is not supported")
 
         if rank is not None:
             # Rank is not None, this is Ray worker
@@ -76,7 +80,7 @@ class RayPPCommunicator(Communicator):
 
             self._build_actor_rank_mapping()
         else:
-            # rank is None, this is Ray driver
+            # Rank is None, this is Ray driver
             self._comm = None
 
         self._closed = False
@@ -185,6 +189,7 @@ class RayPPCommunicator(Communicator):
             dtype: The dtype of the tensor to receive.
             peer_rank: The rank of the actor to receive from.
             allocator: The allocator to use to create the received tensor.
+                This is ignored for this implementation.
         """
         if self._closed:
             raise RayChannelError("RayPPCommunicator has been destroyed.")
