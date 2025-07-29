@@ -32,7 +32,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 import torch
 
@@ -45,6 +45,12 @@ if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
+
+# s_tensor_list, d_tensor_list, s_indices, d_indices, direction
+CopyBlocksOp = Callable[[
+    dict[str, torch.Tensor], dict[
+        str, torch.Tensor], list[int], list[int], Literal["h2d", "d2h"]
+], None]
 
 logger = init_logger(__name__)
 
@@ -124,6 +130,13 @@ class KVConnectorBase_V1(ABC):
 
         Args: kv_caches:
             dictionary of layer names, kv cache
+        """
+        return
+
+    def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
+        """
+        Set the xPU-specific ops for copying KV between host and device.
+        Needed when host buffer is used for kv transfer (e.g., in NixlConnector)
         """
         return
 
