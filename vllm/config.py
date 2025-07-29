@@ -728,6 +728,10 @@ class ModelConfig:
         if self.hf_text_config.model_type == "gemma2":
             self.hf_text_config.sliding_window_pattern = 2
 
+        if self.hf_text_config.model_type == "gemma3n_text":
+            # 4 sliding window attention followed by 1 full attention
+            self.hf_text_config.sliding_window_pattern = "LLLLG"
+
         sliding_window = getattr(self.hf_text_config, "sliding_window", None)
         sliding_window_pattern = getattr(self.hf_text_config,
                                          "sliding_window_pattern", None)
