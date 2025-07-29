@@ -297,8 +297,13 @@ class Gemma3nAttention(nn.Module):
                               has_weight=False)
 
         layer_idx = extract_layer_index(prefix)
-        if config.layer_types[layer_idx] == "sliding_attention":
-            self.sliding_window = config.sliding_window
+
+        is_sliding_window = (
+            getattr(config, "interleaved_sliding_window", None) is not None
+            and config.layer_types[layer_idx] == "sliding_attention")
+
+        if is_sliding_window:
+            self.sliding_window = config.interleaved_sliding_window
             rope_theta = config.rope_local_base_freq
             rope_scaling = {"rope_type": "default"}
         else:
