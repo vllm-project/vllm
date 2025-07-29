@@ -4,5 +4,6 @@
 from vllm.transformers_utils.processors.deepseek_vl2 import (
     DeepseekVLV2Processor)
 from vllm.transformers_utils.processors.ovis import OvisProcessor
+from vllm.transformers_utils.processors.kimi_audio import KimiAudioProcessor
 
-__all__ = ["DeepseekVLV2Processor", "OvisProcessor"]
+__all__ = ["DeepseekVLV2Processor", "OvisProcessor", "KimiAudioProcessor"]
