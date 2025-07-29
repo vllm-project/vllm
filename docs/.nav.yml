@@ -56,9 +56,7 @@ nav:
       - contributing/model/tests.md
       - contributing/model/multimodal.md
     - CI: contributing/ci
-    - Design Documents:
-      - V0: design
-      - V1: design/v1
+    - Design Documents: design
   - API Reference:
     - Summary: api/README.md
     - Contents:
