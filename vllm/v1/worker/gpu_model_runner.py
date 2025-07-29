@@ -319,13 +319,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # means this layer will perform attention using the keys and values
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
-        self.fast_prefill_eligible_layers: set[str] = set()
+        self.kv_sharing_fast_prefill_eligible_layers: set[str] = set()
 
-        self.logits_indices = None
+        self.kv_sharing_fast_prefill_logits_indices = None
         if self.cache_config.kv_sharing_fast_prefill:
-            self.logits_indices = torch.zeros(self.max_num_tokens,
-                                              dtype=torch.int32,
-                                              device=self.device)
+            self.kv_sharing_fast_prefill_logits_indices = torch.zeros(
+                self.max_num_tokens, dtype=torch.int32, device=self.device)
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
@@ -767,15 +766,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         logits_indices_padded = None
         if self.cache_config.kv_sharing_fast_prefill:
-            assert self.logits_indices is not None
+            assert self.kv_sharing_fast_prefill_logits_indices is not None
             num_logits = logits_indices.shape[0]
             assert num_logits > 0
-            self.logits_indices[:num_logits].copy_(logits_indices)
-            # self.logits_indices[num_logits:] might have leftover indices from
-            # previous iterations, whose values may be greater than the batch
-            # size in the current iteration. To ensure the indices are always
+            self.kv_sharing_fast_prefill_logits_indices[:num_logits].copy_(
+                logits_indices)
+            # There might have leftover indices in logits_indices[num_logits:]
+            # from previous iterations, whose values may be greater than the
+            # batch size in the current iteration. To ensure indices are always
             # valid, we fill the padded indices with the last index.
-            self.logits_indices[num_logits:].fill_(logits_indices[-1].item())
+            self.kv_sharing_fast_prefill_logits_indices[num_logits:].fill_(
+                logits_indices[-1].item())
             if (self.use_cuda_graph
                     and num_logits <= self.cudagraph_batch_sizes[-1]):
                 # Use piecewise CUDA graphs.
@@ -784,7 +785,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     num_logits)
             else:
                 num_logits_padded = num_logits
-            logits_indices_padded = self.logits_indices[:num_logits_padded]
+            logits_indices_padded = (
+                self.kv_sharing_fast_prefill_logits_indices[:num_logits_padded]
+            )
 
         attn_metadata: dict[str, Any] = {}
         # Prepare the attention metadata for each KV cache group and make layers
@@ -843,7 +846,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             fast_prefill_metadata = attn_metadata_i
             if (self.cache_config.kv_sharing_fast_prefill
-                    and self.fast_prefill_eligible_layers):
+                    and self.kv_sharing_fast_prefill_eligible_layers):
                 # Dynamically create a a dataclass type that inherits
                 # from attention metadata type but includes additional
                 # fields logits_indices_padded and num_logits_indices
@@ -858,8 +861,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
 
             for layer_name in kv_cache_group_spec.layer_names:
-                if (self.cache_config.kv_sharing_fast_prefill
-                        and layer_name in self.fast_prefill_eligible_layers):
+                if (self.cache_config.kv_sharing_fast_prefill and layer_name
+                        in self.kv_sharing_fast_prefill_eligible_layers):
                     attn_metadata[layer_name] = fast_prefill_metadata
                     continue
 
@@ -2748,7 +2751,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # e.g. in YOCO-like KV sharing setups (e.g. Gemma3n)
             for layer_name in reversed(attn_layers):
                 if layer_name in self.shared_kv_cache_layers:
-                    self.fast_prefill_eligible_layers.add(layer_name)
+                    self.kv_sharing_fast_prefill_eligible_layers.add(
+                        layer_name)
                 else:
                     break
 

@@ -503,7 +503,7 @@ def reorder_batch_to_split_decodes_and_prefills(
     return modified_batch
 
 
-FAST_PREFILL_METADATA_FIELDS = [
+KV_SHARING_FAST_PREFILL_METADATA_FIELDS = [
     ('logits_indices_padded', Optional[torch.Tensor], None),
     ('num_logits_indices', int, 0),
 ]
@@ -528,7 +528,7 @@ def make_kv_sharing_fast_prefill_attention_metadata(
     Return a new subclass of `metadata_cls` for fast prefill
     """
     return subclass_attention_metadata(
-        name_prefix="FastPrefill",
+        name_prefix="KVSharingFastPrefill",
         metadata_cls=metadata_cls,
-        fields=FAST_PREFILL_METADATA_FIELDS,
+        fields=KV_SHARING_FAST_PREFILL_METADATA_FIELDS,
     )

@@ -145,10 +145,6 @@ class LLM:
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the level of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
-        kv_sharing_fast_prefill: Work in progress feature to
-            enable metadata required to skip prefill in certain KV sharing
-            setups (e.g. YOCO). See
-            [CacheConfig][vllm.config.CacheConfig].
         **kwargs: Arguments for [`EngineArgs`][vllm.EngineArgs].
 
     Note:
@@ -197,7 +193,6 @@ class LLM:
         override_pooler_config: Optional[PoolerConfig] = None,
         compilation_config: Optional[Union[int, dict[str, Any],
                                            CompilationConfig]] = None,
-        kv_sharing_fast_prefill: bool = False,
         **kwargs,
     ) -> None:
         """LLM constructor."""
@@ -271,8 +266,6 @@ class LLM:
             mm_processor_kwargs=mm_processor_kwargs,
             override_pooler_config=override_pooler_config,
             compilation_config=compilation_config_instance,
-            kv_sharing_fast_prefill=\
-                kv_sharing_fast_prefill,
             **kwargs,
         )
 
