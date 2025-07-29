@@ -126,9 +126,15 @@ OpenAI Python client library does not officially support `reasoning_content` att
         reasoning_content = None
         content = None
         # Check the content is reasoning_content or content
-        if hasattr(chunk.choices[0].delta, "reasoning_content"):
+        if (
+            hasattr(chunk.choices[0].delta, "reasoning_content")
+            and chunk.choices[0].delta.reasoning_content
+        ):
             reasoning_content = chunk.choices[0].delta.reasoning_content
-        elif hasattr(chunk.choices[0].delta, "content"):
+        elif (
+            hasattr(chunk.choices[0].delta, "content")
+            and chunk.choices[0].delta.content
+        ):
             content = chunk.choices[0].delta.content
 
         if reasoning_content is not None:
