@@ -194,7 +194,7 @@ class Step3TextAttention(nn.Module):
                 hidden_states: torch.Tensor) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = self.inter_norm(q.contiguous())
+        q = self.inter_norm(q)
         q = self.wq(q)[0]
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
@@ -369,7 +369,64 @@ class Step3TextModel(nn.Module):
         return hidden_states
 
 
-class Step3TextPretrainedModel(nn.Module, SupportsPP):
+class Step3TextForCausalLM(nn.Module, SupportsPP):
+
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        lora_config = vllm_config.lora_config
+        self.config = config
+        self.vllm_config = vllm_config
+
+        self.model = Step3TextModel(vllm_config=vllm_config, prefix=prefix)
+
+        if get_pp_group().is_last_rank:
+            self.unpadded_vocab_size = config.vocab_size
+            if lora_config:
+                self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+            self.lm_head = ParallelLMHead(
+                self.unpadded_vocab_size,
+                config.hidden_size,
+                org_num_embeddings=config.vocab_size,
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE
+                if not lora_config else lora_config.lora_vocab_padding_size,
+            )
+            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                    config.vocab_size)
+            self.sampler = get_sampler()
+        else:
+            self.lm_head = PPMissingLayer()
+
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
+
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
+                intermediate_tensors: Optional[IntermediateTensors] = None,
+                inputs_embeds: Optional[torch.Tensor] = None):
+        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+                                   inputs_embeds)
+        return hidden_states
+
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
+        return logits
+
+    def sample(
+        self,
+        logits: Optional[torch.Tensor],
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        next_tokens = self.sampler(logits, sampling_metadata)
+        return next_tokens
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         qkv_params_mapping = [
@@ -465,63 +522,3 @@ class Step3TextPretrainedModel(nn.Module, SupportsPP):
                         weight_loader = getattr(param, "weight_loader",
                                                 default_weight_loader)
                         weight_loader(param, loaded_weight)
-
-
-class Step3TextForCausalLM(Step3TextPretrainedModel):
-
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        lora_config = vllm_config.lora_config
-        self.config = config
-        self.vllm_config = vllm_config
-
-        self.model = Step3TextModel(vllm_config=vllm_config, prefix=prefix)
-
-        if get_pp_group().is_last_rank:
-            self.unpadded_vocab_size = config.vocab_size
-            if lora_config:
-                self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-            self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
-                config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE
-                if not lora_config else lora_config.lora_vocab_padding_size,
-            )
-            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                    config.vocab_size)
-            self.sampler = get_sampler()
-        else:
-            self.lm_head = PPMissingLayer()
-
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
-
-    def forward(self,
-                input_ids: torch.Tensor,
-                positions: torch.Tensor,
-                intermediate_tensors: Optional[IntermediateTensors] = None,
-                inputs_embeds: Optional[torch.Tensor] = None):
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)
-        return hidden_states
-
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
-        return logits
-
-    def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens

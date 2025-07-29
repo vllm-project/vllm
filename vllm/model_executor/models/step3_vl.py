@@ -60,6 +60,8 @@ Step3VLImageInputs = Union[Step3VLImagePixelInputs,
 
 ImageWithPatches = tuple[Image.Image, list[Image.Image], list[int] | None]
 
+MAX_IMAGE_SIZE: int = 3024
+
 
 class ImagePatcher:
 
@@ -123,13 +125,11 @@ class ImagePatcher:
     def get_image_size_for_preprocess(self, img_width: int,
                                       img_height: int) -> tuple[int, int]:
 
-        if max(img_height, img_width) > 3024:
-            scale_factor = 3024 / max(img_height, img_width)
+        if max(img_height, img_width) > MAX_IMAGE_SIZE:
+            scale_factor = MAX_IMAGE_SIZE / max(img_height, img_width)
             img_width = int(img_width * scale_factor)
             img_height = int(img_height * scale_factor)
-            return img_width, img_height
-        else:
-            return img_width, img_height
+        return img_width, img_height
 
     def get_image_size_for_crop(self, img_width: int, img_height: int,
                                 window_size: int):
@@ -439,7 +439,7 @@ class Step3VLProcessingInfo(BaseProcessingInfo):
         return {"image": self.get_max_image_tokens()}
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        return ImageSize(728, 728)
+        return ImageSize(3024, 3024)
 
     def get_num_mm_tokens(self, mm_data: MultiModalDataDict) -> int:
         if len(mm_data) != 1 or "image" not in mm_data:
