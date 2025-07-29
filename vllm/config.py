@@ -4397,6 +4397,12 @@ class CompilationConfig:
         if isinstance(self.pass_config, dict):
             self.pass_config = PassConfig(**self.pass_config)
 
+        # safe to directly check cudagraph_separate_routine here
+        if self.cudagraph_separate_routine:
+            assert self.cudagraph_mode == CUDAGraphMode.FULL, (
+                "cudagraph_separate_routine requires "
+                "cudagraph_mode be CUDAGraphMode.FULL")
+
     def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
@@ -4471,10 +4477,6 @@ class CompilationConfig:
 
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called
-        if self.cudagraph_separate_routine:
-            assert self.cudagraph_mode == CUDAGraphMode.FULL, (
-                "cudagraph_separate_routine requires "
-                "cudagraph_mode be CUDAGraphMode.FULL")
 
         if self.splitting_ops is None:
             # NOTE: When using full cudagraph, instead of setting an empty
@@ -4779,9 +4781,10 @@ class VllmConfig:
             self.compilation_config.custom_ops.append("+rms_norm")
         if envs.VLLM_USE_V1 and self.model_config is not None and \
             not self.model_config.enforce_eager:
-            # By default, V1 uses piecewise CUDA graphs. If cudagraph_mode
-            # is set to `FULL`, full CUDA graphs will be used.
             self.compilation_config.cudagraph_num_of_warmups = 1
+
+        # splitting ops is only set for piecewise compilation
+        if self.compilation_config.level == CompilationLevel.PIECEWISE:
             self.compilation_config.set_splitting_ops_for_v1()
 
         if self.compilation_config.use_cudagraph is not None:
