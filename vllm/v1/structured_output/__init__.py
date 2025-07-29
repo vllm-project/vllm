@@ -226,9 +226,8 @@ class StructuredOutputManager:
                     self._fill_bitmasks([(structured_output_request.grammar,
                                           cumulative_index, apply_bitmask)])
 
-                    if apply_bitmask and \
-                        structured_output_request.grammar.is_terminated() and \
-                            token is not None:
+                    if apply_bitmask and token is not None and \
+                        not structured_output_request.grammar.is_terminated():
                         assert structured_output_request.grammar.accept_tokens(
                             req_id, [token])
                         state_advancements += 1
