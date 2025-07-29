@@ -717,6 +717,10 @@ class SequenceGroup:
                  trace_headers: Optional[Mapping[str, str]] = None,
                  priority: int = 0,
                  draft_size: int = 1) -> None:
+        # Ensure request_id is always a string to prevent type comparison errors
+        # in scheduler sorting (e.g., when comparing UUID vs str)
+        if not isinstance(request_id, str):
+            request_id = str(request_id)
         self.request_id = request_id
         self.seqs = seqs
         self.first_seq = seqs[0]
