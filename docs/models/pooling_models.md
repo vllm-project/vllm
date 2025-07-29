@@ -164,9 +164,9 @@ It returns the extracted hidden states directly.
 !!! note
     Please use one of the more specific methods or set the task directly when using `LLM.encode`:
 
-    - For embeddings, use `LLM.embed(...)` or `task="embed"`.
-    - For classification logits, use `LLM.classify(...)` or `task="classify"`.
-    - For rewards, use `LLM.reward(...)` or `task="reward"`.
+    - For embeddings, use `LLM.embed(...)` or `pooling_task="embed"`.
+    - For classification logits, use `LLM.classify(...)` or `pooling_task="classify"`.
+    - For rewards, use `LLM.reward(...)` or `pooling_task="reward"`.
     - For similarity scores, use `LLM.score(...)`.  
 
 ```python

@@ -1103,11 +1103,11 @@ class LLM:
                 "Please use one of the more specific methods or set the "
                 "task directly when using `LLM.encode`:\n"
                 "  - For embeddings, use `LLM.embed(...)` "
-                "or `task=\"embed\"`.\n"
+                "or `pooling_task=\"embed\"`.\n"
                 "  - For classification logits, use `LLM.classify(...)` "
-                "or `task=\"classify\"`.\n"
+                "or `pooling_task=\"classify\"`.\n"
                 "  - For rewards, use `LLM.reward(...)` "
-                "or `task=\"reward\"`\n"
+                "or `pooling_task=\"reward\"`\n"
                 "  - For similarity scores, use `LLM.score(...)`.",
                 pooling_task)
 
