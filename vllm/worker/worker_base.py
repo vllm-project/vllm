@@ -128,21 +128,21 @@ class WorkerBase:
     def vocab_size(self) -> int:
         """Get vocabulary size from model configuration."""
         return self.model_config.get_vocab_size()
-        
-    def register_intermediate_hooks(self, config=None, **kwargs) -> None:
+
+    def register_intermediate_hooks(self, config=None) -> None:
         """Register hooks for intermediate tensor logging.
         
-        This method is a stub for v0 workers. The actual implementation is in v1 workers.
-        It's included here for compatibility with the collective_rpc mechanism.
+        This method is a stub for v0 workers. The actual implementation is 
+        in v1 workers. It's included here for compatibility with the 
+        collective_rpc mechanism.
         
         Args:
             config: Configuration for intermediate logging.
-            **kwargs: Configuration parameters for intermediate logging.
-                These are ignored in v0 workers.
         """
         logger.warning(
             "register_intermediate_hooks is not implemented in v0 workers. "
-            "This is only available in v1 workers. No hooks will be registered.")
+            "This is only available in v1 workers. No hooks will be registered."
+        )
         return None
 
 

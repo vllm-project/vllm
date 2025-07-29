@@ -49,7 +49,6 @@ The configuration file should be a JSON file with the following structure:
 python3 ./examples/offline_inference/llm_engine_example.py --model "meta-llama/Llama-3.1-8B-Instruct"  --enforce-eager  --intermediate-log-config-path $HOME/intermediate_logging_config.json
 ```
 
-
 #### Configuration Parameters
 
 | Parameter | Type | Description | Default |
