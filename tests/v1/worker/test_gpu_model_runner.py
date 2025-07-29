@@ -405,7 +405,7 @@ def test_kv_cache_stride_order(monkeypatch, model_runner):
     n_heads = model_runner.model_config.get_num_kv_heads(
         model_runner.parallel_config)
     expected_kv_cache_shape = [
-        2, NUM_BLOCKS, BLOCK_SIZE, n_heads,
+        NUM_BLOCKS, 2, BLOCK_SIZE, n_heads,
         model_runner.model_config.get_head_size()
     ]
     # TODO mla test
