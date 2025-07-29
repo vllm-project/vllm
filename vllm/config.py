@@ -1737,7 +1737,7 @@ class CacheConfig:
 
         if self.kv_sharing_fast_prefill:
             logger.warning_once(
-                "This feature is currently work in progress "
+                "--kv-sharing-fast-prefill is currently work in progress "
                 "and not functional yet (i.e. no prefill savings)")
 
         return self
