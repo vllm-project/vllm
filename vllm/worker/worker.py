@@ -28,7 +28,7 @@ from vllm.utils import (GiB_bytes, MemorySnapshot, bind_kv_cache,
                         memory_profiling)
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
-from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner, MiddleModelRunner
+from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner, MiddleModelRunner, DecoderModelRunner
 from vllm.worker.pooling_model_runner import PoolingModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
@@ -84,8 +84,16 @@ class Worker(LocalOrDistributedWorkerBase):
             ModelRunnerClass = PoolingModelRunner
         elif self.model_config.is_encoder_decoder:
             ModelRunnerClass = EncoderDecoderModelRunner
-        elif model_config.is_middle_blocks:
+        elif model_config.model_part == "middle":
             ModelRunnerClass = MiddleModelRunner
+        elif model_config.model_part == "encoder":
+            #TODO: Add support for encoder model part
+            # raise NotImplementedError(
+            #     "Encoder model part is not supported yet. "
+            #     "Please use the full model or middle model part.")
+            ModelRunnerClass = MiddleModelRunner
+        elif model_config.model_part == "decoder":
+            ModelRunnerClass = DecoderModelRunner
         self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
             vllm_config=self.vllm_config,
             kv_cache_dtype=self.cache_config.cache_dtype,

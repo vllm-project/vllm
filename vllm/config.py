@@ -409,9 +409,10 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation."""
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
-    is_middle_blocks: bool = False
-    """Whether the model is a middle block model. If True, the model will be treated as a middle block during execution.
-    The output of the model will be the hidden states of the last layer, and the input to the model will be the hidden states of the previous layer.
+    model_part: Literal["full", "encoder", "middle", "decoder"] = "full"
+    """Specify which part of the model to load. Options are "full" for the
+    full model, "encoder" for the encoder part, "middle" for the middle
+    part, and "decoder" for the decoder part. This is useful for models for split loading
     """
 
     def compute_hash(self) -> str:

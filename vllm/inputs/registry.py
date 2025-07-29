@@ -227,6 +227,19 @@ class InputRegistry:
 
         if not model_config.is_multimodal_model:
             seq_data = SequenceData.from_prompt_token_counts((0, seq_len))
+
+            if model_config.model_part in ("middle", "decoder"):
+                # Default to 0.05 for prompt embeds
+                # seq_data.prompt_embeds = torch.ones(
+                #     (seq_len, 3584),
+                #     dtype=model_config.dtype,
+                # ) * 0.05
+                # Random normal distribution
+                seq_data.prompt_embeds = torch.randn(
+                    (seq_len, model_config.get_hidden_size()),
+                    dtype=model_config.dtype,
+                )
+
             return DummyData(seq_data=seq_data)
 
         # Encoder dummy data does not contain multi-modal data

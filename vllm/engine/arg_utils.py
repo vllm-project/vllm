@@ -464,7 +464,7 @@ class EngineArgs:
 
     enable_multimodal_encoder_data_parallel: bool = \
         ParallelConfig.enable_multimodal_encoder_data_parallel
-    is_middle_blocks: bool = False
+    model_part: Literal["full", "encoder", "middle", "decoder"] = "full"
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -982,7 +982,7 @@ class EngineArgs:
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
-            is_middle_blocks= self.is_middle_blocks,
+            model_part=self.model_part,
         )
 
     def create_load_config(self) -> LoadConfig:

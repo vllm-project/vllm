@@ -1059,7 +1059,7 @@ class LLMEngine:
             # print(f"Output for seq_group {seq_group.seq_id}: {output}")
             if self.model_config.runner_type == "pooling":
                 self._process_sequence_group_outputs(seq_group, output)
-            elif not self.model_config.is_middle_blocks:
+            elif not self.model_config.model_part in ("full", "decoder"):
                 self.output_processor.process_prompt_logprob(seq_group, output)
                 if seq_group_meta.do_sample:
                     self.output_processor.process_outputs(
@@ -1476,7 +1476,7 @@ class LLMEngine:
                     "Async postprocessor expects only a single output set")
                 # print(f"Seq group metadata list: {seq_group_metadata_list}")
                 # print(f"Scheduler outputs: {scheduler_outputs}")
-                if not self.model_config.is_middle_blocks:
+                if not self.model_config.model_part in ("full", "decoder"):
                     self._advance_to_next_step(
                         outputs[0], seq_group_metadata_list,
                         scheduler_outputs.scheduled_seq_groups)
@@ -1513,8 +1513,8 @@ class LLMEngine:
             # queued control plane messages, such as add/remove lora adapters.
             logger.debug("Stopping remote worker execution loop.")
             self.model_executor.stop_remote_worker_execution_loop()
-        
-        if self.model_config.is_middle_blocks:
+
+        if self.model_config.model_part in ("encoder", "middle"):
             # If the model has middle blocks, we need to return the outputs
             # for the middle blocks.
             if len(ctx.output_queue) > 0:
