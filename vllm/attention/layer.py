@@ -126,10 +126,11 @@ class Attention(nn.Module):
         self._q_scale = torch.tensor(1.0, dtype=torch.float32)
         self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
 
-        # We also keep the float32 versions of k/v_scale for attention
+        # We also keep the float32 versions of k/v/o_scale for attention
         # backends that don't support tensors (Flashinfer)
         self._k_scale_float = 1.0
         self._v_scale_float = 1.0
+        self._prob_scale_float = 1.0
 
         self.use_mla = use_mla
         self.num_heads = num_heads
@@ -273,7 +274,12 @@ class Attention(nn.Module):
                                   output=output)
             else:
                 torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name)
+                    query,
+                    key,
+                    value,
+                    output,
+                    self.layer_name,
+                    query_scale=self._q_scale)
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
@@ -476,6 +482,7 @@ def unified_attention_with_output(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    query_scale: Optional[torch.Tensor] = None,
     output_scale: Optional[torch.Tensor] = None,
 ) -> None:
     wait_for_kv_layer_from_connector(layer_name)
@@ -503,6 +510,7 @@ def unified_attention_with_output_fake(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    query_scale: Optional[torch.Tensor] = None,
     output_scale: Optional[torch.Tensor] = None,
 ) -> None:
     return

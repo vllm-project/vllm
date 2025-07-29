@@ -375,9 +375,9 @@ def _get_seq_len_block_table_args(
     Decoder attn -> select entirely decoder self-attention-related fields
     Encoder/decoder cross-attn -> select encoder sequence lengths
     Encoder attn -> select encoder sequence lengths fields
-    Encoder-only attn -> select prefill sequence lengths with 
+    Encoder-only attn -> select prefill sequence lengths with
         bidirectional attention
-    
+
     Arguments:
 
     * attn_metadata: Attention metadata structure associated with attention op
@@ -478,7 +478,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
     If chunked prefill is enabled, prefill tokens and decode tokens can be
     batched together in a flattened 1D query.
 
-    |<----- num_prefill_tokens ---->|<------- num_decode_tokens ----------->|	
+    |<----- num_prefill_tokens ---->|<------- num_decode_tokens ----------->|
     |<-prompt_0->|...|<-prompt_N-1->|<-generation_0->|...|<-generation_M-1->|
 
     Currently, cuda graph is disabled for chunked prefill, meaning there's no
@@ -621,7 +621,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         For decoder-only models: query, key and value must be non-None.
 
         For encoder/decoder models:
-        * ROCmFlashAttentionImpl.forward() may be invoked for both self- and 
+        * ROCmFlashAttentionImpl.forward() may be invoked for both self- and
             cross-attention layers.
         * For self-attention: query, key and value must be non-None.
         * For cross-attention:
@@ -632,10 +632,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
               (1) key and value tensors were cached during prefill, and
               (2) cross-attention key and value tensors do not grow during
                   decode
-        
+
         A note on how the attn_type (attention type enum) argument impacts
         attention forward() behavior:
-    
+
             * DECODER: normal decoder-only behavior;
                 use decoder self-attention block table
             * ENCODER: no KV caching; pass encoder sequence

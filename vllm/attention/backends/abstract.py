@@ -304,6 +304,10 @@ class AttentionImpl(ABC, Generic[T]):
         """
         return False
 
+    def inserted_input_quant_supported(self, dtype: torch.dtype, static: bool,
+                                       group_shape: GroupShape):
+        return False
+
 
 class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
 
