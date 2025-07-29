@@ -5,9 +5,10 @@ from importlib.util import find_spec
 import pytest
 import torch
 
-import vllm._custom_ops as ops
 import vllm.envs as envs
 from vllm.compilation.collective_fusion import AllReduceFusionPass
+from vllm.compilation.fix_functionalization import FixFunctionalizationPass
+from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.config import (CompilationConfig, CompilationLevel, DeviceConfig,
                          ModelConfig, PassConfig, VllmConfig)
 from vllm.distributed import tensor_model_parallel_all_reduce
@@ -25,7 +26,7 @@ from .backend import TestBackend
 
 class TestAllReduceRMSNormModel(torch.nn.Module):
 
-    def __init__(self, hidden_size=16, eps=1e-6):
+    def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
@@ -46,7 +47,7 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
 
 class TestAllReduceFusedAddRMSNormModel(torch.nn.Module):
 
-    def __init__(self, hidden_size=16, eps=1e-6):
+    def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
@@ -67,7 +68,7 @@ class TestAllReduceFusedAddRMSNormModel(torch.nn.Module):
 
 class TestAllReduceFusedAddRMSNormStaticQuantFP8Model(torch.nn.Module):
 
-    def __init__(self, hidden_size=16, eps=1e-6):
+    def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
@@ -75,13 +76,17 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP8Model(torch.nn.Module):
         self.quant_fp8 = QuantFP8(static=True,
                                   group_shape=GroupShape.PER_TENSOR)
         self.scale = torch.rand(1, dtype=torch.float32)
+        self.output = torch.empty((token_num, hidden_size),
+                                  dtype=torch.float32)
 
     def forward(self, hidden_states, residual):
         view = hidden_states.reshape(-1, self.hidden_size)
         all_reduce = tensor_model_parallel_all_reduce(view)
         norm_output, residual_output = self.norm(all_reduce, residual)
-        fp8_result, _ = self.quant_fp8(norm_output, self.scale)
-        return fp8_result, residual_output
+        torch.ops._C.static_scaled_fp8_quant(self.output,
+                                             norm_output.contiguous(),
+                                             self.scale)
+        return self.output, residual_output
 
     def ops_in_model_after(self):
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
@@ -95,19 +100,30 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP8Model(torch.nn.Module):
 
 class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
 
-    def __init__(self, hidden_size=16, eps=1e-6):
+    def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
         self.norm = RMSNorm(hidden_size, eps)
         self.scale = torch.rand(1, dtype=torch.float32)
+        self.output = torch.empty((token_num, hidden_size),
+                                  dtype=torch.float32)
+
+        round_up = lambda x, y: (x + y - 1) // y * y
+        rounded_m = round_up(token_num, 128)
+        scale_n = hidden_size // 16
+        rounded_n = round_up(scale_n, 4)
+        self.output_scale = torch.empty((rounded_m, rounded_n // 4),
+                                        dtype=torch.int32)
 
     def forward(self, hidden_states, residual):
         view = hidden_states.reshape(-1, self.hidden_size)
         all_reduce = tensor_model_parallel_all_reduce(view)
         norm_output, residual_output = self.norm(all_reduce, residual)
-        fp4_result, fp4_scale = ops.scaled_fp4_quant(norm_output, self.scale)
-        return fp4_result, residual_output, fp4_scale
+        norm_output = norm_output.reshape(-1, norm_output.shape[-1])
+        torch.ops._C.scaled_fp4_quant(self.output, norm_output,
+                                      self.output_scale, self.scale)
+        return self.output, residual_output, self.output_scale
 
     def ops_in_model_after(self):
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
@@ -120,14 +136,12 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize(
-    "test_model",
-    [
-        TestAllReduceRMSNormModel,
-        TestAllReduceFusedAddRMSNormModel,
-        # TestAllReduceFusedAddRMSNormStaticQuantFP8Model,
-        # TestAllReduceFusedAddRMSNormStaticQuantFP4Model,
-    ])
+@pytest.mark.parametrize("test_model", [
+    TestAllReduceRMSNormModel,
+    TestAllReduceFusedAddRMSNormModel,
+    TestAllReduceFusedAddRMSNormStaticQuantFP8Model,
+    TestAllReduceFusedAddRMSNormStaticQuantFP4Model,
+])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [8])
 @pytest.mark.parametrize("hidden_size", [16])
@@ -192,14 +206,16 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
                                            seed=42)
 
     all_reduce_fusion_pass = AllReduceFusionPass(vllm_config)
-    backend = TestBackend(all_reduce_fusion_pass)
+    noop_pass = NoOpEliminationPass(vllm_config)
+    func_pass = FixFunctionalizationPass(vllm_config)
 
-    model = test_model_cls(hidden_size)
+    backend = TestBackend(all_reduce_fusion_pass, noop_pass, func_pass)
 
-    hidden_states = torch.randn((batch_size * seq_len, hidden_size),
-                                requires_grad=False)
-    residual = torch.randn((batch_size * seq_len, hidden_size),
-                           requires_grad=False)
+    token_num = batch_size * seq_len
+    model = test_model_cls(hidden_size, token_num)
+
+    hidden_states = torch.randn((token_num, hidden_size), requires_grad=False)
+    residual = torch.randn((token_num, hidden_size), requires_grad=False)
 
     compiled_model = torch.compile(model, backend=backend)
     compiled_model(hidden_states, residual)
