@@ -7,7 +7,6 @@ import torch
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.distributed import get_ep_group
@@ -23,8 +22,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_utils import (
     build_flashinfer_fp4_cutlass_moe_kernel,
-    flashinfer_fp4_cutlass_moe_forward,
-    is_flashinfer_fp4_cutlass_moe_available, reorder_w1w3_to_w3w1)
+    flashinfer_fp4_cutlass_moe_forward, reorder_w1w3_to_w3w1)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear, is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin, prepare_moe_fp4_layer_for_marlin)
@@ -844,31 +842,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def __init__(self, quant_config: ModelOptNvFp4Config):
         self.quant_config = quant_config
-        self.cutlass_nvfp4_supported = cutlass_fp4_supported()
-        self.use_marlin = False
-        # enable flashinfer when both hardware + env ready
-        self.allow_flashinfer_cutlass = (
-            self.cutlass_nvfp4_supported
-            and is_flashinfer_fp4_cutlass_moe_available())
-
-        if self.allow_flashinfer_cutlass:
-            logger.info_once(
-                "Using FlashInfer kernels for ModelOptNvFp4FusedMoE.")
-        else:
-            if envs.VLLM_USE_FLASHINFER_MOE_FP4:
-                logger.warning_once(
-                    "FlashInfer kernels unavailable for "
-                    "ModelOptNvFp4FusedMoE on current platform.")
-
-        # fallback to Marlin kernel
-        if not self.cutlass_nvfp4_supported:
-            if is_fp4_marlin_supported():
-                self.use_marlin = True
-                logger.info_once("Falling back to Marlin FP4 MoE kernel.")
-            else:
-                raise ValueError(
-                    "Current platform does not support NVFP4 quantization. "
-                    "Please use Blackwell GPUs or enable FlashInfer.")
+        from vllm.model_executor.layers.quantization.utils.nvfp4_support import (  # noqa: E501
+            detect_nvfp4_support)
+        _nvfp4 = detect_nvfp4_support(self.__class__.__name__, logger)
+        self.cutlass_nvfp4_supported = _nvfp4.cutlass_supported
+        self.allow_flashinfer_cutlass = _nvfp4.allow_flashinfer_cutlass
+        self.use_marlin = _nvfp4.use_marlin
 
         self.fused_experts = None  # type: ignore
 

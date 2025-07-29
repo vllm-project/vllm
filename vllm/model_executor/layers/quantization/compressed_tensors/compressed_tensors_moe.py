@@ -25,17 +25,16 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_utils import (
     build_flashinfer_fp4_cutlass_moe_kernel,
-    flashinfer_fp4_cutlass_moe_forward,
-    is_flashinfer_fp4_cutlass_moe_available, reorder_w1w3_to_w3w1)
+    flashinfer_fp4_cutlass_moe_forward, reorder_w1w3_to_w3w1)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer, marlin_make_workspace_new,
     marlin_moe_permute_scales)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-    is_fp4_marlin_supported, prepare_moe_fp4_layer_for_marlin)
+    prepare_moe_fp4_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_moe_fp8_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    cutlass_fp4_supported, swizzle_blockscale)
+    swizzle_blockscale)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize)
 from vllm.model_executor.utils import set_weight_attrs
@@ -103,29 +102,12 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
 
     def __init__(self):
-        self.cutlass_nvfp4_supported = cutlass_fp4_supported()
-        self.use_marlin: bool = False
-        self.allow_flashinfer_cutlass: bool = (
-            self.cutlass_nvfp4_supported
-            and is_flashinfer_fp4_cutlass_moe_available())
-
-        if self.allow_flashinfer_cutlass:
-            logger.info_once(
-                "Using FlashInfer kernels for CompressedTensorsW4A4MoeMethod.")
-        else:
-            if envs.VLLM_USE_FLASHINFER_MOE_FP4:
-                logger.warning_once(
-                    "FlashInfer kernels unavailable for "
-                    "CompressedTensorsW4A4MoeMethod on current platform.")
-
-        if not self.cutlass_nvfp4_supported:
-            if is_fp4_marlin_supported():
-                self.use_marlin = True
-            else:
-                raise ValueError(
-                    "Current platform does not support NVFP4 quantization. "
-                    "Please use Blackwell and above.")
-
+        from vllm.model_executor.layers.quantization.utils.nvfp4_support import (  # noqa: E501
+            detect_nvfp4_support)
+        _nvfp4 = detect_nvfp4_support(self.__class__.__name__, logger)
+        self.cutlass_nvfp4_supported = _nvfp4.cutlass_supported
+        self.allow_flashinfer_cutlass = _nvfp4.allow_flashinfer_cutlass
+        self.use_marlin = _nvfp4.use_marlin
         self.group_size = 16
         self.fused_experts = None  # type: ignore[assignment]
 
