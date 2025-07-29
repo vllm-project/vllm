@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import regex as re
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
@@ -11,6 +12,7 @@ from torch._subclasses.fake_tensor import (FakeTensorMode,
 from vllm.attention import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.platforms import current_platform
 
 from .fusion import QUANT_OPS, GroupShape, QuantKey, empty_bf16, empty_fp32
@@ -277,9 +279,32 @@ class AttnFusionPass(VllmInductorPass):
 
         for layer_name, layer in get_layers_from_vllm_config(
                 config, Attention).items():
-            pattern = AttentionStaticQuantPattern(layer,
-                                                  current_platform.fp8_dtype())
-            pattern.register_if_supported(self.patterns)
+            pattern1 = AttentionStaticQuantPattern(
+                layer, current_platform.fp8_dtype())
+            pattern1.register_if_supported(self.patterns)
+
+        # map from layer prefix name to input_scale
+        input_scale = {}
+        o_proj_pattern = re.compile(r"(.*layers\.\d+\.self_attn)\.o_proj$")
+        attn_pattern = re.compile(r"(.*layers\.\d+\.self_attn)\.attn$")
+
+        # collect the input_scale for each self_attn.o_proj layer
+        for layer_name, layer in get_layers_from_vllm_config(
+                config, LinearBase).items():
+            match = o_proj_pattern.search(layer_name)
+            if match and hasattr(layer, "input_scale"):
+                input_scale[match.group(1)] = layer.input_scale.item()
+
+        for layer_name, layer in get_layers_from_vllm_config(
+                config, Attention).items():
+            match = attn_pattern.search(layer_name)
+            # only register the pass when the input_scalar is found
+            if not match or not input_scale.get(match.group(1)):
+                logger.debug(
+                    "Cannot find o_proj layer or input_scale for fusing %s",
+                    layer_name)
+                continue
+            layer._prob_scale_float = input_scale[match.group(1)]
 
             pattern2 = QuantAttentionQuantPattern(layer,
                                                   current_platform.fp8_dtype(),

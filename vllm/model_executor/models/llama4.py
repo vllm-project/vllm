@@ -20,7 +20,6 @@
 from collections.abc import Iterable
 from typing import Any, Optional
 
-import regex as re
 import torch
 from torch import nn
 from transformers import Llama4TextConfig
@@ -416,20 +415,7 @@ class Llama4Model(LlamaModel):
             num_experts=1)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        # Regex pattern to match layers.{layer_idx}.self_attn.o_proj.input_scale
-        o_proj_scale_pattern = re.compile(
-            r"layers\.(\d+)\.self_attn\.o_proj\.input_scale$")
-
         for name, loaded_weight in weights:
-            # Store o_proj.input_scale scalar for attn layers
-            match = o_proj_scale_pattern.match(name)
-            if match:
-                idx = int(match.group(1))
-                if idx < len(self.layers):
-                    # Store the scalar to the attn layer's _prob_scale_float
-                    o_scale = loaded_weight.item() if loaded_weight.dim(
-                    ) > 0 else float(loaded_weight)
-                    self.layers[idx].self_attn.attn._prob_scale_float = o_scale
             if "experts.gate_up_proj" in name or "experts.down_proj" in name:
                 fused_experts_params = True
                 expert_params_mapping = expert_params_mapping_fused
