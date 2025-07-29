@@ -102,6 +102,7 @@ def test_get_gen_prompt(model, template, add_generation_prompt,
         tokenizer=model_info.tokenizer or model,
         tokenizer_mode=model_info.tokenizer_mode,
         trust_remote_code=model_info.trust_remote_code,
+        revision=model_info.revision,
         hf_overrides=model_info.hf_overrides,
     )
 
