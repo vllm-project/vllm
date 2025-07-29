@@ -186,12 +186,10 @@ class MambaSpec(KVCacheSpec):
     page_size_padded: Optional[int] = None
     mamba_type: str = "mamba2"
 
-    def __post_init__(self):
-        self.num_elements = sum(prod(shape) for shape in self.shapes)
-
     @property
     def page_size_bytes(self) -> int:
-        page_size = self.num_elements * get_dtype_size(self.dtype)
+        num_elements = sum(prod(shape) for shape in self.shapes)
+        page_size = num_elements * get_dtype_size(self.dtype)
         if self.page_size_padded is not None:
             assert self.page_size_padded >= page_size
             return self.page_size_padded
