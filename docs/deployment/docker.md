@@ -20,7 +20,7 @@ docker run --runtime nvidia --gpus all \
 This image can also be used with other container engines such as [Podman](https://podman.io/).
 
 ```bash
-podman run --gpus all \
+podman run --device nvidia.com/gpu=all \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
   --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" \
   -p 8000:8000 \
