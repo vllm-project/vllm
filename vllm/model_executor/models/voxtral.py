@@ -483,7 +483,7 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                 "by Voxtral. Results may be less accurate for this choice. "
                 "Consider using an audio from the supported set of "
                 "languages: %s", language,
-                list(ISO639_1_SUPPORTED_LANGS.values()))
+                list(ISO639_1_SUPPORTED_LANGS.keys()))
             return True
         else:
             raise ValueError(
