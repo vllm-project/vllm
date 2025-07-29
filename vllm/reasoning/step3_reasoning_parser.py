@@ -16,11 +16,11 @@ logger = init_logger(__name__)
 
 
 @ReasoningParserManager.register_module("step3")
-class StepRminiReasoningParser(ReasoningParser):
+class Step3ReasoningParser(ReasoningParser):
     """
-    Reasoning parser for Step Rmini model.
+    Reasoning parser for Step3 model.
 
-    The Step RMini model uses </think> token to denote the end of reasoning 
+    The Step3 model uses </think> token to denote the end of reasoning 
     text. This parser extracts all content before </think> as reasoning content.
     """
 
@@ -39,7 +39,7 @@ class StepRminiReasoningParser(ReasoningParser):
         self.think_end_token_id = self.vocab.get(self.think_end_token)
         if self.think_end_token_id is None:
             raise RuntimeError(
-                "Step Rmini reasoning parser could not locate think end "
+                "Step3 reasoning parser could not locate think end "
                 "token in the tokenizer!")
 
     def extract_reasoning_content_streaming(
