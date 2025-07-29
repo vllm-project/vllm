@@ -857,10 +857,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ):
         if not self.allow_flashinfer_cutlass:
             return
-
         self.fused_experts = build_flashinfer_fp4_cutlass_moe_kernel(
             moe_parallel_config)
-        logger.debug_once("FlashInferExperts (util)")
 
     # This method update self.fused_experts
     # only prepare_finalize is not None call select_gemm_impl

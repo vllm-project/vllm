@@ -60,6 +60,7 @@ def build_flashinfer_fp4_cutlass_moe_kernel(
         tp_rank=moe_parallel_config.tp_rank,
         tp_size=moe_parallel_config.tp_size,
     )
+    logger.debug_once("FlashInferExperts (util)")
     return mk.FusedMoEModularKernel(
         FlashInferCutlassMoEPrepareAndFinalize(quant_dtype=torch.uint8),
         experts,

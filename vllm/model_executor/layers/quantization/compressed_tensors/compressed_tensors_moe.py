@@ -271,7 +271,6 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             return
         self.fused_experts = build_flashinfer_fp4_cutlass_moe_kernel(
             moe_parallel_config)
-        logger.debug_once("FlashInferExperts (util)")
 
     def select_gemm_impl(self, prepare_finalize, moe):
         """Return the appropriate GEMM experts implementation."""
@@ -442,7 +441,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             is_rocm_aiter_moe_enabled)
 
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
-        self.fused_experts = None  # type: ignore[assignment]
 
         # cutlass path
         self.is_fp8_w8a8_sm100 = quant_config._is_fp8_w8a8_sm100(
