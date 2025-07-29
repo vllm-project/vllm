@@ -20,8 +20,6 @@ from vllm.config import DecodingConfig, ModelConfig, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.engine.async_llm_engine import (
-    build_guided_decoding_logits_processor_async)
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, RPC_REQUEST_T,
@@ -536,22 +534,6 @@ class MQLLMEngineClient(EngineClient):
         # Ensure the request id is unique among running requests
         if request_id in self.output_queues:
             raise ValueError(f"Request {request_id} already exists")
-
-        # Constructing guided decoding logits processors is expensive, so we do
-        # it here to avoid contending with cpu resources and the GIL on the
-        # backend process.
-        if isinstance(params, SamplingParams) and \
-            params.guided_decoding is not None:
-            params = await \
-                build_guided_decoding_logits_processor_async(
-                    sampling_params=params,
-                    tokenizer=await self.get_tokenizer(lora_request),
-                    default_guided_backend=(self.decoding_config.backend
-                        if self.decoding_config
-                        else DecodingConfig.backend),
-                    model_config=self.model_config,
-                    reasoning_backend=self.decoding_config.reasoning_backend,
-                )
 
         # 1) Create output queue for this requests.
         queue: asyncio.Queue[Union[RequestOutput,
