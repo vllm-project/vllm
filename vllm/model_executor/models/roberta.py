@@ -255,6 +255,8 @@ class RobertaForSequenceClassification(nn.Module, BertMMTokenIdsMixin,
         inputs_embeds: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if input_ids is None:
+            input_ids = self.input_ids
         replace_roberta_positions(input_ids=input_ids,
                                   position_ids=positions,
                                   padding_idx=self.padding_idx)
