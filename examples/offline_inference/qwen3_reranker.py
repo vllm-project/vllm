@@ -17,17 +17,17 @@ model_name = "Qwen/Qwen3-Reranker-0.6B"
 # Models converted offline using this method can not only be more efficient
 # and support the vllm score API, but also make the init parameters more
 # concise, for example.
-# model = LLM(model="tomaarsen/Qwen3-Reranker-0.6B-seq-cls", task="score")
+# llm = LLM(model="tomaarsen/Qwen3-Reranker-0.6B-seq-cls", runner="pooling")
 
 # If you want to load the official original version, the init parameters are
 # as follows.
 
 
-def get_model() -> LLM:
+def get_llm() -> LLM:
     """Initializes and returns the LLM model for Qwen3-Reranker."""
     return LLM(
         model=model_name,
-        task="score",
+        runner="pooling",
         hf_overrides={
             "architectures": ["Qwen3ForSequenceClassification"],
             "classifier_from_token": ["no", "yes"],
@@ -77,8 +77,8 @@ def main() -> None:
     ]
     documents = [document_template.format(doc=doc, suffix=suffix) for doc in documents]
 
-    model = get_model()
-    outputs = model.score(queries, documents)
+    llm = get_llm()
+    outputs = llm.score(queries, documents)
 
     print("-" * 30)
     print([output.outputs.score for output in outputs])
