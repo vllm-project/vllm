@@ -10,7 +10,10 @@ from triton_kernels.numerics import InFlexData
 from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
 from triton_kernels.tensor_details import layout
 
-from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
+from vllm import envs
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE, FusedMoEActivationFormat, FusedMoEConfig, FusedMoEMethodBase,
+    FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -23,8 +26,7 @@ from vllm.platforms import current_platform
 from vllm.utils import round_up
 
 
-def swizzle_mxfp4(quant_tensor, scale):
-    num_warps = 8
+def swizzle_mxfp4(quant_tensor, scale, num_warps):
     value_layout, value_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
         mx_axis=1)
     scale_layout, scale_layout_opts = (
@@ -84,7 +86,7 @@ class Mxfp4Config(QuantizationConfig):
                 return UnquantizedLinearMethod()
             raise NotImplementedError("Mxfp4 linear layer is not implemented")
         elif isinstance(layer, FusedMoE):
-            return Mxfp4MoEMethod()
+            return Mxfp4MoEMethod(layer.moe_config)
         elif isinstance(layer, Attention):
             raise NotImplementedError(
                 "Mxfp4 attention layer is not implemented")
@@ -92,6 +94,11 @@ class Mxfp4Config(QuantizationConfig):
 
 
 class Mxfp4MoEMethod(FusedMoEMethodBase):
+
+    def __init__(self, moe: FusedMoEConfig):
+        super().__init__()
+        self.topk_indices_dtype = None
+        self.moe = moe
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -176,10 +183,18 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         layer.w13_bias = Parameter(w13_bias, requires_grad=False)
         layer.w2_bias = Parameter(w2_bias, requires_grad=False)
 
+        # FIXME warp need to be adjusted based on batch size
+        # only apply to  batched mode
+        if self.moe.use_ep:
+            num_warps = 4 if envs.VLLM_MOE_DP_CHUNK_SIZE <= 512 else 8
+        else:
+            num_warps = 8
+
         w13_weight, w13_flex, w13_scale = swizzle_mxfp4(
-            layer.w13_weight, layer.w13_weight_scale)
+            layer.w13_weight, layer.w13_weight_scale, num_warps)
         w2_weight, w2_flex, w2_scale = swizzle_mxfp4(layer.w2_weight,
-                                                     layer.w2_weight_scale)
+                                                     layer.w2_weight_scale,
+                                                     num_warps)
 
         self.w13_precision_config = PrecisionConfig(
             weight_scale=w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex))
@@ -195,6 +210,30 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         layer.w13_weight = None
         layer.w2_weight = None
         torch.cuda.empty_cache()
+
+    def select_gemm_impl(
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+        moe: FusedMoEConfig,
+    ) -> FusedMoEPermuteExpertsUnpermute:
+        # this is happen after the weights are loaded
+        # so we can safely use precision config
+        from vllm.model_executor.layers.fused_moe.triton_kernels_moe import (
+            BatchedOAITritonExperts)
+        if (prepare_finalize.activation_format ==
+                FusedMoEActivationFormat.BatchedExperts):
+            max_num_tokens_per_rank = (
+                prepare_finalize.max_num_tokens_per_rank())
+            return BatchedOAITritonExperts(
+                None,
+                max_num_tokens=max_num_tokens_per_rank,
+                num_dispatchers=prepare_finalize.num_dispatchers(),
+                w1_precision=self.w13_precision_config,
+                w2_precision=self.w2_precision_config,
+            )
+        else:
+            raise NotImplementedError(
+                "Mxfp4 does not support non-batched experts format for EP")
 
     def apply(
         self,
@@ -225,18 +264,48 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         if enable_eplb:
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
-        return triton_kernel_moe_forward(
-            hidden_states=x,
-            w1=self.w13_weight_triton_tensor,
-            w2=self.w2_weight_triton_tensor,
-            gating_output=router_logits,
-            topk=top_k,
-            renormalize=renormalize,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            w1_bias=layer.w13_bias,
-            w2_bias=layer.w2_bias,
-            w1_precision=self.w13_precision_config,
-            w2_precision=self.w2_precision_config,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-        )
+        if self.moe.use_ep:
+            topk_weights, topk_ids = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias,
+                indices_type=self.topk_indices_dtype,
+                enable_eplb=enable_eplb,
+                expert_map=expert_map,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+            )
+
+            return self.fused_experts(
+                x,
+                self.w13_weight_triton_tensor,
+                self.w2_weight_triton_tensor,
+                topk_weights,
+                topk_ids,
+                w1_bias=layer.w13_bias,
+                w2_bias=layer.w2_bias,
+            )
+        else:
+            return triton_kernel_moe_forward(
+                hidden_states=x,
+                w1=self.w13_weight_triton_tensor,
+                w2=self.w2_weight_triton_tensor,
+                gating_output=router_logits,
+                topk=top_k,
+                renormalize=renormalize,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                w1_bias=layer.w13_bias,
+                w2_bias=layer.w2_bias,
+                w1_precision=self.w13_precision_config,
+                w2_precision=self.w2_precision_config,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )

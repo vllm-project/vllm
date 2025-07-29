@@ -8,8 +8,10 @@ import torch.distributed as dist
 from torch import nn
 
 from vllm.attention import Attention, AttentionType
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (get_ep_group, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
@@ -23,7 +25,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import OpenAIMoeConfig
-from vllm.compilation.decorators import support_torch_compile
+from vllm.utils import cdiv
 
 from .utils import extract_layer_index, maybe_prefix
 
@@ -51,11 +53,16 @@ class OAIAttention(nn.Module):
             base=config.rope_theta,
             dtype=torch.float32,
             rope_scaling={
-                "rope_type": "yarn",
-                "factor": config.rope_scaling["factor"],
-                "original_max_position_embeddings": config.rope_scaling["original_max_position_embeddings"],
-                "beta_fast": config.rope_ntk_beta,
-                "beta_slow": config.rope_ntk_alpha,
+                "rope_type":
+                "yarn",
+                "factor":
+                config.rope_scaling["factor"],
+                "original_max_position_embeddings":
+                config.rope_scaling["original_max_position_embeddings"],
+                "beta_fast":
+                config.rope_ntk_beta,
+                "beta_slow":
+                config.rope_ntk_alpha,
             },
             is_neox_style=True,
         )
@@ -138,8 +145,8 @@ class MLPBlock(torch.nn.Module):
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
         self.norm = RMSNorm(config.hidden_size, eps=1e-5)
         self.router = torch.nn.Linear(config.hidden_size,
-                                    config.num_local_experts,
-                                    dtype=torch.bfloat16)
+                                      config.num_local_experts,
+                                      dtype=torch.bfloat16)
         assert config.intermediate_size % self.world_size == 0
         self.experts = FusedMoE(num_experts=config.num_local_experts,
                                 top_k=config.num_experts_per_token,
@@ -183,7 +190,10 @@ class TransformerBlock(torch.nn.Module):
 
 class OpenAIModel(nn.Module):
 
-    def __init__(self, config: OpenAIMoeConfig, quant_config: QuantizationConfig, prefix: str = ""):
+    def __init__(self,
+                 config: OpenAIMoeConfig,
+                 quant_config: QuantizationConfig,
+                 prefix: str = ""):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
@@ -202,12 +212,14 @@ class OpenAIModel(nn.Module):
         ])
         self.norm = RMSNorm(self.config.hidden_size, eps=1e-5)
 
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor,
+                positions: torch.Tensor) -> torch.Tensor:
         x = self.embedding(input_ids)
         for layer in self.layers:
             x = layer(x, positions)
         x = self.norm(x)
         return x
+
 
 @support_torch_compile
 class OpenAIMoeForCausalLM(nn.Module):
@@ -218,14 +230,19 @@ class OpenAIMoeForCausalLM(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        self.config = vllm_config.model_config.hf_config
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
-        self.model = OpenAIModel(self.config, self.quant_config, prefix=maybe_prefix(prefix, "model"),)
-        self.lm_head = ParallelLMHead(
-            self.config.vocab_size,
-            self.config.hidden_size,
+        self.model = OpenAIModel(
+            self.model_config,
+            self.quant_config,
+            prefix=maybe_prefix(prefix, "model"),
         )
-        self.logits_processor = LogitsProcessor(self.config.vocab_size)
+        self.lm_head = ParallelLMHead(
+            self.model_config.vocab_size,
+            self.model_config.hidden_size,
+        )
+        self.logits_processor = LogitsProcessor(self.model_config.vocab_size)
 
     def forward(self,
                 input_ids: torch.Tensor,
@@ -257,39 +274,42 @@ class OpenAIMoeForCausalLM(nn.Module):
                     return name.replace(remap_name, new_name)
             return name
 
-        
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         mxfp4_block = 32
 
-        my_rank = dist.get_rank() if dist.is_initialized() else 0
-        world_size = dist.get_world_size() if dist.is_initialized() else 1
-        num_experts = self.config.num_local_experts
-        intermediate_size = self.config.intermediate_size
+        tp_rank = get_tensor_model_parallel_rank()
+        tp_size = get_tensor_model_parallel_world_size()
+        intermediate_size = self.model_config.intermediate_size
         intermediate_size_block = intermediate_size // mxfp4_block
-        per_rank_intermediate_size_block = (
-            intermediate_size_block //
-            world_size) + 1 if intermediate_size_block % world_size != 0 else (
-                intermediate_size_block // world_size)
+        per_rank_intermediate_size_block = cdiv(intermediate_size_block,
+                                                tp_size)
         per_rank_intermediate_size = (per_rank_intermediate_size_block *
                                       mxfp4_block)
 
         # Calculate common slicing bounds for current rank
-        rank_start = my_rank * per_rank_intermediate_size
-        rank_end = min((my_rank + 1) * per_rank_intermediate_size,
-                       intermediate_size)
+        tp_rank_start = tp_rank * per_rank_intermediate_size
+        tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size,
+                          intermediate_size)
 
         # Attention heads per rank
-        heads_per_rank = self.config.num_attention_heads // world_size
-        head_start = my_rank * heads_per_rank
+        heads_per_rank = self.model_config.num_attention_heads // tp_size
+        head_start = tp_rank * heads_per_rank
+
+        use_ep = self.vllm_config.parallel_config.enable_expert_parallel
+        ep_size = get_ep_group().world_size
+        ep_rank = get_ep_group().rank
+        num_experts = self.model_config.num_experts
+        experts_per_rank = num_experts // ep_size
+        ep_rank_start = ep_rank * experts_per_rank
+        ep_rank_end = (ep_rank + 1) * experts_per_rank
 
         for name, weight in weights:
             weight = weight.cuda()
 
             if "gate_up_proj_blocks" in name:
                 # Handle MLP gate and up projection weights
-                new_name = name.replace("gate_up_proj_blocks",
-                                        "w13_weight")
+                new_name = name.replace("gate_up_proj_blocks", "w13_weight")
 
                 # flat weight from (E, 2 * N, block_size, entry_per_block)
                 # to (E, 2 * N, -1), shouldn't trigger copy for contiguous
@@ -298,7 +318,12 @@ class OpenAIMoeForCausalLM(nn.Module):
 
                 # Extract gate and up projection parts
                 # since the weight is shuffled, we can slice directly
-                narrow_weight = weight[:, 2 * rank_start:2 * rank_end, ...]
+                if use_ep:
+                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    narrow_weight = weight[:,
+                                           2 * tp_rank_start:2 * tp_rank_end,
+                                           ...]
 
                 param = params_dict[new_name]
                 weight_loader = getattr(param, "weight_loader",
@@ -312,13 +337,16 @@ class OpenAIMoeForCausalLM(nn.Module):
 
             elif "down_proj_blocks" in name:
                 # Handle MLP down projection weights
-                new_name = name.replace("down_proj_blocks",
-                                        "w2_weight")
+                new_name = name.replace("down_proj_blocks", "w2_weight")
                 # same flatten here, but since 2 mx4 value are packed in 1
                 # uint8, divide by 2
                 weight = weight.view(num_experts, -1,
                                      intermediate_size // 2).contiguous()
-                narrow_weight = weight[..., rank_start // 2:rank_end // 2]
+                if use_ep:
+                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    narrow_weight = weight[...,
+                                           tp_rank_start // 2:tp_rank_end // 2]
 
                 param = params_dict[new_name]
                 weight_loader = getattr(param, "weight_loader",
@@ -334,7 +362,12 @@ class OpenAIMoeForCausalLM(nn.Module):
                 # Handle MLP gate and up projection weights scale
                 new_name = name.replace("gate_up_proj_scales",
                                         "w13_weight_scale")
-                narrow_weight = weight[:, 2 * rank_start:2 * rank_end, ...]
+                if use_ep:
+                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    narrow_weight = weight[:,
+                                           2 * tp_rank_start:2 * tp_rank_end,
+                                           ...]
 
                 param = params_dict[new_name]
                 weight_loader = getattr(param, "weight_loader",
@@ -348,10 +381,13 @@ class OpenAIMoeForCausalLM(nn.Module):
 
             elif "down_proj_scales" in name:
                 # Handle MLP down projection weights
-                new_name = name.replace("down_proj_scales",
-                                        "w2_weight_scale")
-                narrow_weight = weight[..., rank_start //
-                                       mxfp4_block:rank_end // mxfp4_block]
+                new_name = name.replace("down_proj_scales", "w2_weight_scale")
+                if use_ep:
+                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    narrow_weight = weight[..., tp_rank_start //
+                                           mxfp4_block:tp_rank_end //
+                                           mxfp4_block]
 
                 param = params_dict[new_name]
                 weight_loader = getattr(param, "weight_loader",
@@ -367,8 +403,11 @@ class OpenAIMoeForCausalLM(nn.Module):
                 new_name = name.replace("gate_up_proj_bias", "w13_bias")
 
                 # Extract gate and up projection bias parts
-                narrow_weight = narrow_weight = weight[:, 2 * rank_start:2 *
-                                                       rank_end]
+                if use_ep:
+                    narrow_weight = weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    narrow_weight = weight[:,
+                                           2 * tp_rank_start:2 * tp_rank_end]
 
                 param = params_dict[new_name]
                 weight_loader = getattr(param, "weight_loader",
@@ -382,14 +421,16 @@ class OpenAIMoeForCausalLM(nn.Module):
 
             elif "down_proj_bias" in name:
                 # Handle MLP down projection bias
-                # (only load on rank 0 to avoid duplication)
-                if dist.get_rank() != 0:
-                    weight.zero_()
-
                 new_name = name.replace("down_proj_bias", "w2_bias")
                 param = params_dict[new_name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
+                if use_ep:
+                    weight = weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    # (only load on rank 0 to avoid duplication)
+                    if tp_rank != 0:
+                        weight.zero_()
                 weight_loader(param,
                               weight,
                               weight_name=new_name,
@@ -408,7 +449,7 @@ class OpenAIMoeForCausalLM(nn.Module):
                 name = name.replace("self_attn", "attn")
                 param_name = name.replace(f"{shard_id}_proj", "qkv")
                 param = params_dict[param_name]
-                weight_loader = getattr(param, "weight_loader")
+                weight_loader = param.weight_loader
                 weight_loader(param, weight, loaded_shard_id=shard_id)
                 loaded_params.add(param_name)
             else:
