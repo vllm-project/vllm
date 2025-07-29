@@ -325,8 +325,8 @@ class FusedMoEConfig:
 
     def __post_init__(self):
         if self.dp_size > 1:
-            logger.debug("Using FusedMoEConfig::max_num_tokens=%d",
-                         self.max_num_tokens)
+            logger.debug_once("Using FusedMoEConfig::max_num_tokens=%d",
+                              self.max_num_tokens)
 
         assert self.max_num_tokens > 0
 
@@ -464,10 +464,11 @@ class FusedMoEConfig:
                 )
             else:
                 _quant_config = FusedMoEQuantConfig()
-                logger.warning_once("MoE DP setup unable to determine "
-                                    "quantization scheme or unsupported "
-                                    "quantization type. This model will "
-                                    "not run with DP enabled.")
+                if moe_parallel_config.dp_size > 1:
+                    logger.warning_once("MoE DP setup unable to determine "
+                                        "quantization scheme or unsupported "
+                                        "quantization type. This model will "
+                                        "not run with DP enabled.")
         else:
             _quant_config = quant_config
 

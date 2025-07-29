@@ -27,7 +27,7 @@ class SingleTypeKVCacheManager(ABC):
         caching_hash_fn: Callable,
     ) -> None:
         """
-        Initializes the SpecializedManager.
+        Initializes the SingleTypeKVCacheManager.
         Args:
             kv_cache_spec: The kv_cache_spec for this manager.
             block_pool: The block pool.

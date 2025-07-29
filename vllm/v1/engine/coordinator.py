@@ -10,7 +10,7 @@ import zmq
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import get_mp_context, make_zmq_socket
+from vllm.utils import get_mp_context, make_zmq_socket, set_process_title
 from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
 from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
@@ -61,11 +61,12 @@ class DPCoordinator:
 
         host = parallel_config.data_parallel_master_ip
         external_lb = parallel_config.data_parallel_external_lb
+        hybrid_lb = parallel_config.data_parallel_hybrid_lb
 
         # Assume coordinator is colocated with front-end procs when not in
-        # external DP LB mode.
+        # either external or hybrid DP LB mode.
         front_publish_address = get_engine_client_zmq_addr(
-            local_only=not external_lb, host=host)
+            local_only=not external_lb and not hybrid_lb, host=host)
 
         local_only_eng = dp_size == parallel_config.data_parallel_size_local
         back_publish_address = get_engine_client_zmq_addr(local_only_eng, host)
@@ -78,7 +79,7 @@ class DPCoordinator:
 
         context = get_mp_context()
         self.proc: multiprocessing.Process = context.Process(
-            target=CoordinatorProc.run_coordinator,
+            target=DPCoordinatorProc.run_coordinator,
             name="VLLM_DP_Coordinator",
             kwargs={
                 "engine_count": parallel_config.data_parallel_size,
@@ -112,12 +113,12 @@ class EngineState:
         self.request_counts = [0, 0]  # [waiting, running]
 
 
-class CoordinatorProc:
+class DPCoordinatorProc:
 
     def __init__(self,
                  engine_count: int,
                  min_stats_update_interval_ms: int = 100):
-
+        set_process_title("DPCoordinator")
         self.ctx = zmq.Context()
 
         self.engines = [EngineState() for _ in range(engine_count)]
@@ -136,7 +137,7 @@ class CoordinatorProc:
         back_publish_address: str,
         min_stats_update_interval_ms: int = 100,
     ):
-        coordinator = CoordinatorProc(
+        coordinator = DPCoordinatorProc(
             engine_count=engine_count,
             min_stats_update_interval_ms=min_stats_update_interval_ms)
         try:
