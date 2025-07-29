@@ -460,7 +460,8 @@ class OpenAIServingChat(OpenAIServing):
 
         all_previous_token_ids: Optional[list[list[int]]]
         function_name_returned = [False] * num_choices
-        history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
+        history_tool_call_cnt = get_history_tool_calls_cnt(
+            conversation) if self.tool_call_id_type == 'kimi_k2' else 0
 
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
@@ -714,6 +715,7 @@ class OpenAIServingChat(OpenAIServing):
                                 tool_call_idx=history_tool_call_cnt))
                         if (delta_message and delta_message.tool_calls and
                                 delta_message.tool_calls[0].id is not None):
+                            # this tool call cnt is used for kimi-k2 only
                             history_tool_call_cnt += 1
 
                         # update the previous values for the next iteration
@@ -988,7 +990,8 @@ class OpenAIServingChat(OpenAIServing):
         assert final_res is not None
 
         choices: list[ChatCompletionResponseChoice] = []
-        history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
+        history_tool_call_cnt = get_history_tool_calls_cnt(
+            conversation) if self.tool_call_id_type == 'kimi_k2' else 0
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
@@ -1065,6 +1068,7 @@ class OpenAIServingChat(OpenAIServing):
                         make_tool_call_id(id_type=self.tool_call_id_type,
                                           func_name=tool_call.name,
                                           idx=history_tool_call_cnt))
+                    # this tool call cnt is used for kimi-k2 only
                     history_tool_call_cnt += 1
 
                 message = ChatMessage(

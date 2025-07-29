@@ -1381,15 +1381,14 @@ def get_history_tool_calls_cnt(conversation: list[ConversationMessage]):
         if msg['role'] == 'assistant':
             tool_calls = msg.get('tool_calls')
             if tool_calls is not None:
-                for _ in tool_calls:
-                    idx += 1
+                idx += len(tool_calls) # type: ignore
     return idx
 
-def make_tool_call_id(id_type: str = 'random', **kwargs: Any) -> str:
+def make_tool_call_id(id_type: str = 'random', func_name: Optional[str] = None,
+                      idx: Optional[int] = None) -> str:
     if id_type == 'random':
         return f"chatcmpl-tool-{random_uuid()}"
     elif id_type == 'kimi_k2':
-        assert 'func_name' in kwargs and 'idx' in kwargs
-        return f"functions.{kwargs['func_name']}:{kwargs['idx']}"
+        return f"functions.{func_name}:{idx}"
     else:
         raise ValueError(f"Invalid id_type: {id_type}")
