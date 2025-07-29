@@ -386,6 +386,8 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 
 # Install FlashInfer from source
 ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
+# Keep this in sync with https://github.com/vllm-project/vllm/blob/main/requirements/cuda.txt
+# We use `--force-reinstall --no-deps` to avoid issues with the existing FlashInfer wheel.
 ARG FLASHINFER_GIT_REF="v0.2.9rc2"
 RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
   . /etc/environment
@@ -408,7 +410,7 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
         TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
             python3 -m flashinfer.aot
         TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-            uv pip install --system --no-build-isolation .
+            uv pip install --system --no-build-isolation --force-reinstall --no-deps .
     popd
     rm -rf flashinfer
 BASH
