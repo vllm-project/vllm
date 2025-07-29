@@ -1147,30 +1147,25 @@ direct_register_custom_op(
 
 
 def flashinfer_fused_moe_per_tensor_scale_fp8(
-    routing_logits: torch.Tensor,
-    routing_bias: Optional[torch.Tensor],
-    hidden_states: torch.Tensor,
-    input_scale: torch.Tensor,
-    gemm1_weights: torch.Tensor,
-    gemm1_weights_scale: torch.Tensor,
-    activation_scale: torch.Tensor,
-    gemm2_weights: torch.Tensor,
-    gemm2_weights_scale: torch.Tensor,
-    num_experts: int,
-    top_k: int,
-    num_expert_group: Optional[int],
-    topk_group: Optional[int],
-    intermediate_size: int,
-    local_expert_offset: int,
-    local_num_experts: int,
-    use_routing_scales_on_input: bool,
-    routed_scaling_factor: float = 1.0,
-    routing_method_type: int = 3  # Llama4-styled routing method
-) -> torch.Tensor:
-    if routing_bias is None:
-        routing_bias = torch.zeros(num_experts,
-                                   dtype=torch.bfloat16,
-                                   device=hidden_states.device)
+        routing_logits: torch.Tensor,
+        routing_bias: Optional[torch.Tensor],
+        hidden_states: torch.Tensor,
+        input_scale: torch.Tensor,
+        gemm1_weights: torch.Tensor,
+        gemm1_weights_scale: torch.Tensor,
+        activation_scale: torch.Tensor,
+        gemm2_weights: torch.Tensor,
+        gemm2_weights_scale: torch.Tensor,
+        num_experts: int,
+        top_k: int,
+        num_expert_group: Optional[int],
+        topk_group: Optional[int],
+        intermediate_size: int,
+        local_expert_offset: int,
+        local_num_experts: int,
+        use_routing_scales_on_input: bool,
+        routing_method_type: int,
+        routed_scaling_factor: float = 1.0) -> torch.Tensor:
     num_expert_group = num_expert_group if num_expert_group is not None else 0
     topk_group = topk_group if topk_group is not None else 0
 
@@ -1205,7 +1200,8 @@ def flashinfer_fused_moe_per_tensor_scale_fp8(
         local_num_experts=local_num_experts,
         routed_scaling_factor=routed_scaling_factor,
         use_routing_scales_on_input=use_routing_scales_on_input,
-        tile_tokens_dim=8,
+        tile_tokens_dim=calculate_tile_tokens_dim(hidden_states.shape[0],
+                                                  top_k, num_experts),
         routing_method_type=routing_method_type)
 
 

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Optional
+
 import torch
 
 
@@ -58,3 +60,41 @@ def rotate_flashinfer_fp8_moe_weights(gemm1_weights: torch.Tensor,
         torch.float8_e4m3fn)
     gemm2_weights.data = torch.stack(gemm2_weights_fp8_shuffled).view(
         torch.float8_e4m3fn)
+
+
+def apply_flashinfer_per_tensor_scale_fp8(
+    layer: torch.nn.Module,
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    routing_bias: Optional[torch.Tensor],
+    top_k: int,
+    num_expert_group: Optional[int],
+    topk_group: Optional[int],
+    global_num_experts: int,
+    apply_router_weight_on_input: bool,
+) -> torch.Tensor:
+    from flashinfer.fushed_moe import RoutingMethodType
+
+    from vllm.model_executor.models.llama4 import Llama4MoE
+    assert layer.custom_routing_function == Llama4MoE.custom_routing_function, \
+        "FusedMoE flashinfer kernels are only supported for Llama4"
+    return torch.ops.vllm.flashinfer_fused_moe_per_tensor_scale_fp8(
+        routing_logits=router_logits,
+        routing_bias=routing_bias,
+        hidden_states=hidden_states,
+        input_scale=layer.w13_input_scale,
+        gemm1_weights=layer.w13_weight,
+        gemm1_weights_scale=layer.w13_weight_scale,
+        gemm2_weights=layer.w2_weight,
+        gemm2_weights_scale=layer.w2_weight_scale,
+        activation_scale=layer.w2_input_scale,
+        num_experts=global_num_experts,
+        top_k=top_k,
+        num_expert_group=num_expert_group,
+        topk_group=topk_group,
+        intermediate_size=layer.intermediate_size_per_partition,
+        local_expert_offset=layer.ep_rank * layer.local_num_experts,
+        local_num_experts=layer.local_num_experts,
+        use_routing_scales_on_input=apply_router_weight_on_input,
+        routing_method=RoutingMethodType.Llama4,
+    )

@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
 import torch.nn.functional as F
+from quantization.utils.flashinfer_utils import (
+    apply_flashinfer_per_tensor_scale_fp8)
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
@@ -1024,26 +1026,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             else:
                 assert (not renormalize
                         and custom_routing_function is not None)
-                return torch.ops.vllm.flashinfer_fused_moe_per_tensor_scale_fp8(
-                    routing_logits=router_logits,
-                    routing_bias=e_score_correction_bias,
+                return apply_flashinfer_per_tensor_scale_fp8(
+                    layer=layer,
                     hidden_states=x,
-                    input_scale=layer.w13_input_scale,
-                    gemm1_weights=layer.w13_weight,
-                    gemm1_weights_scale=layer.w13_weight_scale,
-                    gemm2_weights=layer.w2_weight,
-                    gemm2_weights_scale=layer.w2_weight_scale,
-                    activation_scale=layer.w2_input_scale,
-                    num_experts=global_num_experts,
+                    router_logits=router_logits,
+                    routing_bias=e_score_correction_bias,
+                    global_num_experts=global_num_experts,
                     top_k=top_k,
                     num_expert_group=num_expert_group,
                     topk_group=topk_group,
-                    intermediate_size=layer.intermediate_size_per_partition,
-                    local_expert_offset=layer.ep_rank *
-                    layer.local_num_experts,
-                    local_num_experts=layer.local_num_experts,
-                    use_routing_scales_on_input=apply_router_weight_on_input,
-                )
+                    apply_router_weight_on_input=apply_router_weight_on_input)
         else:
             return self.fused_experts(
                 hidden_states=x,
