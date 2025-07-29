@@ -149,9 +149,6 @@ pull_request_rules:
       - files=examples/offline_inference/structured_outputs.py
       - files=examples/online_serving/openai_chat_completion_structured_outputs.py
       - files=examples/online_serving/openai_chat_completion_structured_outputs_with_reasoning.py
-      - files~=^vllm/model_executor/guided_decoding/
-      - files=tests/model_executor/test_guided_processors.py
-      - files=tests/entrypoints/llm/test_guided_generate.py
       - files~=^tests/v1/structured_output/
       - files=tests/v1/entrypoints/llm/test_guided_generate.py
       - files~=^vllm/v1/structured_output/
