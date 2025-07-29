@@ -57,8 +57,7 @@ cc the PyTorch release team to initiate discussion on how to address them.
 
 ## Update CUDA version
 
-The PyTorch release matrix includes both stable and experimental [CUDA versions](https://github.com/pytorch/pytorch/blob/main/RELEASE.md#release-compatibility-matrix). Due to limitations, only the latest stable CUDA version (for example,
-`torch2.7.0+cu12.6`) is uploaded to PyPI. However, vLLM may require a different CUDA version,
+The PyTorch release matrix includes both stable and experimental [CUDA versions](https://github.com/pytorch/pytorch/blob/main/RELEASE.md#release-compatibility-matrix). Due to limitations, only the latest stable CUDA version (for example, torch `2.7.1+cu126`) is uploaded to PyPI. However, vLLM may require a different CUDA version,
 such as 12.8 for Blackwell support.
 This complicates the process as we cannot use the out-of-the-box
 `pip install torch torchvision torchaudio` command. The solution is to use
