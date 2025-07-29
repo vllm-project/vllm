@@ -7,27 +7,31 @@ This script compares the tensor outputs from two different intermediate logging
 directories and generates a report of the differences.
 
 Usage:
-    python compare_intermediate.py --dir1 /path/to/first/log/dir --dir2 /path/to/second/log/dir [options]
+    python compare_intermediate.py --dir1 /path/to/first/log/dir \
+        --dir2 /path/to/second/log/dir [options]
 
 Options:
     --dir1 DIR           First intermediate logging directory
     --dir2 DIR           Second intermediate logging directory
     --output FILE        Output file for the report (default: stdout)
     --format {md,json}   Output format (default: md)
-    --rtol FLOAT         Relative tolerance for tensor comparison (default: 1e-5)
-    --atol FLOAT         Absolute tolerance for tensor comparison (default: 1e-8)
+    --rtol FLOAT         Relative tolerance for tensor comparison 
+                         (default: 1e-5)
+    --atol FLOAT         Absolute tolerance for tensor comparison 
+                         (default: 1e-8)
     --steps STEPS        Comma-separated list of steps to compare (default: all)
-    --modules MODULES    Comma-separated list of module name patterns to compare (default: all)
+    --modules MODULES    Comma-separated list of module name patterns to compare
+                         (default: all)
     --verbose            Include detailed information about each tensor
 """
 
 import argparse
 import json
-import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
+import regex as re
 import torch
 
 
@@ -40,34 +44,29 @@ def load_tensor(path: Path) -> torch.Tensor:
         return None
 
 
-def load_json(path: Path) -> Dict:
+def load_json(path: Path) -> dict:
     """Load a JSON file."""
     try:
-        with open(path, "r") as f:
+        with open(path) as f:
             return json.load(f)
     except Exception as e:
         print(f"Error loading JSON from {path}: {e}")
         return {}
 
 
-def extract_diff_metatada(exception_str: str) -> Dict:
+def extract_diff_metatada(exception_str: str) -> dict:
     try:
         num_diff_elements = int(
-            re.search(r"Mismatched elements: (\d+) /", exception_str).group(1)
-        )
+            re.search(r"Mismatched elements: (\d+) /", exception_str).group(1))
         total_elements = int(
-            re.search(r"Mismatched elements: \d+ / (\d+)", exception_str).group(1)
-        )
+            re.search(r"Mismatched elements: \d+ / (\d+)",
+                      exception_str).group(1))
         max_abs_diff = float(
-            re.search(
-                r"Greatest absolute difference: ([\d\.e-]+)", exception_str
-            ).group(1)
-        )
+            re.search(r"Greatest absolute difference: ([\d\.e-]+)",
+                      exception_str).group(1))
         max_rel_diff = float(
-            re.search(
-                r"Greatest relative difference: ([\d\.e-]+)", exception_str
-            ).group(1)
-        )
+            re.search(r"Greatest relative difference: ([\d\.e-]+)",
+                      exception_str).group(1))
         return {
             "num_diff_elements": num_diff_elements,
             "total_elements": total_elements,
@@ -78,9 +77,8 @@ def extract_diff_metatada(exception_str: str) -> Dict:
         return {"error": exception_str}
 
 
-def compare_tensors(
-    tensor1: torch.Tensor, tensor2: torch.Tensor, rtol: float, atol: float
-) -> Dict:
+def compare_tensors(tensor1: torch.Tensor, tensor2: torch.Tensor, rtol: float,
+                    atol: float) -> dict:
     """Compare two tensors and return a dictionary with comparison results."""
     if tensor1 is None or tensor2 is None:
         return {"match": False, "error": "One or both tensors are None"}
@@ -105,12 +103,16 @@ def compare_tensors(
     return {"match": True}
 
 
-def compare_json_values(value1: Any, value2: Any) -> Dict:
-    """Compare two JSON values and return a dictionary with comparison results."""
+def compare_json_values(value1: Any, value2: Any) -> dict:
+    """Compare two JSON values and return a dictionary with comparison 
+    results."""
     if type(value1) is not type(value2):
         return {
-            "match": False,
-            "error": f"Type mismatch: {type(value1).__name__} vs {type(value2).__name__}",
+            "match":
+            False,
+            "error":
+            f"Type mismatch: {type(value1).__name__} vs "
+            f"{type(value2).__name__}",
         }
 
     if isinstance(value1, dict):
@@ -158,7 +160,8 @@ def compare_json_values(value1: Any, value2: Any) -> Dict:
             return {"match": False, "value1": value1, "value2": value2}
 
 
-def find_tensor_files(directory: Path) -> Dict[str, Dict[str, Dict[str, List[Path]]]]:
+def find_tensor_files(
+        directory: Path) -> dict[str, dict[str, dict[str, list[Path]]]]:
     """
     Find all tensor files in the given directory.
 
@@ -211,10 +214,10 @@ def find_tensor_files(directory: Path) -> Dict[str, Dict[str, Dict[str, List[Pat
 
 
 def filter_steps_and_modules(
-    tensor_files: Dict[str, Dict[str, Dict[str, List[Path]]]],
-    steps: Optional[List[str]] = None,
-    module_patterns: Optional[List[str]] = None,
-) -> Dict[str, Dict[str, Dict[str, List[Path]]]]:
+    tensor_files: dict[str, dict[str, dict[str, list[Path]]]],
+    steps: Optional[list[str]] = None,
+    module_patterns: Optional[list[str]] = None,
+) -> dict[str, dict[str, dict[str, list[Path]]]]:
     """Filter tensor files by steps and module patterns."""
     result = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
 
@@ -223,11 +226,13 @@ def filter_steps_and_modules(
         step_names = [f"step_{step}" for step in steps]
         steps_to_include = {step: True for step in step_names}
     else:
-        steps_to_include = {step: True for step in tensor_files.keys()}
+        steps_to_include = {step: True for step in tensor_files}
 
     # Compile module patterns
     if module_patterns:
-        compiled_patterns = [re.compile(pattern) for pattern in module_patterns]
+        compiled_patterns = [
+            re.compile(pattern) for pattern in module_patterns
+        ]
     else:
         compiled_patterns = None
 
@@ -237,11 +242,10 @@ def filter_steps_and_modules(
 
         for module_name, file_types in modules.items():
             # Check if module matches any pattern
-            if compiled_patterns:
-                if not any(
-                    pattern.search(module_name) for pattern in compiled_patterns
-                ):
-                    continue
+            if compiled_patterns and not any(
+                    pattern.search(module_name)
+                    for pattern in compiled_patterns):
+                continue
 
             result[step_name][module_name] = file_types
 
@@ -253,9 +257,9 @@ def compare_directories(
     dir2: Path,
     rtol: Optional[float] = None,
     atol: Optional[float] = None,
-    steps: Optional[List[str]] = None,
-    module_patterns: Optional[List[str]] = None,
-) -> Dict:
+    steps: Optional[list[str]] = None,
+    module_patterns: Optional[list[str]] = None,
+) -> dict:
     """Compare two intermediate logging directories and return a report."""
     # Find tensor files in both directories
     tensor_files1 = find_tensor_files(dir1)
@@ -263,8 +267,10 @@ def compare_directories(
 
     # Filter by steps and modules
     if steps or module_patterns:
-        tensor_files1 = filter_steps_and_modules(tensor_files1, steps, module_patterns)
-        tensor_files2 = filter_steps_and_modules(tensor_files2, steps, module_patterns)
+        tensor_files1 = filter_steps_and_modules(tensor_files1, steps,
+                                                 module_patterns)
+        tensor_files2 = filter_steps_and_modules(tensor_files2, steps,
+                                                 module_patterns)
 
     # Get all steps and modules from both directories
     all_steps = set(tensor_files1.keys()) | set(tensor_files2.keys())
@@ -296,12 +302,12 @@ def compare_directories(
         # TODO: check if module calls txt exsits
         dir1_module_call_file = dir1 / step / "module_calls.txt"
         if dir1_module_call_file.exists():
-            with open(dir1 / step / "module_calls.txt", "r") as f:
+            with open(dir1 / step / "module_calls.txt") as f:
                 all_modules = f.read().splitlines()
         else:
             print(
-                "Warnings: the module call orders are missed, ordering using module alphbetics"
-            )
+                "Warnings: the module call orders are missed, ordering using "
+                "module alphbetics")
             all_modules = sorted(set(modules1.keys()) | set(modules2.keys()))
         step_report["module_call_list"] = []
         for module in all_modules:
@@ -345,16 +351,21 @@ def compare_directories(
                     # Add file paths for manual checking when there's a mismatch
                     if not json_comparison.get("match", True):
                         module_report[f"{json_name}_metadata"]["file1"] = str(
-                            json_files1[0]
-                        )
+                            json_files1[0])
                         module_report[f"{json_name}_metadata"]["file2"] = str(
-                            json_files2[0]
-                        )
+                            json_files2[0])
 
             # Compare input tensors
-            input_tensors1 = {p.name: p for p in modules1[module].get("inputs", [])}
-            input_tensors2 = {p.name: p for p in modules2[module].get("inputs", [])}
-            all_input_names = set(input_tensors1.keys()) | set(input_tensors2.keys())
+            input_tensors1 = {
+                p.name: p
+                for p in modules1[module].get("inputs", [])
+            }
+            input_tensors2 = {
+                p.name: p
+                for p in modules2[module].get("inputs", [])
+            }
+            all_input_names = set(input_tensors1.keys()) | set(
+                input_tensors2.keys())
 
             for tensor_name in sorted(all_input_names):
                 if tensor_name not in input_tensors1:
@@ -389,9 +400,16 @@ def compare_directories(
                 module_report["summary"]["total_tensors"] += 1
 
             # Compare output tensors
-            output_tensors1 = {p.name: p for p in modules1[module].get("outputs", [])}
-            output_tensors2 = {p.name: p for p in modules2[module].get("outputs", [])}
-            all_output_names = set(output_tensors1.keys()) | set(output_tensors2.keys())
+            output_tensors1 = {
+                p.name: p
+                for p in modules1[module].get("outputs", [])
+            }
+            output_tensors2 = {
+                p.name: p
+                for p in modules2[module].get("outputs", [])
+            }
+            all_output_names = set(output_tensors1.keys()) | set(
+                output_tensors2.keys())
 
             for tensor_name in sorted(all_output_names):
                 if tensor_name not in output_tensors1:
@@ -439,64 +457,58 @@ def compare_directories(
 
     # Add overall summary
     report["summary"] = {
-        "total_steps": len(all_steps),
-        "total_modules": sum(
-            step_report["summary"]["total_modules"]
-            for step_report in report["steps"].values()
-        ),
-        "matching_modules": sum(
-            step_report["summary"]["matching_modules"]
-            for step_report in report["steps"].values()
-        ),
-        "mismatched_modules": sum(
-            step_report["summary"]["mismatched_modules"]
-            for step_report in report["steps"].values()
-        ),
-        "missing_modules": sum(
-            step_report["summary"]["missing_modules"]
-            for step_report in report["steps"].values()
-        ),
-        "total_tensors": sum(
-            module_report["summary"]["total_tensors"]
+        "total_steps":
+        len(all_steps),
+        "total_modules":
+        sum(step_report["summary"]["total_modules"]
+            for step_report in report["steps"].values()),
+        "matching_modules":
+        sum(step_report["summary"]["matching_modules"]
+            for step_report in report["steps"].values()),
+        "mismatched_modules":
+        sum(step_report["summary"]["mismatched_modules"]
+            for step_report in report["steps"].values()),
+        "missing_modules":
+        sum(step_report["summary"]["missing_modules"]
+            for step_report in report["steps"].values()),
+        "total_tensors":
+        sum(module_report["summary"]["total_tensors"]
             for step_report in report["steps"].values()
             for module_name, module_report in step_report["modules"].items()
-            if "summary" in module_report
-        ),
-        "matching_tensors": sum(
-            module_report["summary"]["matching_tensors"]
+            if "summary" in module_report),
+        "matching_tensors":
+        sum(module_report["summary"]["matching_tensors"]
             for step_report in report["steps"].values()
             for module_name, module_report in step_report["modules"].items()
-            if "summary" in module_report
-        ),
-        "mismatched_tensors": sum(
-            module_report["summary"]["mismatched_tensors"]
+            if "summary" in module_report),
+        "mismatched_tensors":
+        sum(module_report["summary"]["mismatched_tensors"]
             for step_report in report["steps"].values()
             for module_name, module_report in step_report["modules"].items()
-            if "summary" in module_report
-        ),
-        "missing_tensors": sum(
-            module_report["summary"]["missing_tensors"]
+            if "summary" in module_report),
+        "missing_tensors":
+        sum(module_report["summary"]["missing_tensors"]
             for step_report in report["steps"].values()
             for module_name, module_report in step_report["modules"].items()
-            if "summary" in module_report
-        ),
+            if "summary" in module_report),
     }
 
     return report
 
 
-def generate_markdown_report(report: Dict, verbose: bool = False) -> str:
+def generate_markdown_report(report: dict, verbose: bool = False) -> str:
     """Generate a markdown report from the comparison results."""
     lines = []
 
     # Add header
     lines.append("# Intermediate Logging Comparison Report")
     lines.append("")
-    lines.append("Comparing intermediate logging outputs between:")
+    lines.append("Comparing intermediate logging outputs "
+                 "between:")
     lines.append(f"- **Directory 1**: `{report['dir1']}`")
     lines.append(f"- **Directory 2**: `{report['dir2']}`")
     lines.append("")
-    lines.append(f"Comparison parameters:")
+    lines.append("Comparison parameters:")
     lines.append(f"- Relative tolerance (rtol): {report['rtol']}")
     lines.append(f"- Absolute tolerance (atol): {report['atol']}")
     lines.append("")
@@ -509,11 +521,13 @@ def generate_markdown_report(report: Dict, verbose: bool = False) -> str:
     lines.append("|----------|-------|----------|------------|---------|")
     lines.append(f"| Steps | {summary['total_steps']} | - | - | - |")
     lines.append(
-        f"| Modules | {summary['total_modules']} | {summary['matching_modules']} | {summary['mismatched_modules']} | {summary['missing_modules']} |"
-    )
+        f"| Modules | {summary['total_modules']} | "
+        f"{summary['matching_modules']} | {summary['mismatched_modules']} | "
+        f"{summary['missing_modules']} |")
     lines.append(
-        f"| Tensors | {summary['total_tensors']} | {summary['matching_tensors']} | {summary['mismatched_tensors']} | {summary['missing_tensors']} |"
-    )
+        f"| Tensors | {summary['total_tensors']} | "
+        f"{summary['matching_tensors']} | {summary['mismatched_tensors']} | "
+        f"{summary['missing_tensors']} |")
     lines.append("")
 
     # Add step details
@@ -523,8 +537,9 @@ def generate_markdown_report(report: Dict, verbose: bool = False) -> str:
         lines.append(f"## {step_name}")
         lines.append("")
         lines.append(
-            f"**Summary**: {step_summary['matching_modules']} matching modules, {step_summary['mismatched_modules']} mismatched modules, {step_summary['missing_modules']} missing modules"
-        )
+            f"**Summary**: {step_summary['matching_modules']} matching "
+            f"modules, {step_summary['mismatched_modules']} mismatched "
+            f"modules, {step_summary['missing_modules']} missing modules")
         lines.append("")
 
         # Add module details
@@ -540,15 +555,14 @@ def generate_markdown_report(report: Dict, verbose: bool = False) -> str:
             module_summary = module_report["summary"]
 
             # Determine module status
-            if module_summary["mismatched_tensors"] > 0:
-                status = "❌"
-            else:
-                status = "✅"
+            status = "❌" if module_summary["mismatched_tensors"] > 0 else "✅"
 
             lines.append(f"### {status} {module_name}")
             lines.append("")
             lines.append(
-                f"**Summary**: {module_summary['matching_tensors']} matching tensors, {module_summary['mismatched_tensors']} mismatched tensors, {module_summary['missing_tensors']} missing tensors"
+                f"**Summary**: {module_summary['matching_tensors']} matching "
+                f"tensors, {module_summary['mismatched_tensors']} mismatched "
+                f"tensors, {module_summary['missing_tensors']} missing tensors"
             )
             lines.append("")
 
@@ -558,20 +572,21 @@ def generate_markdown_report(report: Dict, verbose: bool = False) -> str:
                     metadata_comparison = module_report[metadata_type]
                     if not metadata_comparison.get("match", True):
                         file_paths = ""
-                        if (
-                            "file1" in metadata_comparison
-                            and "file2" in metadata_comparison
-                        ):
-                            file_paths = f" - Files: `{metadata_comparison['file1']}` vs `{metadata_comparison['file2']}`"
+                        if ("file1" in metadata_comparison
+                                and "file2" in metadata_comparison):
+                            file_paths = (
+                                f" - Files: "
+                                f"`{metadata_comparison['file1']}` "
+                                f"vs `{metadata_comparison['file2']}`")
 
                         lines.append(
-                            f"**{metadata_type.capitalize()}**: Mismatch detected{file_paths}"
-                        )
+                            f"**{metadata_type.capitalize()}**: Mismatch "
+                            f"detected{file_paths}")
                         if verbose and "mismatches" in metadata_comparison:
                             lines.append("```json")
                             lines.append(
-                                json.dumps(metadata_comparison["mismatches"], indent=2)
-                            )
+                                json.dumps(metadata_comparison["mismatches"],
+                                           indent=2))
                             lines.append("```")
                         lines.append("")
 
@@ -585,8 +600,7 @@ def generate_markdown_report(report: Dict, verbose: bool = False) -> str:
                     lines.append("|--------|--------|---------|")
 
                     for tensor_name, comparison in sorted(
-                        module_report["inputs"].items()
-                    ):
+                            module_report["inputs"].items()):
                         if comparison.get("match", False):
                             status = "✅"
                             details = "Tensors match"
@@ -595,13 +609,23 @@ def generate_markdown_report(report: Dict, verbose: bool = False) -> str:
                             details = comparison["error"]
                         else:
                             status = "❌"
-                            details = f"Max abs diff: {comparison.get('max_abs_diff', 'N/A'):.2e}, "
-                            details = f"Max relative diff: {comparison.get('max_rel_diff', 'N/A'):.2e}, "
-                            details += f"Diff elements: {comparison.get('num_diff_elements', 'N/A')}/{comparison.get('total_elements', 'N/A')}"
+                            details = (
+                                f"Max abs diff: "
+                                f"{comparison.get('max_abs_diff', 'N/A')}, ")
+                            details += (
+                                f"Max relative diff: "
+                                f"{comparison.get('max_rel_diff', 'N/A')}, ")
+                            details += (
+                                f"Diff elements: "
+                                f"{comparison.get('num_diff_elements', 'N/A')}/"
+                                f"{comparison.get('total_elements', 'N/A')}")
                             if "file1" in comparison and "file2" in comparison:
-                                details += f"<br>Files: `{comparison['file1']}` vs `{comparison['file2']}`"
+                                details += (
+                                    f"<br>Files: `{comparison['file1']}` vs "
+                                    f"`{comparison['file2']}`")
 
-                        lines.append(f"| {tensor_name} | {status} | {details} |")
+                        lines.append(
+                            f"| {tensor_name} | {status} | {details} |")
 
                     lines.append("")
 
@@ -613,8 +637,7 @@ def generate_markdown_report(report: Dict, verbose: bool = False) -> str:
                     lines.append("|--------|--------|---------|")
 
                     for tensor_name, comparison in sorted(
-                        module_report["outputs"].items()
-                    ):
+                            module_report["outputs"].items()):
                         if comparison.get("match", False):
                             status = "✅"
                             details = "Tensors match"
@@ -623,11 +646,19 @@ def generate_markdown_report(report: Dict, verbose: bool = False) -> str:
                             details = comparison["error"]
                         else:
                             status = "❌"
-                            details = f"Max abs diff: {comparison.get('max_abs_diff', 'N/A')}, "
-                            details = f"Max relative diff: {comparison.get('max_rel_diff', 'N/A')}, "
-                            details += f"Diff elements: {comparison.get('num_diff_elements', 'N/A')}/{comparison.get('total_elements', 'N/A')}"
+                            details = (
+                                f"Max abs diff: "
+                                f"{comparison.get('max_abs_diff', 'N/A')}, ")
+                            details += (
+                                f"Max relative diff: "
+                                f"{comparison.get('max_rel_diff', 'N/A')}, ")
+                            details += (
+                                f"Diff elements: "
+                                f"{comparison.get('num_diff_elements', 'N/A')}/"
+                                f"{comparison.get('total_elements', 'N/A')}")
 
-                        lines.append(f"| {tensor_name} | {status} | {details} |")
+                        lines.append(
+                            f"| {tensor_name} | {status} | {details} |")
 
                     lines.append("")
 
@@ -636,15 +667,16 @@ def generate_markdown_report(report: Dict, verbose: bool = False) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Compare intermediate logging outputs from two different runs."
-    )
-    parser.add_argument(
-        "--dir1", required=True, help="First intermediate logging directory"
-    )
-    parser.add_argument(
-        "--dir2", required=True, help="Second intermediate logging directory"
-    )
-    parser.add_argument("--output", help="Output file for the report (default: stdout)")
+        description=
+        "Compare intermediate logging outputs from two different runs.")
+    parser.add_argument("--dir1",
+                        required=True,
+                        help="First intermediate logging directory")
+    parser.add_argument("--dir2",
+                        required=True,
+                        help="Second intermediate logging directory")
+    parser.add_argument("--output",
+                        help="Output file for the report (default: stdout)")
     parser.add_argument(
         "--rtol",
         type=float,
@@ -658,11 +690,12 @@ def main():
         help="Absolute tolerance for tensor comparison (default: 1e-8)",
     )
     parser.add_argument(
-        "--steps", help="Comma-separated list of steps to compare (default: all)"
-    )
+        "--steps",
+        help="Comma-separated list of steps to compare (default: all)")
     parser.add_argument(
         "--modules",
-        help="Comma-separated list of module name patterns to compare (default: all)",
+        help="Comma-separated list of module name patterns to compare "
+        "(default: all)",
     )
     parser.add_argument(
         "--verbose",

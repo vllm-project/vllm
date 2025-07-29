@@ -5,9 +5,8 @@ Tests for the intermediate tensor logging functionality.
 """
 
 import json
-from os.path import isdir
-import shutil
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -17,14 +16,10 @@ import torch
 import torch.nn as nn
 
 from vllm.config import IntermediateLoggingConfig
-from vllm.v1.intermediates.intermediates_logging import (get_current_il_config,
-                                                  get_step, increment_step,
-                                                  intermediate_logging,
-                                                  register_intermediate_hooks,
-                                                  reset_step,
-                                                  should_log_device,
-                                                  should_log_module,
-                                                  should_log_step)
+from vllm.v1.intermediates.intermediates_logging import (
+    get_current_il_config, get_step, increment_step, intermediate_logging,
+    register_intermediate_hooks, reset_step, should_log_device,
+    should_log_module, should_log_step)
 
 
 class SimpleModel(nn.Module):
@@ -237,7 +232,8 @@ def test_register_hooks(simple_model, il_config):
     assert len(logger_instance.hooks) == 0
 
 
-@mock.patch('vllm.v1.intermediates.intermediates_logging.dump_intermediates_to_json')
+@mock.patch(
+    'vllm.v1.intermediates.intermediates_logging.dump_intermediates_to_json')
 @mock.patch('vllm.v1.intermediates.intermediates_logging.save_tensors')
 def test_forward_hooks(mock_save_tensors, mock_dump_json, simple_model,
                        il_config, temp_output_dir):
@@ -262,7 +258,6 @@ def test_forward_hooks(mock_save_tensors, mock_dump_json, simple_model,
         # Check that dump_intermediates_to_json and save_tensors were called
         assert mock_dump_json.called
         assert mock_save_tensors.called
-        
 
         # Remove hooks
         logger_instance.remove_hooks()
