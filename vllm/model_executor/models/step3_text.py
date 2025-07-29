@@ -108,7 +108,6 @@ class Step3TextMLP(nn.Module):
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
-        self.prefix = prefix
         self.hidden_size = hidden_size
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -190,7 +189,6 @@ class Step3TextAttention(nn.Module):
                               self.num_kv_heads,
                               cache_config=cache_config,
                               prefix=f"{prefix}.attn")
-        self.prefix = prefix
 
     def forward(self, positions: torch.Tensor,
                 hidden_states: torch.Tensor) -> torch.Tensor:
@@ -263,7 +261,6 @@ class Step3TextDecoderLayer(nn.Module):
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
-        self.prefix = prefix
 
     def forward(
             self, positions: torch.Tensor, hidden_states: torch.Tensor,
@@ -352,6 +349,7 @@ class Step3TextModel(nn.Module):
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.get_input_embeddings(input_ids)
+            residual = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]

@@ -18,6 +18,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -36,7 +37,7 @@ from vllm.transformers_utils.configs import Step3VisionEncoderConfig
 from vllm.transformers_utils.processors import Step3VisionProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (flatten_bn, init_vllm_registered_model,
                     is_pp_missing_parameter, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -138,14 +139,14 @@ class ImagePatcher:
         if w_ratio < 1:
             width_new = img_width
         else:
-            xiaoshu_w = w_ratio - img_width // window_size
-            w_ratio = int(w_ratio) + 1 if xiaoshu_w > 0.2 else int(w_ratio)
+            decimal_w = w_ratio - img_width // window_size
+            w_ratio = int(w_ratio) + 1 if decimal_w > 0.2 else int(w_ratio)
             width_new = window_size * w_ratio
         if h_ratio < 1:
             height_new = img_height
         else:
-            xiaoshu_h = h_ratio - img_height // window_size
-            h_ratio = int(h_ratio) + 1 if xiaoshu_h > 0.2 else int(h_ratio)
+            decimal_h = h_ratio - img_height // window_size
+            h_ratio = int(h_ratio) + 1 if decimal_h > 0.2 else int(h_ratio)
             height_new = window_size * h_ratio
         return int(width_new), int(height_new)
 
@@ -255,10 +256,7 @@ class Step3VLProcessor:
     def image_token_id(self) -> int:
         return self.tokenizer.get_vocab()[self.image_token]
 
-    def get_num_image_tokens(self,
-                             img_width: int,
-                             img_height: int,
-                             detail: str = "auto") -> int:
+    def get_num_image_tokens(self, img_width: int, img_height: int) -> int:
         num_patches, num_newlines = self.patcher.get_num_patches(
             img_width, img_height)
 
@@ -453,8 +451,7 @@ class Step3VLProcessingInfo(BaseProcessingInfo):
             image_data = [image_data]
 
         return sum(self.get_hf_processor().get_num_image_tokens(
-            img.width, img.height, detail=img.info.get("detail", None))
-                   for img in image_data)
+            img.width, img.height) for img in image_data)
 
 
 class Step3VLDummyInputsBuilder(BaseDummyInputsBuilder[Step3VLProcessingInfo]):
@@ -631,9 +628,9 @@ class Step3VisionAttention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
-        self.qkv_proj = RowParallelLinear(self.embed_dim,
-                                          self.head_dim *
-                                          self.total_num_heads * 3,
+        self.qkv_proj = QKVParallelLinear(self.embed_dim,
+                                          self.head_dim,
+                                          self.total_num_heads,
                                           bias=True,
                                           quant_config=quant_config,
                                           prefix=prefix)
@@ -696,15 +693,10 @@ class Step3VisionMLP(nn.Module):
                                      quant_config=quant_config,
                                      prefix=prefix)
 
-    def forward(self,
-                hidden_states: torch.Tensor,
-                residual=None,
-                layernorm=None) -> torch.Tensor:
-        if layernorm is not None:
-            hidden_states = layernorm(hidden_states)
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.fc1(hidden_states)
         hidden_states = self.activation_fn(hidden_states)
-        hidden_states, _ = self.fc2(hidden_states, residual=residual)
+        hidden_states, _ = self.fc2(hidden_states)
         return hidden_states
 
 
@@ -793,7 +785,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
-            return f"Picture {i}: <img></img>"
+            return "<im_patch>"
 
         raise ValueError("Only image modality is supported")
 
@@ -909,7 +901,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def _get_vision_model_output(self,
                                  input_tensor: torch.Tensor) -> torch.Tensor:
-        return self.vision_model(input_tensor)[0][:, 4:]
+        return self.vision_model(input_tensor)[:, 4:]
 
     def _process_image_input(
             self, image_input: Step3VLImageInputs) -> tuple[torch.Tensor, ...]:
@@ -954,9 +946,9 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        vision_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
-        if vision_embeddings is None:
+        if multimodal_embeddings is None:
             inputs_embeds = self.language_model.model.get_input_embeddings(
                 input_ids)
         else:
@@ -970,7 +962,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         device=text_embeds.device)
             inputs_embeds[is_text] = text_embeds
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, vision_embeddings,
+                input_ids, inputs_embeds, multimodal_embeddings,
                 self.config.image_token_id)
         return inputs_embeds
 

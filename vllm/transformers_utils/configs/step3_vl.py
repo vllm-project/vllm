@@ -99,6 +99,7 @@ class Step3VLConfig(PretrainedConfig):
         text_config: Optional[Union[dict, Step3TextConfig]] = None,
         understand_projector_stride: int = 1,
         projector_bias: bool = True,
+        image_token_id: int = 128001,
         **kwargs,
     ) -> None:
         if vision_config is None:
@@ -116,5 +117,6 @@ class Step3VLConfig(PretrainedConfig):
         self.understand_projector_stride = understand_projector_stride
         self.projector_bias = projector_bias
         self.hidden_size = text_config.hidden_size
+        self.image_token_id = image_token_id
 
         super().__init__(**kwargs)
