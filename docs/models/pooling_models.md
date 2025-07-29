@@ -47,7 +47,7 @@ enabling the corresponding APIs:
 
 | Task       | APIs               |
 |------------|--------------------|
-| `reward`   | `encode`           |
+| `encode`   | `reward`           |
 | `embed`    | `embed`, `score`\* |
 | `classify` | `classify`         |
 | `score`    | `score`            |
