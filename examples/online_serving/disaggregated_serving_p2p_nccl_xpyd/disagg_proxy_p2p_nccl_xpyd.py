@@ -64,12 +64,12 @@ def _listen_for_register(poller, router_socket):
                     )
                     _remove_oldest_instances(decode_instances)
             else:
-                node = None
                 print(
                     "Unexpected, Received message from %s, data: %s",
                     remote_address,
                     data,
                 )
+                return
 
             if node is None:
                 print(f"🔵Add [HTTP:{data['http_address']}, ZMQ:{data['zmq_address']}]")
