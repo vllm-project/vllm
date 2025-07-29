@@ -98,8 +98,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         """
         return False
 
-    def maybe_make_prepare_finalize(self,
-            moe: FusedMoEConfig) -> Optional[FusedMoEPrepareAndFinalize]:
+    @staticmethod
+    def _maybe_make_prepare_finalize(
+        moe: FusedMoEConfig,
+    ) -> Optional[FusedMoEPrepareAndFinalize]:
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
 
@@ -186,6 +188,12 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             )
 
         return prepare_finalize
+
+    def maybe_make_prepare_finalize(
+        self,
+        moe: FusedMoEConfig,
+    ) -> Optional[FusedMoEPrepareAndFinalize]:
+        return FusedMoEMethodBase._maybe_make_prepare_finalize(moe)
 
     def init_prepare_finalize(self, moe: FusedMoEConfig):
         self.moe = moe

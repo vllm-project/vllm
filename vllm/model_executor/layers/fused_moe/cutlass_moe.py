@@ -12,6 +12,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP)
 from vllm.model_executor.layers.fused_moe.utils import (_fp8_perm,
                                                         _fp8_quantize,
