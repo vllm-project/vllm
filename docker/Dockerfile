@@ -454,7 +454,7 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
         popd
         rm -rf deepgemm
     else
-        echo "Skipping DeepGEMM installation (requires CUDA 12.8+)"
+        echo "Skipping DeepGEMM installation (requires CUDA 12.8+ but got ${CUDA_VERSION})"
     fi
 BASH
 
