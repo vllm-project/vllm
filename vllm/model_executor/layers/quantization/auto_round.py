@@ -50,7 +50,6 @@ class AutoRoundConfig(QuantizationConfig):
         extra_config: Optional[dict[str, Any]] = None,
         data_type: str = "int",
         backend: str = "auto",
-        fusion_mapping: Optional[dict[str, Any]] = None,
     ) -> None:
         super().__init__()
         if weight_bits not in self.SUPPORTED_BITS:
@@ -80,14 +79,6 @@ class AutoRoundConfig(QuantizationConfig):
         self.data_type = data_type
         self.backend = backend
         self.pack_factor = Fraction(32, weight_bits)
-        self.fusion_mapping = fusion_mapping if (fusion_mapping
-                                                 is not None) else {}
-        default_fusions = {
-            "qkv": ("q", "k", "v"),
-            "gate_up": ("gate", "up"),
-        }
-        for key, parts in default_fusions.items():
-            self.fusion_mapping.setdefault(key, parts)
 
     def __repr__(self) -> str:
         return (f"AutoRoundConfig(weight_bits={self.weight_bits}, "
@@ -124,8 +115,6 @@ class AutoRoundConfig(QuantizationConfig):
             data_type=cls.get_from_keys_or(config, ["data_type"], "int"),
             backend=cls.get_from_keys_or(config, ["backend", "vllm_backend"],
                                          "auto"),
-            fusion_mapping=cls.get_from_keys_or(
-                config, ["fusion_mapping", "vllm_fusion_mapping"], None),
         )
 
     def get_layer_config(self, layer, layer_name: str):
@@ -149,9 +138,22 @@ class AutoRoundConfig(QuantizationConfig):
                 layer_name.startswith(name)
                 for name in self.block_name_to_quantize)
 
-        # 3. Handle fused QKV or other patterns
+        # 3. Handle fused MoE
+        if self.extra_config and "fusedmoe" in layer.__class__.__name__.lower(
+        ):
+            moe_configs = [
+                get_config(name, quantized) for name in self.extra_config
+                if name.startswith(layer_name)
+            ]
+            if moe_configs:
+                if len(set(moe_configs)) == 1:
+                    return moe_configs[0]
+                raise ValueError(f"Fused MoE layer '{layer_name}' requires "
+                                 f"consistent quant config for all sub-layers")
+
+        # 4. Handle fused QKV or other patterns
         if self.extra_config:
-            for fusion_key, sub_keys in self.fusion_mapping.items():
+            for fusion_key, sub_keys in self.packed_modules_mapping.items():
                 if fusion_key in layer_name and layer_name.count(
                         fusion_key) == 1:
                     sub_names = [
@@ -166,19 +168,6 @@ class AutoRoundConfig(QuantizationConfig):
                     raise ValueError(
                         f"Fused module '{layer_name}' requires "
                         f"consistent quant config for {sub_names}")
-
-        # 4. Handle fused MoE
-        if self.extra_config and "fusedmoe" in layer.__class__.__name__.lower(
-        ):
-            moe_configs = [
-                get_config(name, quantized) for name in self.extra_config
-                if name.startswith(layer_name)
-            ]
-            if moe_configs:
-                if len(set(moe_configs)) == 1:
-                    return moe_configs[0]
-                raise ValueError(f"Fused MoE layer '{layer_name}' requires "
-                                 f"consistent quant config for all sub-layers")
 
         # 5. Fallback
         return get_config(layer_name, quantized)
