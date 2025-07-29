@@ -22,7 +22,7 @@ try:
 
     from vllm.utils import direct_register_custom_op
     if envs.VLLM_TRITON_FP4_GEMM_USE_ASM:
-        from aiter import gemm_a4w4_asm
+        from aiter import gemm_a4w4
         from aiter.utility.fp4_utils import (
             dynamic_mxfp4_quant as dynamic_mxfp4_quant_asm)
 
@@ -92,13 +92,13 @@ try:
                             device=x_q.device,
                             dtype=out_dtype)
             #asm_bias = torch.empty_like(y)
-            gemm_a4w4_asm(x_q,
-                          weight,
-                          x_s,
-                          weight_scale,
-                          y,
-                          y,
-                          bpreshuffle=False)
+            gemm_a4w4(x_q,
+                      weight,
+                      x_s,
+                      weight_scale,
+                      y,
+                      y,
+                      bpreshuffle=False)
 
             return y[:M]
         elif envs.VLLM_TRITON_FP4_GEMM_USE_ASM:
