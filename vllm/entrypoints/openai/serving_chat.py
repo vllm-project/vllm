@@ -63,6 +63,7 @@ class OpenAIServingChat(OpenAIServing):
         return_tokens_as_token_ids: bool = False,
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
+        exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: Optional[str] = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
@@ -111,6 +112,8 @@ class OpenAIServingChat(OpenAIServing):
                 raise TypeError("Error: --enable-auto-tool-choice requires "
                                 f"tool_parser:'{tool_parser}' which has not "
                                 "been registered") from e
+        self.exclude_tools_when_tool_choice_none = (
+            exclude_tools_when_tool_choice_none)
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -147,11 +150,8 @@ class OpenAIServingChat(OpenAIServing):
             raise self.engine_client.dead_error
 
         try:
-            (
-                lora_request,
-                prompt_adapter_request,
-            ) = self._maybe_get_adapters(request,
-                                         supports_default_mm_loras=True)
+            lora_request = self._maybe_get_adapters(
+                request, supports_default_mm_loras=True)
 
             model_name = self._get_model_name(request.model, lora_request)
 
@@ -177,7 +177,9 @@ class OpenAIServingChat(OpenAIServing):
                     "--enable-auto-tool-choice and --tool-call-parser to be set"
                 )
 
-            if request.tools is None:
+            if (request.tools is None
+                    or (request.tool_choice == "none"
+                        and self.exclude_tools_when_tool_choice_none)):
                 tool_dicts = None
             else:
                 tool_dicts = [tool.model_dump() for tool in request.tools]
@@ -239,8 +241,7 @@ class OpenAIServingChat(OpenAIServing):
                 self._log_inputs(request_id,
                                  request_prompts[i],
                                  params=sampling_params,
-                                 lora_request=lora_request,
-                                 prompt_adapter_request=prompt_adapter_request)
+                                 lora_request=lora_request)
 
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
@@ -259,7 +260,6 @@ class OpenAIServingChat(OpenAIServing):
                         request_id,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
-                        prompt_adapter_request=prompt_adapter_request,
                         priority=request.priority,
                     )
 
@@ -623,7 +623,7 @@ class OpenAIServingChat(OpenAIServing):
 
                     # handle streaming deltas for tools with named tool_choice
                     if tool_choice_function_name:
-                        if (self.reasoning_parser
+                        if (self.reasoning_parser and not reasoning_end_arr[i]
                                 and not reasoning_parser.is_reasoning_end(
                                     previous_token_ids)):
                             assert reasoning_parser is not None
@@ -637,11 +637,18 @@ class OpenAIServingChat(OpenAIServing):
                                     current_token_ids,
                                     output.token_ids,
                                 ))
-                            # When encountering think end id in delta_token_ids,
-                            # process the `content`. Only keep 'content',
-                            # remove 'reasoning_content'
+                            # When encountering think end id in delta_token_ids
+                            # or think end id in prompt_token_ids
+                            # i.e {"enable_thinking": False},
+                            # set reasoning status to end.
+                            # Only keep 'content', remove 'reasoning_content'.
                             if reasoning_parser.is_reasoning_end(
-                                    list(output.token_ids)):
+                                    list(output.token_ids)) or \
+                                    (res.prompt_token_ids and
+                                        reasoning_parser.is_reasoning_end(
+                                            list(res.prompt_token_ids)
+                                        )):
+                                reasoning_end_arr[i] = True
                                 if delta_message and delta_message.content:
                                     # This need to be added to next `delta_text`
                                     current_text = delta_message.content

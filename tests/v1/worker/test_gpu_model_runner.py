@@ -76,10 +76,6 @@ def get_vllm_config():
     )
     model_config = ModelConfig(
         model="facebook/opt-125m",
-        task="generate",
-        tokenizer="facebook/opt-125m",
-        tokenizer_mode="auto",
-        trust_remote_code=True,
         dtype="float16",
         seed=42,
     )
@@ -460,9 +456,14 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
         {"load_config": {
             "load_format": original_load_format
         }})
-    model_runner_2.load_model()  # Load real weights inplace
+    model_runner_2.reload_weights()  # Load real weights inplace
     assert str(model_runner.get_model().state_dict()) == str(
         model_runner_2.get_model().state_dict())
+
+
+def test_reload_weights_before_load_model(model_runner):
+    with pytest.raises(AssertionError):
+        model_runner.reload_weights()
 
 
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
