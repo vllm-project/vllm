@@ -7,9 +7,9 @@ These models use a [Pooler][vllm.model_executor.layers.pooler.Pooler] to extract
 before returning them.
 
 !!! note
-    We currently support pooling models primarily as a matter of convenience.
-    As shown in the [Compatibility Matrix](../features/compatibility_matrix.md), most vLLM features are not applicable to
-    pooling models as they only work on the generation or decode stage, so performance may not improve as much.
+    We currently support pooling models primarily as a matter of convenience. This is not guaranteed to have any performance improvement over using HF Transformers / Sentence Transformers directly.
+
+    We are now planning to optimize pooling models in vLLM. Please comment on <gh-issue:21796> if you have any suggestions!
 
 ## Configuration
 
