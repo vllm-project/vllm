@@ -45,14 +45,14 @@ Each pooling model in vLLM supports one or more of these tasks according to
 [Pooler.get_supported_tasks][vllm.model_executor.layers.pooler.Pooler.get_supported_tasks],
 enabling the corresponding APIs:
 
-| Task       | APIs               |
-|------------|--------------------|
-| `encode`   | `reward`           |
-| `embed`    | `embed`, `score`\* |
-| `classify` | `classify`         |
-| `score`    | `score`            |
+| APIs                                 | Task       |
+|--------------------------------------|------------|
+| `LLM.reward(...)`                    | `encode`   |
+| `LLM.embed(...)`, `LLM.score(...)`\* | `embed`    |
+| `LLM.classify(...)`                  | `classify` |
+| `LLM.score(...)`                     | `score`    |
 
-\* The `score` API falls back to `embed` task if the model does not support `score` task.
+\* The `LLM.score(...)` API falls back to `embed` task if the model does not support `score` task.
 
 ### Pooler Configuration
 
@@ -68,9 +68,9 @@ the pooler assigned to each task has the following attributes by default:
 
 | Task       | Pooling Type | Normalization | Softmax |
 |------------|--------------|---------------|---------|
-| `reward`   | `ALL`        | ❌             | ❌       |
-| `embed`    | `LAST`       | ✅︎            | ❌       |
-| `classify` | `LAST`       | ❌             | ✅︎      |
+| `reward`   | `ALL`        | ❌            | ❌     |
+| `embed`    | `LAST`       | ✅︎            | ❌      |
+| `classify` | `LAST`       | ❌            | ✅︎      |
 
 When loading [Sentence Transformers](https://huggingface.co/sentence-transformers) models,
 its Sentence Transformers configuration file (`modules.json`) takes priority over the model's defaults.
