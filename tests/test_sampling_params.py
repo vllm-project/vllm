@@ -56,8 +56,7 @@ def test_sampling_params_from_request_with_no_guided_decoding_backend(
 
 
 @pytest.mark.parametrize("request_level_guided_decoding_backend,expected",
-                         [("xgrammar", "xgrammar"),
-                          ("lm-format-enforcer", "lm-format-enforcer"),
+                         [("xgrammar", "xgrammar"), ("guidance", "guidance"),
                           ("outlines", "outlines")])
 def test_sampling_params_from_request_with_guided_decoding_backend(
         request_level_guided_decoding_backend: str, expected: str,
