@@ -1,7 +1,9 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/all.h>
 
-#include "../per_token_group_quant_8bit.h"
+#ifndef USE_ROCM
+  #include "../per_token_group_quant_8bit.h"
+#endif
 
 #include <cmath>
 
@@ -339,6 +341,7 @@ void dynamic_scaled_int8_quant(
       });
 }
 
+#ifndef USE_ROCM
 void per_token_group_quant_int8(const torch::Tensor& input,
                                 torch::Tensor& output_q,
                                 torch::Tensor& output_s, int64_t group_size,
@@ -346,3 +349,4 @@ void per_token_group_quant_int8(const torch::Tensor& input,
   per_token_group_quant_8bit(input, output_q, output_s, group_size, eps,
                              int8_min, int8_max);
 }
+#endif
