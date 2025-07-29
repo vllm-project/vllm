@@ -4493,8 +4493,17 @@ class CompilationConfig:
                 "vllm.mamba_mixer2",
             ]
         elif len(self.splitting_ops) == 0:
-            assert self.cudagraph_mode != CUDAGraphMode.PIECEWISE, (
-                "Cannot use piecewise CUDAGraph without splitting ops.")
+            if self.level == CompilationLevel.PIECEWISE:
+                logger.warning_once("Using piecewise compilation with empty "
+                                    "splitting_ops.")
+            if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+                logger.warning_once("Using cudagraph_mode PIECEWISE with "
+                                    "empty splitting_ops will be treated as "
+                                    "cudagraph_mode FULL. Please make sure "
+                                    "using attention backends that are "
+                                    "cudagraph-compatible or set cudagraph"
+                                    "_mode as NONE explxicitly.")
+                self.cudagraph_mode = CUDAGraphMode.FULL
             self.splitting_ops = []
         self.is_attention_splitting = all(
             op in self.splitting_ops for op in
@@ -4801,11 +4810,9 @@ class VllmConfig:
             if envs.VLLM_USE_V1:
                 self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        # disable compilation and cudagraph if enforce eager execution
+        # disable cudagraph if enforce eager execution
         if self.model_config is not None and self.model_config.enforce_eager:
-            logger.info("Compilation and cudagraph are both disabled under "
-                        "eager mode.")
-            self.compilation_config.level = CompilationLevel.NO_COMPILATION
+            logger.info("Cudagraph is disabled under eager mode.")
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         self._set_cudagraph_sizes()
@@ -4862,6 +4869,7 @@ class VllmConfig:
                            "to True to enable.")
         current_platform.check_and_update_config(self)
 
+        # final check of cudagraph mode after platform-specific update
         if envs.VLLM_USE_V1:
             if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL \
                 and not self.model_config.disable_cascade_attn:

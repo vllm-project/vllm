@@ -101,9 +101,12 @@ def test_simple_piecewise_compile(use_inductor):
             num_backend_compilations=3,  # num_piecewise_capturable_graphs_seen
             num_cudagraph_captured=
             6,  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
-    ):
+    ), set_forward_context(None,
+                           vllm_config=vllm_config):  # background context
+        # warm up with background context
         model(inputs)
 
+        # capturing/replaying should under context of cudagraph dispatching
         with set_forward_context(
                 None,
                 vllm_config=vllm_config,
@@ -120,6 +123,11 @@ def test_simple_piecewise_compile(use_inductor):
         input = torch.zeros(2).cuda()
         global global_counter
         global_counter = 0
-        output = model(input)
+        with set_forward_context(
+                None,
+                vllm_config=vllm_config,
+                cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+                batch_descriptor=BatchDescriptor(num_tokens=2, )):
+            output = model(input)
         assert global_counter == 2
         assert torch.allclose(output.cpu(), torch.tensor([3., 1.]))
