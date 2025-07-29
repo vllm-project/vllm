@@ -180,11 +180,14 @@ class MultiModalProfiler(Generic[_I]):
     def _get_mm_num_tokens(
         self,
         mm_inputs: MultiModalInputs,
+        mm_embeddings_only: bool = True,
     ) -> Mapping[str, int]:
         placeholders_by_modality = mm_inputs["mm_placeholders"]
 
         return {
-            modality: sum(item.length for item in placeholders)
+            modality:
+            sum(item.get_num_embeds() if mm_embeddings_only else item.length
+                for item in placeholders)
             for modality, placeholders in placeholders_by_modality.items()
         }
 
@@ -257,6 +260,7 @@ class MultiModalProfiler(Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
+        mm_embeddings_only: bool = True,
     ) -> Mapping[str, int]:
         if mm_counts is None:
             mm_counts = self.get_mm_limits()
@@ -285,4 +289,14 @@ class MultiModalProfiler(Generic[_I]):
             return max_tokens_per_item
 
         mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
-        return self._get_mm_num_tokens(mm_inputs)
+        return self._get_mm_num_tokens(mm_inputs,
+                                       mm_embeddings_only=mm_embeddings_only)
+
+    def get_max_placeholder_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Optional[Mapping[str, int]] = None,
+    ):
+        return self.get_mm_max_tokens(seq_len,
+                                      mm_counts,
+                                      mm_embeddings_only=False)
