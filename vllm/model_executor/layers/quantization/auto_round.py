@@ -80,7 +80,8 @@ class AutoRoundConfig(QuantizationConfig):
         self.data_type = data_type
         self.backend = backend
         self.pack_factor = Fraction(32, weight_bits)
-        self.fusion_mapping = fusion_mapping if fusion_mapping is not None else {}
+        self.fusion_mapping = fusion_mapping if (fusion_mapping
+                                                 is not None) else {}
         default_fusions = {
             "qkv": ("q", "k", "v"),
             "gate_up": ("gate", "up"),
@@ -163,7 +164,8 @@ class AutoRoundConfig(QuantizationConfig):
                     if len(set(sub_configs)) == 1:
                         return sub_configs[0]
                     raise ValueError(
-                        f"Fused module '{layer_name}' requires consistent quant config for {sub_names}"
+                        f"Fused module '{layer_name}' requires "
+                        f"consistent quant config for {sub_names}"
                     )
 
         # 4. Handle fused MoE
@@ -177,7 +179,8 @@ class AutoRoundConfig(QuantizationConfig):
                 if len(set(moe_configs)) == 1:
                     return moe_configs[0]
                 raise ValueError(
-                    f"Fused MoE layer '{layer_name}' requires consistent quant config for all sub-layers"
+                    f"Fused MoE layer '{layer_name}' requires "
+                    f"consistent quant config for all sub-layers"
                 )
 
         # 5. Fallback
