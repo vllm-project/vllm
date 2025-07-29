@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import multiprocessing
+import os
 from contextlib import ExitStack
 from typing import Optional
 from unittest.mock import MagicMock
 
+import psutil
 import pytest
 
 from vllm import SamplingParams
@@ -400,3 +403,58 @@ async def test_check_health(monkeypatch: pytest.MonkeyPatch):
 
         # Test 3: Verify healthy engine still works after mock
         await engine.check_health()
+
+        # Kill the EngineCore subprocess
+        engine_core_proc = \
+            engine.engine_core.resources.engine_manager.processes[0]
+
+        os.kill(engine_core_proc.pid, 9)
+        await asyncio.sleep(10)
+
+        # Test 4: Verify engine raises EngineDeadError
+        with pytest.raises(EngineDeadError):
+            await engine.check_health()
+
+
+@pytest.mark.asyncio
+async def test_engine_core_orphaned(monkeypatch: pytest.MonkeyPatch):
+    """
+    Test that engine core processes will be killed if
+    the parent process dies and leaves them orphaned
+    """
+
+    with monkeypatch.context() as m, ExitStack() as after:
+        m.setenv("VLLM_USE_V1", "1")
+
+        async def setup_engine_cores():
+            """Setup the AsyncLLM and get EngineCore process pid."""
+
+            with set_default_torch_num_threads(1):
+                engine = AsyncLLM.from_engine_args(TEXT_ENGINE_ARGS)
+            after.callback(engine.shutdown)
+
+            await engine.check_health()
+
+            proc = engine.engine_core.resources.engine_manager.processes[0]
+            assert proc.is_alive(), "EngineCore process is not alive."
+
+            os.kill(os.getpid(), 9)  # Kill parent process
+
+            return proc.pid
+
+        def run_setup(pid):
+            pid[0] = asyncio.run(setup_engine_cores())
+
+        manager = multiprocessing.Manager()
+        pid = manager.list(range(1))
+
+        process = multiprocessing.Process(target=run_setup, args=(pid, ))
+
+        process.start()
+
+        process.join()  # Wait for the process to finish
+
+        # Allow time for the EngineProcObserver to detect and reap EngineCores
+        await asyncio.sleep(30)
+        # Check that orphaned EngineCore processess are automatically killed
+        assert not psutil.pid_exists(pid[0])

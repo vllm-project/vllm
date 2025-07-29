@@ -317,6 +317,8 @@ class EngineArgs:
     eplb_log_balancedness: bool = ParallelConfig.eplb_log_balancedness
     max_parallel_loading_workers: Optional[
         int] = ParallelConfig.max_parallel_loading_workers
+    engine_core_orphaned_check_interval: int = \
+        ParallelConfig.engine_core_orphaned_check_interval
     block_size: Optional[BlockSize] = CacheConfig.block_size
     enable_prefix_caching: Optional[bool] = CacheConfig.enable_prefix_caching
     prefix_caching_hash_algo: PrefixCachingHashAlgo = \
@@ -674,6 +676,9 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-multimodal-encoder-data-parallel",
             **parallel_kwargs["enable_multimodal_encoder_data_parallel"])
+        parallel_group.add_argument(
+            "--engine_core_orphaned_check_interval",
+            **parallel_kwargs["engine_core_orphaned_check_interval"])
 
         # KV cache arguments
         cache_kwargs = get_kwargs(CacheConfig)
@@ -1189,6 +1194,8 @@ class EngineArgs:
             worker_extension_cls=self.worker_extension_cls,
             enable_multimodal_encoder_data_parallel=self.
             enable_multimodal_encoder_data_parallel,
+            engine_core_orphaned_check_interval=self.
+            engine_core_orphaned_check_interval,
         )
 
         speculative_config = self.create_speculative_config(
