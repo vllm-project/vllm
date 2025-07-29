@@ -1629,6 +1629,7 @@ class LLM:
 
         # Run the engine.
         outputs: list[Union[RequestOutput, PoolingRequestOutput]] = []
+
         total_in_toks = 0
         total_out_toks = 0
         while self.llm_engine.has_unfinished_requests():
