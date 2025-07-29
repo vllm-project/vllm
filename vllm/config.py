@@ -723,10 +723,15 @@ class ModelConfig:
         )
 
         # Workaround for Gemma 2 which uses interleaved sliding window
-        # attention, but it's not specified in its config. TODO: remove this
-        # when Gemma 2 is fixed in Transformers.
+        # attention, but it's not specified in its config.
+        # TODO: remove this when Gemma 2 config updated in HuggingFace.
         if self.hf_text_config.model_type == "gemma2":
             self.hf_text_config.sliding_window_pattern = 2
+
+        # TODO: remove this when Gemma 3n config updated in HuggingFace.
+        if self.hf_text_config.model_type == "gemma3n_text":
+            # 4 sliding window attention followed by 1 full attention
+            self.hf_text_config.sliding_window_pattern = "LLLLG"
 
         sliding_window = getattr(self.hf_text_config, "sliding_window", None)
         sliding_window_pattern = getattr(self.hf_text_config,
