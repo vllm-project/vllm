@@ -265,7 +265,7 @@ RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
 #################### EXTENSION Build IMAGE ####################
 
 #################### DEV IMAGE ####################
-FROM base as dev
+FROM base AS dev
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -275,10 +275,6 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
-
-# Workaround for #17068
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
 
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
@@ -390,7 +386,9 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 
 # Install FlashInfer from source
 ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
-ARG FLASHINFER_GIT_REF="v0.2.8rc1"
+# Keep this in sync with https://github.com/vllm-project/vllm/blob/main/requirements/cuda.txt
+# We use `--force-reinstall --no-deps` to avoid issues with the existing FlashInfer wheel.
+ARG FLASHINFER_GIT_REF="v0.2.9rc2"
 RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
   . /etc/environment
     git clone --depth 1 --recursive --shallow-submodules \
@@ -412,7 +410,7 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
         TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
             python3 -m flashinfer.aot
         TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-            uv pip install --system --no-build-isolation .
+            uv pip install --system --no-build-isolation --force-reinstall --no-deps .
     popd
     rm -rf flashinfer
 BASH
@@ -451,10 +449,6 @@ ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
-
-# Workaround for #17068
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \

@@ -20,8 +20,8 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
+from vllm.tasks import SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -94,11 +94,14 @@ class AsyncLLM(EngineClient):
         self.log_requests = log_requests
         self.log_stats = log_stats
 
-        # Tokenizer (+ ensure liveness if running in another process).
-        self.tokenizer = init_tokenizer_from_configs(
-            model_config=vllm_config.model_config,
-            scheduler_config=vllm_config.scheduler_config,
-            lora_config=vllm_config.lora_config)
+        if self.model_config.skip_tokenizer_init:
+            self.tokenizer = None
+        else:
+            # Tokenizer (+ ensure liveness if running in another process).
+            self.tokenizer = init_tokenizer_from_configs(
+                model_config=vllm_config.model_config,
+                scheduler_config=vllm_config.scheduler_config,
+                lora_config=vllm_config.lora_config)
 
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(
@@ -125,7 +128,7 @@ class AsyncLLM(EngineClient):
         if self.log_stats:
             self.logger_manager = StatLoggerManager(
                 vllm_config=vllm_config,
-                engine_idxs=self.engine_core.engine_ranks,
+                engine_idxs=self.engine_core.engine_ranks_managed,
                 custom_stat_loggers=stat_loggers,
             )
             self.logger_manager.log_engine_initialized()
@@ -209,6 +212,9 @@ class AsyncLLM(EngineClient):
         if handler := getattr(self, "output_handler", None):
             handler.cancel()
 
+    async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return await self.engine_core.get_supported_tasks_async()
+
     async def add_request(
         self,
         request_id: str,
@@ -218,7 +224,6 @@ class AsyncLLM(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
     ) -> RequestOutputCollector:
@@ -235,8 +240,7 @@ class AsyncLLM(EngineClient):
         # Convert Input --> Request.
         prompt_str, request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
-            tokenization_kwargs, trace_headers, prompt_adapter_request,
-            priority, data_parallel_rank)
+            tokenization_kwargs, trace_headers, priority, data_parallel_rank)
 
         if is_pooling or params.n == 1:
             await self._add_request(request, prompt_str, None, 0, queue)
@@ -280,7 +284,6 @@ class AsyncLLM(EngineClient):
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
@@ -311,7 +314,6 @@ class AsyncLLM(EngineClient):
                 sampling_params,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
-                prompt_adapter_request=prompt_adapter_request,
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
             )
@@ -437,6 +439,7 @@ class AsyncLLM(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -465,6 +468,7 @@ class AsyncLLM(EngineClient):
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=priority,
+                tokenization_kwargs=tokenization_kwargs,
             )
 
             # The output_handler task pushes items into the queue.
@@ -523,6 +527,10 @@ class AsyncLLM(EngineClient):
         self,
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
+        if self.tokenizer is None:
+            raise ValueError("Unable to get tokenizer because "
+                             "skip_tokenizer_init is True")
+
         return self.tokenizer.get_lora_tokenizer(lora_request)
 
     async def is_tracing_enabled(self) -> bool:
