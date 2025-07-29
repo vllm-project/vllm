@@ -81,6 +81,12 @@ class AutoRoundConfig(QuantizationConfig):
         self.backend = backend
         self.pack_factor = Fraction(32, weight_bits)
         self.fusion_mapping = fusion_mapping if fusion_mapping is not None else {}
+        default_fusions = {
+            "qkv": ("q", "k", "v"),
+            "gate_up": ("gate", "up"),
+        }
+        for key, parts in default_fusions.items():
+            self.fusion_mapping.setdefault(key, parts)
 
     def __repr__(self) -> str:
         return (f"AutoRoundConfig(weight_bits={self.weight_bits}, "
@@ -144,13 +150,6 @@ class AutoRoundConfig(QuantizationConfig):
 
         # 3. Handle fused QKV or other patterns
         if self.extra_config:
-            default_fusions = {
-                "qkv": ("q", "k", "v"),
-                "gate_up": ("gate", "up"),
-            }
-            for key, parts in default_fusions.items():
-                self.fusion_mapping.setdefault(key, parts)
-
             for fusion_key, sub_keys in self.fusion_mapping.items():
                 if fusion_key in layer_name and layer_name.count(
                         fusion_key) == 1:
