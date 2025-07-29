@@ -4106,9 +4106,11 @@ class CompilationConfig:
         certain small batchsizes, where inductor is good at optimizing.
     """
     # Top-level Compilation control
-    level: int = 0
+    level: Optional[int] = None
     """The level of compilation:
 
+    - None: If None, we will select the default compilation level.
+      For V1 engine this is 3, for V0 engine this is 0.
     - 0: no compilation.
     - 1: dynamo as is.
     - 2: dynamo once.
@@ -4664,6 +4666,22 @@ class VllmConfig:
                 "To workaround this limitation, vLLM will set 'ieee' input "
                 "precision for chunked prefill triton kernels.")
 
+        # If the user does not explicitly set a compilation level, then
+        # we use the default level. The default level depends on other
+        # settings (see the below code).
+        if self.compilation_config.level is None:
+            if envs.VLLM_USE_V1:
+                if (self.model_config is not None
+                        and not self.model_config.enforce_eager):
+                    self.compilation_config.level = CompilationLevel.PIECEWISE
+                else:
+                    self.compilation_config.level = \
+                            CompilationLevel.NO_COMPILATION
+            else:
+                # NB: Passing both --enforce-eager and a compilation level
+                # in V0 means the compilation level wins out.
+                self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
         if self.compilation_config.pass_config.enable_async_tp:
@@ -4676,7 +4694,6 @@ class VllmConfig:
             # By default, V1 uses piecewise CUDA graphs. If full_cuda_graph
             # is set to True, full CUDA graphs will be used.
             self.compilation_config.cudagraph_num_of_warmups = 1
-            self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
 
         self._set_cudagraph_sizes()
