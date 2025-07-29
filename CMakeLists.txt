@@ -325,7 +325,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         OR NOT $CACHE{MARLIN_GEN_SCRIPT_HASH} STREQUAL ${MARLIN_GEN_SCRIPT_HASH})
       execute_process(
         COMMAND ${CMAKE_COMMAND} -E env
-        PYTHONPATH=$PYTHONPATH
+        PYTHONPATH=$ENV{PYTHONPATH}
           ${Python_EXECUTABLE} ${MARLIN_GEN_SCRIPT}
         RESULT_VARIABLE marlin_generation_result
         OUTPUT_VARIABLE marlin_generation_result
@@ -678,7 +678,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         OR NOT $CACHE{MACHETE_GEN_SCRIPT_HASH} STREQUAL ${MACHETE_GEN_SCRIPT_HASH})
       execute_process(
         COMMAND ${CMAKE_COMMAND} -E env
-        PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$PYTHONPATH
+        PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$ENV{PYTHONPATH}
           ${Python_EXECUTABLE} ${MACHETE_GEN_SCRIPT}
         RESULT_VARIABLE machete_generation_result
         OUTPUT_VARIABLE machete_generation_output
@@ -808,7 +808,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         OR NOT $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH} STREQUAL ${MOE_MARLIN_GEN_SCRIPT_HASH})
       execute_process(
         COMMAND ${CMAKE_COMMAND} -E env
-        PYTHONPATH=$PYTHONPATH
+        PYTHONPATH=$ENV{PYTHONPATH}
           ${Python_EXECUTABLE} ${MOE_MARLIN_GEN_SCRIPT}
         RESULT_VARIABLE moe_marlin_generation_result
         OUTPUT_VARIABLE moe_marlin_generation_output
