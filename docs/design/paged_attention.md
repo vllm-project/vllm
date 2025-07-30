@@ -1,7 +1,7 @@
-# vLLM Paged Attention
+# Paged Attention
 
 !!! warning
-    This document is being kept in the vLLM documentation for historical purposes.
+    This is a historical document based on the [original paper for vLLM](https://arxiv.org/abs/2309.06180).
     It no longer describes the code used in vLLM today.
 
 Currently, vLLM utilizes its own implementation of a multi-head query
@@ -140,7 +140,7 @@ const scalar_t* q_ptr = q + seq_idx * q_stride + head_idx * HEAD_SIZE;
 ```
 
 <figure markdown="span">
-  ![](../../assets/kernel/query.png){ align="center" alt="query" width="70%" }
+  ![](../assets/design/paged_attention/query.png){ align="center" alt="query" width="70%" }
 </figure>
 
 Each thread defines its own `q_ptr` which points to the assigned
@@ -149,7 +149,7 @@ and `HEAD_SIZE` is 128, the `q_ptr` points to data that contains
 total of 128 elements divided into 128 / 4 = 32 vecs.
 
 <figure markdown="span">
-  ![](../../assets/kernel/q_vecs.png){ align="center" alt="q_vecs" width="70%" }
+  ![](../assets/design/paged_attention/q_vecs.png){ align="center" alt="q_vecs" width="70%" }
 </figure>
 
 ```cpp
@@ -188,7 +188,7 @@ points to key token data based on `k_cache` at assigned block,
 assigned head and assigned token.
 
 <figure markdown="span">
-  ![](../../assets/kernel/key.png){ align="center" alt="key" width="70%" }
+  ![](../assets/design/paged_attention/key.png){ align="center" alt="key" width="70%" }
 </figure>
 
 The diagram above illustrates the memory layout for key data. It
@@ -203,7 +203,7 @@ elements for one token) that will be processed by 2 threads (one
 thread group) separately.
 
 <figure markdown="span">
-  ![](../../assets/kernel/k_vecs.png){ align="center" alt="k_vecs" width="70%" }
+  ![](../assets/design/paged_attention/k_vecs.png){ align="center" alt="k_vecs" width="70%" }
 </figure>
 
 ```cpp
@@ -362,15 +362,15 @@ later steps. Now, it should store the normalized softmax result of
 ## Value
 
 <figure markdown="span">
-  ![](../../assets/kernel/value.png){ align="center" alt="value" width="70%" }
+  ![](../assets/design/paged_attention/value.png){ align="center" alt="value" width="70%" }
 </figure>
 
 <figure markdown="span">
-  ![](../../assets/kernel/logits_vec.png){ align="center" alt="logits_vec" width="50%" }
+  ![](../assets/design/paged_attention/logits_vec.png){ align="center" alt="logits_vec" width="50%" }
 </figure>
 
 <figure markdown="span">
-  ![](../../assets/kernel/v_vec.png){ align="center" alt="v_vec" width="70%" }
+  ![](../assets/design/paged_attention/v_vec.png){ align="center" alt="v_vec" width="70%" }
 </figure>
 
 Now we need to retrieve the value data and perform dot multiplication
@@ -499,3 +499,14 @@ for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
 Finally, we need to iterate over different assigned head positions
 and write out the corresponding accumulated result based on the
 `out_ptr`.
+
+## Citation
+
+```bibtex
+@inproceedings{kwon2023efficient,
+  title={Efficient Memory Management for Large Language Model Serving with PagedAttention},
+  author={Woosuk Kwon and Zhuohan Li and Siyuan Zhuang and Ying Sheng and Lianmin Zheng and Cody Hao Yu and Joseph E. Gonzalez and Hao Zhang and Ion Stoica},
+  booktitle={Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles},
+  year={2023}
+}
+```
