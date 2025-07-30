@@ -305,6 +305,7 @@ def test_propose(num_speculative_tokens):
         _Backend.FLASH_ATTN_VLLM_V1)
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
+        layer_names=proposer.attn_layer_names,
         vllm_config=proposer.vllm_config,
         device=device,
     )

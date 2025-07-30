@@ -740,8 +740,8 @@ class ModelConfig:
             isinstance(sliding_window, list))
 
         if not self.disable_sliding_window and has_interleaved_attention:
-            if (backend :=
-                    envs.VLLM_ATTENTION_BACKEND) in ("XFORMERS", "FLASHINFER"):
+            if not envs.VLLM_USE_V1 and (backend := envs.VLLM_ATTENTION_BACKEND
+                                         ) in ("XFORMERS", "FLASHINFER"):
                 sliding_window_len_min = get_min_sliding_window(
                     self.hf_text_config.sliding_window)
 
@@ -5080,13 +5080,29 @@ def assert_hashable(text):
 T = TypeVar("T")
 
 
-def get_layers_from_vllm_config(vllm_config: VllmConfig,
-                                layer_type: type[T]) -> dict[str, T]:
+def get_layers_from_vllm_config(
+        vllm_config: VllmConfig,
+        layer_type: type[T],
+        layer_names: Optional[list[str]] = None) -> dict[str, T]:
+    """
+    Get layers from the vLLM config.
+
+    Args:
+        vllm_config: The vLLM config.
+        layer_type: The type of the layer to get.
+        layer_names: The names of the layers to get. If None, return all layers.
+    """
+
+    if layer_names is None:
+        layer_names = list(
+            vllm_config.compilation_config.static_forward_context.keys())
+
+    forward_context = vllm_config.compilation_config.static_forward_context
+
     return {
-        layer_name: layer
-        for layer_name, layer in
-        vllm_config.compilation_config.static_forward_context.items()
-        if isinstance(layer, layer_type)
+        layer_name: forward_context[layer_name]
+        for layer_name in layer_names
+        if isinstance(forward_context[layer_name], layer_type)
     }
 
 
