@@ -65,3 +65,11 @@ mkdocs.yaml @hmellor
 # Qwen-specific files
 /vllm/attention/backends/dual_chunk_flash_attn.py @sighingnow
 /vllm/model_executor/models/qwen* @sighingnow
+
+# Mistral-specific files
+/vllm/model_executor/models/mistral*.py @patrickvonplaten
+/vllm/model_executor/models/mixtral*.py @patrickvonplaten
+/vllm/model_executor/models/voxtral*.py @patrickvonplaten
+/vllm/model_executor/models/pixtral*.py @patrickvonplaten
+/vllm/transformers_utils/configs/mistral.py @patrickvonplaten
+/vllm/transformers_utils/tokenizers/mistral.py @patrickvonplaten
