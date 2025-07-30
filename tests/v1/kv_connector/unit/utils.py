@@ -9,6 +9,7 @@ import torch
 from vllm import SamplingParams
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
                          ModelConfig, SchedulerConfig, VllmConfig)
+from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector import (  # noqa
@@ -188,8 +189,9 @@ def create_model_runner_output(
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=None,
-        finished_sending=finished_sending,
-        finished_recving=finished_recving,
+        kv_connector_finish_output=KVConnectorBase.KVConnectorFinishOutput(
+            finished_sending=finished_sending,
+            finished_recving=finished_recving),
     )
 
 
