@@ -59,8 +59,8 @@ class TritonAttentionMetadataBuilder(
         AttentionMetadataBuilder[TritonAttentionMetadata]):
     full_cudagraph_supported: ClassVar[bool] = True
 
-    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
-                 device: torch.device):
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
+                 vllm_config: VllmConfig, device: torch.device):
         self.device = device
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
