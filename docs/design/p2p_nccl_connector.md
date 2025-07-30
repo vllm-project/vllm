@@ -5,6 +5,7 @@ An implementation of xPyD with dynamic scaling based on point-to-point communica
 ## Detailed Design
 
 ### Overall Process
+
 As shown in Figure 1, the overall process of this **PD disaggregation** solution is described through a request flow:
 
 1. The client sends an HTTP request to the Proxy/Router's `/v1/completions` interface.
@@ -23,7 +24,7 @@ A simple HTTP service acts as the entry point for client requests and starts a b
 
 The Proxy/Router is responsible for selecting 1P1D based on the characteristics of the client request, such as the prompt, and generating a corresponding `request_id`, for example:
 
-```
+```text
 cmpl-___prefill_addr_10.0.1.2:21001___decode_addr_10.0.1.3:22001_93923d63113b4b338973f24d19d4bf11-0
 ```
 
@@ -70,6 +71,7 @@ pip install "vllm>=0.9.2"
 ## Run xPyD
 
 ### Instructions
+
 - The following examples are run on an A800 (80GB) device, using the Meta-Llama-3.1-8B-Instruct model.
 - Pay attention to the setting of the `kv_buffer_size` (in bytes). The empirical value is 10% of the GPU memory size. This is related to the kvcache size. If it is too small, the GPU memory buffer for temporarily storing the received kvcache will overflow, causing the kvcache to be stored in the tensor memory pool, which increases latency. If it is too large, the kvcache available for inference will be reduced, leading to a smaller batch size and decreased throughput.
 - For Prefill instances, when using non-GET mode, the `kv_buffer_size` can be set to 1, as Prefill currently does not need to receive kvcache. However, when using GET mode, a larger `kv_buffer_size` is required because it needs to store the kvcache sent to the D instance.
