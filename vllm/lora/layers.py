@@ -134,6 +134,7 @@ class BaseLayerWithLoRA(nn.Module):
         """Returns True if the layer can be replaced by this LoRA layer."""
         raise NotImplementedError
 
+
 @CustomOp.register("vocab_parallel_embedding_with_lora")
 class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA, CustomOp):
 
