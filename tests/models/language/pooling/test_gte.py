@@ -58,8 +58,8 @@ MODELS = [
 
 
 @pytest.mark.parametrize("model_info", MODELS)
-def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo,
-                           monkeypatch) -> None:
+def test_embed_models_mteb(hf_runner, vllm_runner,
+                           model_info: EmbedModelInfo) -> None:
     vllm_extra_kwargs: dict[str, Any] = {}
     if model_info.architecture == "GteNewModel":
         vllm_extra_kwargs["hf_overrides"] = {"architectures": ["GteNewModel"]}
@@ -70,8 +70,8 @@ def test_embed_models_mteb(hf_runner, vllm_runner, model_info: EmbedModelInfo,
 
 @pytest.mark.parametrize("model_info", MODELS)
 def test_embed_models_correctness(hf_runner, vllm_runner,
-                                  model_info: EmbedModelInfo, example_prompts,
-                                  monkeypatch) -> None:
+                                  model_info: EmbedModelInfo,
+                                  example_prompts) -> None:
     vllm_extra_kwargs: dict[str, Any] = {}
     if model_info.architecture == "GteNewModel":
         vllm_extra_kwargs["hf_overrides"] = {"architectures": ["GteNewModel"]}
