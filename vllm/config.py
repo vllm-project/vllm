@@ -1585,7 +1585,7 @@ class ModelConfig:
         """
         This method attempts to retrieve the non-default values of the
         generation config for this model.
-        
+
         The generation config can contain information about special tokens, as
         well as sampling parameters. Which is why this method exists separately
         to `get_diff_sampling_param`.
@@ -2066,7 +2066,7 @@ class ParallelConfig:
     and when data_parallel_size > 0. Enables running an AsyncLLM
     and API server on a "per-node" basis where vLLM load balances
     between local data parallel ranks, but an external LB balances
-    between vLLM nodes/replicas. Set explicitly in conjunction with 
+    between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
@@ -4358,12 +4358,20 @@ class CompilationConfig:
             "disabled_custom_ops": True,
             "compilation_time": True,
             "bs_to_padded_graph_size": True,
-            "pass_config": True,
             "traced_files": True,
             "inductor_compile_config": {
                 "post_grad_custom_post_pass": True,
             },
         }
+
+        # exclude default attr in pass_config
+        pass_config_exclude = {}
+        for attr, default_val in vars(PassConfig()).items():
+            if getattr(self.pass_config, attr) == default_val:
+                pass_config_exclude[attr] = True
+        if pass_config_exclude:
+            exclude["pass_config"] = pass_config_exclude
+
         # The cast to string is necessary because Pydantic is mocked in docs
         # builds and sphinx-argparse doesn't know the return type of decode()
         return str(
