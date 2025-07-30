@@ -31,3 +31,46 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+
+# Docker build optimization - exclude unnecessary files
+*.log
+build-log*
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Git (keep .git for build context but exclude these)
+.git/hooks/
+.git/logs/
+
+# Temporary and backup files
+*.tmp
+*.bak
+*.orig
+
+# Large model files that shouldn't be in build context
+*.bin
+*.safetensors
+*.ggml
+*.gguf
+
+# Documentation build artifacts
+docs/_build/
+site/

@@ -79,31 +79,63 @@ ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
 
-# Install Python and other dependencies
+# Configure timezone
 RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
-    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
-    && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl sudo \
-    && if [ ! -z ${DEADSNAKES_MIRROR_URL} ] ; then \
+    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections
+
+# Install system dependencies with optimized APT configuration
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    # Configure APT for better performance
+    echo 'Acquire::Languages "none";' > /etc/apt/apt.conf.d/99performance && \
+    echo 'Acquire::GzipIndexes "true";' >> /etc/apt/apt.conf.d/99performance && \
+    echo 'APT::Install-Recommends "false";' >> /etc/apt/apt.conf.d/99performance && \
+    echo 'APT::Install-Suggests "false";' >> /etc/apt/apt.conf.d/99performance && \
+    echo 'Acquire::Queue-Mode "host";' >> /etc/apt/apt.conf.d/99performance && \
+    # Install base system packages
+    apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        ccache \
+        curl \
+        git \
+        gnupg \
+        libibverbs-dev \
+        lsb-release \
+        software-properties-common \
+        sudo
+
+# Install Python from deadsnakes PPA
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    if [ ! -z ${DEADSNAKES_MIRROR_URL} ] ; then \
         if [ ! -z "${DEADSNAKES_GPGKEY_URL}" ] ; then \
-            mkdir -p -m 0755 /etc/apt/keyrings ; \
-            curl -L ${DEADSNAKES_GPGKEY_URL} | gpg --dearmor > /etc/apt/keyrings/deadsnakes.gpg ; \
-            sudo chmod 644 /etc/apt/keyrings/deadsnakes.gpg ; \
+            mkdir -p -m 0755 /etc/apt/keyrings && \
+            curl -L ${DEADSNAKES_GPGKEY_URL} | gpg --dearmor > /etc/apt/keyrings/deadsnakes.gpg && \
+            chmod 644 /etc/apt/keyrings/deadsnakes.gpg && \
             echo "deb [signed-by=/etc/apt/keyrings/deadsnakes.gpg] ${DEADSNAKES_MIRROR_URL} $(lsb_release -cs) main" > /etc/apt/sources.list.d/deadsnakes.list ; \
         fi ; \
     else \
-        for i in 1 2 3; do \
-            add-apt-repository -y ppa:deadsnakes/ppa && break || \
-            { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
-        done ; \
-    fi \
-    && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
-    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
-    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
-    && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
-    && python3 --version && python3 -m pip --version
+        add-apt-repository -y ppa:deadsnakes/ppa || \
+        { sleep 5 && add-apt-repository -y ppa:deadsnakes/ppa; } || \
+        { sleep 5 && add-apt-repository -y ppa:deadsnakes/ppa; } ; \
+    fi && \
+    apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+        python${PYTHON_VERSION} \
+        python${PYTHON_VERSION}-dev \
+        python${PYTHON_VERSION}-venv && \
+    # Configure Python as default
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
+    update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} && \
+    ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config
+
+# Install pip and package managers
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} && \
+    python3 -m pip install --upgrade pip setuptools wheel && \
+    python3 --version && python3 -m pip --version
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -111,22 +143,18 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 ARG PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL
 ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
 
-# Install uv for faster pip installs
-RUN --mount=type=cache,target=/root/.cache/uv \
+# Install uv package manager
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     python3 -m pip install uv
 
-# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
-# Reference: https://github.com/astral-sh/uv/pull/1694
-ENV UV_HTTP_TIMEOUT=500
-ENV UV_INDEX_STRATEGY="unsafe-best-match"
-
-# Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
-# as it was causing spam when compiling the CUTLASS kernels
-RUN apt-get install -y gcc-10 g++-10
-RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10
-RUN <<EOF
-gcc --version
-EOF
+# Upgrade to GCC 10 (fixes CUTLASS kernel compilation warnings)
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update -y && \
+    apt-get install -y --no-install-recommends gcc-10 g++-10 && \
+    update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10 && \
+    gcc --version
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -138,25 +166,24 @@ WORKDIR /workspace
 
 # install build and runtime dependencies
 
-# arm64 (GH200) build follows the practice of "use existing pytorch" build,
-# we need to install torch and torchvision from the nightly builds first,
-# pytorch will not appear as a vLLM dependency in all of the following steps
-# after this step
-RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        uv pip install --system \
-            --index-url ${PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-            "torch==2.8.0.dev20250318+cu128" "torchvision==0.22.0.dev20250319";  \
-        uv pip install --system \
-            --index-url ${PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-            --pre pytorch_triton==3.3.0+gitab727c40; \
-    fi
-
+# Copy requirements files first for better layer caching
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r requirements/cuda.txt \
-    --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+
+# Install PyTorch for ARM64 platform (GH200 support)
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+        NIGHTLY_INDEX="${PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" && \
+        uv pip install --system --index-url "$NIGHTLY_INDEX" \
+            "torch==2.8.0.dev20250318+cu128" "torchvision==0.22.0.dev20250319" && \
+        uv pip install --system --index-url "$NIGHTLY_INDEX" --pre pytorch_triton==3.3.0+gitab727c40; \
+    fi
+
+# Install Python dependencies
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    CUDA_INDEX="${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" && \
+    uv pip install --system -r requirements/common.txt --extra-index-url "$CUDA_INDEX" && \
+    uv pip install --system -r requirements/cuda.txt --extra-index-url "$CUDA_INDEX"
 
 # cuda arch list used by torch
 # can be useful for both `dev` and `test`
@@ -180,12 +207,13 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 # install build dependencies
 COPY requirements/build.txt requirements/build.txt
 
-# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
-# Reference: https://github.com/astral-sh/uv/pull/1694
+# Configure uv timeout and performance settings
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
+ENV UV_CONCURRENT_DOWNLOADS=10
+ENV UV_CONCURRENT_BUILDS=4
 
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     uv pip install --system -r requirements/build.txt \
     --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
@@ -194,12 +222,13 @@ ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != "0" ]; then bash tools/check_repo.sh ; fi
 
-# max jobs used by Ninja to build extensions
+# Build configuration
 ARG max_jobs=2
-ENV MAX_JOBS=${max_jobs}
-# number of threads used by nvcc
 ARG nvcc_threads=8
-ENV NVCC_THREADS=$nvcc_threads
+ENV MAX_JOBS=${max_jobs}
+ENV NVCC_THREADS=${nvcc_threads}
+ENV MAKEFLAGS="-j${max_jobs}"
+ENV CMAKE_BUILD_PARALLEL_LEVEL=${max_jobs}
 
 ARG USE_SCCACHE
 ARG SCCACHE_DOWNLOAD_URL=https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-x86_64-unknown-linux-musl.tar.gz
@@ -208,42 +237,64 @@ ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
 ARG SCCACHE_S3_NO_CREDENTIALS=0
 
-# Flag to control whether to use pre-built vLLM wheels
+# Precompiled wheel options
 ARG VLLM_USE_PRECOMPILED=""
+ARG USE_FLASHINFER_PREBUILT_WHEEL=false
+ARG FLASHINFER_PREBUILT_WHEEL_URL=""
 
-# if USE_SCCACHE is set, use sccache to speed up compilation
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=.git,target=.git \
-    if [ "$USE_SCCACHE" = "1" ]; then \
-        echo "Installing sccache..." \
-        && curl -L -o sccache.tar.gz ${SCCACHE_DOWNLOAD_URL} \
-        && tar -xzf sccache.tar.gz \
-        && sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache \
-        && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
-        && if [ ! -z ${SCCACHE_ENDPOINT} ] ; then export SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT} ; fi \
-        && export SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME} \
-        && export SCCACHE_REGION=${SCCACHE_REGION_NAME} \
-        && export SCCACHE_S3_NO_CREDENTIALS=${SCCACHE_S3_NO_CREDENTIALS} \
-        && export SCCACHE_IDLE_TIMEOUT=0 \
-        && export CMAKE_BUILD_TYPE=Release \
-        && export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
-        && export VLLM_DOCKER_BUILD_CONTEXT=1 \
-        && sccache --show-stats \
-        && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
-        && sccache --show-stats; \
+# Install sccache build cache tool
+RUN if [ "$USE_SCCACHE" = "1" ]; then \
+        echo "Installing sccache..." && \
+        curl -L -o sccache.tar.gz ${SCCACHE_DOWNLOAD_URL} && \
+        tar -xzf sccache.tar.gz && \
+        mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache && \
+        rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl && \
+        sccache --version; \
     fi
 
-ENV CCACHE_DIR=/root/.cache/ccache
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=.git,target=.git  \
-    if [ "$USE_SCCACHE" != "1" ]; then \
-        # Clean any existing CMake artifacts
-        rm -rf .deps && \
-        mkdir -p .deps && \
+# Build vLLM wheel with sccache acceleration
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
+    --mount=type=bind,source=.git,target=.git \
+    if [ "$USE_SCCACHE" = "1" ]; then \
+        # Configure sccache
+        [ -n "${SCCACHE_ENDPOINT}" ] && export SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT}; \
+        export SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME} && \
+        export SCCACHE_REGION=${SCCACHE_REGION_NAME} && \
+        export SCCACHE_S3_NO_CREDENTIALS=${SCCACHE_S3_NO_CREDENTIALS} && \
+        export SCCACHE_IDLE_TIMEOUT=0 && \
+        export CMAKE_C_COMPILER_LAUNCHER=sccache && \
+        export CMAKE_CXX_COMPILER_LAUNCHER=sccache && \
+        export CMAKE_BUILD_TYPE=Release && \
         export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" && \
         export VLLM_DOCKER_BUILD_CONTEXT=1 && \
-        python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
+        # Build wheel
+        sccache --show-stats && \
+        python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 && \
+        sccache --show-stats; \
+    fi
+
+# Configure ccache for compilation acceleration
+ENV CCACHE_DIR=/root/.cache/ccache
+ENV CCACHE_MAXSIZE=10G
+ENV CCACHE_COMPRESS=1
+ENV CCACHE_COMPRESSLEVEL=6
+
+# Build vLLM wheel with ccache (fallback when sccache not used)
+RUN --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
+    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    --mount=type=cache,target=/workspace/.deps,sharing=locked \
+    --mount=type=bind,source=.git,target=.git \
+    if [ "$USE_SCCACHE" != "1" ]; then \
+        # Configure build environment
+        export CMAKE_C_COMPILER_LAUNCHER=ccache && \
+        export CMAKE_CXX_COMPILER_LAUNCHER=ccache && \
+        export CMAKE_BUILD_TYPE=Release && \
+        export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" && \
+        export VLLM_DOCKER_BUILD_CONTEXT=1 && \
+        # Build wheel
+        python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 && \
+        ccache -s; \
     fi
 
 # When using precompiled wheels, keep only the newest manylinux1 wheel and delete others
@@ -257,16 +308,13 @@ RUN if [ "$VLLM_USE_PRECOMPILED" = "1" ]; then \
         fi; \
     fi
 
-# Check the size of the wheel if RUN_WHEEL_CHECK is true
+# Validate wheel size
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
-# sync the default value with .buildkite/check-wheel-size.py
 ARG VLLM_MAX_SIZE_MB=400
-ENV VLLM_MAX_SIZE_MB=$VLLM_MAX_SIZE_MB
 ARG RUN_WHEEL_CHECK=true
+ENV VLLM_MAX_SIZE_MB=$VLLM_MAX_SIZE_MB
 RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
         python3 check-wheel-size.py dist; \
-    else \
-        echo "Skipping wheel size check."; \
     fi
 #################### EXTENSION Build IMAGE ####################
 
@@ -277,17 +325,13 @@ ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ARG PYTORCH_CUDA_INDEX_BASE_URL
 
-# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
-# Reference: https://github.com/astral-sh/uv/pull/1694
-ENV UV_HTTP_TIMEOUT=500
-ENV UV_INDEX_STRATEGY="unsafe-best-match"
-
+# Install development dependencies
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
 COPY requirements/dev.txt requirements/dev.txt
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     uv pip install --system -r requirements/dev.txt \
-    --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 #################### DEV IMAGE ####################
 
 #################### vLLM installation IMAGE ####################
@@ -307,15 +351,40 @@ ARG DEADSNAKES_MIRROR_URL
 ARG DEADSNAKES_GPGKEY_URL
 ARG GET_PIP_URL
 
+# Set up Python version environment variable
 RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
     echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
 
-# Install Python and other dependencies
-RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
+# Install Python and other dependencies (optimized for final image)
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
+    # Configure APT for better performance
+    && echo 'Acquire::Languages "none";' > /etc/apt/apt.conf.d/99performance \
+    && echo 'Acquire::GzipIndexes "true";' >> /etc/apt/apt.conf.d/99performance \
+    && echo 'APT::Install-Recommends "false";' >> /etc/apt/apt.conf.d/99performance \
+    && echo 'APT::Install-Suggests "false";' >> /etc/apt/apt.conf.d/99performance \
+    && echo 'Acquire::Queue-Mode "host";' >> /etc/apt/apt.conf.d/99performance \
     && apt-get update -y \
-    && apt-get install -y ccache software-properties-common git curl wget sudo vim python3-pip \
-    && apt-get install -y ffmpeg libsm6 libxext6 libgl1 \
+    && apt-get install -y --no-install-recommends \
+        ccache \
+        software-properties-common \
+        git \
+        curl \
+        wget \
+        sudo \
+        vim \
+        python3-pip \
+        ca-certificates \
+        gnupg \
+        lsb-release \
+        # Media and graphics libraries
+        ffmpeg \
+        libsm6 \
+        libxext6 \
+        libgl1 \
+        libibverbs-dev \
     && if [ ! -z ${DEADSNAKES_MIRROR_URL} ] ; then \
         if [ ! -z "${DEADSNAKES_GPGKEY_URL}" ] ; then \
             mkdir -p -m 0755 /etc/apt/keyrings ; \
@@ -330,11 +399,18 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
         done ; \
     fi \
     && apt-get update -y \
-    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv libibverbs-dev \
+    && apt-get install -y --no-install-recommends \
+        python${PYTHON_VERSION} \
+        python${PYTHON_VERSION}-dev \
+        python${PYTHON_VERSION}-venv \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
-    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
-    && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
+    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config
+
+# Install pip separately for better caching
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
+    && python3 -m pip install --upgrade pip setuptools wheel \
     && python3 --version && python3 -m pip --version
 
 ARG PIP_INDEX_URL UV_INDEX_URL
@@ -344,13 +420,15 @@ ARG PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL
 ARG PIP_KEYRING_PROVIDER UV_KEYRING_PROVIDER
 
 # Install uv for faster pip installs
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     python3 -m pip install uv
 
-# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
-# Reference: https://github.com/astral-sh/uv/pull/1694
+# Configure uv timeout and performance settings
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
+ENV UV_CONCURRENT_DOWNLOADS=10
+ENV UV_CONCURRENT_BUILDS=4
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -358,23 +436,18 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # or future versions of triton.
 RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
-# arm64 (GH200) build follows the practice of "use existing pytorch" build,
-# we need to install torch and torchvision from the nightly builds first,
-# pytorch will not appear as a vLLM dependency in all of the following steps
-# after this step
-RUN --mount=type=cache,target=/root/.cache/uv \
+# Install PyTorch for ARM64 platform (GH200 support)
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        uv pip install --system \
-            --index-url ${PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-            "torch==2.8.0.dev20250318+cu128" "torchvision==0.22.0.dev20250319" ; \
-        uv pip install --system \
-            --index-url ${PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-            --pre pytorch_triton==3.3.0+gitab727c40 ; \
+        NIGHTLY_INDEX="${PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')" && \
+        uv pip install --system --index-url "$NIGHTLY_INDEX" \
+            "torch==2.8.0.dev20250318+cu128" "torchvision==0.22.0.dev20250319" \
+            --pre pytorch_triton==3.3.0+gitab727c40; \
     fi
 
 # Install vllm wheel first, so that torch etc will be installed.
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
-    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     uv pip install --system dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
@@ -390,41 +463,39 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 # -rw-rw-r-- 1 mgoin mgoin 205M Jun  9 18:03 flashinfer_python-0.2.6.post1-cp39-abi3-linux_x86_64.whl
 # $ # upload the wheel to a public location, e.g. https://wheels.vllm.ai/flashinfer/v0.2.6.post1/flashinfer_python-0.2.6.post1-cp39-abi3-linux_x86_64.whl
 
-# Install FlashInfer from source
+# Install FlashInfer with prebuilt wheel support
 ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
-# Keep this in sync with https://github.com/vllm-project/vllm/blob/main/requirements/cuda.txt
-# We use `--force-reinstall --no-deps` to avoid issues with the existing FlashInfer wheel.
 ARG FLASHINFER_GIT_REF="v0.2.9rc2"
-RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
-  . /etc/environment
-    git clone --depth 1 --recursive --shallow-submodules \
-        --branch ${FLASHINFER_GIT_REF} \
-        ${FLASHINFER_GIT_REPO} flashinfer
-    # Exclude CUDA arches for older versions (11.x and 12.0-12.7)
-    # TODO: Update this to allow setting TORCH_CUDA_ARCH_LIST as a build arg.
-    if [[ "${CUDA_VERSION}" == 11.* ]]; then
-        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
-    elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then
-        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
-    else
-        # CUDA 12.8+ supports 10.0a and 12.0
-        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    --mount=type=cache,target=/root/.cache/ccache,sharing=locked \
+    . /etc/environment && \
+    if [ "$USE_FLASHINFER_PREBUILT_WHEEL" = "true" ] && [ -n "$FLASHINFER_PREBUILT_WHEEL_URL" ]; then \
+        echo "Installing FlashInfer from prebuilt wheel" && \
+        uv pip install --system --force-reinstall --no-deps "$FLASHINFER_PREBUILT_WHEEL_URL"; \
+    else \
+        echo "Building FlashInfer from source" && \
+        git clone --depth 1 --recursive --shallow-submodules --branch ${FLASHINFER_GIT_REF} ${FLASHINFER_GIT_REPO} flashinfer && \
+        # Determine CUDA architectures based on CUDA version
+        if [[ "${CUDA_VERSION}" == 11.* ]]; then \
+            FI_ARCH_LIST="7.5 8.0 8.9"; \
+        elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then \
+            FI_ARCH_LIST="7.5 8.0 8.9 9.0a"; \
+        else \
+            FI_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"; \
+        fi && \
+        echo "Building FlashInfer for architectures: $FI_ARCH_LIST" && \
+        cd flashinfer && \
+        export CMAKE_C_COMPILER_LAUNCHER=ccache && \
+        export CMAKE_CXX_COMPILER_LAUNCHER=ccache && \
+        TORCH_CUDA_ARCH_LIST="$FI_ARCH_LIST" python3 -m flashinfer.aot && \
+        TORCH_CUDA_ARCH_LIST="$FI_ARCH_LIST" uv pip install --system --no-build-isolation --force-reinstall --no-deps . && \
+        cd .. && rm -rf flashinfer; \
     fi
-    echo "🏗️  Building FlashInfer for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
-    # Needed to build AOT kernels
-    pushd flashinfer
-        TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-            python3 -m flashinfer.aot
-        TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-            uv pip install --system --no-build-isolation --force-reinstall --no-deps .
-    popd
-    rm -rf flashinfer
-BASH
 COPY examples examples
 COPY benchmarks benchmarks
 COPY ./vllm/collect_env.py .
 
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 . /etc/environment && \
 uv pip list
 
@@ -433,7 +504,7 @@ uv pip list
 # install build dependencies for JIT compilation.
 # TODO: Remove this once FlashInfer AOT wheel is fixed
 COPY requirements/build.txt requirements/build.txt
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     uv pip install --system -r requirements/build.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
@@ -451,25 +522,13 @@ ARG PYTHON_VERSION
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 
-# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
-# Reference: https://github.com/astral-sh/uv/pull/1694
-ENV UV_HTTP_TIMEOUT=500
-ENV UV_INDEX_STRATEGY="unsafe-best-match"
-
-# install development dependencies (for testing)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
+# Install development and test dependencies
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    CUDA_MAJOR="${CUDA_VERSION%%.*}" && \
     if [ "$CUDA_MAJOR" -ge 12 ]; then \
         uv pip install --system -r requirements/dev.txt; \
-    fi
-
-# install development dependencies (for testing)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -e tests/vllm_test_utils
-
-# enable fast downloads from hf (for testing)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system hf_transfer
+    fi && \
+    uv pip install --system -e tests/vllm_test_utils hf_transfer
 ENV HF_HUB_ENABLE_HF_TRANSFER 1
 
 # Copy in the v1 package for testing (it isn't distributed yet)
@@ -478,11 +537,12 @@ COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 # doc requires source code
 # we hide them inside `test_docs/` , so that this source code
 # will not be imported by other tests
-RUN mkdir test_docs
-RUN mv docs test_docs/
-RUN cp -r examples test_docs/
-RUN mv vllm test_docs/
-RUN mv mkdocs.yaml test_docs/
+# Consolidate test docs setup for better layer efficiency
+RUN mkdir test_docs \
+    && mv docs test_docs/ \
+    && cp -r examples test_docs/ \
+    && mv vllm test_docs/ \
+    && mv mkdocs.yaml test_docs/
 #################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
@@ -494,14 +554,10 @@ ARG INSTALL_KV_CONNECTORS=false
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 
-# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
-# Reference: https://github.com/astral-sh/uv/pull/1694
-ENV UV_HTTP_TIMEOUT=500
-
 COPY requirements/kv_connectors.txt requirements/kv_connectors.txt
 
 # install additional dependencies for openai api server
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
         uv pip install --system -r requirements/kv_connectors.txt; \
     fi; \
