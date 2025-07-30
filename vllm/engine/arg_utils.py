@@ -38,6 +38,8 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
+from vllm.transformers_utils.configs.speculators_eagle import (
+    is_speculators_eagle_config)
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
@@ -399,6 +401,7 @@ class EngineArgs:
         str] = ModelConfig.logits_processor_pattern
 
     speculative_config: Optional[Dict[str, Any]] = None
+    draft_tensor_parallel_size: Optional[int] = None
 
     show_hidden_metrics_for_version: Optional[str] = \
         ObservabilityConfig.show_hidden_metrics_for_version
@@ -757,6 +760,14 @@ class EngineArgs:
             default=None,
             help="The configurations for speculative decoding. Should be a "
             "JSON string.")
+        speculative_group.add_argument(
+            "--draft-tensor-parallel-size",
+            type=int,
+            default=None,
+            help="Number of tensor parallel replicas for the draft model. "
+            "Only used with speculative decoding. "
+            "Note: draft_tensor_parallel_size > 1 is not supported at the "
+            "moment.")
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
@@ -861,6 +872,48 @@ class EngineArgs:
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
+        # Auto-detect speculators format models
+        if args.model and not args.speculative_config:
+            from vllm.logger import init_logger
+            from vllm.transformers_utils.configs import (
+                extract_speculators_info)
+            logger = init_logger(__name__)
+
+            speculators_info = extract_speculators_info(args.model)
+            if speculators_info:
+                # Log what we're doing
+                logger.info("🦅 Auto-detected Eagle speculators format model")
+                logger.info("  Target model: %s",
+                            speculators_info['target_model'])
+                logger.info("  Draft model: %s", args.model)
+                logger.info("  Method: %s", speculators_info['method'])
+                logger.info("  Speculative tokens: %s",
+                            speculators_info['num_tokens'])
+
+                # Build speculative config
+                spec_config = {
+                    "method": speculators_info["method"],
+                    "model": args.model,  # Original model becomes draft
+                    "num_speculative_tokens": speculators_info["num_tokens"],
+                }
+
+                # Add draft tensor parallel size if specified
+                if (hasattr(args, 'draft_tensor_parallel_size')
+                        and args.draft_tensor_parallel_size is not None):
+                    spec_config["draft_tensor_parallel_size"] = (
+                        args.draft_tensor_parallel_size)
+
+                # Set the speculative config directly
+                # (it's already parsed by argparse)
+                args.speculative_config = spec_config
+
+                # Swap the model to target
+                args.model = speculators_info["target_model"]
+
+                # Also update tokenizer if not explicitly set
+                if not hasattr(args, 'tokenizer') or args.tokenizer is None:
+                    args.tokenizer = speculators_info["target_model"]
+
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
@@ -1396,12 +1449,37 @@ class EngineArgs:
             return False
 
         # V1 supports N-gram, Medusa, and Eagle speculative decoding.
-        if (self.speculative_config is not None
-                and self.speculative_config.get("method") == "draft_model"):
-            raise NotImplementedError(
-                "Speculative decoding with draft model is not supported yet. "
-                "Please consider using other speculative decoding methods "
-                "such as ngram, medusa, eagle, or deepseek_mtp.")
+        is_ngram_enabled = False
+        is_eagle_enabled = False
+        is_medusa_enabled = False
+        if self.speculative_config is not None:
+            # This is supported but experimental (handled below).
+            speculative_method = self.speculative_config.get("method")
+            speculative_model = self.speculative_config.get("model")
+
+            if speculative_method:
+                if speculative_method in ("ngram", "[ngram]"):
+                    is_ngram_enabled = True
+                elif speculative_method == "medusa":
+                    is_medusa_enabled = True
+                elif speculative_method in ("eagle", "eagle3", "deepseek_mtp"):
+                    is_eagle_enabled = True
+            else:
+                # If method is not set, try to detect from model
+                if speculative_model:
+                    if speculative_model in ("ngram", "[ngram]"):
+                        is_ngram_enabled = True
+                    # Detect speculators format Eagle models which don't
+                    # set the method field explicitly but can be identified
+                    # by their config structure
+                    elif is_speculators_eagle_config(speculative_model):
+                        is_eagle_enabled = True
+
+            if not (is_ngram_enabled or is_eagle_enabled or is_medusa_enabled):
+                # Other speculative decoding methods are not supported yet.
+                _raise_or_fallback(feature_name="Speculative Decoding",
+                                   recommend_to_remove=False)
+                return False
 
         # No XFormers so far.
         V1_BACKENDS = [
