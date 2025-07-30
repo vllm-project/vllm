@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable, MutableSequence
+from collections.abc import Iterable, Mapping, MutableSequence
 from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
-                    Union, overload, runtime_checkable, Mapping)
+                    Union, overload, runtime_checkable)
 
 import numpy as np
 import torch
@@ -696,7 +696,7 @@ class SupportsTranscription(Protocol):
     Transcription models can opt out of text generation by setting this to
     `True`.
     """
-    
+
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         # language codes in supported_languages that don't exist in the full language map
@@ -717,12 +717,14 @@ class SupportsTranscription(Protocol):
         The model has control over the construction, as long as it
         returns a valid PromptType."""
         ...
-    
+
     @classmethod
     def _other_languages(cls) -> Mapping[str, str]:
         # other possible language codes from the whisper map
-        return {k: v for k, v in LANGUAGES.items()
-                if k not in cls.supported_languages}
+        return {
+            k: v
+            for k, v in LANGUAGES.items() if k not in cls.supported_languages
+        }
 
     @classmethod
     def validate_language(cls, language: Optional[str]) -> Optional[str]:
@@ -732,14 +734,15 @@ class SupportsTranscription(Protocol):
             logger.warning(
                 "Language %r is not natively supported by %s; "
                 "results may be less accurate. Supported languages: %r",
-                language, cls.__name__, list(cls.supported_languages.keys()),
+                language,
+                cls.__name__,
+                list(cls.supported_languages.keys()),
             )
             return language
         else:
             raise ValueError(
                 f"Unsupported language: {language!r}.  Must be one of "
-                f"{list(cls.supported_languages.keys())}."
-            )
+                f"{list(cls.supported_languages.keys())}.")
 
     @classmethod
     def get_speech_to_text_config(

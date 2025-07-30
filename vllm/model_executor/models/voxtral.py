@@ -61,6 +61,7 @@ ISO639_1_SUPPORTED_LANGS = {
     "es": "Spanish",
 }
 
+
 class VoxtralProcessorAdapter:
     """
     Provide a HF-compatible interface for

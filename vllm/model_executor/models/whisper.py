@@ -110,6 +110,7 @@ ISO639_1_SUPPORTED_LANGS = {
     "cy": "Welsh"
 }
 
+
 class WhisperAudioInputs(TypedDict):
     input_features: NestedTensors
     """Shape: `(batch_size, 128, M)`"""
