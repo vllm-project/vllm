@@ -26,7 +26,7 @@ from pydantic import (ConfigDict, SkipValidation, field_validator,
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.distributed import ProcessGroup, ReduceOp
-from typing_extensions import Self, assert_never, runtime_checkable
+from typing_extensions import Self, assert_never, deprecated, runtime_checkable
 
 import vllm.envs as envs
 from vllm import version
@@ -2057,6 +2057,31 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 
 @config
 @dataclass
+class EPLBConfig:
+    """Configuration for Expert Parallel Load Balancing (EP)."""
+
+    window_size: int = 1000
+    """Window size for expert load recording."""
+    step_interval: int = 3000
+    """
+    Interval for rearranging experts in expert parallelism.
+
+    Note that if this is greater than the EPLB window size, only the metrics
+    of the last `lb_window_size` steps will be used for rearranging experts.
+    """
+
+    num_redundant_experts: int = 0
+    """Number of redundant experts to use for expert parallelism."""
+
+    log_balancedness: bool = False
+    """
+    Log the balancedness each step of expert parallelism.
+    This is turned off by default since it will cause communication overhead.
+    """
+
+
+@config
+@dataclass
 class ParallelConfig:
     """Configuration for the distributed execution."""
 
@@ -2098,23 +2123,8 @@ class ParallelConfig:
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False
     """Enable expert parallelism load balancing for MoE layers."""
-    num_redundant_experts: int = 0
-    """Number of redundant experts to use for expert parallelism."""
-    eplb_window_size: int = 1000
-    """Window size for expert load recording."""
-    eplb_step_interval: int = 3000
-    """
-    Interval for rearranging experts in expert parallelism.
-
-    Note that if this is greater than the EPLB window size, only the metrics
-    of the last `eplb_window_size` steps will be used for rearranging experts.
-    """
-    eplb_log_balancedness: bool = False
-    """
-    Log the balancedness each step of expert parallelism.
-    This is turned off by default since it will cause communication overhead.
-    """
-
+    eplb_config: EPLBConfig = field(default_factory=EPLBConfig)
+    """Expert parallelism configuration."""
     max_parallel_loading_workers: Optional[int] = None
     """Maximum number of parallel loading workers when loading model
     sequentially in multiple batches. To avoid RAM OOM when using tensor
@@ -2302,10 +2312,10 @@ class ParallelConfig:
                 raise ValueError(
                     "Expert parallelism load balancing is only supported on "
                     "CUDA devices now.")
-            if self.num_redundant_experts < 0:
+            if self.eplb_config.num_redundant_experts < 0:
                 raise ValueError(
                     "num_redundant_experts must be non-negative, but got "
-                    f"{self.num_redundant_experts}.")
+                    f"{self.eplb_config.num_redundant_experts}.")
             if not self.enable_expert_parallel:
                 raise ValueError(
                     "enable_expert_parallel must be True to use EPLB.")
@@ -2316,10 +2326,10 @@ class ParallelConfig:
                     f"TP={self.tensor_parallel_size},DP={self.data_parallel_size}."
                 )
         else:
-            if self.num_redundant_experts != 0:
+            if self.eplb_config.num_redundant_experts != 0:
                 raise ValueError(
                     "num_redundant_experts should be used with EPLB."
-                    f"{self.num_redundant_experts}.")
+                    f"{self.eplb_config.num_redundant_experts}.")
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
@@ -2396,6 +2406,70 @@ class ParallelConfig:
                              "run with Ray.")
 
         return self
+
+    @property
+    @deprecated(
+        "`num_redundant_experts` is deprecated and has been replaced with "
+        "`eplb_config.num_redundant_experts`. This will be removed in v0.12.0. "
+        "Please use `eplb_config.num_redundant_experts` instead.")
+    def num_redundant_experts(self) -> int:
+        return self.eplb_config.num_redundant_experts
+
+    @num_redundant_experts.setter
+    @deprecated(
+        "`num_redundant_experts` is deprecated and has been replaced with "
+        "`eplb_config.num_redundant_experts`. This will be removed in v0.12.0. "
+        "Please use `eplb_config.num_redundant_experts` instead.")
+    def num_redundant_experts(self, value: int):
+        self.eplb_config.num_redundant_experts = value
+
+    @property
+    @deprecated("`eplb_window_size` is deprecated and has been replaced with "
+                "`eplb_config.window_size`. This will be removed in v0.12.0. "
+                "Please use `eplb_config.window_size` instead.")
+    def eplb_window_size(self) -> int:
+        return self.eplb_config.window_size
+
+    @eplb_window_size.setter
+    @deprecated(
+        "`eplb_window_size` is deprecated and has been replaced with "
+        "`eplb_config.lb_window_size`. This will be removed in v0.12.0. "
+        "Please use `eplb_config.lb_window_size` instead.")
+    def eplb_window_size(self, value: int):
+        self.eplb_config.window_size = value
+
+    @property
+    @deprecated(
+        "`eplb_step_interval` is deprecated and has been replaced with "
+        "`eplb_config.lb_step_istep_intervalnterval`."
+        " This will be removed in v0.12.0. "
+        "Please use `eplb_config.step_interval` instead.")
+    def eplb_step_interval(self) -> int:
+        return self.eplb_config.step_interval
+
+    @eplb_step_interval.setter
+    @deprecated(
+        "`eplb_step_interval` is deprecated and has been replaced with "
+        "`eplb_config.step_interval`. This will be removed in v0.12.0. "
+        "Please use `eplb_config.step_interval` instead.")
+    def eplb_step_interval(self, value: int):
+        self.eplb_config.step_interval = value
+
+    @property
+    @deprecated(
+        "`eplb_log_balancedness` is deprecated and has been replaced with "
+        "`eplb_config.log_balancedness`. This will be removed in v0.12.0. "
+        "Please use `eplb_config.log_balancedness` instead.")
+    def eplb_log_balancedness(self) -> bool:
+        return self.eplb_config.log_balancedness
+
+    @eplb_log_balancedness.setter
+    @deprecated(
+        "`eplb_log_balancedness` is deprecated and has been replaced with "
+        "`eplb_config.log_balancedness`. This will be removed in v0.12.0. "
+        "Please use `eplb_config.log_balancedness` instead.")
+    def eplb_log_balancedness(self, value: bool):
+        self.eplb_config.log_balancedness = value
 
 
 PreemptionMode = Literal["swap", "recompute"]
