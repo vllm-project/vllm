@@ -36,7 +36,7 @@ from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType,
                             ReconfigureDistributedRequest, ReconfigureRankType,
-                            UtilityOutput)
+                            UtilityOutput, UtilityResult)
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.v1.executor.abstract import Executor
@@ -715,8 +715,8 @@ class EngineCoreProc(EngineCore):
             output = UtilityOutput(call_id)
             try:
                 method = getattr(self, method_name)
-                output.result = method(
-                    *self._convert_msgspec_args(method, args))
+                result = method(*self._convert_msgspec_args(method, args))
+                output.result = UtilityResult(result)
             except BaseException as e:
                 logger.exception("Invocation of %s method failed", method_name)
                 output.failure_message = (f"Call to {method_name} method"
