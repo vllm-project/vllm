@@ -232,6 +232,11 @@ class AsyncLLM(EngineClient):
         if self.errored:
             raise EngineDeadError()
 
+        # Validate the request_id type.
+        if not isinstance(request_id, str):
+            raise TypeError(
+                f"request_id must be a string, got {type(request_id)}")
+
         is_pooling = isinstance(params, PoolingParams)
 
         # Create a new output collector for the request.

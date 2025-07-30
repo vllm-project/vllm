@@ -717,11 +717,6 @@ class SequenceGroup:
                  trace_headers: Optional[Mapping[str, str]] = None,
                  priority: int = 0,
                  draft_size: int = 1) -> None:
-        # Ensure request_id is always a string to prevent type comparison errors
-        if not isinstance(request_id, str):
-            raise TypeError(
-                f"request_id must be a string, got {type(request_id).__name__}."
-            )
         self.request_id = request_id
         self.seqs = seqs
         self.first_seq = seqs[0]
