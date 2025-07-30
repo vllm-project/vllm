@@ -5,6 +5,8 @@ import argparse
 import json
 import math
 import os
+import resource
+import sys
 from typing import Any
 
 
@@ -73,3 +75,19 @@ def write_to_json(filename: str, records: list) -> None:
             cls=InfEncoder,
             default=lambda o: f"<{type(o).__name__} is not JSON serializable>",
         )
+
+
+def maybe_increase_ulimit(limit: int) -> None:
+    """
+    Increase the soft ulimit of the current process to at least the specified value.
+    """
+    if not sys.platform in ['linux', 'darwin']:
+        print("ulimit adjustment is only supported on Linux and macOS.")
+        return
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if limit > hard:
+        raise ValueError(f"Required ulimit {limit} exceeds hard limit {hard}.")
+    if soft < limit:
+        print(f"Temporarily increasing ulimit to {limit} (was {soft})")
+        resource.setrlimit(resource.RLIMIT_NOFILE, (limit, hard))
