@@ -371,40 +371,31 @@ class repackage_wheel(build_ext):
                 raise SetupError(
                     f"Failed to get vLLM wheel from {wheel_location}") from e
 
-        # During a docker build: determine correct filename, copy wheel.
-        if envs.VLLM_DOCKER_BUILD_CONTEXT:
-            dist_dir = "/workspace/dist"
-            os.makedirs(dist_dir, exist_ok=True)
-            # Determine correct wheel filename from METADATA
-            with zipfile.ZipFile(wheel_path, "r") as z:
-                metadata_file = next(
-                    (n for n in z.namelist()
-                     if n.endswith(".dist-info/METADATA")),
-                    None,
-                )
-                if not metadata_file:
-                    raise RuntimeError(
-                        "Could not find METADATA in precompiled wheel.")
-                metadata = z.read(metadata_file).decode()
-                version_line = next((line for line in metadata.splitlines()
-                                     if line.startswith("Version: ")), None)
-                if not version_line:
-                    raise RuntimeError(
-                        "Could not determine version from METADATA.")
-                version = version_line.split(": ")[1].strip()
+        # Set the dist_dir for Docker build context
+        dist_dir = ("/workspace/dist"
+                    if envs.VLLM_DOCKER_BUILD_CONTEXT else "dist")
+        os.makedirs(dist_dir, exist_ok=True)
 
-            # Build correct filename using internal version
-            arch_tag = "cp38-abi3-manylinux1_x86_64"
-            corrected_wheel_name = f"vllm-{version}-{arch_tag}.whl"
-            final_wheel_path = os.path.join(dist_dir, corrected_wheel_name)
-
-            print(f"Docker build context detected, copying precompiled wheel "
-                  f"({version}) to {final_wheel_path}")
-            shutil.copy2(wheel_path, final_wheel_path)
-            return
-
-        # Unzip the wheel when not in Docker context
+        # Extract only necessary compiled .so files from precompiled wheel
         with zipfile.ZipFile(wheel_path) as wheel:
+            # Get version from METADATA (optional, mostly useful for logging)
+            metadata_file = next((n for n in wheel.namelist()
+                                  if n.endswith(".dist-info/METADATA")), None)
+            if not metadata_file:
+                raise RuntimeError(
+                    "Could not find METADATA in precompiled wheel.")
+            metadata = wheel.read(metadata_file).decode()
+            version_line = next((line for line in metadata.splitlines()
+                                 if line.startswith("Version: ")), None)
+            if not version_line:
+                raise RuntimeError(
+                    "Could not determine version from METADATA.")
+            version = version_line.split(": ")[1].strip()
+
+            print(f"Extracting precompiled kernels from vLLM wheel version: "
+                  f"{version}")
+
+            # List of compiled shared objects to extract
             files_to_copy = [
                 "vllm/_C.abi3.so",
                 "vllm/_moe_C.abi3.so",
@@ -413,6 +404,7 @@ class repackage_wheel(build_ext):
                 "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                 "vllm/cumem_allocator.abi3.so",
             ]
+
             file_members = list(
                 filter(lambda x: x.filename in files_to_copy, wheel.filelist))
             compiled_regex = re.compile(
@@ -430,9 +422,26 @@ class repackage_wheel(build_ext):
                 if package_name not in package_data:
                     package_data[package_name] = []
 
-                wheel.extract(file)
-                if not file_name.endswith(".py"):
-                    package_data[package_name].append(file_name)
+                output_base = (dist_dir
+                               if envs.VLLM_DOCKER_BUILD_CONTEXT else ".")
+                target_path = os.path.join(output_base, file.filename)
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                with wheel.open(file.filename) as src, open(target_path,
+                                                            "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+
+                package_data[package_name].append(file_name)
+
+        # Copy wheel into dist dir for Docker to consume (e.g., via --mount)
+        if envs.VLLM_DOCKER_BUILD_CONTEXT:
+            arch_tag = "cp38-abi3-manylinux1_x86_64"
+            corrected_wheel_name = f"vllm-{version}-{arch_tag}.whl"
+            final_wheel_path = os.path.join(dist_dir, corrected_wheel_name)
+
+            print(
+                "Docker build context detected, copying precompiled wheel to "
+                f"{final_wheel_path}")
+            shutil.copy2(wheel_path, final_wheel_path)
 
 
 def _no_device() -> bool:
