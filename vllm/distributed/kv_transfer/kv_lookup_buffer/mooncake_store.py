@@ -7,6 +7,7 @@ from this remote lookup buffer.
 """
 import json
 import os
+import time
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -39,11 +40,9 @@ class MooncakeStoreConfig:
             config = json.load(fin)
         rank_id = torch.distributed.get_rank()
         rank_id = rank_id % 8
-        # please check mlx interface name on your node!! 
-        if rank_id == 0:
-            device = "mlx5_0"
-        else:
-            device = "mlx5_" + str(rank_id+2)
+        # please check mlx interface name on your node!!
+        device = "mlx5_0" if rank_id == 0 else "mlx5_" + str(rank_id + 2)
+
         return MooncakeStoreConfig(
             local_hostname=config.get("local_hostname"),
             metadata_server=config.get("metadata_server"),
@@ -72,7 +71,7 @@ class MooncakeStore(KVLookupBufferBase):
     ):
 
         try:
-            from mooncake.store import MooncakeDistributedStore
+            from mooncake import MooncakeDistributedStore
         except ImportError as e:
             raise ImportError(
                 "Please install mooncake by following the instructions at "
@@ -150,8 +149,10 @@ class MooncakeStore(KVLookupBufferBase):
     ) -> None:
         """Put KVCache to Mooncake Store"""
         device_id = value.device.index if value.device.type == 'hpu' else -1
-        logger.debug(f"putting, device id: {device_id}")
-        device_tensor = torch.tensor(device_id, dtype=torch.int32, device="cpu")
+        logger.debug("putting, device id: %d", device_id)
+        device_tensor = torch.tensor(device_id,
+                                     dtype=torch.int32,
+                                     device="cpu")
         value = value.cpu()
         value_bytes = safetensors_save({
             "tensor": value,
@@ -184,3 +185,48 @@ class MooncakeStore(KVLookupBufferBase):
             return tensor.to(device)
 
         return None
+
+    def put_unsafe(
+        self,
+        key: str,
+        value: Optional[torch.Tensor],
+    ) -> None:
+        """Put KVCache to Mooncake Store"""
+        value = value.cpu()
+        start_serde = time.time()
+        data_ptr = value.data_ptr()
+        element_size = value.element_size()
+        numel = value.numel()
+        total_size = element_size * numel
+        end_serde = time.time()
+        try:
+            self.store.put_unsafe(key, data_ptr, total_size)
+        except TypeError as err:
+            logger.error("Failed to put value into Mooncake Store: %s", err)
+            raise TypeError("Mooncake Store Put Type Error.") from err
+        end_put = time.time()
+        logger.debug("contiguous time: %f, put time: %f",
+                     end_serde - start_serde, end_put - end_serde)
+
+    def get_unsafe(self,
+                   key: str,
+                   shape,
+                   dtype=torch.bfloat16) -> Optional[torch.Tensor]:
+        """Get KVCache from Mooncake Store without type checking"""
+        start_get = time.time()
+        data = self.store.get(key)
+        end_get = time.time()
+        if data:
+            tensor = torch.frombuffer(data, dtype=dtype)
+            shape = (61, -1, 1, 576) if shape is None else shape
+            tensor = tensor.view(shape)
+            end_from_buffer = time.time()
+            logger.debug("from buffer time: %f , get time: %f",
+                         end_from_buffer - end_get, end_get - start_get)
+
+            return tensor
+        return None
+
+    def is_exist(self, key: str) -> bool:
+        """Check if the key exists in the Mooncake Store"""
+        return self.store.isExist(key) == 1

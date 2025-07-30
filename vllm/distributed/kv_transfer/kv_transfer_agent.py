@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, List, Tuple, Union
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
+    from vllm.worker.hpu_model_runner import \
+        ModelInputForHPUWithSamplingMetadata
     from vllm.config import VllmConfig
 
 import torch
@@ -87,11 +89,23 @@ class KVTransferAgent:
             model_executable, model_input, kv_caches,
             hidden_or_intermediate_states)
 
+    def send_kv_caches_and_hidden_states_cpu(
+        self,
+        input_tokens_list: List[torch.Tensor],
+        kv_caches_send_list: List[torch.Tensor],
+        hidden_states_list: List[torch.Tensor],
+    ) -> None:
+        self.connector.send_kv_caches_and_hidden_states_cpu(
+            input_tokens_list, kv_caches_send_list, hidden_states_list)
+
+    def recv_kv_caches_and_hidden_states_cpu(
+            self, prefix: str) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.connector.recv_kv_caches_and_hidden_states_cpu(prefix)
+
     def recv_kv_caches_and_hidden_states_hpu(
         self, model_executable: torch.nn.Module,
         model_input: "ModelInputForHPUWithSamplingMetadata",
-        attn_metadata: object,
-        kv_caches: List[torch.Tensor]
+        attn_metadata: object, kv_caches: List[torch.Tensor]
     ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForHPUWithSamplingMetadata"]:
         return self.connector.recv_kv_caches_and_hidden_states_hpu(

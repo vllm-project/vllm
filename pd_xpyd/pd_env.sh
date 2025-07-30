@@ -15,7 +15,7 @@ export PT_HPU_LAZY_MODE=1
 
 ray stop --force
 
-# DO NOT change unless you fully undersand its purpose
+# DO NOT change unless you fully understand its purpose
 export HABANA_VISIBLE_DEVICES="ALL"
 export VLLM_MLA_DISABLE_REQUANTIZATION=0
 export PT_HPU_ENABLE_LAZY_COLLECTIVES="true"
@@ -30,7 +30,7 @@ export VLLM_EP_SIZE=8
 export VLLM_DELAYED_SAMPLING="false"
 export VLLM_MLA_PERFORM_MATRIX_ABSORPTION=0
 
-export VLLM_USE_ASYNC_PD=1
+export VLLM_USE_ASYNC_TRANSFER_IN_PD=1
 
 block_size=128
 # DO NOT change ends...

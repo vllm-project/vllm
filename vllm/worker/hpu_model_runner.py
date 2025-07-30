@@ -5,6 +5,7 @@
 ###############################################################################
 
 import collections
+import concurrent.futures
 import contextlib
 import dataclasses
 import functools
@@ -29,14 +30,19 @@ from vllm_hpu_extension.ops import LoraMask as LoraMask
 from vllm_hpu_extension.ops import batch2block, block2batch
 from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
                                          HabanaMemoryProfiler, format_bytes)
+from vllm_hpu_extension.utils import VLLMKVCache
 
+import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.backends.hpu_attn import HPUAttentionImpl
 from vllm.config import DeviceConfig, VllmConfig
-from vllm.distributed import broadcast_tensor_dict, get_kv_transfer_group
-from vllm.distributed.parallel_state import (get_dp_group, get_tp_group,
-                                             get_pp_group, get_world_group)
+from vllm.distributed import (broadcast_tensor_dict, get_kv_transfer_group,
+                              get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_reduce)
+from vllm.distributed.parallel_state import (get_dp_group, get_pp_group,
+                                             get_tp_group, get_world_group)
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
@@ -58,8 +64,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceData, SequenceGroupMetadata,
                            SequenceOutput)
-from vllm.utils import (bind_kv_cache, is_fake_hpu, is_pin_memory_available,
-                        make_tensor_with_pad)
+from vllm.utils import (SharedDict, bind_kv_cache, is_fake_hpu,
+                        is_pin_memory_available, make_tensor_with_pad)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase,
     _add_attn_metadata_broadcastable_dict,
@@ -85,6 +91,7 @@ VLLM_DELAYED_SAMPLING = os.environ.get('VLLM_DELAYED_SAMPLING',
 DUMMY_TOKEN_ID = -1
 
 _SAMPLING_EPS = 1e-5
+
 
 class PhaseType(Enum):
     PREFILL = 'prefill'
@@ -383,16 +390,13 @@ class HpuModelAdapter:
 
     def forward_update_meta_only(self, *args, **kwargs):
         kwargs = kwargs.copy()
-        selected_token_indices = kwargs.pop('selected_token_indices')
         if 'warmup_mode' in kwargs:
             kwargs.pop('warmup_mode')
-        virtual_engine = 0
-        if 'virtual_engine' in kwargs:
-            virtual_engine = kwargs.pop('virtual_engine')
         input_ids = kwargs['input_ids']
-        attn_metadata = self._update_metadata(
-            kwargs['attn_metadata'], input_ids.size(0), input_ids.size(1),
-            input_ids.device, self.dtype)
+        attn_metadata = self._update_metadata(kwargs['attn_metadata'],
+                                              input_ids.size(0),
+                                              input_ids.size(1),
+                                              input_ids.device, self.dtype)
         kwargs['attn_metadata'] = attn_metadata
         return attn_metadata
 
@@ -476,7 +480,8 @@ class HpuModelAdapter:
         if 'lora_mask' in kwargs:
             LoraMask.setLoraMask(kwargs.pop('lora_mask'))
         if self.layer_names is not None \
-            and self.vllm_config.model_config.hf_config.model_type not in ("deepseek_mtp"):
+            and self.vllm_config.model_config.hf_config.model_type not \
+                in ("deepseek_mtp"):
             self._prepare_cos_sin(kwargs['positions'])
 
         with set_forward_context(kwargs['attn_metadata'],
@@ -720,10 +725,12 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         self.pin_memory = is_pin_memory_available()
         self.kv_cache_dtype = self.cache_config.cache_dtype
+        self.cache_k = VLLMKVCache()
+        self.input_tokens_tensor_cpu = None
 
         if self.model_config.is_deepseek_mla and not self.model_config.use_mla:
-             raise NotImplementedError(
-                 "HPU doesn't support MLA off for Deepseek model, \
+            raise NotImplementedError(
+                "HPU doesn't support MLA off for Deepseek model, \
                      please set VLLM_MLA_DISABLE_REQUANTIZATION=1.")
         num_attn_heads = self.model_config.get_num_attention_heads(
             self.parallel_config)
@@ -786,6 +793,11 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.cached_step_inputs: List[
             ModelInputForHPUWithSamplingMetadata] = []
 
+        self.pd_executor_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1)
+        self.use_async_kv_transfer_in_pd = envs.VLLM_USE_ASYNC_TRANSFER_IN_PD
+        logger.info("will use async pd: %s", self.use_async_kv_transfer_in_pd)
+
     def _set_gc_threshold(self) -> None:
         """
         Read https://docs.python.org/3/library/gc.html#gc.set_threshold
@@ -837,11 +849,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self._remove_duplicate_submodules_(model, inc_config)
 
     def _is_quant_with_inc(self):
-        return (
-            self.model_config.quantization == "inc"
-            or os.getenv("VLLM_REQUANT_FP8_INC", "0") in ["1", "true"]
-        )
-    
+        return (self.model_config.quantization == "inc"
+                or os.getenv("VLLM_REQUANT_FP8_INC", "0") in ["1", "true"])
+
     def load_model(self) -> None:
         import habana_frameworks.torch.core as htcore
         if self.model_config.quantization == 'inc' or \
@@ -896,21 +906,21 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             if self._is_quant_with_inc():
                 logger.info("Preparing model with INC..")
                 if torch.distributed.get_rank() == 0:
-                    logger.debug(f"Original model \n {self.model}")
+                    logger.debug("Original model \n %s", self.model)
                 with HabanaMemoryProfiler() as m_inc:
                     from neural_compressor.torch.quantization import (
                         FP8Config, convert, prepare)
 
                     mark_scales_as_const = os.getenv(
-                        "VLLM_HPU_MARK_SCALES_AS_CONST", "true"
-                    ) in ("1", "true")
+                        "VLLM_HPU_MARK_SCALES_AS_CONST",
+                        "true") in ("1", "true")
                     config = FP8Config.from_json_file(
                         os.getenv("QUANT_CONFIG", ""))
 
                     self._inc_preprocess_(self.model, config)
                     if config.measure:
                         self.model = prepare(self.model, config)
-                        
+
                     elif config.quantize:
                         self.model = convert(self.model, config)
                     if mark_scales_as_const:
@@ -948,7 +958,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.model_memory_usage = m.consumed_device_memory
         msg = f"Loading model weights took in total {m.get_summary_string()}"
         logger.info(msg)
-        logger.info(f"")
+        logger.info("")
 
     def _add_dummy_seq(self,
                        seq_group_metadata_list,
@@ -957,7 +967,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         real_batch_size = len(seq_group_metadata_list)
         batch_size_padded = self.bucketing_ctx.get_padded_batch_size(
             real_batch_size, is_prompt)
-        if self.dp_awared_padding and (self.vllm_config.kv_transfer_config is None or not is_prompt):
+        if self.dp_awared_padding and (self.vllm_config.kv_transfer_config
+                                       is None or not is_prompt):
             if self.is_driver_worker:
                 batch_size_padded = align_dp_groups(
                     batch_size_padded, torch.distributed.ReduceOp.MAX)
@@ -993,7 +1004,11 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             return self.model.model
         return self.model
 
-    def _use_graphs(self, batch_size, seq_len, is_prompt, is_profile_run=False):
+    def _use_graphs(self,
+                    batch_size,
+                    seq_len,
+                    is_prompt,
+                    is_profile_run=False):
         if is_prompt and batch_size * seq_len > self.max_seq_len_to_capture:
             return False
         if self.enforce_eager:
@@ -1178,8 +1193,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             self.bucketing_ctx.get_padded_prompt_seq_len(max_query_len),
             self.block_size)
 
-        # Align the prompt length across DP groups when PD aggregation is not enabled.
-        if self.dp_awared_padding and self.vllm_config.kv_transfer_config is None:
+        # Align the prompt length across DP groups when PD aggregation is
+        # not enabled.
+        if self.dp_awared_padding and \
+            self.vllm_config.kv_transfer_config is None:
             if self.is_driver_worker:
                 max_prompt_len = align_dp_groups(
                     max_prompt_len, torch.distributed.ReduceOp.MAX)
@@ -1229,6 +1246,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                                    pad=0,
                                                    dtype=torch.long,
                                                    device='cpu')
+        if self.use_async_kv_transfer_in_pd:
+            self.input_tokens_tensor_cpu = input_tokens_tensor.clone()
 
         input_positions = make_tensor_with_pad(input_positions,
                                                max_len=max_prompt_len,
@@ -1587,8 +1606,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             slot_mapping=slot_mapping,
             multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=False,
-            input_positions=input_positions
-        )
+            input_positions=input_positions)
         return PrepareDecodeMetadata(input_tokens=input_tokens,
                                      input_positions=input_positions,
                                      attn_metadata=attn_metadata,
@@ -1885,8 +1903,13 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             max_seq_len,
         )
 
-        self.warmup_scenario(max_batch_size, max_seq_len, True, kv_caches,
-                             False, True, is_profile_run=True)
+        self.warmup_scenario(max_batch_size,
+                             max_seq_len,
+                             True,
+                             kv_caches,
+                             False,
+                             True,
+                             is_profile_run=True)
         return
 
     def _dummy_run(self, max_num_batched_tokens: int) -> None:
@@ -1907,10 +1930,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         num_iters=3,
                         align_worker=False,
                         is_dummy_run=False) -> None:
-        use_graphs = (is_dummy_run) or self._use_graphs(batch_size,
-                                      seq_len,
-                                      is_prompt,
-                                      is_profile_run=is_profile_run)
+        use_graphs = (is_dummy_run) or self._use_graphs(
+            batch_size, seq_len, is_prompt, is_profile_run=is_profile_run)
         scenario_name = ("warmup_"
                          f"{'prompt' if is_prompt else 'decode'}_"
                          f"bs{batch_size}_"
@@ -1975,21 +1996,22 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 seqs, align_worker=align_worker)
             additional_inputs = {}
             if self.model_type in ("medusa", "mlp_speculator", "eagle",
-                                    "deepseek_mtp"):
-                 input_tokens = inputs.input_tokens
-                 assert input_tokens is not None
-                 bs = input_tokens.shape[0]
-                 hidden_size = self.model_config.get_hidden_size()
-                 previous_hidden_states = torch.zeros(
-                     (bs, hidden_size),
-                     device=input_tokens.device,
-                     dtype=self.model_config.dtype)
-                 additional_inputs = {
-                     "previous_hidden_states": previous_hidden_states
-                 }
+                                   "deepseek_mtp"):
+                input_tokens = inputs.input_tokens
+                assert input_tokens is not None
+                bs = input_tokens.shape[0]
+                hidden_size = self.model_config.get_hidden_size()
+                previous_hidden_states = torch.zeros(
+                    (bs, hidden_size),
+                    device=input_tokens.device,
+                    dtype=self.model_config.dtype)
+                additional_inputs = {
+                    "previous_hidden_states": previous_hidden_states
+                }
             if time_index == 0:
                 if self.is_driver_worker:
-                    broadcast_tensor_dict({"input_tokens": inputs.input_tokens}, src=0)
+                    broadcast_tensor_dict(
+                        {"input_tokens": inputs.input_tokens}, src=0)
                 else:
                     broadcast_tensor_dict(src=0)
             is_single_step = \
@@ -2119,7 +2141,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             # Graph memory usage is proportional to seq dimension in a batch
             batch_seq = batch_size * seq_len if is_prompt else batch_size
             mem_estimate = batch_seq / total_batch_seq * total_mem
-            if mem_estimate >= available_mem or batch_seq > self.max_seq_len_to_capture:
+            if mem_estimate >= available_mem or \
+                batch_seq > self.max_seq_len_to_capture:
                 captured_all = False
                 continue
             graphed_bucket = (batch_size, seq_len, is_prompt)
@@ -2473,7 +2496,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         is_prefill_run = model_input.attn_metadata.is_prompt
 
         # check if the current run is profiling
-        is_profile_run = kv_caches is None or kv_caches[0] is None or (kv_caches[0][0].numel() == 0)
+        is_profile_run = kv_caches is None or kv_caches[0] is None or (
+            kv_caches[0][0].numel() == 0)
         # check if the current run is prefill
         return self.vllm_config.kv_transfer_config.is_kv_consumer and (
             not is_profile_run) and is_prefill_run
@@ -2498,7 +2522,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         is_prefill_run = model_input.attn_metadata.is_prompt
 
         # check if the current run is profiling
-        is_profile_run = kv_caches is None or kv_caches[0] is None or (kv_caches[0][0].numel() == 0)
+        is_profile_run = kv_caches is None or kv_caches[0] is None or (
+            kv_caches[0][0].numel() == 0)
         # check if the current run is prefill
 
         return self.vllm_config.kv_transfer_config.is_kv_producer and (
@@ -2660,6 +2685,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         warmup_mode = kwargs.get('warmup_mode', False)
         previous_hidden_states = kwargs.get('previous_hidden_states')
+        kv_cache_shared_dict: Optional[SharedDict] = kwargs.get(
+            'kv_cache_shared_dict')
 
         self.has_patched_prev_output = False
         use_delayed_sampling = VLLM_DELAYED_SAMPLING and not warmup_mode
@@ -2767,7 +2794,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 # pad previous_hidden_states as well
                 previous_hidden_states = previous_hidden_states.unsqueeze(
                     1).expand(-1, input_tokens.shape[-1], -1)
-                batch_size_padding = batch_size - previous_hidden_states.shape[0]
+                batch_size_padding = batch_size - previous_hidden_states.shape[
+                    0]
                 if batch_size_padding > 0:
                     dummy_previous_hidden_states = torch.zeros(
                         batch_size_padding,
@@ -2829,42 +2857,146 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     })
 
                 # Receive KV cache in distributed KV cache transfer setting
-                # In disagg prefill setting, it will also recv hidden states and bypass
-                # model forwarding
-                # In KV cache database setting, it will change the model input so that
-                # we can skip prefilling on tokens that successfully received KV caches
+                # In disagg prefill setting, it will also recv hidden states
+                # and bypass model forwarding
+                # In KV cache database setting, it will change the model input
+                # so that we can skip prefilling on tokens that successfully
+                # received KV caches
                 # NOTE: The receive operation is blocking
                 bypass_model_exec = False
                 if self.need_recv_kv(model_input, kv_caches, warmup_mode):
+                    # we assume kv cache is recved and put into the dict!
+                    def tensor_hash(tensor: torch.Tensor) -> int:
+                        """Calculate the hash value of the tensor."""
+                        import hashlib
+                        tensor_bytes = tensor.clone().detach().cpu().numpy(
+                        ).tobytes()
+                        hash_object = hashlib.blake2b(tensor_bytes)
+                        hash_hex = hash_object.hexdigest()
+                        return int(hash_hex[:16], 16)
+
                     cur_time = time.time()
                     attn_metadata = self.model.forward_update_meta_only(
                         **execute_model_kwargs,
                         selected_token_indices=sampling_metadata.
                         selected_token_indices)
-                    hidden_states, bypass_model_exec, model_input = \
-                    get_kv_transfer_group().recv_kv_caches_and_hidden_states_hpu(
-                        # model is used to know which layer the current worker
-                        # is working on, so that we can receive KV for only those
-                        # layers.
-                        self.get_model(),
-                        model_input,
-                        attn_metadata,
-                        kv_caches=kv_caches
-                    )
+
+                    def sync_recv_kv_caches(model, model_input, attn_metadata,
+                                            kv_caches):
+                        hidden_states, bypass_model_exec, model_input = \
+                            get_kv_transfer_group().recv_kv_caches_and_hidden_states_hpu(
+                            model, model_input, attn_metadata,
+                            kv_caches)
+                        return hidden_states, bypass_model_exec
+
+                    def async_recv_kv_caches(model, model_input, attn_metadata,
+                                             kv_caches):
+
+                        input_tokens_tensor_cpu = self.input_tokens_tensor_cpu
+                        block_indices_list = attn_metadata.block_indices.tolist(
+                        )
+                        torch.hpu.synchronize()
+                        seq_lens_tensor = \
+                            model_input.attn_metadata.seq_lens_tensor
+                        seq_lens = seq_lens_tensor.tolist()  #2D list
+                        hidden_states_list = []
+                        start_block_idx = 0
+                        k_v_head_size = 576
+                        htorch.core.mark_step()
+                        for idx, slen in enumerate(seq_lens):
+                            if slen == 1:
+                                hidden_states_list.append(
+                                    hidden_states_list[0])
+                                # skip the seq with only one token
+                                continue
+                            num_blocks = (slen + 127) // 128
+                            end_block_idx = start_block_idx + num_blocks
+
+                            kv_cache_shape = (61, num_blocks * self.block_size,
+                                              1, k_v_head_size)
+                            if get_tensor_model_parallel_rank() == 0:
+                                current_tokens = input_tokens_tensor_cpu[
+                                    idx][:slen]
+                                prefix = tensor_hash(current_tokens)
+                                assert kv_cache_shared_dict is not None
+                                kv_cache_for_cur_seq, hidden_states = \
+                                    kv_cache_shared_dict.get_item(prefix)
+
+                                if get_tensor_model_parallel_world_size() > 1:
+                                    kv_cache_for_cur_seq = \
+                                        tensor_model_parallel_all_reduce(
+                                        kv_cache_for_cur_seq)
+                                    hidden_states = \
+                                        tensor_model_parallel_all_reduce(
+                                        hidden_states)
+                                kv_cache_shared_dict.remove_item(prefix)
+                            else:
+                                kv_cache_for_cur_seq = torch.zeros(
+                                    kv_cache_shape,
+                                    dtype=torch.bfloat16,
+                                    device="hpu")
+                                hidden_states = torch.zeros(
+                                    (1, 7168),
+                                    dtype=torch.bfloat16,
+                                    device="hpu")
+                                kv_cache_for_cur_seq = \
+                                    tensor_model_parallel_all_reduce(
+                                    kv_cache_for_cur_seq)
+                                hidden_states = \
+                                    tensor_model_parallel_all_reduce(
+                                    hidden_states)
+
+                            hidden_states_list.append(hidden_states)
+
+                            block_indices_tensor = torch.tensor(
+                                block_indices_list[
+                                    start_block_idx:end_block_idx],
+                                device="hpu",
+                                dtype=torch.int32)
+                            htorch.core.mark_step()
+                            # write to kv cache
+                            for i in range(61):
+                                kv_cache_current_layer = kv_caches[i]
+                                key_cache_current_layer = \
+                                    kv_cache_current_layer[0]
+
+                                key = kv_cache_for_cur_seq[i].squeeze(-2).view(
+                                    -1, self.block_size, k_v_head_size)
+                                self.cache_k(key, key_cache_current_layer,
+                                             block_indices_tensor, None)
+
+                            start_block_idx = end_block_idx
+                            htorch.core.mark_step()
+                        hidden_states = torch.cat(hidden_states_list, dim=0)
+                        bypass_model_exec = True
+                        htorch.core.mark_step()
+                        return hidden_states, bypass_model_exec
+
+                    model = self.get_model()
+                    if self.use_async_kv_transfer_in_pd:
+                        hidden_states, bypass_model_exec = \
+                            async_recv_kv_caches(model, model_input,
+                                                 attn_metadata, kv_caches)
+                    else:
+                        hidden_states, bypass_model_exec = \
+                            sync_recv_kv_caches(model, model_input,
+                                                attn_metadata, kv_caches)
                     now = time.time()
-                    logger.info(f"KV transfer recv time: {now - cur_time}")
+                    logger.info("KV transfer recv time: %s", now - cur_time)
 
                 profiler_args = {
                     'real_seq_len': model_input.seq_lens,
                     'real_batch_size': real_batch_size
                 }
                 if not bypass_model_exec:
-                    with self.profiler.record_event('internal', model_event_name, args=profiler_args):
+                    with self.profiler.record_event('internal',
+                                                    model_event_name,
+                                                    args=profiler_args):
                         hidden_states = self.model.forward(
                             **execute_model_kwargs,
-                            selected_token_indices=sampling_metadata.selected_token_indices
-                        )
-                        if profile_run_mode == True and is_dummy_run == False:
+                            selected_token_indices=sampling_metadata.
+                            selected_token_indices)
+                        if profile_run_mode and not is_dummy_run:
                             torch.hpu.synchronize()
                             import torch.distributed as dist
                             if dist.is_initialized():
@@ -2875,19 +3007,107 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 # torch.hpu.synchronize()
                 # Sending KV cache in distributed KV cache transfer setting
                 # NOTE: the send operation is non-blocking
-                cur_time = time.time()
+
                 if self.need_send_kv(model_input, kv_caches, warmup_mode):
-                    get_kv_transfer_group().send_kv_caches_and_hidden_states_hpu(
-                        # model_executable is used to know which layer the current
-                        # worker is working on, so that we can send KV for only those
-                        # layers.
-                        self.get_model(),
-                        model_input,
-                        kv_caches,
-                        hidden_states,
-                    )
+                    cur_time = time.time()
+
+                    def sync_send_kv_caches(hidden_states):
+                        get_kv_transfer_group(
+                        ).send_kv_caches_and_hidden_states_hpu(
+                            # model_executable is used to know which layer the
+                            # current worker is working on, so that we can send
+                            # KV for only those layers.
+                            self.get_model(),
+                            model_input,
+                            kv_caches,
+                            hidden_states,
+                        )
+
+                    def fetch_kv_to_host(model, model_input, kv_caches,
+                                         hidden_states):
+                        input_tokens_tensor_cpu = model_input.input_tokens.to(
+                            "cpu"
+                        )  # shape: [batch_size, seq_len_padding_to_128]
+                        torch.hpu.synchronize(
+                        )  # sync here may hurt performance.
+                        seq_lens = model_input.attn_metadata.seq_lens
+                        start_layer = model.model.start_layer
+                        end_layer = model.model.end_layer
+                        num_kv_heads = 1
+                        k_v_head_size = 576
+                        kv_caches_send_list = []
+                        hidden_states_list = []
+                        input_tokens_list = []
+                        htorch.core.mark_step()
+                        for idx, slen in enumerate(seq_lens):
+                            if slen == 1:
+                                continue
+                            current_tokens_cpu = input_tokens_tensor_cpu[
+                                idx][:slen]
+                            keys = []
+                            start = 0
+                            padded_total_size = (
+                                slen + self.block_size -
+                                1) // self.block_size * self.block_size
+                            current_slot_mapping = \
+                                model_input.attn_metadata.slot_mapping[
+                                idx][start:padded_total_size]
+                            # ==== graph should start here ======
+                            for layer_id in range(start_layer, end_layer):
+                                kv_cache = kv_caches[layer_id - start_layer]
+                                key_cache = kv_cache[0].reshape(
+                                    -1, num_kv_heads, k_v_head_size)
+
+                                keys.append(
+                                    key_cache.index_select(
+                                        0, current_slot_mapping).unsqueeze(0))
+                            keys = torch.cat(keys, dim=0)
+                            kv_cache_to_sent = keys.cpu()
+                            current_hidden_states = hidden_states[
+                                idx].unsqueeze(0).cpu()
+                            # ==== graph should end here ======
+                            htorch.core.mark_step()
+                            torch.hpu.synchronize()
+                            kv_caches_send_list.append(kv_cache_to_sent)
+                            hidden_states_list.append(current_hidden_states)
+                            input_tokens_list.append(current_tokens_cpu)
+
+                        return (input_tokens_list, kv_caches_send_list,
+                                hidden_states_list)
+
+                    def send_kv(input_tokens_list, kv_caches_send_list,
+                                hidden_states_list):
+                        cur_time = time.time()
+                        get_kv_transfer_group(
+                        ).send_kv_caches_and_hidden_states_cpu(
+                            input_tokens_list, kv_caches_send_list,
+                            hidden_states_list)
+                        now = time.time()
+                        logger.info("KV send time: %s", now - cur_time)
+
+                    def async_send_kv_caches(hidden_states):
+                        (input_tokens_list,
+                         kv_caches_send_list,
+                         hidden_states_list) = \
+                            fetch_kv_to_host(self.get_model(),
+                                             model_input,
+                                             kv_caches,
+                                             hidden_states,
+                                             )
+                        self.pd_executor_pool.submit(
+                            send_kv,
+                            input_tokens_list,
+                            kv_caches_send_list,
+                            hidden_states_list,
+                        )
+
+                    if self.use_async_kv_transfer_in_pd:
+                        async_send_kv_caches(hidden_states)
+                    else:
+                        sync_send_kv_caches(hidden_states)
+
                     now = time.time()
-                    logger.info(f"KV transfer send time: {now - cur_time}")
+                    logger.info("KV send time: %f", now - cur_time)
 
                 if self.lora_config:
                     LoraMask.setLoraMask(
@@ -2931,15 +3151,19 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     fake_output = self._delayed_sampler_outputs(model_input)
                     if not model_input.is_prompt:
                         penalty_are_requested = any([
-                            abs(sg.sampling_params.presence_penalty) >= _SAMPLING_EPS
-                            or abs(sg.sampling_params.frequency_penalty) >= _SAMPLING_EPS
-                            or abs(sg.sampling_params.repetition_penalty) >= _SAMPLING_EPS
-                            for sg in sampling_metadata.seq_groups])
-                        # If penalty is requsted, move _patch_prev_output
+                            abs(sg.sampling_params.presence_penalty)
+                            >= _SAMPLING_EPS
+                            or abs(sg.sampling_params.frequency_penalty)
+                            >= _SAMPLING_EPS
+                            or abs(sg.sampling_params.repetition_penalty)
+                            >= _SAMPLING_EPS
+                            for sg in sampling_metadata.seq_groups
+                        ])
+                        # If penalty is requested, move _patch_prev_output
                         # before sampler, as output_token_ids is required
                         # but not yet updated for some requests.
                         if penalty_are_requested:
-                            is_prev_output_patched =True
+                            is_prev_output_patched = True
                             self._patch_prev_output()
 
                 with self.profiler.record_event(

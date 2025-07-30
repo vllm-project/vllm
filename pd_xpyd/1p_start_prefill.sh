@@ -6,10 +6,10 @@ BENCHMARK_MODE=0
 
 if [ "$2" == "benchmark" ]; then
     BENCHMARK_MODE=1
-    sed -i 's/export VLLM_USE_ASYNC_PD=.*/export VLLM_USE_ASYNC_PD=0/' $BASH_DIR/pd_env.sh
+    sed -i 's/export VLLM_USE_ASYNC_TRANSFER_IN_PD=.*/export VLLM_USE_ASYNC_TRANSFER_IN_PD=0/' $BASH_DIR/pd_env.sh
     echo " Benchmark mode enabled"
 else
-    sed -i 's/export VLLM_USE_ASYNC_PD=.*/export VLLM_USE_ASYNC_PD=1/' $BASH_DIR/pd_env.sh
+    sed -i 's/export VLLM_USE_ASYNC_TRANSFER_IN_PD=.*/export VLLM_USE_ASYNC_TRANSFER_IN_PD=1/' $BASH_DIR/pd_env.sh
     echo " Normal mode enabled"
 fi
 

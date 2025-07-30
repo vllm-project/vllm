@@ -58,7 +58,7 @@ from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import Counter, Device, deprecate_kwargs, weak_bind
+from vllm.utils import Counter, Device, SharedDict, deprecate_kwargs, weak_bind
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -230,6 +230,7 @@ class LLMEngine:
         self.prompt_adapter_config = vllm_config.prompt_adapter_config  # noqa
         self.observability_config = vllm_config.observability_config or ObservabilityConfig(  # noqa
         )
+        self.kv_cache_shared_dict = SharedDict()
 
         self.need_to_sync_across_dp = self.parallel_config.data_parallel_size > 1  # noqa
         if self.need_to_sync_across_dp:
@@ -351,12 +352,17 @@ class LLMEngine:
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
+
+        self.use_async_kv_transfer_in_pd = \
+            envs.VLLM_USE_ASYNC_TRANSFER_IN_PD and \
+            self.vllm_config.kv_transfer_config.is_kv_consumer
         self.scheduler = [
             Scheduler(
                 self.scheduler_config, self.cache_config, self.lora_config,
                 self.parallel_config.pipeline_parallel_size,
                 self.async_callbacks[v_id]
-                if self.model_config.use_async_output_proc else None)
+                if self.model_config.use_async_output_proc else None,
+                self.kv_cache_shared_dict, self.use_async_kv_transfer_in_pd)
             for v_id in range(self.parallel_config.pipeline_parallel_size)
         ]
 
@@ -506,6 +512,8 @@ class LLMEngine:
         # Use getattr since __init__ can fail before the field is set
         if model_executor := getattr(self, "model_executor", None):
             model_executor.shutdown()
+        for scheduler in self.scheduler:
+            scheduler.shutdown()
 
     def get_tokenizer_group(
         self,
@@ -1334,7 +1342,8 @@ class LLMEngine:
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
 
-        if self.vllm_config.kv_transfer_config is None and self.should_execute_dummy_batch:
+        if self.vllm_config.kv_transfer_config is None and \
+        self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False
             outputs = self.model_executor.execute_model(
                 execute_model_req=ExecuteModelRequest(
@@ -1417,7 +1426,8 @@ class LLMEngine:
                 finished_requests_ids=finished_requests_ids,
                 # We use ExecuteModelRequest to pass the last sampled_token_ids
                 # to each of the non-last PP stages for in-place prepare_input.
-                last_sampled_token_ids=last_sampled_token_ids)
+                last_sampled_token_ids=last_sampled_token_ids,
+                kv_cache_shared_dict=self.kv_cache_shared_dict)
 
             if allow_async_output_proc:
                 execute_model_req.async_callback = self.async_callbacks[
@@ -1433,10 +1443,11 @@ class LLMEngine:
         else:
             # Nothing scheduled => If there is pending async postprocessor,
             # then finish it here.
-            if self.vllm_config.kv_transfer_config is not None and self.need_to_sync_across_dp:
+            if self.vllm_config.kv_transfer_config is not None and \
+                self.need_to_sync_across_dp:
                 self.model_executor.execute_model(
                     execute_model_req=ExecuteModelRequest(
-                    seq_group_metadata_list=[], is_dummy_batch=True))
+                        seq_group_metadata_list=[], is_dummy_batch=True))
             if len(ctx.output_queue) > 0:
                 self._process_model_outputs(ctx=ctx)
             # No outputs in this case
@@ -1458,13 +1469,17 @@ class LLMEngine:
             is_first_step_output: bool = False if not seq_group_metadata_list \
                 else seq_group_metadata_list[0].state.num_steps == 1
 
-            # Add results to the output_queue
-            ctx.append_output(outputs=outputs,
-                              seq_group_metadata_list=seq_group_metadata_list,
-                              scheduler_outputs=scheduler_outputs,
-                              is_async=allow_async_output_proc,
-                              is_last_step=True,
-                              is_first_step_output=is_first_step_output)
+            # in async PD scenario, outputs here maybe empty, and still
+            # append to ctx. this may cause error
+            if len(outputs) > 0 or (not self.use_async_kv_transfer_in_pd):
+                # Add results to the output_queue
+                ctx.append_output(
+                    outputs=outputs,
+                    seq_group_metadata_list=seq_group_metadata_list,
+                    scheduler_outputs=scheduler_outputs,
+                    is_async=allow_async_output_proc,
+                    is_last_step=True,
+                    is_first_step_output=is_first_step_output)
 
             if outputs and allow_async_output_proc:
                 assert len(outputs) == 1, (
