@@ -728,6 +728,10 @@ class SupportsTranscription(Protocol):
 
     @classmethod
     def validate_language(cls, language: Optional[str]) -> Optional[str]:
+        """
+        Ensure the language specified in the transcription request is a valid ISO 639-1 language code.
+        If the request language is valid, but not natively supported by the model, trigger a warning (but not an exception).
+        """
         if language is None or language in cls.supported_languages:
             return language
         elif language in cls._other_languages():
