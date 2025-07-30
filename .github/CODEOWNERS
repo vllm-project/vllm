@@ -61,3 +61,7 @@ mkdocs.yaml @hmellor
 /vllm/v1/worker/^xpu @jikunshang
 /vllm/platforms/xpu.py @jikunshang
 /docker/Dockerfile.xpu @jikunshang
+
+# Qwen-specific files
+/vllm/attention/backends/dual_chunk_flash_attn.py @sighingnow
+/vllm/model_executor/models/qwen* @sighingnow
