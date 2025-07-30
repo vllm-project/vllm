@@ -12,8 +12,6 @@ vllm serve NousResearch/Meta-Llama-3-8B-Instruct \
 
 To call the server, in your preferred text editor, create a script that uses an HTTP client. Include any messages that you want to send to the model. Then run that script. Below is an example script using the [official OpenAI Python client](https://github.com/openai/openai-python).
 
-
-
 ```python
 from openai import OpenAI
 client = OpenAI(
@@ -143,7 +141,6 @@ completion = client.chat.completions.create(
 Only `X-Request-Id` HTTP request header is supported for now. It can be enabled
 with `--enable-request-id-headers`.
 
-
 ```python
 completion = client.chat.completions.create(
     model="NousResearch/Meta-Llama-3-8B-Instruct",
@@ -265,31 +262,29 @@ and passing a list of `messages` in the request. Refer to the examples below for
 
     Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
 
+```python
+import requests
 
+image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
-  ```python
-  import requests
-
-  image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
-
-  response = requests.post(
-      "http://localhost:8000/v1/embeddings",
-      json={
-          "model": "TIGER-Lab/VLM2Vec-Full",
-          "messages": [{
-              "role": "user",
-              "content": [
-                  {"type": "image_url", "image_url": {"url": image_url}},
-                  {"type": "text", "text": "Represent the given image."},
-              ],
-          }],
-          "encoding_format": "float",
-      },
-  )
-  response.raise_for_status()
-  response_json = response.json()
-  print("Embedding output:", response_json["data"][0]["embedding"])
-  ```
+response = requests.post(
+    "http://localhost:8000/v1/embeddings",
+    json={
+        "model": "TIGER-Lab/VLM2Vec-Full",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": "Represent the given image."},
+            ],
+        }],
+        "encoding_format": "float",
+    },
+)
+response.raise_for_status()
+response_json = response.json()
+print("Embedding output:", response_json["data"][0]["embedding"])
+```
 
 === "DSE-Qwen2-MRL"
 
