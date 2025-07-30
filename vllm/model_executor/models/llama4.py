@@ -564,6 +564,9 @@ class Llama4ForCausalLM(LlamaForCausalLM):
             attn_in = self.config.head_dim * n_heads
             attn_out = self.config.hidden_size
 
+            if w.dtype in [torch.uint8, torch.int8]:
+                attn_out = attn_out // 2
+
             return w.view(n_heads, attn_in // n_heads // 2, 2,
                           attn_out).transpose(1, 2).reshape(attn_in, attn_out)
 
