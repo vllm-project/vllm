@@ -39,6 +39,8 @@ def is_blackwell_deep_gemm_e8m0_used() -> bool:
 
     _lazy_init()
     if _per_block_cast_impl is None:
+        logger.debug_once(
+            "DeepGEMM E8M0 disabled: per_block_cast_to_fp8 not found")
         return False
 
     enabled = (current_platform.is_cuda()
