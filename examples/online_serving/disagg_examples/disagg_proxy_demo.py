@@ -34,17 +34,23 @@ logger.propagate = False
 def log_info_blue(msg):
     logger.info("%s%s%s", escape_codes['cyan'], msg, escape_codes['reset'])
 
+
 def log_info_green(msg):
     logger.info("%s%s%s", escape_codes['green'], msg, escape_codes['reset'])
 
+
 def log_info_yellow(msg):
     logger.info("%s%s%s", escape_codes['yellow'], msg, escape_codes['reset'])
+
 
 def log_info_red(msg):
     logger.info("%s%s%s", escape_codes['red'], msg, escape_codes['reset'])
 
 
-AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
+AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60,
+                                        connect=60,
+                                        sock_read=1200,
+                                        sock_connect=30)
 
 
 async def P_first_token_generator(generator_p,
@@ -121,11 +127,8 @@ class Proxy:
         self.custom_create_chat_completion = custom_create_chat_completion
         self.router = APIRouter()
         self.setup_routes()
-        self.generator = (
-            P_first_token_generator
-            if generator_on_p_node
-            else D_first_token_generator
-        )
+        self.generator = (P_first_token_generator
+                          if generator_on_p_node else D_first_token_generator)
         self.tokenizer = AutoTokenizer.from_pretrained(model)
 
     def on_done(self,
@@ -349,8 +352,7 @@ class Proxy:
                 log_info_green(
                     f"create_completion -- prompt length: {total_length}, "
                     f"tokenizer took "
-                    f"{(end_time - start_time) * 1000:.2f} ms"
-                )
+                    f"{(end_time - start_time) * 1000:.2f} ms")
                 prefill_instance = self.schedule(self.prefill_cycler,
                                                  is_prompt=True,
                                                  request_len=total_length)
@@ -390,7 +392,8 @@ class Proxy:
                                              prefill_instance,
                                              decode_instance,
                                              req_len=total_length)
-            response = StreamingResponse(final_generator)
+            response = StreamingResponse(final_generator,
+                                         media_type="application/json")
             return response
         except Exception:
             import sys
@@ -416,8 +419,7 @@ class Proxy:
             log_info_green(
                 f"create_chat_completion -- prompt length: {total_length}, "
                 f"tokenizer took "
-                f"{(end_time - start_time) * 1000:.2f} ms"
-            )
+                f"{(end_time - start_time) * 1000:.2f} ms")
 
             prefill_instance = self.schedule(self.prefill_cycler,
                                              is_prompt=True,
@@ -459,7 +461,8 @@ class Proxy:
                                              prefill_instance,
                                              decode_instance,
                                              req_len=total_length)
-            response = StreamingResponse(final_generator)
+            response = StreamingResponse(final_generator,
+                                         media_type="application/json")
             return response
         except Exception:
             exc_info = sys.exc_info()
@@ -467,7 +470,7 @@ class Proxy:
             print("Error occurred in disagg proxy server")
             print(error_messages)
             return StreamingResponse(content=iter(error_messages),
-                                     media_type="text/event-stream")
+                                     media_type="application/json")
 
     def remove_instance_endpoint(self, instance_type, instance):
         with self.scheduling_policy.lock:
@@ -535,8 +538,7 @@ class LoadBalancedScheduler(SchedulingPolicy):
                 self.prefill_schedule_index += 1
                 log_info_yellow(
                     f"<schedule prefill {self.prefill_schedule_index}> "
-                    f"instance = {min_index}, min_tokens = {min_value}"
-                )
+                    f"instance = {min_index}, min_tokens = {min_value}")
                 return self.prefill_instances[min_index]
             else:
                 min_value = min(self.decode_bs_counter)
@@ -557,16 +559,12 @@ class LoadBalancedScheduler(SchedulingPolicy):
                 self.decode_schedule_index += 1
                 log_info_blue(
                     f"<schedule decode {self.decode_schedule_index}> "
-                    f"instance = {min_index}, min_batch = {min_value}"
-                )
+                    f"instance = {min_index}, min_batch = {min_value}")
+                log_info_blue(f"<schedule decode> "
+                              f"decode_bs_counter: {self.decode_bs_counter}")
                 log_info_blue(
                     f"<schedule decode> "
-                    f"decode_bs_counter: {self.decode_bs_counter}"
-                )
-                log_info_blue(
-                    f"<schedule decode> "
-                    f"decode_kv_utils_counter: {self.decode_kv_utils_counter}"
-                )
+                    f"decode_kv_utils_counter: {self.decode_kv_utils_counter}")
 
                 return self.decode_instances[min_index]
 
@@ -578,11 +576,9 @@ class LoadBalancedScheduler(SchedulingPolicy):
             if prefill_instance:
                 index = self.prefill_instances.index(prefill_instance)
                 self.prefill_schedule_completion_index += 1
-                log_info_yellow(
-                    f"<Prefill completed "
-                    f"{self.prefill_schedule_completion_index}> "
-                    f"instance = {index}, req_len={req_len}"
-                )
+                log_info_yellow(f"<Prefill completed "
+                                f"{self.prefill_schedule_completion_index}> "
+                                f"instance = {index}, req_len={req_len}")
 
                 self.prefill_bs_counter[index] -= 1
                 all_zero = True
@@ -601,11 +597,9 @@ class LoadBalancedScheduler(SchedulingPolicy):
             if decode_instance:
                 index = self.decode_instances.index(decode_instance)
                 self.decode_schedule_completion_index += 1
-                log_info_blue(
-                    f"<Decode completed "
-                    f"{self.decode_schedule_completion_index}> "
-                    f"instance = {index}, req_len={req_len}"
-                )
+                log_info_blue(f"<Decode completed "
+                              f"{self.decode_schedule_completion_index}> "
+                              f"instance = {index}, req_len={req_len}")
 
                 self.decode_bs_counter[index] -= 1
                 all_zero = True
@@ -622,13 +616,10 @@ class LoadBalancedScheduler(SchedulingPolicy):
                     self.decode_kv_utils_counter[index] -= req_len
                     log_info_blue(
                         f"<schedule_completion decode> "
-                        f"decode_bs_counter: {self.decode_bs_counter}"
-                    )
-                    log_info_blue(
-                        f"<schedule_completion decode> "
-                        f"decode_kv_utils_counter: "
-                        f"{self.decode_kv_utils_counter}"
-                    )
+                        f"decode_bs_counter: {self.decode_bs_counter}")
+                    log_info_blue(f"<schedule_completion decode> "
+                                  f"decode_kv_utils_counter: "
+                                  f"{self.decode_kv_utils_counter}")
 
 
 class ProxyServer:
