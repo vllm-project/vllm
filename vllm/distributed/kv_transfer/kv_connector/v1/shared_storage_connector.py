@@ -126,11 +126,14 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 dst_kv_cache_layer[slot_mapping, ...] = src_kv_cache
                 dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
             else:
-                num_pages = dst_kv_cache_layer_shape[1]
+                num_pages = dst_kv_cache_layer_shape[0]
                 page_size = dst_kv_cache_layer_shape[2]
                 dst_kv_cache_layer = dst_kv_cache_layer.reshape(
-                    2, num_pages * page_size, -1)
-                dst_kv_cache_layer[:, slot_mapping, ...] = src_kv_cache
+                    num_pages, 2, page_size, -1)
+                slot_mapping_page = slot_mapping // page_size
+                slot_mapping_tok = slot_mapping % page_size
+                dst_kv_cache_layer[slot_mapping_page, :, slot_mapping_tok,
+                                   ...] = src_kv_cache
                 dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
 
         # Get the metadata
@@ -212,9 +215,12 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 num_pages, page_size = layer.shape[0], layer.shape[1]
                 return layer.reshape(num_pages * page_size, -1)[slot_mapping,
                                                                 ...]
-            num_pages, page_size = layer.shape[1], layer.shape[2]
-            return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping,
-                                                               ...]
+            num_pages, page_size = layer.shape[0], layer.shape[2]
+            slot_mapping_page = slot_mapping // page_size
+            slot_mapping_tok = slot_mapping % page_size
+            return layer.reshape(num_pages, 2, page_size,
+                                 -1)[slot_mapping_page, :, slot_mapping_tok,
+                                     ...]
 
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, SharedStorageConnectorMetadata)
