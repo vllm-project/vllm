@@ -406,6 +406,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
     def __init__(self,
                  kv_cache_spec: AttentionSpec,
+                 layer_names: list[str],
                  vllm_config: VllmConfig,
                  device: torch.device,
                  metadata_cls: Optional[type[M]] = None):
@@ -471,7 +472,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 BatchPrefillWithRaggedKVCacheWrapper] = []
 
             self._global_hyperparameters = infer_global_hyperparameters(
-                get_per_layer_parameters(vllm_config, MLACommonImpl))
+                get_per_layer_parameters(vllm_config, layer_names,
+                                         MLACommonImpl))
 
         if self._use_cudnn_prefill:
             self.cudnn_workspace = torch.empty(
