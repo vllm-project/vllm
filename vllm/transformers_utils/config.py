@@ -35,8 +35,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              MllamaConfig, MLPSpeculatorConfig,
                                              Nemotron_Nano_VL_Config,
                                              NemotronConfig, RWConfig,
-                                             SpeculatorsConfig,
-                                             UltravoxConfig)
+                                             SpeculatorsConfig, UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
 from vllm.transformers_utils.utils import check_gguf_file
