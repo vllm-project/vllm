@@ -236,8 +236,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
             input_size = input_.size()
             if sizes is not None:
                 assert len(sizes) == world_size
-                print(f"lhs:{input_.shape[dim]}")
-                print(f"rhs:{sizes[self.rank_in_group]}")
                 assert input_.shape[dim] == sizes[self.rank_in_group]
                 output_size = (sum(sizes), ) + input_size[1:]
             else:

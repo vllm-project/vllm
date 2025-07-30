@@ -6,7 +6,7 @@ import torch
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.distributed import (get_dp_group, get_ep_group)
+from vllm.distributed import get_dp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -21,13 +21,11 @@ def get_local_sizes(local_tokens):
         sizes.append((cu_sizes[i] - cu_sizes[i - 1]).item())
     max_num_tokens = envs.VLLM_MOE_DP_CHUNK_SIZE
     sizes_chunked = [max_num_tokens] * len(sizes)
-    # print(f"local_tokens:{local_tokens}")
-    # print(f"before sizes: {sizes}")
     if local_tokens < max_num_tokens:
         # When the number of local tokens is less than max_num_tokens, all other
         # ranks will also have fewer than max_num_tokens. The remaining tokens
         # are accounted for as residual.
-        sizes_chunked = [x % max_num_tokens or 1 for x in sizes]
+        sizes_chunked = [x % max_num_tokens for x in sizes]
 
     return sizes_chunked
 
@@ -89,16 +87,10 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             is_fp4_scale_swizzled=not use_dp,  # Swizzling after communication
         )
         if use_dp:
-            # print(f"local_tokens:{local_tokens} from rank:{get_dp_group().rank}")
-            # print(f"sizes:{get_local_sizes(local_tokens)} from rank:{get_dp_group().rank}")
             topk_weights, topk_ids, a1q, a1q_scale = \
                 get_dp_group().all_gatherv([topk_weights, topk_ids, a1q, a1q_scale], # noqa: E501
                                            dim=0,
                                            sizes=get_local_sizes(local_tokens))
-            # topk_weights, topk_ids = get_dp_group().dispatch(
-            #     topk_weights, topk_ids)
-            # a1q, a1q_scale = get_dp_group().dispatch(
-            #     a1q, a1q_scale)
             a1_m, a1_n = a1q.shape
             a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
@@ -114,7 +106,6 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
          local_tokens) = extract_required_args(extra_finalize_args,
                                                ['use_dp', 'local_tokens'])
         if use_dp:
-            # fused_expert_output = get_ep_group().combine(fused_expert_output)
             fused_expert_output = get_dp_group().reduce_scatterv(
                 fused_expert_output,
                 dim=0,
