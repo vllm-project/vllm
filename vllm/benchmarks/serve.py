@@ -402,8 +402,9 @@ async def benchmark(
     print(f"Maximum request concurrency: {max_concurrency}")
 
     if max_concurrency is not None:
+        ULIMIT_BUFFER = 100  # Buffer for system/other FDs.
         # Ensure that the ulimit is sufficiently high to handle the concurrency.
-        maybe_increase_ulimit(max_concurrency + 100)
+        maybe_increase_ulimit(max_concurrency + ULIMIT_BUFFER)
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 

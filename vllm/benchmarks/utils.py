@@ -81,7 +81,7 @@ def maybe_increase_ulimit(limit: int) -> None:
     """
     Increase the soft ulimit of the current process to at least the specified value.
     """
-    if not sys.platform in ['linux', 'darwin']:
+    if sys.platform not in ['linux', 'darwin']:
         print("ulimit adjustment is only supported on Linux and macOS.")
         return
 
