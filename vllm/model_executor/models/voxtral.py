@@ -18,7 +18,6 @@ from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.protocol.transcription.request import TranscriptionRequest
 from mistral_common.tokens.tokenizers.audio import Audio, AudioEncoder
 from transformers import TensorType, WhisperConfig
-from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from transformers.tokenization_utils_base import TextInput
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
@@ -60,11 +59,6 @@ ISO639_1_SUPPORTED_LANGS = {
     "it": "Italian",
     "pt": "Portuguese",
     "es": "Spanish",
-}
-
-ISO639_1_OTHER_LANGS = {
-    k: v
-    for k, v in LANGUAGES.items() if k not in ISO639_1_SUPPORTED_LANGS
 }
 
 class VoxtralProcessorAdapter:
@@ -317,6 +311,7 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo]
                                         dummy_inputs=VoxtralDummyInputsBuilder)
 class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                                       SupportsPP, SupportsTranscription):
+    supported_languages = ISO639_1_SUPPORTED_LANGS
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -472,23 +467,6 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         prompts_dict = {"multi_modal_data": {"audio": audio}}
         prompts_dict["prompt_token_ids"] = tokenized.tokens
         return cast(PromptType, prompts_dict)
-
-    @classmethod
-    def validate_language(cls, language: str) -> bool:
-        if language in ISO639_1_SUPPORTED_LANGS:
-            return True
-        elif language in ISO639_1_OTHER_LANGS:
-            logger.warning(
-                "The selected language %s is not natively supported "
-                "by Voxtral. Results may be less accurate for this choice. "
-                "Consider using an audio from the supported set of "
-                "languages: %s", language,
-                list(ISO639_1_SUPPORTED_LANGS.keys()))
-            return True
-        else:
-            raise ValueError(
-                f"Unsupported language: {language}. Language should "
-                f"be one of: {list(ISO639_1_SUPPORTED_LANGS.keys())}")
 
     @classmethod
     def get_num_audio_tokens(cls, audio_duration_s: float,

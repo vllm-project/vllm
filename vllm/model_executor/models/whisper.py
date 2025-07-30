@@ -12,7 +12,6 @@ from torch import nn
 from transformers import (BatchFeature, WhisperConfig, WhisperFeatureExtractor,
                           WhisperProcessor)
 from transformers.models.whisper.modeling_whisper import sinusoids
-from transformers.models.whisper.tokenization_whisper import LANGUAGES
 
 from vllm.attention import Attention, AttentionType
 from vllm.attention.layer import MultiHeadAttention
@@ -110,11 +109,6 @@ ISO639_1_SUPPORTED_LANGS = {
     "vi": "Vietnamese",
     "cy": "Welsh"
 }
-ISO639_1_OTHER_LANGS = {
-    k: v
-    for k, v in LANGUAGES.items() if k not in ISO639_1_SUPPORTED_LANGS
-}
-
 
 class WhisperAudioInputs(TypedDict):
     input_features: NestedTensors
@@ -767,22 +761,20 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
 
     # Whisper only supports audio-conditioned generation.
     supports_transcription_only = True
+    supported_languages = ISO639_1_SUPPORTED_LANGS
 
     @classmethod
-    def validate_language(cls, language: str) -> bool:
-        if language in ISO639_1_SUPPORTED_LANGS:
-            return True
-        elif language in ISO639_1_OTHER_LANGS:
+    def validate_language(cls, language: Optional[str]) -> Optional[str]:
+        if language is None:
+            # TODO language should be optional and can be guessed.
+            # For now we default to en. See
+            # https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py#L1520
             logger.warning(
-                "The selected language %s has limited accuracy with"
-                " reported WER>=0.5. Results may be less accurate "
-                "for this choice.", language)
-            return True
-        else:
-            raise ValueError(f"Unsupported language: {language}."
-                             "Language should be one of:" +
-                             f" {list(ISO639_1_SUPPORTED_LANGS.values())}" +
-                             f"or {list(ISO639_1_OTHER_LANGS.values())}")
+                "Defaulting to language='en'. If you wish to transcribe "
+                "audio in a different language, pass the `language` field "
+                "in the TranscriptionRequest.")
+            language = "en"
+        return super().validate_language(language)
 
     @classmethod
     def get_generation_prompt(

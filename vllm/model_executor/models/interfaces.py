@@ -3,11 +3,12 @@
 
 from collections.abc import Iterable, MutableSequence
 from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
-                    Union, overload, runtime_checkable)
+                    Union, overload, runtime_checkable, Mapping)
 
 import numpy as np
 import torch
 from torch import Tensor
+from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
 from vllm.config import ModelConfig, SpeechToTextConfig
@@ -685,6 +686,8 @@ class SupportsQuant:
 @runtime_checkable
 class SupportsTranscription(Protocol):
     """The interface required for all models that support transcription."""
+    # Mapping from ISO639_1 language codes: language names
+    supported_languages: ClassVar[Mapping[str, str]]
 
     supports_transcription: ClassVar[Literal[True]] = True
 
@@ -693,6 +696,16 @@ class SupportsTranscription(Protocol):
     Transcription models can opt out of text generation by setting this to
     `True`.
     """
+    
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # language codes in supported_languages that don't exist in the full language map
+        invalid = set(cls.supported_languages) - set(LANGUAGES.keys())
+        if invalid:
+            raise ValueError(
+                f"{cls.__name__}.supported_languages contains invalid language codes: "
+                f"{sorted(invalid)}\n. Valid choices are: {sorted(LANGUAGES.keys())}"
+            )
 
     @classmethod
     def get_generation_prompt(cls, audio: np.ndarray,
@@ -704,11 +717,29 @@ class SupportsTranscription(Protocol):
         The model has control over the construction, as long as it
         returns a valid PromptType."""
         ...
+    
+    @classmethod
+    def _other_languages(cls) -> Mapping[str, str]:
+        # other possible language codes from the whisper map
+        return {k: v for k, v in LANGUAGES.items()
+                if k not in cls.supported_languages}
 
     @classmethod
-    def validate_language(cls, language: str) -> bool:
-        """Check if the model supports a specific ISO639_1 language."""
-        ...
+    def validate_language(cls, language: Optional[str]) -> Optional[str]:
+        if language is None or language in cls.supported_languages:
+            return language
+        elif language in cls._other_languages():
+            logger.warning(
+                "Language %r is not natively supported by %s; "
+                "results may be less accurate. Supported languages: %r",
+                language, cls.__name__, list(cls.supported_languages.keys()),
+            )
+            return language
+        else:
+            raise ValueError(
+                f"Unsupported language: {language!r}.  Must be one of "
+                f"{list(cls.supported_languages.keys())}."
+            )
 
     @classmethod
     def get_speech_to_text_config(

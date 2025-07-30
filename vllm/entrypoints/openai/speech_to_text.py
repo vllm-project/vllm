@@ -87,19 +87,7 @@ class OpenAISpeechToText(OpenAIServing):
         audio_data: bytes,
     ) -> tuple[list[PromptType], float]:
         # Validate request
-        if request.language is None and isinstance(
-                self.model_cls, WhisperForConditionalGeneration):
-            # TODO language should be optional and can be guessed.
-            # For now we default to en. See
-            # https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py#L1520
-            request.language = "en"
-            logger.warning(
-                "Defaulting to language='en'. If you wish to transcribe "
-                "audio in a different language, pass the `language` field "
-                "in the TranscriptionRequest.")
-
-        if request.language:
-            self.model_cls.validate_language(request.language)
+        request.language = self.model_cls.validate_language(request.language)
 
         if len(audio_data) / 1024**2 > self.max_audio_filesize_mb:
             raise ValueError("Maximum file size exceeded.")
