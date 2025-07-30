@@ -16,7 +16,7 @@ __global__ void scaled_fp8_quant_kernel_strided(
     fp8_type* __restrict__ out, const scalar_t* __restrict__ input,
     const float* __restrict__ scale, int hidden_size, int64_t in_row_stride,
     int64_t out_row_stride) {
-  const int token_idx = blockIdx.x;  // one token per block
+  const int64_t token_idx = blockIdx.x;  // one token per block
   const int tid = threadIdx.x;
 
   const scalar_t* token_in = input + token_idx * in_row_stride;
@@ -76,7 +76,7 @@ __global__ void scaled_fp8_quant_kernel_strided_dynamic(
     fp8_type* __restrict__ out, const scalar_t* __restrict__ input,
     const float* __restrict__ scale, int hidden_size, int64_t in_row_stride,
     int64_t out_row_stride) {
-  const int token_idx = blockIdx.x;
+  const int64_t token_idx = blockIdx.x;
   const int tid = threadIdx.x;
 
   const scalar_t* token_in = input + token_idx * in_row_stride;
@@ -96,7 +96,7 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided(
     fp8_type* __restrict__ out, float* __restrict__ scale,
     const scalar_t* __restrict__ input, const float* __restrict__ scale_ub,
     int hidden_size, int64_t in_row_stride, int64_t out_row_stride) {
-  const int token_idx = blockIdx.x;
+  const int64_t token_idx = blockIdx.x;
   const int tid = threadIdx.x;
 
   // Use int64 to avoid overflowing an int32 when calculating this offset
