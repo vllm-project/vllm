@@ -7,10 +7,10 @@ Run `pytest tests/quantization/test_quark.py`.
 See also `tests/kernels/moe/test_mxfp4_moe.py`.
 """
 
-import importlib
 import importlib.metadata
 import os
 from dataclasses import dataclass
+from importlib.util import find_spec
 
 import huggingface_hub
 import lm_eval
@@ -24,9 +24,8 @@ from vllm.platforms import current_platform
 
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
-QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
-    "quark") is not None and version.parse(
-        importlib.metadata.version("amd-quark")) >= version.parse('0.8.99')
+QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
+    importlib.metadata.version("amd-quark")) >= version.parse('0.8.99')
 
 if QUARK_MXFP4_AVAILABLE:
     from quark.torch.export.nn.modules.realquantizer import (
