@@ -35,6 +35,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              MllamaConfig, MLPSpeculatorConfig,
                                              Nemotron_Nano_VL_Config,
                                              NemotronConfig, RWConfig,
+                                             Step3TextConfig, Step3VLConfig,
                                              UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
@@ -82,6 +83,8 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "eagle": EAGLEConfig,
     "nemotron": NemotronConfig,
     "ultravox": UltravoxConfig,
+    "step3_vl": Step3VLConfig,
+    "step3_text": Step3TextConfig,
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 
