@@ -95,7 +95,8 @@ def test_quark_int8_w_per_tensor_a_per_tensor(vllm_runner, tp):
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         assert output
 
-
+from ..utils import create_new_process_for_each_test
+@create_new_process_for_each_test()
 def test_quark_fp8_parity(vllm_runner):
     quark_model_id = "amd-quark/llama-tiny-fp8-quark-quant-method"
     fp8_model_id = "amd-quark/llama-tiny-fp8-quant-method"

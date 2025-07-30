@@ -13,14 +13,17 @@ from vllm.model_executor.layers.quantization.ptpc_fp8 import (
     PTPCFp8LinearMethod)
 from vllm.platforms import current_platform
 
-
+from ..utils import create_new_process_for_each_test
 @pytest.mark.skipif(not is_quant_method_supported("ptpc_fp8"),
                     reason="PTPC FP8 is not supported on this GPU type.")
 @pytest.mark.skipif(not current_platform.is_rocm(),
                     reason="This test is for ROCm GPU.")
 @pytest.mark.parametrize("dtype", ["auto", "bfloat16", "float16"])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
-def test_ptpc_fp8_rocm(vllm_runner, dtype: str, kv_cache_dtype: str) -> None:
+@create_new_process_for_each_test()
+def test_ptpc_fp8_rocm(vllm_runner, monkeypatch, dtype: str, kv_cache_dtype: str) -> None:
+
+    monkeypatch.setenv('VLLM_ENABLE_V1_MULTIPROCESSING', '0')
 
     try:
         with vllm_runner("facebook/opt-125m",
@@ -28,7 +31,7 @@ def test_ptpc_fp8_rocm(vllm_runner, dtype: str, kv_cache_dtype: str) -> None:
                          quantization="ptpc_fp8",
                          kv_cache_dtype=kv_cache_dtype) as llm:
 
-            model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
+            model = llm.llm.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
             fc1 = model.model.decoder.layers[0].fc1
             assert isinstance(fc1.quant_method, PTPCFp8LinearMethod)
             if kv_cache_dtype == "ptpc_fp8":

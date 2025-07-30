@@ -19,6 +19,11 @@ MODELS = [
     "nm-testing/Qwen2-0.5B-Instruct-FP8-SkipQKV",
 ]
 
+if current_platform.is_rocm():
+    MODELS = [
+        "neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV",
+        "nm-testing/Qwen2-0.5B-Instruct-FP8-SkipQKV",
+    ]
 
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="FP8 is not supported on this GPU type.")

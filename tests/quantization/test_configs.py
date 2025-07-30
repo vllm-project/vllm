@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import pytest
 
 from vllm.config import ModelConfig
+from vllm.platforms import current_platform
 
 
 @dataclass
@@ -51,10 +52,12 @@ MODEL_ARG_EXPTYPES = [
     ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "gptq", "ERROR"),
 ]
 
-
 @pytest.mark.parametrize("model_arg_exptype", MODEL_ARG_EXPTYPES)
 def test_auto_gptq(model_arg_exptype: tuple[str, None, str]) -> None:
     model_path, quantization_arg, expected_type = model_arg_exptype
+    
+    if current_platform.is_rocm() and expected_type in ("marlin", "gptq_marlin", "awq_marlin"):
+        pytest.skip("Marlin kernels are not supported on ROCm")
 
     try:
         model_config = ModelConfig(model_path, quantization=quantization_arg)

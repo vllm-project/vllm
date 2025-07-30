@@ -8,11 +8,15 @@ import pytest
 
 from tests.quantization.utils import is_quant_method_supported
 
+from vllm.platforms import current_platform
+
 from ..utils import compare_two_settings
 
 
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="fp8 is not supported on this GPU type.")
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="do not duplicate CPU tests on ROCm platform")
 def test_cpu_offload_fp8():
     # Test quantization of an unquantized checkpoint
     compare_two_settings("meta-llama/Llama-3.2-1B-Instruct",
@@ -27,6 +31,8 @@ def test_cpu_offload_fp8():
 
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
                     reason="gptq_marlin is not supported on this GPU type.")
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="do not duplicate CPU tests on ROCm platform")
 def test_cpu_offload_gptq(monkeypatch):
     # This quant method is sensitive to dummy weights, so we force real weights
     monkeypatch.setenv('VLLM_TEST_FORCE_LOAD_FORMAT', 'auto')
@@ -43,6 +49,8 @@ def test_cpu_offload_gptq(monkeypatch):
 
 @pytest.mark.skipif(not is_quant_method_supported("awq_marlin"),
                     reason="awq_marlin is not supported on this GPU type.")
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="do not duplicate CPU tests on ROCm platform")
 def test_cpu_offload_awq(monkeypatch):
     # This quant method is sensitive to dummy weights, so we force real weights
     monkeypatch.setenv('VLLM_TEST_FORCE_LOAD_FORMAT', 'auto')
@@ -59,6 +67,8 @@ def test_cpu_offload_awq(monkeypatch):
 
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
                     reason="gptq_marlin is not supported on this GPU type.")
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="do not duplicate CPU tests on ROCm platform")
 def test_cpu_offload_compressed_tensors(monkeypatch):
     # This quant method is sensitive to dummy weights, so we force real weights
     monkeypatch.setenv('VLLM_TEST_FORCE_LOAD_FORMAT', 'auto')

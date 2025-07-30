@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization import (
     QuantizationMethods, get_quantization_config, register_quantization_config)
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig)
+from vllm.platforms import current_platform
 
 
 class FakeQuantLinearMethod(UnquantizedLinearMethod):
@@ -103,6 +104,8 @@ def test_register_quantization_config():
                          argvalues=[
                              "meta-llama/Llama-3.2-1B-Instruct",
                          ])
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="custom_quant is not supported on ROCm")
 def test_custom_quant(vllm_runner, model, monkeypatch):
     """Test infer with the custom quantization method."""
     # vllm_runner.apply_model() relies on V0 internals.
