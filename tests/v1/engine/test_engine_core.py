@@ -25,7 +25,7 @@ if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
                 allow_module_level=True)
 
-MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+MODEL_NAME = "unsloth/Llama-3.2-1B-Instruct"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 PROMPT = "Hello my name is Robert and I love quantization kernels"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
@@ -236,7 +236,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
     Test that the engine can handle multiple concurrent batches.
     """
 
-    def make_request_with_max_tokens(req_id: int,
+    def make_request_with_max_tokens(req_id: str,
                                      max_tokens: int) -> EngineCoreRequest:
         request = make_request()
         request.request_id = req_id
@@ -297,16 +297,16 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         assert engine_core.batch_queue is not None
 
         # Add two requests in a row. Each request have 12 prompt tokens.
-        req0 = make_request_with_max_tokens(0, 5)
+        req0 = make_request_with_max_tokens("0", 5)
         engine_core.add_request(req0)
-        req1 = make_request_with_max_tokens(1, 5)
+        req1 = make_request_with_max_tokens("1", 5)
         engine_core.add_request(req1)
 
         # Schedule Batch 1: (10, req0)
         assert engine_core.step_with_batch_queue()[0] is None
         assert engine_core.batch_queue.qsize() == 1
         scheduler_output = engine_core.batch_queue.queue[-1][1]
-        assert scheduler_output.num_scheduled_tokens[0] == 10
+        assert scheduler_output.num_scheduled_tokens["0"] == 10
         # num_computed_tokens should have been updated immediately.
         assert engine_core.scheduler.requests[
             req0.request_id].num_computed_tokens == 10
@@ -315,11 +315,11 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         assert engine_core.step_with_batch_queue()[0] is None
         assert engine_core.batch_queue.qsize() == 2
         scheduler_output = engine_core.batch_queue.queue[-1][1]
-        assert scheduler_output.num_scheduled_tokens[0] == 2
-        assert scheduler_output.num_scheduled_tokens[1] == 8
+        assert scheduler_output.num_scheduled_tokens["0"] == 2
+        assert scheduler_output.num_scheduled_tokens["1"] == 8
         # num_computed_tokens should have been updated immediately.
-        assert engine_core.scheduler.requests[0].num_computed_tokens == 12
-        assert engine_core.scheduler.requests[1].num_computed_tokens == 8
+        assert engine_core.scheduler.requests["0"].num_computed_tokens == 12
+        assert engine_core.scheduler.requests["1"].num_computed_tokens == 8
 
         assert engine_core.scheduler.get_num_unfinished_requests() == 2
 
@@ -331,7 +331,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         engine_core.step_with_batch_queue()
         assert engine_core.batch_queue.qsize() == 2
         scheduler_output = engine_core.batch_queue.queue[-1][1]
-        assert scheduler_output.num_scheduled_tokens[1] == 4
+        assert scheduler_output.num_scheduled_tokens["1"] == 4
 
         # Batch queue is full. Finish Batch 2. Get first token of req0.
         output = engine_core.step_with_batch_queue()[0].get(0)
@@ -343,7 +343,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         engine_core.step_with_batch_queue()
         assert engine_core.batch_queue.qsize() == 2
         scheduler_output = engine_core.batch_queue.queue[-1][1]
-        assert scheduler_output.num_scheduled_tokens[0] == 1
+        assert scheduler_output.num_scheduled_tokens["0"] == 1
 
         # Batch queue is full. Finish Batch 3. Get first token of req1.
         output = engine_core.step_with_batch_queue()[0].get(0)
@@ -355,14 +355,14 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
         engine_core.step_with_batch_queue()
         assert engine_core.batch_queue.qsize() == 2
         scheduler_output = engine_core.batch_queue.queue[-1][1]
-        assert scheduler_output.num_scheduled_tokens[1] == 1
+        assert scheduler_output.num_scheduled_tokens["1"] == 1
 
         # Loop until req0 is finished.
         step = 0
         req_id = 0
         expected_num_tokens = [
-            engine_core.scheduler.requests[0].num_tokens + 1,
-            engine_core.scheduler.requests[1].num_tokens + 1,
+            engine_core.scheduler.requests["0"].num_tokens + 1,
+            engine_core.scheduler.requests["1"].num_tokens + 1,
         ]
         while engine_core.scheduler.get_num_unfinished_requests() == 2:
             output = engine_core.step_with_batch_queue()[0]
