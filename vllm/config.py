@@ -722,26 +722,14 @@ class ModelConfig:
             revision=self.revision,
         )
 
-        # Workaround for Gemma 2 which uses interleaved sliding window
-        # attention, but it's not specified in its config.
-        # TODO: remove this when Gemma 2 config updated in HuggingFace.
-        if self.hf_text_config.model_type == "gemma2":
-            self.hf_text_config.sliding_window_pattern = 2
-
-        # TODO: remove this when Gemma 3n config updated in HuggingFace.
-        if self.hf_text_config.model_type == "gemma3n_text":
-            # 4 sliding window attention followed by 1 full attention
-            self.hf_text_config.sliding_window_pattern = "LLLLG"
-
-        sliding_window = getattr(self.hf_text_config, "sliding_window", None)
-        sliding_window_pattern = getattr(self.hf_text_config,
-                                         "sliding_window_pattern", None)
-        has_interleaved_attention = sliding_window_pattern is not None or (
-            isinstance(sliding_window, list))
-
-        if not self.disable_sliding_window and has_interleaved_attention:
-            if not envs.VLLM_USE_V1 and (backend := envs.VLLM_ATTENTION_BACKEND
-                                         ) in ("XFORMERS", "FLASHINFER"):
+        if self.disable_sliding_window:
+            self.hf_text_config.sliding_window = None
+        elif layer_types := getattr(self.hf_text_config, "layer_types", None):
+            is_interleaved = ("full_attention" in layer_types
+                              and "sliding_attention" in layer_types)
+            if (is_interleaved and not envs.VLLM_USE_V1
+                    and (backend := envs.VLLM_ATTENTION_BACKEND)
+                    in ("XFORMERS", "FLASHINFER")):
                 sliding_window_len_min = get_min_sliding_window(
                     self.hf_text_config.sliding_window)
 
@@ -752,18 +740,6 @@ class ModelConfig:
                     sliding_window_len_min,
                 )
                 self.disable_sliding_window = True
-            else:
-                # for a model with interleaved attention,
-                # the scheduler and the model treat it as full attention
-                # (i.e., not dropping any tokens outside the window).
-                # only the attention layer itself is aware of the sliding
-                # window, and use the window size to compute the attention.
-                self.hf_text_config.interleaved_sliding_window = sliding_window
-
-                if hasattr(self.hf_text_config, "sliding_window"):
-                    delattr(self.hf_text_config, "sliding_window")
-
-                sliding_window = None
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)

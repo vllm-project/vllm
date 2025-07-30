@@ -116,7 +116,8 @@ class SambaYAttention(nn.Module):
             self.Wqkv = nn.Linear(self.hidden_size, op_size, bias=True)
 
         # disable sliding window for the second half of the model
-        sliding_window = config.interleaved_sliding_window[layer_idx]
+        is_sliding = config.layer_types[layer_idx] == "sliding_window"
+        sliding_window = config.sliding_window if is_sliding else None
         if layer_idx >= config.num_hidden_layers // 2:
             assert sliding_window is None, \
                 "sliding_window must be none for the second decoder"
