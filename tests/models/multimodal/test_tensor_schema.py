@@ -84,7 +84,7 @@ def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
         tokenizer=cached_tokenizer_from_config(model_config),
     )
     processor = factories.build_processor(ctx)
-    processing_info = factories.info(ctx)
+    processing_info = processor.info
     dummy_inputs = processor.dummy_inputs
     supported_mm_limits = processing_info.get_supported_mm_limits()
     mm_counts = {
@@ -123,11 +123,9 @@ def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
         ) as vllm_model:
 
             def validate_model_input(model):
-                if hasattr(model, "_parse_and_validate_audio_input"):
-                    model._parse_and_validate_audio_input(**mm_kwargs)
-                if hasattr(model, "_parse_and_validate_image_input"):
-                    model._parse_and_validate_image_input(**mm_kwargs)
-                if hasattr(model, "_parse_and_validate_video_input"):
-                    model._parse_and_validate_video_input(**mm_kwargs)
+                for modality in ("audio", "image", "video"):
+                    method_name = f"_parse_and_validate_{modality}_input"
+                    if hasattr(model, method_name):
+                        getattr(model, method_name)(**mm_kwargs)
 
             vllm_model.llm.apply_model(validate_model_input)
