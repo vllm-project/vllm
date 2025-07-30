@@ -202,3 +202,36 @@ class MultiConnector(KVConnectorBase_V1):
         self._requests_to_connector.pop(request.request_id, None)
 
         return async_saves > 0, kv_txfer_params
+
+    @classmethod
+    def get_required_kvcache_layout(
+            cls, vllm_config: "VllmConfig") -> Optional[str]:
+        """
+        Get the required KV cache layout for this connector.
+        Args:
+            vllm_config (VllmConfig): the vllm config.
+
+        Returns:
+            str: the required KV cache layout. e.g. HND, or NHD.
+            None if the connector does not require a specific layout.
+        """
+        ktcs = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "connectors")
+        assert ktcs is not None
+        layouts: set[str] = set()
+        temp_vllm_config = copy.copy(vllm_config)
+        for ktc in ktcs:
+            kv_transfer_config = KVTransferConfig(**ktc)
+            temp_vllm_config.kv_transfer_config = kv_transfer_config
+            required_kvcache_layout = KVConnectorFactory.get_connector_class(
+                kv_transfer_config).get_required_kvcache_layout(
+                    temp_vllm_config)
+            if required_kvcache_layout is not None:
+                layouts.add(required_kvcache_layout)
+
+        if len(layouts) > 1:
+            raise ValueError(f"KV cache layout mismatch: "
+                             f"found {len(layouts)} different layouts "
+                             f"({', '.join(layouts) })."
+                             f"All connectors must use the same layout.")
+        return next(iter(layouts), None)
