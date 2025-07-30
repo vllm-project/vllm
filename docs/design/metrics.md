@@ -361,7 +361,7 @@ instances in Prometheus.
 
 We use this concept for the `vllm:cache_config_info` metric:
 
-```
+```text
 # HELP vllm:cache_config_info Information of the LLMEngine CacheConfig
 # TYPE vllm:cache_config_info gauge
 vllm:cache_config_info{block_size="16",cache_dtype="auto",calculate_kv_scales="False",cpu_offload_gb="0",enable_prefix_caching="False",gpu_memory_utilization="0.9",...} 1.0
@@ -686,7 +686,7 @@ documentation for this option states:
 The metrics were added by <gh-pr:7089> and who up in an OpenTelemetry trace
 as:
 
-```
+```text
 -> gen_ai.latency.time_in_scheduler: Double(0.017550230026245117)
 -> gen_ai.latency.time_in_model_forward: Double(3.151565277099609)
 -> gen_ai.latency.time_in_model_execute: Double(3.6468167304992676)

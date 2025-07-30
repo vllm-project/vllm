@@ -99,7 +99,7 @@ From any node, enter a container and run `ray status` and `ray list nodes` to ve
 ### Running vLLM on a Ray cluster
 
 !!! tip
-     If Ray is running inside containers, run the commands in the remainder of this guide _inside the containers_, not on the host. To open a shell inside a container, connect to a node and use `docker exec -it <container_name> /bin/bash`.
+    If Ray is running inside containers, run the commands in the remainder of this guide *inside the containers*, not on the host. To open a shell inside a container, connect to a node and use `docker exec -it <container_name> /bin/bash`.
 
 Once a Ray cluster is running, use vLLM as you would in a single-node setting. All resources across the Ray cluster are visible to vLLM, so a single `vllm` command on a single node is sufficient.
 

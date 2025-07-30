@@ -35,12 +35,11 @@ repos:
     exclude: 'csrc/(moe/topk_softmax_kernels.cu|quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))|vllm/third_party/.*'
     types_or: [c++, cuda]
     args: [--style=file, --verbose]
-- repo: https://github.com/jackdewinter/pymarkdown
-  rev: v0.9.29
+- repo: https://github.com/igorshubovych/markdownlint-cli
+  rev: v0.45.0
   hooks:
-  - id: pymarkdown
+  - id: markdownlint-fix
     exclude: '.*\.inc\.md'
-    args: [fix]
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
