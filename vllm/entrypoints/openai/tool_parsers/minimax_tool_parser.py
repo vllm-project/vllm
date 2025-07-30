@@ -172,8 +172,7 @@ class MinimaxToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
-        logger.debug("delta_text: %s", delta_text)
-        logger.debug("delta_token_ids: %s", delta_token_ids)
+
 
         # Preprocess to remove tool calls from thinking tags
         processed_current_text = self.preprocess_model_output(current_text)
@@ -207,6 +206,15 @@ class MinimaxToolParser(ToolParser):
                 self.tool_call_start_token)[-1].split(
                     self.tool_call_end_token)[0]
 
+            # Extract previous parsable content for delta calculation
+            previous_parsable_content = ""
+            if previous_text:
+                previous_processed = self.preprocess_model_output(previous_text)
+                if self.tool_call_start_token in previous_processed:
+                    previous_parsable_content = previous_processed.split(
+                        self.tool_call_start_token)[-1].split(
+                            self.tool_call_end_token)[0]
+
             tool_call_arr = []
             if parsable_content.strip():
                 lines = parsable_content.strip().split('\n')
@@ -230,8 +238,18 @@ class MinimaxToolParser(ToolParser):
             current_tool_call: dict = tool_call_arr[self.current_tool_id] \
                 if len(tool_call_arr) > self.current_tool_id >= 0 else {}
 
+            # Detect new tools at string level, not just relying on JSON parsing
+            current_content_lines = parsable_content.strip().split('\n') if parsable_content.strip() else []
+            
+            # Initialize tool ID if not set but content lines exist
+            if self.current_tool_id == -1 and len(current_content_lines) > 0:
+                self.current_tool_id = 0
+                self.current_tool_name_sent = False
+                self.streamed_args_for_tool = [""]
+
             if len(tool_call_arr) == 0:
-                return None
+                # Continue processing even if JSON parsing fails
+                pass
 
             # Starting a new tool in the array
             elif (len(tool_call_arr) > 0
@@ -274,14 +292,23 @@ class MinimaxToolParser(ToolParser):
                 self.current_tool_id = len(tool_call_arr) - 1
                 self.current_tool_name_sent = False
                 self.streamed_args_for_tool.append("")
-                logger.debug("starting on new tool %d", self.current_tool_id)
                 return delta
 
             # Send tool name if not sent yet
-            if not self.current_tool_name_sent:
+            function_name_delta = None
+            if not self.current_tool_name_sent and self.current_tool_id >= 0:
                 function_name = current_tool_call.get("name")
+                # Extract function name from string if JSON parsing failed
+                if not function_name and len(current_content_lines) > self.current_tool_id:
+                    tool_line = current_content_lines[self.current_tool_id].strip()
+                    if '"name":' in tool_line:
+                        import re
+                        name_match = re.search(r'"name":\s*"([^"]+)"', tool_line)
+                        if name_match:
+                            function_name = name_match.group(1)
+                
                 if function_name:
-                    delta = DeltaMessage(tool_calls=[
+                    function_name_delta = DeltaMessage(tool_calls=[
                         DeltaToolCall(index=self.current_tool_id,
                                       type="function",
                                       id=random_tool_call_id(),
@@ -290,78 +317,93 @@ class MinimaxToolParser(ToolParser):
                                               exclude_none=True))
                     ])
                     self.current_tool_name_sent = True
-                else:
-                    delta = None
 
-            # Stream arguments
-            else:
-                prev_arguments = None
-                if (self.current_tool_id < len(self.prev_tool_call_arr)
-                        and self.prev_tool_call_arr[self.current_tool_id]):
-                    prev_arguments = self.prev_tool_call_arr[
-                        self.current_tool_id].get("arguments")
-
-                cur_arguments = current_tool_call.get("arguments")
-
-                if not cur_arguments and not prev_arguments:
-                    delta = None
-                elif not cur_arguments and prev_arguments:
-                    logger.error(
-                        "Arguments reset mid-call, skipping streaming")
-                    delta = None
-                elif cur_arguments and not prev_arguments:
-                    cur_arguments_json = json.dumps(cur_arguments,
-                                                    ensure_ascii=False)
-                    logger.debug("First tokens in arguments received: %s",
-                                 cur_arguments_json)
-
-                    delta = DeltaMessage(tool_calls=[
-                        DeltaToolCall(index=self.current_tool_id,
-                                      function=DeltaFunctionCall(
-                                          arguments=cur_arguments_json).
-                                      model_dump(exclude_none=True))
-                    ])
-                    self.streamed_args_for_tool[
-                        self.current_tool_id] = cur_arguments_json
-
-                elif cur_arguments and prev_arguments:
-                    cur_args_json = json.dumps(cur_arguments,
-                                               ensure_ascii=False)
-                    prev_args_json = json.dumps(prev_arguments,
-                                                ensure_ascii=False)
-
-                    logger.debug("Searching for diff between \n%s\n%s",
-                                 cur_args_json, prev_args_json)
-
-                    already_streamed = self.streamed_args_for_tool[
-                        self.current_tool_id] if self.current_tool_id < len(
-                            self.streamed_args_for_tool) else ""
-
-                    if cur_args_json.startswith(already_streamed):
-                        argument_diff = cur_args_json[len(already_streamed):]
-                    elif cur_args_json != already_streamed:
-                        argument_diff = cur_args_json
-                        self.streamed_args_for_tool[self.current_tool_id] = ""
+            # Stream arguments - process at string level, independent of JSON parsing
+            if True:  # Always check for argument changes
+                # Compare parsable content differences
+                previous_content_lines = previous_parsable_content.strip().split('\n') if previous_parsable_content.strip() else []
+                
+                # Determine current tool line index
+                tool_line_idx = max(0, self.current_tool_id) if self.current_tool_id >= 0 else 0
+                
+                # Get current and previous tool lines
+                current_tool_line = ""
+                previous_tool_line = ""
+                
+                if tool_line_idx < len(current_content_lines):
+                    current_tool_line = current_content_lines[tool_line_idx].strip()
+                
+                if tool_line_idx < len(previous_content_lines):
+                    previous_tool_line = previous_content_lines[tool_line_idx].strip()
+                
+                # Calculate delta for this line at string level
+                if current_tool_line and current_tool_line != previous_tool_line:
+                    # Find arguments value start position
+                    if '"arguments":' in current_tool_line:
+                        args_key_pos = current_tool_line.find('"arguments":')
+                        args_value_start = args_key_pos + len('"arguments":')
+                        while args_value_start < len(current_tool_line) and current_tool_line[args_value_start] in ' \t':
+                            args_value_start += 1
+                        current_args_value = current_tool_line[args_value_start:]
+                        
+                        # Get previous arguments value, preferring recorded state
+                        previous_args_value = ""
+                        tool_id = max(0, self.current_tool_id)
+                        if tool_id < len(self.streamed_args_for_tool):
+                            previous_args_value = self.streamed_args_for_tool[tool_id]
+                        
+                        # Fallback to extracting from previous_tool_line if no recorded state
+                        if not previous_args_value and previous_tool_line and '"arguments":' in previous_tool_line:
+                            prev_args_key_pos = previous_tool_line.find('"arguments":')
+                            prev_args_value_start = prev_args_key_pos + len('"arguments":')
+                            while prev_args_value_start < len(previous_tool_line) and previous_tool_line[prev_args_value_start] in ' \t':
+                                prev_args_value_start += 1
+                            previous_args_value = previous_tool_line[prev_args_value_start:]
+                        
+                        # Calculate delta: current args minus previous args
+                        # Handle JSON closing braces for proper prefix matching
+                        previous_args_clean = previous_args_value
+                        if previous_args_value and previous_args_value.endswith('}}'):
+                            previous_args_clean = previous_args_value[:-2]
+                        elif previous_args_value and previous_args_value.endswith('}'):
+                            previous_args_clean = previous_args_value[:-1]
+                            
+                        if current_args_value and previous_args_clean and current_args_value.startswith(previous_args_clean):
+                            argument_diff = current_args_value[len(previous_args_clean):]
+                        elif current_args_value and current_args_value != previous_args_value:
+                            argument_diff = current_args_value
+                        else:
+                            argument_diff = ""
+                        
+                        # Update streamed args state regardless of whether there's a delta
+                        tool_id = max(0, self.current_tool_id)
+                        while len(self.streamed_args_for_tool) <= tool_id:
+                            self.streamed_args_for_tool.append("")
+                        self.streamed_args_for_tool[tool_id] = current_args_value
+                        
+                        if argument_diff:
+                            arguments_delta = DeltaMessage(tool_calls=[
+                                DeltaToolCall(index=max(0, self.current_tool_id),
+                                              function=DeltaFunctionCall(
+                                                  arguments=argument_diff).
+                                              model_dump(exclude_none=True))
+                            ])
+                        else:
+                            arguments_delta = None
                     else:
-                        argument_diff = ""
-
-                    if argument_diff:
-                        logger.debug("got arguments diff: %s", argument_diff)
-                        delta = DeltaMessage(tool_calls=[
-                            DeltaToolCall(index=self.current_tool_id,
-                                          function=DeltaFunctionCall(
-                                              arguments=argument_diff).
-                                          model_dump(exclude_none=True))
-                        ])
-                        self.streamed_args_for_tool[
-                            self.current_tool_id] += argument_diff
-                    else:
-                        delta = None
+                        arguments_delta = None
                 else:
-                    delta = None
+                    arguments_delta = None
 
             self.prev_tool_call_arr = tool_call_arr
-            return delta
+            
+            # Merge function name and arguments deltas, prioritize function name (OpenAI behavior)
+            if function_name_delta is not None:
+                return function_name_delta
+            elif arguments_delta is not None:
+                return arguments_delta
+            else:
+                return None
 
         except Exception:
             logger.exception("An unexpected error occurred",
