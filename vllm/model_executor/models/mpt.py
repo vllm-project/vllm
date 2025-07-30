@@ -8,7 +8,7 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import MptConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -50,7 +50,7 @@ class MPTAttention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: MptConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -144,7 +144,7 @@ class MPTMLP(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: MptConfig,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -176,7 +176,7 @@ class MPTBlock(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: MptConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
