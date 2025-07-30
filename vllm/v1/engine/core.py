@@ -23,9 +23,11 @@ from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
+from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import make_zmq_socket, resolve_obj_by_qualname
+from vllm.utils import (make_zmq_socket, resolve_obj_by_qualname,
+                        set_process_title)
 from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
                                          unify_kv_cache_configs)
 from vllm.v1.core.sched.interface import SchedulerInterface
@@ -108,6 +110,12 @@ class EngineCore:
                 "This scheduler interface is not public and "
                 "compatibility may not be maintained.",
                 vllm_config.scheduler_config.scheduler_cls)
+
+        if len(kv_cache_config.kv_cache_groups) == 0:
+            # Encoder models without KV cache don't support
+            # chunked prefill. But do SSM models?
+            logger.info("Disabling chunked prefill for model without KVCache")
+            vllm_config.scheduler_config.chunked_prefill_enabled = False
 
         self.scheduler: SchedulerInterface = Scheduler(
             vllm_config=vllm_config,
@@ -194,11 +202,17 @@ class EngineCore:
                      "warmup model) took %.2f seconds"), elapsed)
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
+    def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return self.model_executor.supported_tasks
+
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
         if pooling_params := request.pooling_params:
-            supported_pooling_tasks = (
-                self.model_executor.supported_pooling_tasks)
+            supported_pooling_tasks = [
+                task for task in self.get_supported_tasks()
+                if task in POOLING_TASKS
+            ]
+
             if pooling_params.task not in supported_pooling_tasks:
                 raise ValueError(f"Unsupported task: {pooling_params.task!r} "
                                  f"Supported tasks: {supported_pooling_tasks}")
@@ -615,11 +629,13 @@ class EngineCoreProc(EngineCore):
             parallel_config: ParallelConfig = kwargs[
                 "vllm_config"].parallel_config
             if parallel_config.data_parallel_size > 1 or dp_rank > 0:
+                set_process_title("DPEngineCore", str(dp_rank))
                 # Set data parallel rank for this engine process.
                 parallel_config.data_parallel_rank = dp_rank
                 parallel_config.data_parallel_rank_local = local_dp_rank
                 engine_core = DPEngineCoreProc(*args, **kwargs)
             else:
+                set_process_title("EngineCore")
                 engine_core = EngineCoreProc(*args, **kwargs)
 
             engine_core.run_busy_loop()
@@ -1082,8 +1098,13 @@ class DPEngineCoreActor(DPEngineCoreProc):
         # RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES, but vLLM workers created
         # thereafter would have CUDA_VISIBLE_DEVICES set, which is sticky:
         # https://github.com/ray-project/ray/blob/e752fc319ddedd9779a0989b6d3613909bad75c9/python/ray/_private/worker.py#L456 # noqa: E501
-        # But vLLM worker assumes visibility into all local GPUs, therefore
-        # this results in incorrect indexing into the GPU ID list.
+        # This is problematic because when the vLLM worker (a Ray actor)
+        # executes a task, it indexes into the sticky CUDA_VISIBLE_DEVICES
+        # rather than directly using the GPU ID, potentially resulting in
+        # index out of bounds error. See:
+        # https://github.com/ray-project/ray/pull/40461/files#diff-31e8159767361e4bc259b6d9883d9c0d5e5db780fcea4a52ead4ee3ee4a59a78R1860 # noqa: E501
+        # and get_accelerator_ids_for_accelerator_resource() in worker.py
+        # of ray.
         self._set_cuda_visible_devices(vllm_config, local_dp_rank)
 
         super().__init__(vllm_config, local_client, "", executor_class,
