@@ -12,7 +12,8 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
     extract_required_args, moe_kernel_quantize_input)
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
-
+import torch.distributed as dist
+from vllm.forward_context import DPMetadata
 
 def get_local_sizes(local_tokens):
     cu_sizes = get_forward_context().dp_metadata.cu_tokens_across_dp_cpu
@@ -26,6 +27,7 @@ def get_local_sizes(local_tokens):
         # ranks will also have fewer than max_num_tokens. The remaining tokens
         # are accounted for as residual.
         sizes_chunked = [x % max_num_tokens for x in sizes]
+        sizes_chunked = [x if x!=0 else 1 for x in sizes_chunked]
 
     return sizes_chunked
 
@@ -58,6 +60,17 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
 
+    @property
+    def num_tokens_across_dp_current(self):
+        return self._num_tokens_across_dp_current
+
+    def update_local_tokens(self, local_tokens: int):
+        if local_tokens is None:
+            raise ValueError("Local token count not set.")
+        self._num_tokens_across_dp_current = DPMetadata.num_tokens_across_dp(
+            local_tokens, get_dp_group().world_size, get_dp_group().rank
+        )
+    
     def prepare(
         self,
         a1: torch.Tensor,
@@ -87,10 +100,21 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             is_fp4_scale_swizzled=not use_dp,  # Swizzling after communication
         )
         if use_dp:
+            # print(f"from rank{get_dp_group().rank} and {get_dp_group().world_size}, local_tokens:{local_tokens}")
+            # print(f"from rank{get_dp_group().rank} and {get_dp_group().world_size}, chunked_size:{get_local_sizes(local_tokens)}")
+            # print("xx"*100)
+            # self.update_local_tokens(local_tokens)
+            tmp = get_local_sizes(local_tokens)
+            loc_size = tmp[get_dp_group().rank] # could be 0
+            # print(f"topk_w:{topk_weights.shape}; topk_ids:{topk_ids.shape}; a1q:{a1q.shape}; a1q_scale:{topk_ids.shape} from rank:{get_dp_group().rank}")
+            # print(f"local_tokens:{local_tokens} from rank:{get_dp_group().rank}")
+            # print(f"get_local_sizes:{tmp} from rank:{get_dp_group().rank}")
+            # print("xx"*100)
             topk_weights, topk_ids, a1q, a1q_scale = \
                 get_dp_group().all_gatherv([topk_weights, topk_ids, a1q, a1q_scale], # noqa: E501
                                            dim=0,
-                                           sizes=get_local_sizes(local_tokens))
+                                        #    sizes=self.num_tokens_across_dp_current)
+                                           sizes=get_local_sizes(a1q.shape[0]))
             a1_m, a1_n = a1q.shape
             a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
@@ -106,9 +130,15 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
          local_tokens) = extract_required_args(extra_finalize_args,
                                                ['use_dp', 'local_tokens'])
         if use_dp:
+            # num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
+            #     local_tokens, get_dp_group().world_size, get_dp_group().rank)
+            tmp = get_local_sizes(local_tokens)
+            loc_size = tmp[get_dp_group().rank] # could be 0
             fused_expert_output = get_dp_group().reduce_scatterv(
                 fused_expert_output,
                 dim=0,
+                # sizes=self.num_tokens_across_dp_current,
+                # sizes=get_local_sizes(fused_expert_output.shape[0]),
                 sizes=get_local_sizes(local_tokens),
             )
         output.copy_(fused_expert_output)
