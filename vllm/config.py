@@ -856,7 +856,7 @@ class ModelConfig:
             self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
-        if self.registry.is_multimodal_model(self.architectures, self):
+        if self._model_info.supports_multimodal:
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
                 media_io_kwargs=self.media_io_kwargs,
@@ -864,19 +864,6 @@ class ModelConfig:
                 disable_mm_preprocessor_cache=self.
                 disable_mm_preprocessor_cache,
                 interleave_mm_strings=self.interleave_mm_strings)
-
-        if self.limit_mm_per_prompt:
-            raise ValueError("`limit_mm_per_prompt` is only supported for "
-                             "multimodal models.")
-        if self.mm_processor_kwargs:
-            raise ValueError("`mm_processor_kwargs` is only supported for "
-                             "multimodal models.")
-        if self.disable_mm_preprocessor_cache:
-            raise ValueError("`disable_mm_preprocessor_cache` is only "
-                             "supported for multimodal models.")
-        if self.interleave_mm_strings:
-            raise ValueError("`interleave_mm_strings` is only "
-                             "supported for multimodal models.")
 
         return None
 
