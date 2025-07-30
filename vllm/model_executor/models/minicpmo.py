@@ -106,7 +106,7 @@ class MiniCPMOAudioEmbeddingInputs(TensorSchema):
 
     audio_embeds: Annotated[
         Union[torch.Tensor, list[torch.Tensor]],
-        TensorShape("bn", "s", "h"),
+        TensorShape("bn", "s", "h", dynamic_dims={"s"}),
     ]
 
 
