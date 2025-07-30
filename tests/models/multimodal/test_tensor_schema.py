@@ -14,11 +14,18 @@ from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from ...conftest import VllmRunner
 from ..registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
 
+ARCH_TO_SKIP = {
+    "MolmoForCausalLM": "incompatible requirements",
+}
+
 
 @pytest.mark.core_model
 @pytest.mark.parametrize("model_arch", list(_MULTIMODAL_EXAMPLE_MODELS.keys()))
 def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
                              monkeypatch):
+    if model_arch in ARCH_TO_SKIP:
+        pytest.skip(f"Skipping {model_arch} due to {ARCH_TO_SKIP[model_arch]}")
+
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
 
