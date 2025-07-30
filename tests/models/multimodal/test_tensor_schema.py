@@ -3,13 +3,12 @@
 from unittest.mock import patch
 
 import pytest
-import torch
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig
 from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
 from vllm.inputs import InputProcessingContext
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
 from ...conftest import VllmRunner
@@ -103,10 +102,7 @@ def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         tokenization_kwargs=processor_inputs.tokenization_kwargs,
     )["mm_kwargs"]
-    mm_kwargs = {
-        k: v.unsqueeze(0) if isinstance(v, torch.Tensor) else [v]
-        for k, v in mm_kwargs.items()
-    }
+    mm_kwargs = MultiModalKwargs.batch([mm_kwargs])
 
     # Avoid calling model.forward()
     def _initialize_kv_caches_v0(self) -> None:
@@ -118,13 +114,13 @@ def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
         monkeypatch.setenv("VLLM_USE_V1", "0")
         with vllm_runner(
                 model_id,
-                tokenizer_name=model_info.tokenizer or model_id,
+                tokenizer_name=model_info.tokenizer,
                 tokenizer_mode=model_info.tokenizer_mode,
                 revision=model_info.revision,
                 trust_remote_code=model_info.trust_remote_code,
-                enforce_eager=True,
-                hf_overrides=hf_overrides,
+                max_model_len=model_info.max_model_len,
                 load_format="dummy",
+                hf_overrides=hf_overrides,
         ) as vllm_model:
 
             def validate_model_input(model):
