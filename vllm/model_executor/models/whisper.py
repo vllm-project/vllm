@@ -783,7 +783,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
             audio: np.ndarray,
             model_config: ModelConfig,  # not needed here
             stt_config: SpeechToTextConfig,
-            language: str | None,
+            language: Optional[str],
             task_type: str,
             request_prompt: str) -> PromptType:
         assert language is not None

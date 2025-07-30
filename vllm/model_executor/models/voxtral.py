@@ -454,7 +454,7 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_generation_prompt(cls, audio: np.ndarray,
                               model_config: ModelConfig,
                               stt_config: SpeechToTextConfig,
-                              language: str | None, task_type: str,
+                              language: Optional[str], task_type: str,
                               request_prompt: str) -> PromptType:
         tokenizer = cached_tokenizer_from_config(model_config)
         audio = Audio(audio, int(stt_config.sample_rate),

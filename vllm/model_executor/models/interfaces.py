@@ -711,7 +711,7 @@ class SupportsTranscription(Protocol):
     @classmethod
     def get_generation_prompt(cls, audio: np.ndarray,
                               stt_config: SpeechToTextConfig,
-                              model_config: ModelConfig, language: str | None,
+                              model_config: ModelConfig, language: Optional[str],
                               task_type: str,
                               request_prompt: str) -> PromptType:
         """Get the prompt for the ASR model.
@@ -720,7 +720,7 @@ class SupportsTranscription(Protocol):
         ...
 
     @classmethod
-    def _other_languages(cls) -> Mapping[str, str]:
+    def get_other_languages(cls) -> Mapping[str, str]:
         # other possible language codes from the whisper map
         return {
             k: v
@@ -737,7 +737,7 @@ class SupportsTranscription(Protocol):
         """
         if language is None or language in cls.supported_languages:
             return language
-        elif language in cls._other_languages():
+        elif language in cls.get_other_languages():
             logger.warning(
                 "Language %r is not natively supported by %s; "
                 "results may be less accurate. Supported languages: %r",
