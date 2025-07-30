@@ -41,12 +41,20 @@ class KVConnectorFactory:
             raise ValueError("Attempting to initialize a V0 Connector, "
                              f"but found {envs.VLLM_USE_V1=}")
 
-        connector_name = config.kv_transfer_config.kv_connector
-        if connector_name not in cls._registry:
-            raise ValueError(f"Unsupported connector type: {connector_name}")
-
-        connector_cls = cls._registry[connector_name]()
+        kv_transfer_config = config.kv_transfer_config
+        connector_name = kv_transfer_config.kv_connector
+        if connector_name in cls._registry:
+            connector_cls = cls._registry[connector_name]()
+        else:
+            connector_module_path = kv_transfer_config.kv_connector_module_path
+            if connector_module_path is None:
+                raise ValueError(
+                    f"Unsupported connector type: {connector_name}")
+            connector_module = importlib.import_module(connector_module_path)
+            connector_cls = getattr(connector_module, connector_name)
         assert issubclass(connector_cls, KVConnectorBase)
+        logger.info("Creating v0 connector with name: %s and engine_id: %s",
+                    connector_name, kv_transfer_config.engine_id)
         return connector_cls(rank, local_rank, config)
 
     @classmethod
