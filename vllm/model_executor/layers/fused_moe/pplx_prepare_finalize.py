@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Optional, Union
 
 import pplx_kernels as pplx
 import torch
@@ -21,7 +21,7 @@ def pplx_hidden_dim_scale_bytes(
     max_num_tokens: int,
     hidden_dim: int,
     in_dtype: torch.dtype,
-    quant_dtype: Optional[torch.dtype],
+    quant_dtype: Union[torch.dtype, str, None],
     per_act_token_quant: bool,
     block_shape: Optional[list[int]],
 ):

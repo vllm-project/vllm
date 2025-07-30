@@ -77,7 +77,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         a1_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
         a1_dtype: torch.dtype,
-        quant_dtype: Optional[torch.dtype],
+        quant_dtype: Union[torch.dtype, str, None],
         per_act_token_quant: bool,
         block_shape: Optional[list[int]],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:

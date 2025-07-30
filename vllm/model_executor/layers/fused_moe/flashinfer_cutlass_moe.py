@@ -58,7 +58,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         super().__init__(
             FusedMoEQuantConfig(
-                quant_dtype=torch.uint8,
+                quant_dtype="nvfp4",
                 per_act_token_quant=False,
                 block_shape=None,
             ))
