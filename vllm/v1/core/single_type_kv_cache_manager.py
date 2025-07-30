@@ -181,7 +181,7 @@ class SingleTypeKVCacheManager(ABC):
 
         Args:
             request_id: The request ID.
-            block_hashes: The block hashes of the request.
+            num_running_requests: The number of requests in the RUNNING state.
 
         Returns:
             The number of common prefix blocks.
