@@ -874,6 +874,14 @@ class FusedMoE(torch.nn.Module):
         elif shard_id == "w2":
             param_data[expert_id] = loaded_weight
 
+    def _load_w13_weight_scale(self, shard_dim: int,
+                               loaded_weight: torch.Tensor,
+                               param: torch.Tensor, tp_rank: int):
+        shard_size = param.shape[shard_dim]
+        loaded_weight = loaded_weight.narrow(shard_dim, shard_size * tp_rank,
+                                             shard_size)
+        param.copy_(loaded_weight)
+
     def _load_model_weight_or_group_weight_scale(self,
                                                  shard_dim: int,
                                                  expert_data: torch.Tensor,
@@ -1123,7 +1131,12 @@ class FusedMoE(torch.nn.Module):
                 "weight_scale_2" in weight_name if uses_weight_scale_2 else
                 "weight_scale" in weight_name) or "input_scale" in weight_name
 
-            if per_tensor_conditions:
+            if "w13_weight_scale" in weight_name:
+                self._load_w13_weight_scale(shard_dim=shard_dim,
+                                            loaded_weight=loaded_weight,
+                                            param=param,
+                                            tp_rank=self.tp_rank)
+            elif per_tensor_conditions:
                 self._load_per_tensor_weight_scale(
                     shard_id=shard_id,
                     param=param,
