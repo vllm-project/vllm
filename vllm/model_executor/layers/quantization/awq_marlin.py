@@ -44,7 +44,7 @@ def get_moe_quant_method(
     prefix: str,
     moe_method_cls: type,
 ):
-    if isinstance(layer, FusedMoE) and is_layer_skipped_awq(prefix, config.modules_to_not_convert):
+    if isinstance(layer, FusedMoE) and is_layer_skipped_awq(prefix, getattr(config, "modules_to_not_convert", [])):
         return UnquantizedFusedMoEMethod(layer.moe_config)
     return moe_method_cls(config)
 
