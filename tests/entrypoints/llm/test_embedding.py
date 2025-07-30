@@ -35,11 +35,12 @@ def llm():
 
 
 @pytest.mark.skip_global_cleanup
-def test_normalize(llm: LLM):
+def test_pooling_params(llm: LLM):
 
     def get_outputs(normalize):
         outputs = llm.embed(prompts,
-                            pooling_params=PoolingParams(normalize=normalize))
+                            pooling_params=PoolingParams(normalize=normalize),
+                            use_tqdm=False)
         return torch.tensor([x.outputs.embedding for x in outputs])
 
     default = get_outputs(normalize=None)

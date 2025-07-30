@@ -43,11 +43,12 @@ def llm():
 
 
 @pytest.mark.skip_global_cleanup
-def test_activation(llm: LLM):
+def test_pooling_params(llm: LLM):
 
     def get_outputs(activation):
         outputs = llm.classify(
-            prompts, pooling_params=PoolingParams(activation=activation))
+            prompts, pooling_params=PoolingParams(activation=activation),
+        use_tqdm=False)
         return torch.tensor([x.outputs.probs for x in outputs])
 
     default = get_outputs(activation=None)

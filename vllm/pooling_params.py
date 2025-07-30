@@ -30,12 +30,14 @@ class PoolingParams(
     ## for embeddings models
     dimensions: Optional[int] = None
     normalize: Optional[bool] = None
+
     ## for classification models
     activation: Optional[bool] = None
+
     ## for reward models
     softmax: Optional[bool] = None
-
-    output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
+    step_tag_id: Optional[int] = None
+    returned_token_ids: Optional[list[int]] = None
 
     task: Optional[PoolingTask] = None
     """Internal use only."""
@@ -43,9 +45,23 @@ class PoolingParams(
     requires_token_ids: bool = False
     """Internal use only."""
 
+    output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
+
     @property
     def all_parameters(self) -> list[str]:
-        return ["dimensions", "normalize", "activation", "softmax"]
+        return [
+            "dimensions", "normalize", "activation", "softmax", "step_tag_id",
+            "returned_token_ids"
+        ]
+
+    @property
+    def legal_parameters(self):
+        return {
+            "embed": ["dimensions", "normalize"],
+            "classify": ["activation"],
+            "score": ["activation"],
+            "encode": ["softmax", "step_tag_id", "returned_token_ids"],
+        }
 
     def clone(self) -> "PoolingParams":
         """Returns a deep copy of the PoolingParams instance."""
@@ -72,8 +88,6 @@ class PoolingParams(
         # in this method
 
         if self.task == "embed":
-            legal_parameters = ["dimensions", "normalize"]
-
             if self.dimensions is not None and model_config is not None:
                 if not model_config.is_matryoshka:
                     raise ValueError(
@@ -92,22 +106,20 @@ class PoolingParams(
                             f'lead to poor results.')
                 elif self.dimensions < 1:
                     raise ValueError("Dimensions must be greater than 0")
-
             if self.normalize is None:
                 self.normalize = True
-
         elif self.task in ["classify", "score"]:
-            legal_parameters = ["activation"]
             if self.activation is None:
                 self.activation = True
 
         elif self.task == "encode":
-            legal_parameters = ["softmax"]
             if self.softmax is None:
                 self.softmax = True
         else:
             raise ValueError(f"Unknown pooling task: {self.task}")
 
+        assert self.task is not None, "task must be set"
+        legal_parameters = self.legal_parameters[self.task]
         invalid_parameters = []
         for k in self.all_parameters:
             if k in legal_parameters:
@@ -128,16 +140,21 @@ class PoolingParams(
             return
 
         for k in self.all_parameters:
+            if getattr(pooler_config, k, None) is None:
+                continue
+
             if getattr(self, k, None) is None:
                 setattr(self, k, getattr(pooler_config, k))
 
     def __repr__(self) -> str:
         return (f"PoolingParams("
-                f"dimensions={self.dimensions}, "
                 f"task={self.task}, "
-                f"softmax={self.softmax}, "
                 f"normalize={self.normalize}, "
+                f"dimensions={self.dimensions}, "
                 f"activation={self.activation}, "
+                f"softmax={self.softmax}, "
+                f"step_tag_id={self.step_tag_id}, "
+                f"returned_token_ids={self.returned_token_ids}, "
                 f"requires_token_ids={self.requires_token_ids})")
 
     def __post_init__(self) -> None:

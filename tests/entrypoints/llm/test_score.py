@@ -33,7 +33,7 @@ def llm():
 
 
 @pytest.mark.skip_global_cleanup
-def test_activation(llm: LLM):
+def test_pooling_params(llm: LLM):
 
     def get_outputs(activation):
         text_1 = "What is the capital of France?"
@@ -42,7 +42,8 @@ def test_activation(llm: LLM):
         outputs = llm.score(
             text_1,
             text_2,
-            pooling_params=PoolingParams(activation=activation))
+            pooling_params=PoolingParams(activation=activation),
+            use_tqdm=False)
         return torch.tensor([x.outputs.score for x in outputs])
 
     default = get_outputs(activation=None)

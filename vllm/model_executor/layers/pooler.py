@@ -41,35 +41,18 @@ class PoolingType(IntEnum):
 @dataclass(frozen=True)
 class ResolvedPoolingConfig:
     pooling_type: PoolingType
-
-    normalize: bool
-    softmax: bool
-    step_tag_id: Optional[int]
-    returned_token_ids: Optional[list[int]]
+    task: PoolingTask
 
     @classmethod
     def from_config_with_defaults(
         cls,
+        task: PoolingTask,
         pooler_config: PoolerConfig,
         pooling_type: PoolingType,
-        normalize: bool,
-        softmax: bool,
-        step_tag_id: Optional[int] = None,
-        returned_token_ids: Optional[list[int]] = None,
     ) -> "ResolvedPoolingConfig":
-        return cls(
-            pooling_type=PoolingType[pooler_config.pooling_type]
-            if pooler_config.pooling_type is not None else pooling_type,
-            normalize=pooler_config.normalize
-            if pooler_config.normalize is not None else normalize,
-            softmax=pooler_config.softmax
-            if pooler_config.softmax is not None else softmax,
-            step_tag_id=pooler_config.step_tag_id
-            if pooler_config.step_tag_id is not None else step_tag_id,
-            returned_token_ids=pooler_config.returned_token_ids
-            if pooler_config.returned_token_ids is not None else
-            returned_token_ids,
-        )
+        return cls(task=task,
+                   pooling_type=PoolingType[pooler_config.pooling_type]
+                   if pooler_config.pooling_type is not None else pooling_type)
 
 
 @dataclass(frozen=True)
@@ -89,18 +72,11 @@ class Pooler(nn.Module, ABC):
         pooler_config: PoolerConfig,
         *,
         default_pooling_type: PoolingType = PoolingType.ALL,
-        default_normalize: bool = False,
-        default_softmax: bool = False,
-        default_step_tag_id: Optional[int] = None,
-        default_returned_token_ids: Optional[list[int]] = None,
     ):
         resolved_config = ResolvedPoolingConfig.from_config_with_defaults(
+            task="encode",
             pooler_config=pooler_config,
             pooling_type=default_pooling_type,
-            normalize=default_normalize,
-            softmax=default_softmax,
-            step_tag_id=default_step_tag_id,
-            returned_token_ids=default_returned_token_ids,
         )
 
         if resolved_config.pooling_type == PoolingType.STEP:
@@ -113,14 +89,11 @@ class Pooler(nn.Module, ABC):
         pooler_config: PoolerConfig,
         *,
         default_pooling_type: PoolingType = PoolingType.LAST,
-        default_normalize: bool = True,
-        default_softmax: bool = False,
     ):
         resolved_config = ResolvedPoolingConfig.from_config_with_defaults(
+            task="embed",
             pooler_config=pooler_config,
             pooling_type=default_pooling_type,
-            normalize=default_normalize,
-            softmax=default_softmax,
         )
 
         return SimplePooler.from_config(resolved_config)
@@ -131,14 +104,11 @@ class Pooler(nn.Module, ABC):
         classifier: Optional[ClassifierFn],
         *,
         default_pooling_type: PoolingType = PoolingType.LAST,
-        default_normalize: bool = False,
-        default_softmax: bool = True,
     ):
         resolved_config = ResolvedPoolingConfig.from_config_with_defaults(
+            task="classify",
             pooler_config=pooler_config,
             pooling_type=default_pooling_type,
-            normalize=default_normalize,
-            softmax=default_softmax,
         )
         base_pooler = SimplePooler.from_config(resolved_config)
         if classifier is None:
@@ -490,23 +460,31 @@ class LambdaPoolerActivation(PoolerActivation):
 
 class PoolerHead(nn.Module):
 
-    @classmethod
-    def from_config(cls, pooler_config: ResolvedPoolingConfig) -> "PoolerHead":
-        if pooler_config.normalize and pooler_config.softmax:
-            raise ValueError("`normalize=True` and `softmax=True` should not "
-                             "be set together")
-
-        return cls(pooler_config)
-
-    def __init__(self, pooler_config: ResolvedPoolingConfig) -> None:
+    def __init__(self, activation: PoolerActivation) -> None:
         super().__init__()
-
-        self.pooler_config = pooler_config
-        self.normalize = PoolerNormalize()
-        self.softmax = PoolerClassify()
+        self.activation = activation
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
+
+        # Using float32 in PoolerHead
+        if isinstance(pooled_data, list):
+            for i in range(len(pooled_data)):
+                pooled_data[i] = pooled_data[i].to(torch.float32)
+        else:
+            pooled_data = pooled_data.to(torch.float32)
+
+        return self.activation(pooled_data)
+
+
+class EmbeddingPoolerHead(PoolerHead):
+
+    def __init__(self) -> None:
+        super().__init__(activation=PoolerNormalize())
+
+    def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
+                pooling_metadata: PoolingMetadata):
+
         # Using float32 in PoolerHead
         if isinstance(pooled_data, list):
             for i in range(len(pooled_data)):
@@ -538,23 +516,43 @@ class PoolerHead(nn.Module):
         flags = [p.normalize for p in pooling_params]
         if len(set(flags)) == 1:
             if flags[0]:
-                pooled_data = self.normalize(pooled_data)
+                pooled_data = self.activation(pooled_data)
         else:
             pooled_data = [
-                self.normalize(vecs) if f else vecs
+                self.activation(vecs) if f else vecs
                 for vecs, f in zip(pooled_data, flags)
             ]
+
+        return pooled_data
+
+
+class RewardPoolerHead(PoolerHead):
+
+    def __init__(self) -> None:
+        super().__init__(activation=PoolerNormalize())
+
+    def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
+                pooling_metadata: PoolingMetadata):
+        # Using float32 in PoolerHead
+        if isinstance(pooled_data, list):
+            for i in range(len(pooled_data)):
+                pooled_data[i] = pooled_data[i].to(torch.float32)
+        else:
+            pooled_data = pooled_data.to(torch.float32)
+
+        pooling_params = get_pooling_params(pooling_metadata)
 
         # for softmax
         flags = [p.softmax for p in pooling_params]
         if len(set(flags)) == 1:
             if flags[0]:
-                pooled_data = self.softmax(pooled_data)
+                pooled_data = self.activation(pooled_data)
         else:
             pooled_data = [
-                self.softmax(vecs) if f else vecs
+                self.activation(vecs) if f else vecs
                 for vecs, f in zip(pooled_data, flags)
             ]
+
         return pooled_data
 
 
@@ -573,8 +571,12 @@ class SimplePooler(Pooler):
         pooler_config: ResolvedPoolingConfig,
     ) -> "SimplePooler":
         pooling = PoolingMethod.from_pooling_type(pooler_config.pooling_type)
-        head = PoolerHead.from_config(pooler_config)
-
+        if pooler_config.task == "embed":
+            head = EmbeddingPoolerHead()
+        elif pooler_config.task == "encode":
+            head = RewardPoolerHead()
+        else:
+            raise NotImplementedError(f"Unknown task: {pooler_config.task}")
         return cls(pooling, head)
 
     def __init__(self, pooling: PoolingMethod, head: PoolerHead) -> None:
