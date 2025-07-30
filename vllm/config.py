@@ -2022,7 +2022,7 @@ class ParallelConfig:
     and when data_parallel_size > 0. Enables running an AsyncLLM
     and API server on a "per-node" basis where vLLM load balances
     between local data parallel ranks, but an external LB balances
-    between vLLM nodes/replicas. Set explicitly in conjunction with 
+    between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
@@ -4277,7 +4277,6 @@ class CompilationConfig:
             "disabled_custom_ops": True,
             "compilation_time": True,
             "bs_to_padded_graph_size": True,
-            "pass_config": True,
             "traced_files": True,
             "inductor_compile_config": {
                 "post_grad_custom_post_pass": True,
