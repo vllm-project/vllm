@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
+    VLLM_DOCKER_BUILD_CONTEXT: bool = False
     VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
     VLLM_NO_DEPRECATION_WARNING: bool = False
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
@@ -79,6 +80,10 @@ if TYPE_CHECKING:
     VLLM_PLUGINS: Optional[list[str]] = None
     VLLM_LORA_RESOLVER_CACHE_DIR: Optional[str] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
+    VLLM_TORCH_PROFILER_RECORD_SHAPES: bool = False
+    VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: bool = False
+    VLLM_TORCH_PROFILER_WITH_STACK: bool = True
+    VLLM_TORCH_PROFILER_WITH_FLOPS: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -222,8 +227,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # If set, vllm will use precompiled binaries (*.so)
     "VLLM_USE_PRECOMPILED":
-    lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")) or bool(
-        os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
+    lambda: os.environ.get("VLLM_USE_PRECOMPILED", "").strip().lower() in
+    ("1", "true") or bool(os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
+
+    # Used to mark that setup.py is running in a Docker build context,
+    # in order to force the use of precompiled binaries.
+    "VLLM_DOCKER_BUILD_CONTEXT":
+    lambda: os.environ.get("VLLM_DOCKER_BUILD_CONTEXT", "").strip().lower() in
+    ("1", "true"),
 
     # Whether to force using nightly wheel in python build.
     # This is used for testing the nightly wheel in python build.
@@ -621,6 +632,31 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TORCH_PROFILER_DIR":
     lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
              .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
+
+    # Enable torch profiler to record shapes if set
+    # VLLM_TORCH_PROFILER_RECORD_SHAPES=1. If not set, torch profiler will
+    # not record shapes.
+    "VLLM_TORCH_PROFILER_RECORD_SHAPES":
+    lambda: bool(os.getenv("VLLM_TORCH_PROFILER_RECORD_SHAPES", "0") != "0"),
+
+    # Enable torch profiler to profile memory if set
+    # VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY=1. If not set, torch profiler
+    # will not profile memory.
+    "VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY":
+    lambda: bool(
+        os.getenv("VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY", "0") != "0"),
+
+    # Enable torch profiler to profile stack if set
+    # VLLM_TORCH_PROFILER_WITH_STACK=1. If not set, torch profiler WILL
+    # profile stack by default.
+    "VLLM_TORCH_PROFILER_WITH_STACK":
+    lambda: bool(os.getenv("VLLM_TORCH_PROFILER_WITH_STACK", "1") != "0"),
+
+    # Enable torch profiler to profile flops if set
+    # VLLM_TORCH_PROFILER_WITH_FLOPS=1. If not set, torch profiler will
+    # not profile flops.
+    "VLLM_TORCH_PROFILER_WITH_FLOPS":
+    lambda: bool(os.getenv("VLLM_TORCH_PROFILER_WITH_FLOPS", "0") != "0"),
 
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ":
