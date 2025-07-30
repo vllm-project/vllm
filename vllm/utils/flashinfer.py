@@ -10,6 +10,7 @@ import contextlib
 import functools
 import importlib
 import importlib.util
+import os
 from typing import Any, Callable, NoReturn, Optional
 
 import requests
@@ -19,6 +20,14 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+# This is the storage path for the cubins, it can be replaced
+# with a local path for testing.
+# Referenced from https://github.com/flashinfer-ai/flashinfer/blob/0c9a92c3d9a7e043ab6f3f7b2273269caf6ab044/flashinfer/jit/cubin_loader.py#L35  # noqa: E501
+FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
+    "FLASHINFER_CUBINS_REPOSITORY",
+    "https://edge.urm.nvidia.com/artifactory/sw-kernelinferencelibrary-public-generic-local/",  # noqa: E501
+)
 
 
 @functools.cache
@@ -117,12 +126,9 @@ def has_nvidia_artifactory() -> bool:
     This checks connectivity to the kernel inference library artifactory
     which is required for downloading certain cubin kernels like TRTLLM FHMA.
     """
-    # Referenced from https://github.com/flashinfer-ai/flashinfer/blob/0c9a92c3d9a7e043ab6f3f7b2273269caf6ab044/flashinfer/jit/cubin_loader.py#L35  # noqa: E501
-    artifactory_url = "https://edge.urm.nvidia.com/artifactory/sw-kernelinferencelibrary-public-generic-local/"  # noqa: E501
-
     try:
         # Use a short timeout to avoid blocking for too long
-        response = requests.get(artifactory_url, timeout=5)
+        response = requests.get(FLASHINFER_CUBINS_REPOSITORY, timeout=5)
         accessible = response.status_code == 200
         if accessible:
             logger.debug_once("NVIDIA artifactory is accessible")
