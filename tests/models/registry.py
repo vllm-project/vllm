@@ -170,8 +170,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                             min_transformers_version="4.54"),
     "Ernie4_5_MoeForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-21B-A3B-PT",
                                                min_transformers_version="4.54"),
-    "ExaoneForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct"),  # noqa: E501
-    "Exaone4ForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-4.0-32B"),  # noqa: E501
+    "ExaoneForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct",
+                                         trust_remote_code=True),  # noqa: E501
+    "Exaone4ForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-4.0-32B",
+                                         trust_remote_code=True),  # noqa: E501
     "Fairseq2LlamaForCausalLM": _HfExamplesInfo("mgleize/fairseq2-dummy-Llama-3.2-1B"),  # noqa: E501
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "FalconH1ForCausalLM":_HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base",
@@ -200,7 +202,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo("tencent/Hunyuan-A13B-Instruct",
                                                trust_remote_code=True),
     "HunYuanDenseV1ForCausalLM":_HfExamplesInfo("tencent/Hunyuan-7B-Instruct-0124",
-                                               trust_remote_code=True),
+                                               trust_remote_code=True,
+                                               is_available_online=False),
     "HCXVisionForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
         trust_remote_code=True),
@@ -242,7 +245,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                           {"tiny": "TitanML/tiny-mixtral"}),  # noqa: E501
     "QuantMixtralForCausalLM": _HfExamplesInfo("mistral-community/Mixtral-8x22B-v0.1-AWQ"),  # noqa: E501
     "MptForCausalLM": _HfExamplesInfo("mpt", is_available_online=False),
-    "MPTForCausalLM": _HfExamplesInfo("mosaicml/mpt-7b"),
+    "MPTForCausalLM": _HfExamplesInfo("mosaicml/mpt-7b",
+                                      trust_remote_code=True),
     "NemotronForCausalLM": _HfExamplesInfo("nvidia/Minitron-8B-Base"),
     "NemotronHForCausalLM": _HfExamplesInfo("nvidia/Nemotron-H-8B-Base-8K",
                                             trust_remote_code=True),
@@ -275,7 +279,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b"),  # noqa: E501
     "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t"),
     "Starcoder2ForCausalLM": _HfExamplesInfo("bigcode/starcoder2-3b"),
-    "SolarForCausalLM": _HfExamplesInfo("upstage/solar-pro-preview-instruct"),
+    "SolarForCausalLM": _HfExamplesInfo("upstage/solar-pro-preview-instruct",
+                                        trust_remote_code=True),
     "TeleChat2ForCausalLM": _HfExamplesInfo("Tele-AI/TeleChat2-3B",
                                             trust_remote_code=True),
     "TeleFLMForCausalLM": _HfExamplesInfo("CofeAI/FLM-2-52B-Instruct-2407",
@@ -449,7 +454,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                           max_model_len=4096),
     "Qwen2_5OmniModel": _HfExamplesInfo("Qwen/Qwen2.5-Omni-3B"),
     "Qwen2_5OmniForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2.5-Omni-7B-AWQ"),  # noqa: E501
-    "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B"),
+    "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B",
+                                           trust_remote_code=True),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo("HuggingFaceTB/SmolVLM2-2.2B-Instruct"),  # noqa: E501
     "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",  # noqa: E501
                                      trust_remote_code=True),
