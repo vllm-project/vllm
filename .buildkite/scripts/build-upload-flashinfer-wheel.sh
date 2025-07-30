@@ -3,7 +3,7 @@
 set -ex
 
 CUDA_VERSION="${1:-12.8.1}"
-FLASHINFER_VERSION="${FLASHINFER_VERSION:-v0.2.9rc2}"
+# FlashInfer version controlled in tools/flashinfer-build.sh
 
 echo "Building FlashInfer wheel for CUDA ${CUDA_VERSION} using vLLM Dockerfile"
 
@@ -12,7 +12,6 @@ DOCKER_BUILDKIT=1 docker build \
   --build-arg max_jobs=16 \
   --build-arg USE_SCCACHE=1 \
   --build-arg CUDA_VERSION="${CUDA_VERSION}" \
-  --build-arg FLASHINFER_GIT_REF="${FLASHINFER_VERSION}" \
   --tag flashinfer-wheel-builder:${CUDA_VERSION} \
   --target flashinfer-wheel-builder \
   --progress plain \

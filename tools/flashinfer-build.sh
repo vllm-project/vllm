@@ -5,8 +5,9 @@ set -ex
 # Build FlashInfer with AOT kernels
 # This script is used by both the Dockerfile and standalone wheel building
 
-FLASHINFER_GIT_REPO="${FLASHINFER_GIT_REPO:-https://github.com/flashinfer-ai/flashinfer.git}"
-FLASHINFER_GIT_REF="${FLASHINFER_GIT_REF:-v0.2.9rc2}"
+# FlashInfer configuration - keep FLASHINFER_GIT_REF in sync with requirements/cuda.txt
+FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
+FLASHINFER_GIT_REF="${FLASHINFER_GIT_REF:-v0.2.9rc2}"  # Must match requirements/cuda.txt
 CUDA_VERSION="${CUDA_VERSION:-12.8.1}"
 BUILD_WHEEL="${BUILD_WHEEL:-false}"
 
