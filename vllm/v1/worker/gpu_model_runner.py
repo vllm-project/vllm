@@ -2682,7 +2682,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             skip_eplb=True)
 
     def _initialize_single_attn_backend(
-        self, kv_cache_spec: KVCacheSpec
+        self, kv_cache_spec: KVCacheSpec, layer_names: list[str]
     ) -> tuple[AttentionBackend, AttentionMetadataBuilder, AttentionCGSupport]:
         if isinstance(kv_cache_spec, AttentionSpec):
             attn_backend_i = get_attn_backend(
@@ -2712,6 +2712,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         attn_metadata_builder_i = attn_backend_i.get_builder_cls()(
             kv_cache_spec,
+            layer_names,
             self.vllm_config,
             self.device,
         )
@@ -2800,6 +2801,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             attn_backend_i, attn_metadata_builder_i, attn_cg_i = \
                 self._initialize_single_attn_backend(kv_cache_spec)
+            attn_backend_i, attn_metadata_builder_i, attn_cg_i = \
+                self._initialize_single_attn_backend(
+                    kv_cache_spec, kv_cache_group_spec.layer_names))
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)
             if attn_cg is None:
@@ -2842,7 +2846,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     "All or none of the layers are expected to be encoder-only"
 
                 attn_backend, attn_metadata_builder, attn_cg_i = \
-                    self._initialize_single_attn_backend(attn_specs[0])
+                    self._initialize_single_attn_backend(attn_specs[0],
+                                                        attn_layers.keys())
                 self.attn_backends.append(attn_backend)
                 self.attn_metadata_builders.append(attn_metadata_builder)
                 self.is_encoder_only_model = True
