@@ -1131,7 +1131,7 @@ class FusedMoE(torch.nn.Module):
                 "weight_scale_2" in weight_name if uses_weight_scale_2 else
                 "weight_scale" in weight_name) or "input_scale" in weight_name
 
-            if "w13_weight_scale" in weight_name:
+            if "w13_weight_scale" in weight_name and loaded_weight.dim() == param.dim():
                 self._load_w13_weight_scale(shard_dim=shard_dim,
                                             loaded_weight=loaded_weight,
                                             param=param,
