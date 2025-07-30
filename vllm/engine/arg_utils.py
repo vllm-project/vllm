@@ -304,6 +304,7 @@ class EngineArgs:
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_microbatching: bool = ParallelConfig.enable_microbatching
+    enable_async_comms: bool = ParallelConfig.enable_async_comms
     enable_eplb: bool = ParallelConfig.enable_eplb
     num_redundant_experts: int = ParallelConfig.num_redundant_experts
     eplb_window_size: int = ParallelConfig.eplb_window_size
@@ -640,6 +641,8 @@ class EngineArgs:
             **parallel_kwargs["enable_expert_parallel"])
         parallel_group.add_argument("--enable-microbatching",
                                     **parallel_kwargs["enable_microbatching"])
+        parallel_group.add_argument("--enable-async-comms",
+                                    **parallel_kwargs["enable_async_comms"])
         parallel_group.add_argument("--enable-eplb",
                                     **parallel_kwargs["enable_eplb"])
         parallel_group.add_argument("--num-redundant-experts",
@@ -1166,6 +1169,7 @@ class EngineArgs:
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_microbatching=self.enable_microbatching,
+            enable_async_comms=self.enable_async_comms,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.num_redundant_experts,
             eplb_window_size=self.eplb_window_size,

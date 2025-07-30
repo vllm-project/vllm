@@ -127,6 +127,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         hidden_size = a1.size(1)
         ubatch_ctx = get_current_ubatch_context()
         a2a_idx = ubatch_ctx.id if ubatch_ctx is not None else 0
+        do_recv_hook = True if ubatch_ctx is not None and \
+                       ubatch_ctx.enable_async_comms else False
 
         if self.use_fp8_dispatch:
             assert hidden_size % 128 == 0, \
@@ -147,16 +149,16 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # Dispatch
         yield_and_switch_from_compute_to_comm(schedule="default")
-        expert_x, expert_num_tokens, handle, _, _= \
+        expert_x, expert_num_tokens, handle, _, recv_hook= \
                 self.buffers[a2a_idx].low_latency_dispatch(a1,
                                                 topk_ids,
                                                 self.max_tokens_per_rank,
                                                 num_experts,
                                                 use_fp8=self.use_fp8_dispatch,
                                                 async_finish=False,
-                                                return_recv_hook=False)
+                                                return_recv_hook=do_recv_hook)
         self.handles[a2a_idx] = handle
-        yield_and_switch_from_comm_to_compute(schedule="default")
+        yield_and_switch_from_comm_to_compute(schedule="default", recv_hook=recv_hook)
 
         expert_x, expert_x_scale = self._do_quant(
             expert_x, a1_scale, a2_scale, a1.dtype, quant_config.quant_dtype,
@@ -178,6 +180,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         ubatch_ctx = get_current_ubatch_context()
         a2a_idx = ubatch_ctx.id if ubatch_ctx is not None else 0
         handle = self.handles[a2a_idx]
+        do_recv_hook = True if ubatch_ctx is not None and \
+                       ubatch_ctx.enable_async_comms else False
         assert handle is not None
 
         combine_topk_weights = topk_weights
@@ -187,12 +191,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # TODO (varun) : Enable zero copy mode
         yield_and_switch_from_compute_to_comm(schedule="default")
-        _ = self.buffers[a2a_idx].low_latency_combine(fused_expert_output,
+        _, _, recv_hook = self.buffers[a2a_idx].low_latency_combine(fused_expert_output,
                                                       topk_ids,
                                                       combine_topk_weights,
                                                       handle,
                                                       async_finish=False,
                                                       zero_copy=False,
-                                                      return_recv_hook=False,
+                                                      return_recv_hook=do_recv_hook,
                                                       out=output)
-        yield_and_switch_from_comm_to_compute(schedule="default")
+        yield_and_switch_from_comm_to_compute(schedule="default", recv_hook=recv_hook)

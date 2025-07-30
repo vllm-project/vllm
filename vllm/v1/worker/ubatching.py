@@ -24,6 +24,7 @@ class UBatchContext:
                  cpu_signal_event: threading.Event,
                  gpu_comm_done_event: torch.cuda.Event,
                  gpu_compute_done_event: torch.cuda.Event,
+                 enable_async_comms: bool,
                  schedule: str = "default"):
         self.id = id
         self.comm_stream = comm_stream
@@ -34,6 +35,7 @@ class UBatchContext:
         self.current_stream = compute_stream
         self.gpu_comm_done_event = gpu_comm_done_event
         self.gpu_compute_done_event = gpu_compute_done_event
+        self.enable_async_comms = enable_async_comms
         self.schedule = schedule
 
     def __enter__(self):
@@ -106,10 +108,14 @@ class UBatchContext:
         self.update_stream(self.comm_stream)
         self._wait_compute_done()
 
-    def yield_and_switch_from_comm_to_compute(self):
+    def yield_and_switch_from_comm_to_compute(self, recv_hook = None):
         assert current_stream() == self.comm_stream
-        self._signal_comm_done()
+        if recv_hook is None:
+            self._signal_comm_done()
         self._cpu_yield()
+        if recv_hook is not None:
+            recv_hook()
+            self._signal_comm_done()
         assert self.current_stream == self.comm_stream
         self.update_stream(self.compute_stream)
         self._wait_comm_done()
@@ -133,11 +139,11 @@ def yield_and_switch_from_compute_to_comm(schedule="default"):
         ctx.yield_and_switch_from_compute_to_comm()
 
 
-def yield_and_switch_from_comm_to_compute(schedule="default"):
+def yield_and_switch_from_comm_to_compute(schedule="default", recv_hook = None):
     # Perform the barrier if a context exists for this thread
     ctx = get_current_ubatch_context()
     if ctx is not None and ctx.schedule == schedule:
-        ctx.yield_and_switch_from_comm_to_compute()
+        ctx.yield_and_switch_from_comm_to_compute(recv_hook=recv_hook)
 
 
 def make_ubatch_contexts(
@@ -146,6 +152,7 @@ def make_ubatch_contexts(
     comm_stream: torch.cuda.Stream,
     forward_contexts: list[ForwardContext],
     device: Optional[torch.device] = None,
+    enable_async_comms: bool = False,
     schedule: str = "default",
 ) -> list[UBatchContext]:
     assert num_micro_batches == 2, "only been tested with 2 micro-batches"
@@ -175,6 +182,7 @@ def make_ubatch_contexts(
                                                         num_micro_batches],
                             gpu_comm_done_event=gpu_comm_done_events[i],
                             gpu_compute_done_event=gpu_compute_done_events[i],
+                            enable_async_comms=enable_async_comms,
                             schedule=schedule)
         ctxs.append(ctx)
 

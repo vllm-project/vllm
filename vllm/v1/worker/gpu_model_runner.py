@@ -1656,7 +1656,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             comm_stream=self.comm_stream,
             compute_stream=compute_stream,
             forward_contexts=forward_contexts,
-            device=self.device)
+            device=self.device, 
+            enable_async_comms=self.parallel_config.enable_async_comms)
 
         ubatch_metadata: list[UbatchMetadata] = []
         for i, (_, tokens_slice) in enumerate(ubatch_slices):
