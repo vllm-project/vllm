@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence as GenericSequence
 from dataclasses import dataclass, field
 from functools import reduce
-from typing import Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 import msgspec
 import torch
@@ -20,6 +20,10 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderDict
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.kv_connector_model_runner_mixin import (
+        KVConnectorOutput)
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
@@ -1159,14 +1163,11 @@ class IntermediateTensors:
     states and residuals to be sent to the next stage. This data structure
     contains the hidden states and residuals for a request.
     
-    Each stage also needs to handle its own finished_sending and 
-    finished_recving in case of kv transfer.
+    Each stage also needs to handle its own kv_connector_output.
     """
 
     tensors: dict[str, torch.Tensor]
-    # [req_ids]
-    finished_sending: Optional[set[str]] = None
-    finished_recving: Optional[set[str]] = None
+    kv_connector_output: Optional["KVConnectorOutput"]
 
     def __init__(self, tensors):
         # manually define this function, so that
