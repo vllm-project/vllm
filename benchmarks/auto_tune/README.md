@@ -3,6 +3,7 @@
 This script automates the process of finding the optimal server parameter combination (`max-num-seqs` and `max-num-batched-tokens`) to maximize throughput for a vLLM server. It also supports additional constraints such as E2E latency and prefix cache hit rate.
 
 ## Table of Contents
+
 - [Prerequisites](#prerequisites)
 - [Configuration](#configuration)
 - [How to Run](#how-to-run)
@@ -52,7 +53,7 @@ You must set the following variables at the top of the script before execution.
 1. **Configure**: Edit the script and set the variables in the [Configuration](#configuration) section.
 2. **Execute**: Run the script. Since the process can take a long time, it is highly recommended to use a terminal multiplexer like `tmux` or `screen` to prevent the script from stopping if your connection is lost.
 
-```
+```bash
 cd <FOLDER_OF_THIS_SCRIPT>
 bash auto_tune.sh
 ```
@@ -64,6 +65,7 @@ bash auto_tune.sh
 Here are a few examples of how to configure the script for different goals:
 
 ### 1. Maximize Throughput (No Latency Constraint)
+
 - **Goal**: Find the best `max-num-seqs` and `max-num-batched-tokens` to get the highest possible throughput for 1800 input tokens and 20 output tokens.
 - **Configuration**:
 
@@ -76,6 +78,7 @@ MAX_LATENCY_ALLOWED_MS=100000000000 # A very large number
 ```
 
 #### 2. Maximize Throughput with a Latency Requirement
+
 - **Goal**: Find the best server parameters when P99 end-to-end latency must be below 500ms.
 - **Configuration**:
 
@@ -88,6 +91,7 @@ MAX_LATENCY_ALLOWED_MS=500
 ```
 
 #### 3. Maximize Throughput with Prefix Caching and Latency Requirements
+
 - **Goal**: Find the best server parameters assuming a 60% prefix cache hit rate and a latency requirement of 500ms.
 - **Configuration**:
 
@@ -109,7 +113,7 @@ After the script finishes, you will find the results in a new, timestamped direc
 
 - **Final Result Summary**: A file named `result.txt` is created in the log directory. It contains a summary of each tested combination and concludes with the overall best parameters found.
 
-```
+```text
 # Example result.txt content
 hash:a1b2c3d4...
 max_num_seqs: 128, max_num_batched_tokens: 2048, request_rate: 10.0, e2el: 450.5, throughput: 9.8, goodput: 9.8

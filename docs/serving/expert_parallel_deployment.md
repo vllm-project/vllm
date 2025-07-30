@@ -31,11 +31,12 @@ vLLM provides three communication backends for EP:
 
 Enable EP by setting the `--enable-expert-parallel` flag. The EP size is automatically calculated as:
 
-```
+```text
 EP_SIZE = TP_SIZE × DP_SIZE
 ```
 
 Where:
+
 - `TP_SIZE`: Tensor parallel size (always 1 for now)
 - `DP_SIZE`: Data parallel size
 - `EP_SIZE`: Expert parallel size (computed automatically)
