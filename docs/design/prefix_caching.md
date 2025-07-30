@@ -125,7 +125,7 @@ There are two design points to highlight:
 
 As a result, we will have the following components when the KV cache manager is initialized:
 
-![Component Overview](../../assets/design/v1/prefix_caching/overview.png)
+![Component Overview](../assets/design/prefix_caching/overview.png)
 
 * Block Pool: A list of KVCacheBlock.  
 * Free Block Queue: Only store the pointers of head and tail blocks for manipulations.  
@@ -195,7 +195,7 @@ As can be seen, block 3 is a new full block and is cached. However, it is redund
 
 When a request is finished, we free all its blocks if no other requests are using them (reference count = 0). In this example, we free request 1 and block 2, 3, 4, 8 associated with it. We can see that the freed blocks are added to the tail of the free queue in the *reverse* order. This is because the last block of a request must hash more tokens and is less likely to be reused by other requests. As a result, it should be evicted first.
 
-![Free queue after a request us freed](../../assets/design/v1/prefix_caching/free.png)
+![Free queue after a request us freed](../assets/design/prefix_caching/free.png)
 
 ### Eviction (LRU)
 
@@ -211,24 +211,24 @@ In this example, we assume the block size is 4 (each block can cache 4 tokens), 
 
 **Time 1: The cache is empty and a new request comes in.** We allocate 4 blocks. 3 of them are already full and cached. The fourth block is partially full with 3 of 4 tokens.
 
-![Example Time 1](../../assets/design/v1/prefix_caching/example-time-1.png)
+![Example Time 1](../assets/design/prefix_caching/example-time-1.png)
 
 **Time 3: Request 0 makes the block 3 full and asks for a new block to keep decoding.** We cache block 3 and allocate block 4.
 
-![Example Time 3](../../assets/design/v1/prefix_caching/example-time-3.png)
+![Example Time 3](../assets/design/prefix_caching/example-time-3.png)
 
 **Time 4: Request 1 comes in with the 14 prompt tokens, where the first 10 tokens are the same as request 0.** We can see that only the first 2 blocks (8 tokens) hit the cache, because the 3rd block only matches 2 of 4 tokens.
 
-![Example Time 4](../../assets/design/v1/prefix_caching/example-time-4.png)
+![Example Time 4](../assets/design/prefix_caching/example-time-4.png)
 
 **Time 5: Request 0 is finished and free.** Blocks 2, 3 and 4 are added to the free queue in the reverse order (but block 2 and 3 are still cached). Block 0 and 1 are not added to the free queue because they are being used by Request 1.
 
-![Example Time 5](../../assets/design/v1/prefix_caching/example-time-5.png)
+![Example Time 5](../assets/design/prefix_caching/example-time-5.png)
 
 **Time 6: Request 1 is finished and free.**
 
-![Example Time 6](../../assets/design/v1/prefix_caching/example-time-6.png)
+![Example Time 6](../assets/design/prefix_caching/example-time-6.png)
 
 **Time 7: Request 2 comes in with the 29 prompt tokens, where the first 12 tokens are the same as request 0\.** Note that even the block order in the free queue was `7 - 8 - 9 - 4 - 3 - 2 - 6 - 5 - 1 - 0`, the cache hit blocks (i.e., 0, 1, 2) are touched and removed from the queue before allocation, so the free queue becomes `7 - 8 - 9 - 4 - 3 - 6 - 5`. As a result, the allocated blocks are 0 (cached), 1 (cached), 2 (cached), 7, 8, 9, 4, 3 (evicted).
 
-![Example Time 7](../../assets/design/v1/prefix_caching/example-time-7.png)
+![Example Time 7](../assets/design/prefix_caching/example-time-7.png)
