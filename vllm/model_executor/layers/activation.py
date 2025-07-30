@@ -16,7 +16,7 @@ from vllm.utils import LazyDict
 
 
 @CustomOp.register("xielu")
-class XIELU(nn.Module):
+class XIELU(CustomOp):
     """
     Applies the xIELU activation function introduced in https://arxiv.org/abs/2411.13010
     If the user has installed the nickjbrowning/XIELU wheel, we import xIELU CUDA
