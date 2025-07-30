@@ -526,9 +526,23 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         renormalize: bool,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
-        **kwargs,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
     ):
+        if enable_eplb is not False or expert_load_view is not None or \
+                logical_to_physical_map is not None or \
+                logical_replica_count is not None:
+            raise NotImplementedError("Expert load balancing is not supported "
+                                      "for CPU.")
         assert custom_routing_function is None
         return layer.ipex_fusion(
             x,
