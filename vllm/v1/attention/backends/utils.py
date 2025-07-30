@@ -3,8 +3,8 @@
 import abc
 import functools
 from abc import abstractmethod
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Generic, Optional, TypeVar
+from dataclasses import dataclass, make_dataclass
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar
 
 import numpy as np
 import torch
@@ -59,10 +59,7 @@ class CommonAttentionMetadata:
     block_table_tensor: torch.Tensor
     slot_mapping: torch.Tensor
 
-    def __post_init__(self):
-        # Fill unused with -1. Needed for reshape_and_cache in full cuda graph
-        # mode.
-        self.slot_mapping[self.num_actual_tokens:].fill_(-1)
+    causal: bool = True
 
 
 M = TypeVar("M")
@@ -73,8 +70,8 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     full_cudagraph_supported: ClassVar[bool] = False
 
     @abstractmethod
-    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
-                 device: torch.device):
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
+                 vllm_config: VllmConfig, device: torch.device):
         self.kv_cache_spec = kv_cache_spec
 
     @abstractmethod
@@ -120,6 +117,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         num_kv_heads: int,
         use_alibi: bool,
         use_sliding_window: bool,
+        use_local_attention: bool,
         num_sms: int,
     ) -> bool:
         return False
@@ -166,14 +164,14 @@ class PerLayerParameters:
 
 
 def get_per_layer_parameters(
-        vllm_config: VllmConfig,
+        vllm_config: VllmConfig, layer_names: list[str],
         cls_: type['AttentionImpl']) -> dict[str, PerLayerParameters]:
     """
-    Scan all attention layers and determine some hyperparameters
+    Scan layers in `layer_names` and determine some hyperparameters
     to use during `plan`.
     """
 
-    layers = get_layers_from_vllm_config(vllm_config, Attention)
+    layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
     per_layer_params: dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():
@@ -210,6 +208,10 @@ def infer_global_hyperparameters(
     param_sets = list(per_layer_params.values())
     global_params = param_sets[0]
     for params in param_sets:
+        if params.window_left != global_params.window_left:
+            raise ValueError(
+                "Window left is not the same for all layers. One potential fix "
+                "is to set disable_sliding_window=True")
         assert params == global_params, (
             "FlashInfer backend currently only supports models in which all "
             "layers share the same values for the following hyperparameters: "
@@ -272,11 +274,14 @@ def infer_global_hyperparameters(
 #   block_table_local  : shape[local_virtual_batches, pages_per_local_batch]
 def make_local_attention_virtual_batches(
     attn_chunk_size: int,
-    query_start_loc_np: np.ndarray,
-    seq_lens_np: np.ndarray,
-    block_table: torch.Tensor,
+    common_attn_metadata: CommonAttentionMetadata,
     block_size: int = 0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, torch.Tensor]:
+) -> CommonAttentionMetadata:
+    query_start_loc_np = common_attn_metadata.query_start_loc_cpu.numpy()
+    seq_lens_np = common_attn_metadata.seq_lens_cpu.numpy()
+    block_table = common_attn_metadata.block_table_tensor
+    device = common_attn_metadata.query_start_loc.device
+
     q_seqlens = query_start_loc_np[1:] - query_start_loc_np[:-1]
     actual_batch_size = seq_lens_np.shape[0]
 
@@ -339,6 +344,7 @@ def make_local_attention_virtual_batches(
                               attn_chunk_size,
                               dtype=np.int32)
     seqlens_k_local[cu_num_blocks - 1] = tokens_in_last_block
+    num_computed_tokens_local = seqlens_k_local - seqlens_q_local
 
     k_seqstarts_absolute = np.repeat(seq_lens_np, local_blocks) - \
         (rarange * attn_chunk_size + \
@@ -380,8 +386,23 @@ def make_local_attention_virtual_batches(
     block_table_local = block_table[batch_indices, block_indices]\
         .view(virtual_batches, -1)
 
-    return seqlens_q_local, cu_seqlens_q_local, seqlens_k_local, \
-        block_table_local
+    query_start_loc_cpu = torch.from_numpy(cu_seqlens_q_local)
+    seq_lens_cpu = torch.from_numpy(seqlens_k_local)
+
+    return CommonAttentionMetadata(
+        query_start_loc_cpu=query_start_loc_cpu,
+        query_start_loc=query_start_loc_cpu.to(device=device,
+                                               non_blocking=True),
+        seq_lens_cpu=seq_lens_cpu,
+        seq_lens=seq_lens_cpu.to(device=device, non_blocking=True),
+        num_computed_tokens_cpu=torch.from_numpy(num_computed_tokens_local),
+        num_reqs=len(seq_lens_cpu),
+        num_actual_tokens=common_attn_metadata.num_actual_tokens,
+        max_query_len=seqlens_q_local.max(),
+        block_table_tensor=block_table_local,
+        slot_mapping=common_attn_metadata.slot_mapping,
+        causal=True,
+    )
 
 
 def split_decodes_and_prefills(
@@ -487,3 +508,34 @@ def reorder_batch_to_split_decodes_and_prefills(
         modified_batch = True
 
     return modified_batch
+
+
+KV_SHARING_FAST_PREFILL_METADATA_FIELDS = [
+    ('logits_indices_padded', Optional[torch.Tensor], None),
+    ('num_logits_indices', int, 0),
+]
+
+
+def subclass_attention_metadata(
+    name_prefix: str,
+    metadata_cls: Any,
+    fields: list[tuple[str, Any, Any]],
+) -> Any:
+    """
+    Return a new subclass of `metadata_cls` with additional fields
+    """
+    name: str = name_prefix + metadata_cls.__name__  # type: ignore
+    Wrapped = make_dataclass(name, fields, bases=(metadata_cls, ))
+    return Wrapped
+
+
+def make_kv_sharing_fast_prefill_attention_metadata(
+    metadata_cls: Any, ) -> Any:
+    """
+    Return a new subclass of `metadata_cls` for fast prefill
+    """
+    return subclass_attention_metadata(
+        name_prefix="KVSharingFastPrefill",
+        metadata_cls=metadata_cls,
+        fields=KV_SHARING_FAST_PREFILL_METADATA_FIELDS,
+    )

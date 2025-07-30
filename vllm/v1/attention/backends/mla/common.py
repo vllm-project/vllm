@@ -190,7 +190,7 @@ return curr_o @ W_O
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Generic, Optional, TypeVar, Union
 
 import torch
 
@@ -406,6 +406,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
     def __init__(self,
                  kv_cache_spec: AttentionSpec,
+                 layer_names: list[str],
                  vllm_config: VllmConfig,
                  device: torch.device,
                  metadata_cls: Optional[type[M]] = None):
@@ -471,7 +472,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 BatchPrefillWithRaggedKVCacheWrapper] = []
 
             self._global_hyperparameters = infer_global_hyperparameters(
-                get_per_layer_parameters(vllm_config, MLACommonImpl))
+                get_per_layer_parameters(vllm_config, layer_names,
+                                         MLACommonImpl))
 
         if self._use_cudnn_prefill:
             self.cudnn_workspace = torch.empty(
@@ -754,7 +756,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[dict[str, Any]],
         logits_soft_cap: Optional[float],
         attn_type: str,
         kv_sharing_target_layer_name: Optional[str],

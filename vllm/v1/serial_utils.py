@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import importlib
 import pickle
 from collections.abc import Sequence
 from inspect import isclass
@@ -9,6 +10,7 @@ from types import FunctionType
 from typing import Any, Optional, Union
 
 import cloudpickle
+import msgspec
 import numpy as np
 import torch
 import zmq
@@ -22,6 +24,7 @@ from vllm.multimodal.inputs import (BaseMultiModalField,
                                     MultiModalFlatField, MultiModalKwargs,
                                     MultiModalKwargsItem,
                                     MultiModalSharedField, NestedTensors)
+from vllm.v1.engine import UtilityResult
 
 logger = init_logger(__name__)
 
@@ -44,6 +47,10 @@ bytestr = Union[bytes, bytearray, memoryview, zmq.Frame]
 def _log_insecure_serialization_warning():
     logger.warning_once("Allowing insecure serialization using pickle due to "
                         "VLLM_ALLOW_INSECURE_SERIALIZATION=1")
+
+
+def _typestr(t: type):
+    return t.__module__, t.__qualname__
 
 
 class MsgpackEncoder:
@@ -121,6 +128,18 @@ class MsgpackEncoder:
             } for elem in item.values()]
                     for itemlist in mm._items_by_modality.values()
                     for item in itemlist]
+
+        if isinstance(obj, UtilityResult):
+            result = obj.result
+            if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION or result is None:
+                return None, result
+            # Since utility results are not strongly typed, we also encode
+            # the type (or a list of types in the case it's a list) to
+            # help with correct msgspec deserialization.
+            cls = result.__class__
+            return _typestr(cls) if cls is not list else [
+                _typestr(type(v)) for v in result
+            ], result
 
         if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             raise TypeError(f"Object of type {type(obj)} is not serializable"
@@ -237,7 +256,32 @@ class MsgpackDecoder:
                     k: self._decode_nested_tensors(v)
                     for k, v in obj.items()
                 })
+            if t is UtilityResult:
+                return self._decode_utility_result(obj)
         return obj
+
+    def _decode_utility_result(self, obj: Any) -> UtilityResult:
+        result_type, result = obj
+        if result_type is not None:
+            if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
+                raise TypeError("VLLM_ALLOW_INSECURE_SERIALIZATION must "
+                                "be set to use custom utility result types")
+            assert isinstance(result_type, list)
+            if len(result_type) == 2 and isinstance(result_type[0], str):
+                result = self._convert_result(result_type, result)
+            else:
+                assert isinstance(result, list)
+                result = [
+                    self._convert_result(rt, r)
+                    for rt, r in zip(result_type, result)
+                ]
+        return UtilityResult(result)
+
+    def _convert_result(self, result_type: Sequence[str], result: Any):
+        mod_name, name = result_type
+        mod = importlib.import_module(mod_name)
+        result_type = getattr(mod, name)
+        return msgspec.convert(result, result_type, dec_hook=self.dec_hook)
 
     def _decode_ndarray(self, arr: Any) -> np.ndarray:
         dtype, shape, data = arr
