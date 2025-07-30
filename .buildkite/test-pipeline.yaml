@@ -643,6 +643,17 @@ steps:
     - python3 examples/offline_inference/audio_language.py --model-type whisper
     - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
 
+- label: Blackwell Test
+  working_dir: "/vllm-workspace/"
+  gpu: b200
+  # optional: true
+  source_file_dependencies:
+  - csrc/
+  - vllm/
+  commands:
+    - nvidia-smi
+    - python3 examples/offline_inference/basic/chat.py
+
 #####  1 GPU test  #####
 #####  multi gpus test  #####
 
