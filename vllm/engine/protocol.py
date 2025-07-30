@@ -328,3 +328,7 @@ class EngineClient(ABC):
                                drain_timeout: int = 300) -> None:
         """Scale the engine"""
         raise NotImplementedError
+
+    async def load_model(self, model: str, state) -> None:
+        """Load the given model"""
+        raise NotImplementedError
