@@ -112,13 +112,13 @@ vllm bench serve \
 
 In practice, you should set the `--duration` argument to a large value. Whenever you want the server to stop profiling, run:
 
-```
+```bash
 nsys sessions list
 ```
 
 to get the session id in the form of `profile-XXXXX`, then run:
 
-```
+```bash
 nsys stop --session=profile-XXXXX
 ```
 

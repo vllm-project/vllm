@@ -40,6 +40,7 @@ Although the first compilation can take some time, for all subsequent server lau
 Use `VLLM_XLA_CACHE_PATH` environment variable to write to shareable storage for future deployed nodes (like when using autoscaling).
 
 #### Reducing compilation time
+
 This initial compilation time ranges significantly and is impacted by many of the arguments discussed in this optimization doc. Factors that influence the length of time to compile are things like model size and `--max-num-batch-tokens`. Other arguments you can tune are things like `VLLM_TPU_MOST_MODEL_LEN`.
 
 ### Optimize based on your data
@@ -71,12 +72,15 @@ The fewer tokens we pad, the less unnecessary computation TPU does, the better p
 
 However, you need to be careful to choose the padding gap. If the gap is too small, it means the number of buckets is large, leading to increased warmup (precompile) time and higher memory to store the compiled graph. Too many compilaed graphs may lead to HBM OOM. Conversely, an overly large gap yields no performance improvement compared to the default exponential padding.
 
-**If possible, use the precision that matches the chip’s hardware acceleration**
+#### Quantization
+
+If possible, use the precision that matches the chip’s hardware acceleration:
 
 - v5e has int4/int8 hardware acceleration in the MXU
 - v6e has int4/int8 hardware acceleration in the MXU
 
-Supported quantized formats and features in vLLM on TPU [Jul '25]
+Supported quantized formats and features in vLLM on TPU [Jul '25]:
+
 - INT8 W8A8
 - INT8 W8A16
 - FP8 KV cache
@@ -84,11 +88,13 @@ Supported quantized formats and features in vLLM on TPU [Jul '25]
 - [WIP] AWQ
 - [WIP] FP4 W4A8
 
-**Don't set TP to be less than the number of chips on a single-host deployment**
+#### Parallelization
+
+Don't set TP to be less than the number of chips on a single-host deployment.
 
 Although it’s common to do this with GPUs, don't try to fragment 2 or 8 different workloads across 8 chips on a single host. If you need 1 or 4 chips, just create an instance with 1 or 4 chips (these are partial-host machine types).
 
-### Tune your workloads!
+### Tune your workloads
 
 Although we try to have great default configs, we strongly recommend you check out the [vLLM auto-tuner](../../benchmarks/auto_tune/README.md) to optimize your workloads for your use case.
 
@@ -99,6 +105,7 @@ Although we try to have great default configs, we strongly recommend you check o
 The auto-tuner provides a profile of optimized configurations as its final step. However, interpreting this profile can be challenging for new users. We plan to expand this section in the future with more detailed guidance. In the meantime, you can learn how to collect a TPU profile using vLLM's native profiling tools [here](../examples/offline_inference/profiling_tpu.md). This profile can provide valuable insights into your workload's performance.
 
 #### SPMD
+
 More details to come.
 
 **Want us to cover something that isn't listed here? Open up an issue please and cite this doc. We'd love to hear your questions or tips.**
