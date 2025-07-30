@@ -870,8 +870,8 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
 
         if inputs_embeds is None:
             # shape: batch, seq_len, hidden_size
-            input_ids = input_ids.to(torch.cuda.current_device())
-            text_input_ids = text_input_ids.to(torch.cuda.current_device())
+            input_ids = input_ids.to(self.embed_tokens.weight.device)
+            text_input_ids = text_input_ids.to(self.embed_tokens.weight.device)
             audio_emb = self.embed_tokens(input_ids)
             if self.use_whisper_feature and whisper_input_feature is not None:
                 if not isinstance(whisper_input_feature, list):
