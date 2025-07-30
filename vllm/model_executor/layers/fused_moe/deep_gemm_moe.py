@@ -83,9 +83,10 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
 
 
 @run_once
-def warmup_deepgemm_kernels(w1: torch.Tensor, w2: torch.Tensor,
-                            w1_scale: torch.Tensor, w2_scale: torch.Tensor,
-                            num_topk: int):
+def warmup_deepgemm_gg_contiguous_kernels(w1: torch.Tensor, w2: torch.Tensor,
+                                          w1_scale: torch.Tensor,
+                                          w2_scale: torch.Tensor,
+                                          num_topk: int):
     """
     DeepGemm JITs the grouped-gemm kernels. The JIT'ing happens based on the
     input tensor shapes. In this function, we construct all possible input
@@ -219,11 +220,11 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # function is a `run_once` decorated that executes during the model
         # profile run. This warmup is should create all the required JITs for
         # this model.
-        warmup_deepgemm_kernels(w1,
-                                w2,
-                                w1_scale,
-                                w2_scale,
-                                num_topk=topk_ids.size(1))
+        warmup_deepgemm_gg_contiguous_kernels(w1,
+                                              w2,
+                                              w1_scale,
+                                              w2_scale,
+                                              num_topk=topk_ids.size(1))
 
         a1q = hidden_states
         _, N, K = w1.size()
