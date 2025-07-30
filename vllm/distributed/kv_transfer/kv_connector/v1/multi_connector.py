@@ -10,7 +10,8 @@ from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorOutput,
+    KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -105,9 +106,7 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             c.wait_for_save()
 
-    def get_finished(
-        self, finished_req_ids: set[str]
-    ) -> KVConnectorBase_V1.KVConnectorFinishOutput:
+    def get_finished(self, finished_req_ids: set[str]) -> KVConnectorOutput:
         finished_sending: set[str] = set()
         finished_recving: set[str] = set()
         for c in self._connectors:
@@ -132,9 +131,8 @@ class MultiConnector(KVConnectorBase_V1):
                 else:
                     self._extra_async_saves[req_id] = extra_pending - 1
 
-        return KVConnectorBase_V1.KVConnectorFinishOutput(
-            finished_sending=finished_sending,
-            finished_recving=finished_recving)
+        return KVConnectorOutput(finished_sending=finished_sending,
+                                 finished_recving=finished_recving)
 
     # ==============================
     # Scheduler-side methods

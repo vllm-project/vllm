@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING, Optional
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
+from vllm.distributed.kv_transfer.kv_connector.base import (KVConnectorBase,
+                                                            KVConnectorOutput)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
@@ -28,7 +29,7 @@ class KVConnectorModelRunnerMixin:
         # Update KVConnector with the KVConnector metadata forward().
         if has_kv_transfer_group():
             kv_connector = get_kv_transfer_group()
-            assert isinstance(kv_connector, KVConnectorBase_V1)
+            assert isinstance(kv_connector, KVConnectorBase)
             assert scheduler_output.kv_connector_metadata is not None
             kv_connector.bind_connector_metadata(
                 scheduler_output.kv_connector_metadata)
@@ -46,8 +47,7 @@ class KVConnectorModelRunnerMixin:
 
     @staticmethod
     def get_finished_kv_transfers(
-        scheduler_output: "SchedulerOutput",
-    ) -> Optional[KVConnectorBase_V1.KVConnectorFinishOutput]:
+        scheduler_output: "SchedulerOutput", ) -> Optional[KVConnectorOutput]:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_finished(
                 scheduler_output.finished_req_ids)

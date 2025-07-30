@@ -7,7 +7,8 @@ from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorOutput,
+    KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -87,9 +88,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         """
         self._lmcache_engine.wait_for_save()
 
-    def get_finished(
-        self, finished_req_ids: set[str]
-    ) -> KVConnectorBase_V1.KVConnectorFinishOutput:
+    def get_finished(self, finished_req_ids: set[str]) -> KVConnectorOutput:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens.
@@ -103,9 +102,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         """
         finished_sending, finished_recving = self._lmcache_engine.get_finished(
             finished_req_ids)
-        return KVConnectorBase_V1.KVConnectorFinishOutput(
-            finished_sending=finished_sending,
-            finished_recving=finished_recving)
+        return KVConnectorOutput(finished_sending=finished_sending,
+                                 finished_recving=finished_recving)
 
     # ==============================
     # Scheduler-side methods

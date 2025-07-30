@@ -13,7 +13,7 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
+from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorOutput
 from vllm.logger import init_logger
 from vllm.v1.outputs import ModelRunnerOutput
 
@@ -140,9 +140,8 @@ class KVOutputAggregator:
                     finished_set.add(req_id)
                     del remaining_count_dict[req_id]
 
-        final_kv_connector_finish_output = (
-            KVConnectorBaseType.KVConnectorFinishOutput(
-                finished_sending=set(), finished_recving=set()))
+        final_kv_connector_finish_output = (KVConnectorOutput(
+            finished_sending=set(), finished_recving=set()))
         for output in outputs:
             kv_connector_finish_output = output.kv_connector_finish_output
             if kv_connector_finish_output is None:

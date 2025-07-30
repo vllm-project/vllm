@@ -3,7 +3,7 @@
 from concurrent.futures import Future
 from typing import Optional
 
-from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
+from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorOutput
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.v1.outputs import ModelRunnerOutput
 
@@ -13,11 +13,10 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
     def __init__(self,
                  finished_sending: Optional[set[str]] = None,
                  finished_recving: Optional[set[str]] = None):
-        self.kv_connector_finish_output = (
-            KVConnectorBaseType.KVConnectorFinishOutput(
-                finished_sending=finished_sending or set(),
-                finished_recving=finished_recving or set(),
-                finished_loading_num_tokens={}))
+        self.kv_connector_finish_output = (KVConnectorOutput(
+            finished_sending=finished_sending or set(),
+            finished_recving=finished_recving or set(),
+            finished_loading_num_tokens={}))
 
     @property
     def finished_sending(self) -> set[str]:
