@@ -56,9 +56,10 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
     full_cudagraph_supported: ClassVar[bool] = True  # Decode-only
 
-    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
-                 device: torch.device):
-        super().__init__(kv_cache_spec, vllm_config, device, FlashMLAMetadata)
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
+                 vllm_config: VllmConfig, device: torch.device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device,
+                         FlashMLAMetadata)
 
         self.compilation_config = vllm_config.compilation_config
         self.num_q_heads = vllm_config.model_config.get_num_attention_heads(

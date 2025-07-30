@@ -22,16 +22,17 @@ from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         ConfigFormat, ConfigType, DecodingConfig,
-                         DetailedTraceModules, Device, DeviceConfig,
-                         DistributedExecutorBackend, GuidedDecodingBackend,
-                         GuidedDecodingBackendV1, HfOverrides, KVEventsConfig,
+                         ConfigFormat, ConfigType, ConvertOption,
+                         DecodingConfig, DetailedTraceModules, Device,
+                         DeviceConfig, DistributedExecutorBackend,
+                         GuidedDecodingBackend, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
                          LoRAConfig, ModelConfig, ModelDType, ModelImpl,
                          MultiModalConfig, ObservabilityConfig, ParallelConfig,
-                         PoolerConfig, PrefixCachingHashAlgo, SchedulerConfig,
-                         SchedulerPolicy, SpeculativeConfig, TaskOption,
-                         TokenizerMode, VllmConfig, get_attr_docs, get_field)
+                         PoolerConfig, PrefixCachingHashAlgo, RunnerOption,
+                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
+                         TaskOption, TokenizerMode, VllmConfig, get_attr_docs,
+                         get_field)
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -107,15 +108,19 @@ def get_type(type_hints: set[TypeHint], type: TypeHintT) -> TypeHintT:
 
 
 def literal_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
-    """Convert Literal type hints to argparse kwargs."""
+    """Get the `type` and `choices` from a `Literal` type hint in `type_hints`.
+
+    If `type_hints` also contains `str`, we use `metavar` instead of `choices`.
+    """
     type_hint = get_type(type_hints, Literal)
-    choices = get_args(type_hint)
-    choice_type = type(choices[0])
-    if not all(isinstance(choice, choice_type) for choice in choices):
+    options = get_args(type_hint)
+    option_type = type(options[0])
+    if not all(isinstance(option, option_type) for option in options):
         raise ValueError(
-            "All choices must be of the same type. "
-            f"Got {choices} with types {[type(c) for c in choices]}")
-    return {"type": choice_type, "choices": sorted(choices)}
+            "All options must be of the same type. "
+            f"Got {options} with types {[type(c) for c in options]}")
+    kwarg = "metavar" if contains_type(type_hints, str) else "choices"
+    return {"type": option_type, kwarg: sorted(options)}
 
 
 def is_not_builtin(type_hint: TypeHint) -> bool:
@@ -270,7 +275,9 @@ class EngineArgs:
         str, List[str]]] = ModelConfig.served_model_name
     tokenizer: Optional[str] = ModelConfig.tokenizer
     hf_config_path: Optional[str] = ModelConfig.hf_config_path
-    task: TaskOption = ModelConfig.task
+    runner: RunnerOption = ModelConfig.runner
+    convert: ConvertOption = ModelConfig.convert
+    task: Optional[TaskOption] = ModelConfig.task
     skip_tokenizer_init: bool = ModelConfig.skip_tokenizer_init
     enable_prompt_embeds: bool = ModelConfig.enable_prompt_embeds
     tokenizer_mode: TokenizerMode = ModelConfig.tokenizer_mode
@@ -461,7 +468,11 @@ class EngineArgs:
         )
         if not ('serve' in sys.argv[1:] and '--help' in sys.argv[1:]):
             model_group.add_argument("--model", **model_kwargs["model"])
-        model_group.add_argument("--task", **model_kwargs["task"])
+        model_group.add_argument("--runner", **model_kwargs["runner"])
+        model_group.add_argument("--convert", **model_kwargs["convert"])
+        model_group.add_argument("--task",
+                                 **model_kwargs["task"],
+                                 deprecated=True)
         model_group.add_argument("--tokenizer", **model_kwargs["tokenizer"])
         model_group.add_argument("--tokenizer-mode",
                                  **model_kwargs["tokenizer_mode"])
@@ -870,6 +881,8 @@ class EngineArgs:
         return ModelConfig(
             model=self.model,
             hf_config_path=self.hf_config_path,
+            runner=self.runner,
+            convert=self.convert,
             task=self.task,
             tokenizer=self.tokenizer,
             tokenizer_mode=self.tokenizer_mode,
@@ -1328,14 +1341,6 @@ class EngineArgs:
         if self.scheduler_delay_factor != SchedulerConfig.delay_factor:
             _raise_or_fallback(feature_name="--scheduler-delay-factor",
                                recommend_to_remove=True)
-            return False
-
-        if self.guided_decoding_backend not in get_args(
-                GuidedDecodingBackendV1):
-            _raise_or_fallback(
-                feature_name=
-                f"--guided-decoding-backend={self.guided_decoding_backend}",
-                recommend_to_remove=False)
             return False
 
         # Need at least Ampere for now (FA support required).
