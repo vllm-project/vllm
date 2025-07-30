@@ -207,6 +207,11 @@ class EngineCore:
 
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
+        # Validate the request_id type.
+        if not isinstance(request.request_id, str):
+            raise TypeError(
+                f"request_id must be a string, got {type(request.request_id)}")
+
         if pooling_params := request.pooling_params:
             supported_pooling_tasks = [
                 task for task in self.get_supported_tasks()
