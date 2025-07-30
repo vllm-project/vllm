@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping
-from typing import Literal, Optional, TypedDict, Union, cast
+from typing import Annotated, Literal, Optional, Union, cast
 
 import torch
 import torch.nn as nn
@@ -16,6 +16,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.jsontree import json_map_leaves
 
 from .clip import CLIPVisionModel
@@ -29,24 +30,30 @@ from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
 
-class MiniMaxVL01ImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    pixel_values: torch.Tensor
+class MiniMaxVL01ImagePixelInputs(TensorSchema):
     """
-    Shape: `(batch_size * num_images, num_channels, height, width)`
-
-    Note that `height` or `width` may be different per batch and image,
-    in which case the data is passed as a list instead of a batched tensor.
+    Dimensions:
+        - bn: Batch size * number of images
+        - c: Number of channels (3)
+        - h: Height
+        - w: Width
     """
+    type: Literal["pixel_values"] = "pixel_values"
+
+    # Note that `height` or `width` may be different per batch and image,
+    # in which case the data is passed as a list instead of a batched tensor.
+    pixel_values: Annotated[torch.Tensor, TensorShape("bn", 3, "h", "w")]
 
 
-class MiniMaxVL01ImageEmbeddingInputs(TypedDict):
-    type: Literal["image_embeds"]
-    data: torch.Tensor
-    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
-
-    `hidden_size` must match the hidden size of language model backbone.
+class MiniMaxVL01ImageEmbeddingInputs(TensorSchema):
     """
+    Dimensions:
+        - bn: Batch size * number of images
+        - f: Image feature size
+        - h: Hidden size (must match language model backbone)
+    """
+    type: Literal["image_embeds"] = "image_embeds"
+    data: Annotated[torch.Tensor, TensorShape("bn", "f", "h")]
 
 
 MiniMaxVL01ImageInputs = Union[MiniMaxVL01ImagePixelInputs,
@@ -283,19 +290,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         image_embeds = torch.split(image_embeds, feature_sizes)
         return image_embeds
 
-    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-        h = w = self.config.vision_config.image_size
-        expected_dims = (3, h, w)
-        actual_dims = tuple(data.shape[1:])
-
-        if actual_dims != expected_dims:
-            expected_expr = ("batch_size", *map(str, expected_dims))
-            raise ValueError(
-                f"The expected shape of pixel values is {expected_expr}. "
-                f"You supplied {tuple(data.shape)}.")
-
-        return data
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[MiniMaxVL01ImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -311,9 +305,11 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
             return MiniMaxVL01ImagePixelInputs(
                 type="pixel_values",
-                pixel_values=self._validate_pixel_values(
-                    flatten_bn(pixel_values, concat=True)),
-            )
+                pixel_values=flatten_bn(pixel_values, concat=True),
+                resolve_bindings={
+                    "h": self.config.vision_config.image_size,
+                    "w": self.config.vision_config.image_size
+                })
 
         if image_embeds is not None:
             if not isinstance(image_embeds, (torch.Tensor, list)):
