@@ -33,12 +33,6 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
-    # FIXME: Possible memory leak in the previous tests?
-    if model_arch in ("Glm4vForConditionalGeneration",
-                      "GraniteSpeechForConditionalGeneration",
-                      "KimiVLForConditionalGeneration"):
-        pytest.skip("Avoid OOM")
-
     if model_arch in ("Llama4ForCausalLM", "EagleLlama4ForCausalLM"):
         from vllm.model_executor.models.llama4 import Llama4ForCausalLM
         from vllm.model_executor.models.registry import ModelRegistry
@@ -85,6 +79,14 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
             hf_config.encoder_config.update({
                 "num_layers": 1,
                 "num_hidden_layers": 1,
+            })
+
+        # e.g.: Qwen/Qwen2-Audio-7B-Instruct
+        if hasattr(hf_config, "audio_config"):
+            hf_config.audio_config.update({
+                "num_layers": 1,
+                "num_hidden_layers": 1,
+                "encoder_layers": 1,
             })
 
         return hf_config
