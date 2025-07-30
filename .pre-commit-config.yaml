@@ -38,8 +38,9 @@ repos:
 - repo: https://github.com/igorshubovych/markdownlint-cli
   rev: v0.45.0
   hooks:
-  - id: markdownlint-fix
+  - id: markdownlint
     exclude: '.*\.inc\.md'
+    stages: [manual] # Only run in CI
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
