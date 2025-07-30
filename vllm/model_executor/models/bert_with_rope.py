@@ -8,7 +8,6 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionType
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -360,7 +359,6 @@ class BertWithRopeBlock(nn.Module):
         return hidden_states
 
 
-@support_torch_compile
 class BertWithRopeEncoder(nn.Module):
 
     def __init__(self,
