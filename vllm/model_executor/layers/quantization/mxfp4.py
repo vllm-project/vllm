@@ -3,12 +3,7 @@
 from typing import Callable, Optional
 
 import torch
-import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
 from torch.nn.parameter import Parameter
-from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
-from triton_kernels.numerics import InFlexData
-from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
-from triton_kernels.tensor_details import layout
 
 from vllm import envs
 from vllm.model_executor.layers.fused_moe import (
@@ -19,34 +14,12 @@ from vllm.model_executor.layers.linear import (LinearBase,
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    _swizzle_mxfp4)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
 from vllm.utils import round_up
-
-
-def swizzle_mxfp4(quant_tensor, scale, num_warps):
-    value_layout, value_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
-        mx_axis=1)
-    scale_layout, scale_layout_opts = (
-        layout.make_default_matmul_mxfp4_w_scale_layout(mx_axis=1,
-                                                        num_warps=num_warps))
-    if current_platform.is_cuda() and \
-        torch.cuda.get_device_capability()[0] == 10:
-        constraints = {
-            "is_persistent": True,
-            "epilogue_subtile": 1,
-        }
-        opt_flags.update_opt_flags_constraints(constraints)
-    # transpose the tensor so that the quantization axis is on dim1
-    quant_tensor = quant_tensor.transpose(-2, -1)
-    scale = scale.transpose(-2, -1)
-    quant_tensor = convert_layout(wrap_torch_tensor(quant_tensor, dtype=FP4),
-                                  value_layout, **value_layout_opts)
-    scale = convert_layout(wrap_torch_tensor(scale), scale_layout,
-                           **scale_layout_opts)
-    return quant_tensor, InFlexData(), scale
 
 
 class Mxfp4Config(QuantizationConfig):
@@ -180,6 +153,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_bias, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer):
+        from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
         w13_bias = layer.w13_bias.to(torch.float32)
         w2_bias = layer.w2_bias.to(torch.float32)
@@ -194,11 +168,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         else:
             num_warps = 8
 
-        w13_weight, w13_flex, w13_scale = swizzle_mxfp4(
+        w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
             layer.w13_weight, layer.w13_weight_scale, num_warps)
-        w2_weight, w2_flex, w2_scale = swizzle_mxfp4(layer.w2_weight,
-                                                     layer.w2_weight_scale,
-                                                     num_warps)
+        w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(layer.w2_weight,
+                                                      layer.w2_weight_scale,
+                                                      num_warps)
 
         self.w13_precision_config = PrecisionConfig(
             weight_scale=w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex))

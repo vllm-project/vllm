@@ -2,47 +2,39 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
 OCP_MX_BLOCK_SIZE = 32
 
 
-def quantize(w, dtype, dev, **opt):
-    """ Downcast weights to various precision, used for OAI mxfp4 kernel
+def _swizzle_mxfp4(quant_tensor, scale, num_warps):
+    """ weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel
     """
-    from triton_kernels.matmul_ogs import MicroscalingCtx
+    import triton_kernels.matmul_ogs_details.opt_flags as opt_flags
     from triton_kernels.numerics import InFlexData
-    from triton_kernels.numerics_details.mxfp import downcast_to_mxfp
-    from triton_kernels.target_info import get_cdna_version
-    if dtype == "bf16":
-        wq = w.to(torch.bfloat16).transpose(-1,
-                                            -2).contiguous().transpose(-1, -2)
-        return wq, InFlexData(), MicroscalingCtx()
-    elif dtype == "fp8":
-        fp8e4_dtype = torch.float8_e4m3fn if get_cdna_version() != 3 \
-            else torch.float8_e4m3fnuz
-        wq = w.to(fp8e4_dtype)
-        return (wq, InFlexData(dtype=wq.dtype,
-                               scale=w.abs().max().unsqueeze(0)),
-                MicroscalingCtx())
-    else:
-        assert dtype == "mx4", f"{dtype=}"
-        swizzle_mx_scale = opt.get("swizzle_mx_scale")
-        swizzle_mx_value = opt.get("swizzle_mx_value")
-        swizzle_axis = 2 if swizzle_mx_scale else None
-        w = w.to(torch.bfloat16)
-        w, mx_scales, weight_scale_shape = downcast_to_mxfp(
-            w,
-            torch.uint8,
-            axis=1,
-            swizzle_axis=swizzle_axis,
-            swizzle_scale=swizzle_mx_scale,
-            swizzle_value=swizzle_mx_value)
-        return w, InFlexData(), MicroscalingCtx(
-            weight_scale=mx_scales,
-            swizzle_scale=swizzle_mx_scale,
-            swizzle_value=swizzle_mx_value,
-            actual_weight_scale_shape=weight_scale_shape)
+    from triton_kernels.tensor import FP4, convert_layout, wrap_torch_tensor
+    from triton_kernels.tensor_details import layout
+    value_layout, value_layout_opts = layout.make_default_matmul_mxfp4_w_layout(
+        mx_axis=1)
+    scale_layout, scale_layout_opts = (
+        layout.make_default_matmul_mxfp4_w_scale_layout(mx_axis=1,
+                                                        num_warps=num_warps))
+    if current_platform.is_cuda() and \
+        torch.cuda.get_device_capability()[0] == 10:
+        constraints = {
+            "is_persistent": True,
+            "epilogue_subtile": 1,
+        }
+        opt_flags.update_opt_flags_constraints(constraints)
+    # transpose the tensor so that the quantization axis is on dim1
+    quant_tensor = quant_tensor.transpose(-2, -1)
+    scale = scale.transpose(-2, -1)
+    quant_tensor = convert_layout(wrap_torch_tensor(quant_tensor, dtype=FP4),
+                                  value_layout, **value_layout_opts)
+    scale = convert_layout(wrap_torch_tensor(scale), scale_layout,
+                           **scale_layout_opts)
+    return quant_tensor, InFlexData(), scale
 
 
 def _dequant_mxfp4(x: torch.Tensor, scale: torch.Tensor,
