@@ -101,6 +101,7 @@ def rocm_unquantized_gemm_wrapper():
 
         if use_aiter:
             return aiter_ops.rocm_aiter_tuned_gemm(x, weight, bias)
+        return torch.nn.functional.linear(x, weight, bias)
 
     return inner_function
 
