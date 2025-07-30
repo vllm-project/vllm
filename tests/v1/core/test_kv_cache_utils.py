@@ -112,9 +112,9 @@ def test_kv_cache_block():
     assert block.block_hash is None
 
     # Test reference count manipulation
-    block.incr_ref()
+    block.ref_cnt += 1
     assert block.ref_cnt == 1
-    block.decr_ref()
+    block.ref_cnt -= 1
     assert block.ref_cnt == 0
 
     # Test block hash setting and resetting
