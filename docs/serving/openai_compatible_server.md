@@ -295,12 +295,12 @@ and passing a list of `messages` in the request. Refer to the examples below for
 
     To serve the model:
 
-```bash
-vllm serve MrLight/dse-qwen2-2b-mrl-v1 --runner pooling \
-  --trust-remote-code \
-  --max-model-len 8192 \
-  --chat-template examples/template_dse_qwen2_vl.jinja
-```
+    ```bash
+    vllm serve MrLight/dse-qwen2-2b-mrl-v1 --runner pooling \
+      --trust-remote-code \
+      --max-model-len 8192 \
+      --chat-template examples/template_dse_qwen2_vl.jinja
+    ```
 
     !!! important
         Like with VLM2Vec, we have to explicitly pass `--runner pooling`.
