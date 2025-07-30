@@ -445,6 +445,9 @@ class EngineArgs:
     # DEPRECATED
     enable_prompt_adapter: bool = False
 
+    kv_sharing_fast_prefill: bool = \
+        CacheConfig.kv_sharing_fast_prefill
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -697,6 +700,8 @@ class EngineArgs:
                                  **cache_kwargs["cpu_offload_gb"])
         cache_group.add_argument("--calculate-kv-scales",
                                  **cache_kwargs["calculate_kv_scales"])
+        cache_group.add_argument("--kv-sharing-fast-prefill",
+                                 **cache_kwargs["kv_sharing_fast_prefill"])
 
         # Multimodal related configs
         multimodal_kwargs = get_kwargs(MultiModalConfig)
@@ -1069,6 +1074,7 @@ class EngineArgs:
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
+            kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
         )
 
         # Get the current placement group if Ray is initialized and
