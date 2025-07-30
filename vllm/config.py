@@ -723,10 +723,15 @@ class ModelConfig:
         )
 
         # Workaround for Gemma 2 which uses interleaved sliding window
-        # attention, but it's not specified in its config. TODO: remove this
-        # when Gemma 2 is fixed in Transformers.
+        # attention, but it's not specified in its config.
+        # TODO: remove this when Gemma 2 config updated in HuggingFace.
         if self.hf_text_config.model_type == "gemma2":
             self.hf_text_config.sliding_window_pattern = 2
+
+        # TODO: remove this when Gemma 3n config updated in HuggingFace.
+        if self.hf_text_config.model_type == "gemma3n_text":
+            # 4 sliding window attention followed by 1 full attention
+            self.hf_text_config.sliding_window_pattern = "LLLLG"
 
         sliding_window = getattr(self.hf_text_config, "sliding_window", None)
         sliding_window_pattern = getattr(self.hf_text_config,
@@ -735,8 +740,8 @@ class ModelConfig:
             isinstance(sliding_window, list))
 
         if not self.disable_sliding_window and has_interleaved_attention:
-            if (backend :=
-                    envs.VLLM_ATTENTION_BACKEND) in ("XFORMERS", "FLASHINFER"):
+            if not envs.VLLM_USE_V1 and (backend := envs.VLLM_ATTENTION_BACKEND
+                                         ) in ("XFORMERS", "FLASHINFER"):
                 sliding_window_len_min = get_min_sliding_window(
                     self.hf_text_config.sliding_window)
 
@@ -851,7 +856,7 @@ class ModelConfig:
             self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
-        if self.registry.is_multimodal_model(self.architectures, self):
+        if self._model_info.supports_multimodal:
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
                 media_io_kwargs=self.media_io_kwargs,
@@ -859,19 +864,6 @@ class ModelConfig:
                 disable_mm_preprocessor_cache=self.
                 disable_mm_preprocessor_cache,
                 interleave_mm_strings=self.interleave_mm_strings)
-
-        if self.limit_mm_per_prompt:
-            raise ValueError("`limit_mm_per_prompt` is only supported for "
-                             "multimodal models.")
-        if self.mm_processor_kwargs:
-            raise ValueError("`mm_processor_kwargs` is only supported for "
-                             "multimodal models.")
-        if self.disable_mm_preprocessor_cache:
-            raise ValueError("`disable_mm_preprocessor_cache` is only "
-                             "supported for multimodal models.")
-        if self.interleave_mm_strings:
-            raise ValueError("`interleave_mm_strings` is only "
-                             "supported for multimodal models.")
 
         return None
 
@@ -949,9 +941,12 @@ class ModelConfig:
 
         runner_type = self._get_default_runner_type(architectures)
 
-        logger.info(
-            "Resolved `--runner auto` to `--runner %s`. "
-            "Pass the value explicitly to silence this message.", runner_type)
+        # Don't log the most common case
+        if runner_type != "generate":
+            logger.info(
+                "Resolved `--runner auto` to `--runner %s`. "
+                "Pass the value explicitly to silence this message.",
+                runner_type)
 
         return runner_type
 
@@ -998,9 +993,12 @@ class ModelConfig:
         convert_type = self._get_default_convert_type(architectures,
                                                       runner_type)
 
-        logger.info(
-            "Resolved `--convert auto` to `--convert %s`. "
-            "Pass the value explicitly to silence this message.", convert_type)
+        # Don't log the most common case
+        if convert_type != "none":
+            logger.info(
+                "Resolved `--convert auto` to `--convert %s`. "
+                "Pass the value explicitly to silence this message.",
+                convert_type)
 
         return convert_type
 
@@ -1768,8 +1766,8 @@ class CacheConfig:
     - "builtin" is Python's built-in hash.\n
     - "sha256" is collision resistant but with certain overheads.
     This option uses Pickle for object serialization before hashing.\n
-    - "sha256_cbor_64bit" provides a reproducible, cross-language compatible 
-    hash. It serializes objects using canonical CBOR and hashes them with 
+    - "sha256_cbor_64bit" provides a reproducible, cross-language compatible
+    hash. It serializes objects using canonical CBOR and hashes them with
     SHA-256. The resulting hash consists of the lower 64 bits of the SHA-256
     digest."""
     cpu_offload_gb: float = 0
@@ -1796,6 +1794,16 @@ class CacheConfig:
     """The number of blocks to allocate for GPU memory."""
     num_cpu_blocks: Optional[int] = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
+
+    kv_sharing_fast_prefill: bool = False
+    """This feature is work in progress and no prefill optimization takes place
+    with this flag enabled currently.
+
+    In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
+    some layers can skip tokens corresponding to prefill. This flag enables
+    attention metadata for eligible layers to be overriden with metadata
+    necessary for implementating this optimization in some models (e.g. Gemma3n)
+    """
 
     def compute_hash(self) -> str:
         """
@@ -1837,6 +1845,11 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
+
+        if self.kv_sharing_fast_prefill:
+            logger.warning_once(
+                "--kv-sharing-fast-prefill is currently work in progress "
+                "and not functional yet (i.e. no prefill savings)")
 
         return self
 
@@ -3715,12 +3728,7 @@ def get_served_model_name(model: str,
     return served_model_name
 
 
-GuidedDecodingBackendV0 = Literal["auto", "outlines", "lm-format-enforcer",
-                                  "xgrammar", "guidance"]
-
-GuidedDecodingBackendV1 = Literal["auto", "xgrammar", "guidance", "outlines"]
-GuidedDecodingBackend = Literal[GuidedDecodingBackendV0,
-                                GuidedDecodingBackendV1]
+GuidedDecodingBackend = Literal["auto", "xgrammar", "guidance", "outlines"]
 
 
 @config
@@ -3728,7 +3736,7 @@ GuidedDecodingBackend = Literal[GuidedDecodingBackendV0,
 class DecodingConfig:
     """Dataclass which contains the decoding strategy of the engine."""
 
-    backend: GuidedDecodingBackend = "auto" if envs.VLLM_USE_V1 else "xgrammar"
+    backend: GuidedDecodingBackend = "auto"
     """Which engine will be used for guided decoding (JSON schema / regex etc)
     by default. With "auto", we will make opinionated choices based on request
     contents and what the backend libraries currently support, so the behavior
@@ -3770,13 +3778,6 @@ class DecodingConfig:
         return hash_str
 
     def __post_init__(self):
-        if envs.VLLM_USE_V1:
-            valid_guided_backends = get_args(GuidedDecodingBackendV1)
-        else:
-            valid_guided_backends = get_args(GuidedDecodingBackendV0)
-        if self.backend not in valid_guided_backends:
-            raise ValueError(f"Invalid backend '{self.backend}',"
-                             f" must be one of {valid_guided_backends}")
         if (self.disable_any_whitespace
                 and self.backend not in ("xgrammar", "guidance")):
             raise ValueError("disable_any_whitespace is only supported for "
@@ -4112,9 +4113,11 @@ class CompilationConfig:
         certain small batchsizes, where inductor is good at optimizing.
     """
     # Top-level Compilation control
-    level: int = 0
+    level: Optional[int] = None
     """The level of compilation:
 
+    - None: If None, we will select the default compilation level.
+      For V1 engine this is 3, for V0 engine this is 0.
     - 0: no compilation.
     - 1: dynamo as is.
     - 2: dynamo once.
@@ -4670,6 +4673,22 @@ class VllmConfig:
                 "To workaround this limitation, vLLM will set 'ieee' input "
                 "precision for chunked prefill triton kernels.")
 
+        # If the user does not explicitly set a compilation level, then
+        # we use the default level. The default level depends on other
+        # settings (see the below code).
+        if self.compilation_config.level is None:
+            if envs.VLLM_USE_V1:
+                if (self.model_config is not None
+                        and not self.model_config.enforce_eager):
+                    self.compilation_config.level = CompilationLevel.PIECEWISE
+                else:
+                    self.compilation_config.level = \
+                            CompilationLevel.NO_COMPILATION
+            else:
+                # NB: Passing both --enforce-eager and a compilation level
+                # in V0 means the compilation level wins out.
+                self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
         if self.compilation_config.pass_config.enable_async_tp:
@@ -4682,7 +4701,6 @@ class VllmConfig:
             # By default, V1 uses piecewise CUDA graphs. If full_cuda_graph
             # is set to True, full CUDA graphs will be used.
             self.compilation_config.cudagraph_num_of_warmups = 1
-            self.compilation_config.level = CompilationLevel.PIECEWISE
             self.compilation_config.set_splitting_ops_for_v1()
 
         self._set_cudagraph_sizes()
@@ -4763,12 +4781,23 @@ class VllmConfig:
                 # Hybrid KV cache manager is not compatible with KV events.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.model_config is not None and \
-                self.model_config.attention_chunk_size is not None and \
-                self.speculative_config is not None and \
-                self.speculative_config.use_eagle():
-                # Hybrid KV cache manager is not yet supported with chunked
-                # local attention + eagle.
-                self.scheduler_config.disable_hybrid_kv_cache_manager = True
+                self.model_config.attention_chunk_size is not None:
+                if self.speculative_config is not None and \
+                    self.speculative_config.use_eagle():
+                    # Hybrid KV cache manager is not yet supported with chunked
+                    # local attention + eagle.
+                    self.scheduler_config.disable_hybrid_kv_cache_manager = True
+                elif \
+                    not envs.VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE:
+                    logger.warning(
+                        "There is a latency regression when using chunked local"
+                        " attention with the hybrid KV cache manager. Disabling"
+                        " it, by default. To enable it, set the environment "
+                        "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE=1."
+                    )
+                    # Hybrid KV cache manager is not yet supported with chunked
+                    # local attention.
+                    self.scheduler_config.disable_hybrid_kv_cache_manager = True
 
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:
@@ -5038,13 +5067,29 @@ def assert_hashable(text):
 T = TypeVar("T")
 
 
-def get_layers_from_vllm_config(vllm_config: VllmConfig,
-                                layer_type: type[T]) -> dict[str, T]:
+def get_layers_from_vllm_config(
+        vllm_config: VllmConfig,
+        layer_type: type[T],
+        layer_names: Optional[list[str]] = None) -> dict[str, T]:
+    """
+    Get layers from the vLLM config.
+
+    Args:
+        vllm_config: The vLLM config.
+        layer_type: The type of the layer to get.
+        layer_names: The names of the layers to get. If None, return all layers.
+    """
+
+    if layer_names is None:
+        layer_names = list(
+            vllm_config.compilation_config.static_forward_context.keys())
+
+    forward_context = vllm_config.compilation_config.static_forward_context
+
     return {
-        layer_name: layer
-        for layer_name, layer in
-        vllm_config.compilation_config.static_forward_context.items()
-        if isinstance(layer, layer_type)
+        layer_name: forward_context[layer_name]
+        for layer_name in layer_names
+        if isinstance(forward_context[layer_name], layer_type)
     }
 
 
