@@ -428,7 +428,8 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         qkv_params_mapping = [
             # (param_name, shard_name, relative_start_idx, relative_end_idx)
             (".qkv_proj", ".q_proj", 0, self.config.share_q_dim /
@@ -449,6 +450,7 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
 
         expert_params_mapping = [
             (".moe.experts.w13_weight", ".moe.gate_proj.weight", "w1"),
@@ -461,7 +463,6 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
         ]
 
         for name, loaded_weight in weights:
-            # continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -475,6 +476,7 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                loaded_params.add(name)
                 break
             else:
                 for mapping in expert_params_mapping:
@@ -498,6 +500,7 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
                                       name,
                                       shard_id=shard_id,
                                       expert_id=expert_id)
+                    loaded_params.add(name)
                     break
                 else:
                     for (param_name, weight_name, start_idx,
@@ -514,6 +517,7 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
                         param_slice = param.narrow(param.output_dim, begin_idx,
                                                    end_idx - begin_idx)
                         param_slice.copy_(loaded_weight)
+                        loaded_params.add(name)
                         break
                     else:
                         if is_pp_missing_parameter(name, self):
@@ -522,3 +526,5 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
                         weight_loader = getattr(param, "weight_loader",
                                                 default_weight_loader)
                         weight_loader(param, loaded_weight)
+                        loaded_params.add(name)
+        return loaded_params

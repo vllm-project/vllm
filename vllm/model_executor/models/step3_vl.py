@@ -22,7 +22,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -38,8 +37,8 @@ from vllm.transformers_utils.processors import Step3VisionProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .utils import (flatten_bn, init_vllm_registered_model,
-                    is_pp_missing_parameter, maybe_prefix,
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
+                    init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
 
 
@@ -782,6 +781,11 @@ class Step3VisionTransformer(nn.Module):
 class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                       SupportsPP):
 
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
+        "model.": "language_model.model.",
+        "lm_head.": "language_model.lm_head.",
+    })
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
@@ -1006,120 +1010,8 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def maybe_remap_params(self, name):
-        if name.startswith("model."):
-            name = name.replace("model.", "language_model.model.")
-        if name.startswith("lm_head"):
-            name = name.replace("lm_head", "language_model.lm_head")
-        return name
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        from vllm.model_executor.layers.fused_moe import FusedMoE
-
-        qkv_params_mapping = [
-            # (param_name, shard_name, relative_start_idx, relative_end_idx)
-            (".qkv_proj", ".q_proj", 0, self.config.text_config.share_q_dim /
-             (self.config.text_config.share_q_dim +
-              self.config.text_config.head_dim * 2)),
-            (".qkv_proj", ".k_proj", self.config.text_config.share_q_dim /
-             (self.config.text_config.share_q_dim +
-              self.config.text_config.head_dim * 2),
-             (self.config.text_config.share_q_dim +
-              self.config.text_config.head_dim) /
-             (self.config.text_config.share_q_dim +
-              self.config.text_config.head_dim * 2)),
-            (".qkv_proj", ".v_proj", (self.config.text_config.share_q_dim +
-                                      self.config.text_config.head_dim) /
-             (self.config.text_config.share_q_dim +
-              self.config.text_config.head_dim * 2),
-             (self.config.text_config.share_q_dim +
-              self.config.text_config.head_dim * 2) /
-             (self.config.text_config.share_q_dim +
-              self.config.text_config.head_dim * 2)),
-        ]
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.text_config.moe_num_experts)
-
-        expert_params_mapping = [
-            (".moe.experts.w13_weight", ".moe.gate_proj.weight", "w1"),
-            (".moe.experts.w13_weight", ".moe.up_proj.weight", "w3"),
-            (".moe.experts.w2_weight", ".moe.down_proj.weight", "w2")
-        ]
-
-        disable_moe_stacked_params = [
-            data[1] for data in expert_params_mapping
-        ]
-
-        for name, loaded_weight in weights:
-            name = self.maybe_remap_params(name)
-
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                if any(disable_moe_stacked_param in name
-                       for disable_moe_stacked_param in
-                       disable_moe_stacked_params):
-                    continue
-                name = name.replace(weight_name, param_name)
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, shard_id = mapping
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-                    # Skip layers on other devices.
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    # Skip loading extra bias for GPTQ models.
-                    if ((name.endswith(".bias") or name.endswith("_bias"))
-                            and name not in params_dict):
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    for expert_id in range(loaded_weight.shape[0]):
-                        loaded_weight_expert = loaded_weight[expert_id]
-                        weight_loader(param,
-                                      loaded_weight_expert,
-                                      name,
-                                      shard_id=shard_id,
-                                      expert_id=expert_id)
-                    break
-                else:
-                    for (param_name, weight_name, start_idx,
-                         end_idx) in qkv_params_mapping:
-                        if weight_name not in name:
-                            continue
-                        name = name.replace(weight_name, param_name)
-                        if is_pp_missing_parameter(name, self):
-                            continue
-                        param = params_dict[name]
-                        dim = param.shape[param.output_dim]
-                        begin_idx = int(start_idx * dim)
-                        end_idx = int(end_idx * dim)
-                        param_slice = param.narrow(param.output_dim, begin_idx,
-                                                   end_idx - begin_idx)
-                        param_slice.copy_(loaded_weight)
-                        break
-                    else:
-                        if is_pp_missing_parameter(name, self):
-                            continue
-                        param = params_dict[name]
-                        weight_loader = getattr(param, "weight_loader",
-                                                default_weight_loader)
-                        weight_loader(param, loaded_weight)
+        loader = AutoWeightsLoader(self)
+        loaded_weights = loader.load_weights(weights,
+                                             mapper=self.hf_to_vllm_mapper)
+        return loaded_weights
