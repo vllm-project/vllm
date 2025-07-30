@@ -778,8 +778,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         # Swizzle the weight blockscale.
         # contracting dimension is input dimension
         # block_size = 16;
-        assert (layer.weight_scale.shape[1] % 16 == 0), (
-            "Expected weight_scale.dim(1) to be divisible by 16")
         assert (layer.weight_scale.dtype == torch.float8_e4m3fn), (
             "Weight Block scale must be represented as FP8-E4M3")
         swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
