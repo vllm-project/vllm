@@ -143,6 +143,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         w2_scale: Optional[torch.Tensor],
         w1_zp: Optional[torch.Tensor],
         w2_zp: Optional[torch.Tensor],
+        w1_bias: Optional[torch.Tensor],
+        w2_bias: Optional[torch.Tensor],
         a1q_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],  # Not used
         workspace13: Optional[torch.Tensor],
