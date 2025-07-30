@@ -123,6 +123,13 @@ class EngineCoreOutput(
         return self.finish_reason is not None
 
 
+class UtilityResult:
+    """Wrapper for special handling when serializing/deserializing."""
+
+    def __init__(self, r: Any = None):
+        self.result = r
+
+
 class UtilityOutput(
         msgspec.Struct,
         array_like=True,  # type: ignore[call-arg]
@@ -132,7 +139,7 @@ class UtilityOutput(
 
     # Non-None implies the call failed, result should be None.
     failure_message: Optional[str] = None
-    result: Any = None
+    result: Optional[UtilityResult] = None
 
 
 class EngineCoreOutputs(
