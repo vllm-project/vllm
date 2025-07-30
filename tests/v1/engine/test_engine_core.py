@@ -413,3 +413,49 @@ def test_engine_core_tp(monkeypatch: pytest.MonkeyPatch):
             get_worker_cache_config_field, args=("num_cpu_blocks", ))
         assert all(x is not None for x in num_gpu_blocks)
         assert all(x is not None for x in num_cpu_blocks)
+
+
+@create_new_process_for_each_test()
+def test_engine_core_invalid_request_id_type(monkeypatch: pytest.MonkeyPatch):
+    """Test that engine raises TypeError for non-string request_id."""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+
+        engine_args = EngineArgs(model=MODEL_NAME)
+        vllm_config = engine_args.create_engine_config()
+        executor_class = Executor.get_class(vllm_config)
+
+        with set_default_torch_num_threads(1):
+            engine_core = EngineCore(vllm_config=vllm_config,
+                                     executor_class=executor_class,
+                                     log_stats=True)
+
+        # Test with UUID object (common mistake)
+        uuid_request = make_request()
+        uuid_request.request_id = uuid.uuid4()  # UUID object instead of string
+
+        with pytest.raises(TypeError,
+                           match="request_id must be a string, got.*UUID"):
+            engine_core.add_request(uuid_request)
+
+        # Test with integer
+        int_request = make_request()
+        int_request.request_id = 12345
+
+        with pytest.raises(TypeError,
+                           match="request_id must be a string, got.*int"):
+            engine_core.add_request(int_request)
+
+        # Test with None
+        none_request = make_request()
+        none_request.request_id = None
+
+        with pytest.raises(TypeError,
+                           match="request_id must be a string, got.*NoneType"):
+            engine_core.add_request(none_request)
+
+        # Verify engine is still functional after errors
+        valid_request = make_request()
+        engine_core.add_request(valid_request)
+        assert len(engine_core.scheduler.waiting) == 1
+        assert len(engine_core.scheduler.running) == 0
