@@ -201,6 +201,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                              trust_remote_code=True),
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo("tencent/Hunyuan-A13B-Instruct",
                                                trust_remote_code=True),
+    # TODO: Remove is_available_online once their config.json is fixed
     "HunYuanDenseV1ForCausalLM":_HfExamplesInfo("tencent/Hunyuan-7B-Instruct-0124",
                                                trust_remote_code=True,
                                                is_available_online=False),
