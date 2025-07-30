@@ -1275,6 +1275,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, ""),
             architectures=["Glm4ForCausalLM"],
+            hf_config=self.config.get_text_config(),
         )
 
         self.make_empty_intermediate_tensors = (
