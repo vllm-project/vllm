@@ -98,6 +98,7 @@ def extract_trace_headers(headers: Mapping[str, str]) -> Mapping[str, str]:
 class SpanAttributes:
     # Attribute names copied from here to avoid version conflicts:
     # https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/gen-ai-spans.md
+    GEN_AI_SYSTEM = "gen_ai.system"
     GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
     GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
     GEN_AI_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
