@@ -12,7 +12,7 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe.config import (FusedMoEConfig, FusedMoEParallelConfig)
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
@@ -273,6 +273,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     """
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
+        super().__init__()
         self.quant_config = quant_config
         from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
             cutlass_fp8_supported)
@@ -452,6 +453,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert self.fused_experts is None
+
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `ModelOptFp8MoEMethod` yet.")
@@ -885,6 +888,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     """
 
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
+        super().__init__()
         self.quant_config = quant_config
         from vllm.model_executor.layers.quantization.utils.nvfp4_moe_support import (  # noqa: E501
             detect_nvfp4_moe_support)
@@ -916,7 +920,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def maybe_make_prepare_finalize(
         self,
         moe: FusedMoEConfig,
-    ) -> Optional[FusedMoEPrepareAndFinalize]:
+    ) -> Optional[mk.FusedMoEPrepareAndFinalize]:
         moe_parallel_config = moe.parallel_config
         if not self.allow_flashinfer:
             return super().maybe_make_prepare_finalize(moe)

@@ -49,7 +49,7 @@ class INCConfig(QuantizationConfig):
         if isinstance(layer, LinearBase):
             return UnquantizedLinearMethod()
         elif isinstance(layer, FusedMoE):
-            return UnquantizedFusedMoEMethod(layer.moe_config)
+            return UnquantizedFusedMoEMethod()
         return None
 
     @classmethod

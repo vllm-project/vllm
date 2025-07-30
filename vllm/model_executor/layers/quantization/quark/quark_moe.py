@@ -24,6 +24,8 @@ __all__ = [
 
 
 class QuarkMoEMethod(FusedMoEMethodBase):
+    def __init__(self):
+        super().__init__()
 
     @staticmethod
     def get_moe_method(
@@ -53,6 +55,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
 
     def __init__(self, weight_config: dict[str, Any], input_config: dict[str,
                                                                          Any]):
+        super().__init__()
         self.weight_quant = weight_config
         self.input_quant = input_config
 
@@ -215,6 +218,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert self.fused_experts is None
+
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `QuarkW8A8Fp8MoEMethod` yet.")
@@ -255,6 +260,7 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
 
     def __init__(self, weight_config: dict[str, Any], input_config: dict[str,
                                                                          Any]):
+        super().__init__()
         self.weight_quant = weight_config
         self.input_quant = input_config
 
@@ -291,7 +297,7 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
                 "layers computed in high precision.")
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
-                       hidden_size: int, intermediate_size_per_partition: int,
+                      hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
 
         # Add the quantization method used (per tensor/grouped/channel)
@@ -369,6 +375,7 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert self.fused_experts is None
 
         if enable_eplb:
             raise NotImplementedError(
