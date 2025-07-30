@@ -40,9 +40,11 @@ def setup_vllm(num_loras: int, tp: int) -> vllm.LLM:
                     max_lora_rank=8)
 
 
-@pytest.mark.parametrize(
-    "tp",
-    [1, tpu.num_available_chips()] if tpu.num_available_chips() > 1 else [1])
+TPU_TENSOR_PARALLEL_SIZES = [1, tpu.num_available_chips()
+                             ] if tpu.num_available_chips() > 1 else [1]
+
+
+@pytest.mark.parametrize("tp", TPU_TENSOR_PARALLEL_SIZES)
 def test_single_lora(tp: int):
     """
     This test ensures we can run a single LoRA adapter on the TPU backend.
@@ -68,9 +70,7 @@ def test_single_lora(tp: int):
     assert int(answer) == 1
 
 
-@pytest.mark.parametrize(
-    "tp",
-    [1, tpu.num_available_chips()] if tpu.num_available_chips() > 1 else [1])
+@pytest.mark.parametrize("tp", TPU_TENSOR_PARALLEL_SIZES)
 def test_lora_hotswapping(tp: int):
     """
     This test ensures we can run multiple LoRA adapters on the TPU backend, even
@@ -102,9 +102,7 @@ def test_lora_hotswapping(tp: int):
         assert int(answer) == i + 1
 
 
-@pytest.mark.parametrize(
-    "tp",
-    [1, tpu.num_available_chips()] if tpu.num_available_chips() > 1 else [1])
+@pytest.mark.parametrize("tp", TPU_TENSOR_PARALLEL_SIZES)
 def test_multi_lora(tp: int):
     """
     This test ensures we can run multiple LoRA adapters on the TPU backend, when
