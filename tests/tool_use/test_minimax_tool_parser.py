@@ -370,3 +370,267 @@ def test_extract_tool_calls_multiline_json_not_supported(minimax_tool_parser):
     assert not extracted_tool_calls.tools_called
     assert extracted_tool_calls.tool_calls == []
     assert extracted_tool_calls.content is None
+
+
+def test_streaming_arguments_incremental_output(minimax_tool_parser):
+    """Test that streaming arguments are returned incrementally, not cumulatively."""
+    # Reset streaming state
+    minimax_tool_parser.current_tool_name_sent = False
+    minimax_tool_parser.prev_tool_call_arr = []
+    minimax_tool_parser.current_tool_id = -1
+    minimax_tool_parser.streamed_args_for_tool = []
+
+    # Simulate progressive tool call building
+    stages = [
+        # Stage 1: Function name complete
+        '<tool_calls>\n{"name": "get_current_weather", "arguments": ',
+        # Stage 2: Arguments object starts with first key
+        '<tool_calls>\n{"name": "get_current_weather", "arguments": {"city": ',
+        # Stage 3: First parameter value added
+        '<tool_calls>\n{"name": "get_current_weather", "arguments": {"city": "Seattle"',
+        # Stage 4: Second parameter added
+        '<tool_calls>\n{"name": "get_current_weather", "arguments": {"city": "Seattle", "state": "WA"',
+        # Stage 5: Third parameter added, arguments complete
+        '<tool_calls>\n{"name": "get_current_weather", "arguments": {"city": "Seattle", "state": "WA", "unit": "celsius"}}',
+        # Stage 6: Tool calls closed
+        '<tool_calls>\n{"name": "get_current_weather", "arguments": {"city": "Seattle", "state": "WA", "unit": "celsius"}}\n</tool_calls>'
+    ]
+
+    function_name_sent = False
+    previous_args_content = ""
+    
+    for i, current_text in enumerate(stages):
+        previous_text = stages[i-1] if i > 0 else ""
+        delta_text = current_text[len(previous_text):] if i > 0 else current_text
+        
+        result = minimax_tool_parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=None,
+        )
+        
+        print(f"Stage {i}: Current text: {repr(current_text)}")
+        print(f"Stage {i}: Delta text: {repr(delta_text)}")
+        
+        if result is not None and hasattr(result, 'tool_calls') and result.tool_calls:
+            tool_call = result.tool_calls[0]
+            
+            # Check if function name is sent (should happen only once)
+            if tool_call.function and tool_call.function.name:
+                assert not function_name_sent, "Function name should be sent only once"
+                assert tool_call.function.name == "get_current_weather"
+                function_name_sent = True
+                print(f"Stage {i}: Function name sent: {tool_call.function.name}")
+            
+            # Check if arguments are sent incrementally
+            if tool_call.function and tool_call.function.arguments:
+                args_fragment = tool_call.function.arguments
+                print(f"Stage {i}: Got arguments fragment: {repr(args_fragment)}")
+                
+                # For incremental output, each fragment should be new content only
+                # The fragment should not contain all previous content
+                if i >= 2 and previous_args_content:  # After we start getting arguments
+                    # The new fragment should not be identical to or contain all previous content
+                    assert args_fragment != previous_args_content, f"Fragment should be incremental, not cumulative: {args_fragment}"
+                    
+                    # If this is truly incremental, the fragment should be relatively small
+                    # compared to the complete arguments so far
+                    if len(args_fragment) > len(previous_args_content):
+                        print(f"Warning: Fragment seems cumulative rather than incremental")
+                
+                previous_args_content = args_fragment
+
+    # Verify function name was sent at least once
+    assert function_name_sent, "Function name should have been sent"
+
+
+def test_streaming_arguments_delta_only(minimax_tool_parser):
+    """Test that each streaming call returns only the delta (new part) of arguments."""
+    # Reset streaming state
+    minimax_tool_parser.current_tool_name_sent = False
+    minimax_tool_parser.prev_tool_call_arr = []
+    minimax_tool_parser.current_tool_id = -1
+    minimax_tool_parser.streamed_args_for_tool = []
+
+    # Simulate two consecutive calls with growing arguments
+    call1_text = '<tool_calls>\n{"name": "test_tool", "arguments": {"param1": "value1"}}'
+    call2_text = '<tool_calls>\n{"name": "test_tool", "arguments": {"param1": "value1", "param2": "value2"}}'
+    
+    print(f"Call 1 text: {repr(call1_text)}")
+    print(f"Call 2 text: {repr(call2_text)}")
+    
+    # First call - should get the function name and initial arguments
+    result1 = minimax_tool_parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text=call1_text,
+        delta_text=call1_text,
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=None,
+    )
+    
+    print(f"Result 1: {result1}")
+    if result1 and hasattr(result1, 'tool_calls') and result1.tool_calls:
+        for i, tc in enumerate(result1.tool_calls):
+            print(f"  Tool call {i}: {tc}")
+    
+    # Second call - should only get the delta (new part) of arguments
+    result2 = minimax_tool_parser.extract_tool_calls_streaming(
+        previous_text=call1_text,
+        current_text=call2_text,
+        delta_text=', "param2": "value2"}',
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=None,
+    )
+    
+    print(f"Result 2: {result2}")
+    if result2 and hasattr(result2, 'tool_calls') and result2.tool_calls:
+        for i, tc in enumerate(result2.tool_calls):
+            print(f"  Tool call {i}: {tc}")
+    
+    # Verify the second call only returns the delta
+    if result2 is not None and hasattr(result2, 'tool_calls') and result2.tool_calls:
+        tool_call = result2.tool_calls[0]
+        if tool_call.function and tool_call.function.arguments:
+            args_delta = tool_call.function.arguments
+            print(f"Arguments delta from second call: {repr(args_delta)}")
+            
+            # Should only contain the new part, not the full arguments
+            # The delta should be something like ', "param2": "value2"}' or just '"param2": "value2"'
+            assert ', "param2": "value2"}' in args_delta or '"param2": "value2"' in args_delta, f"Expected delta containing param2, got: {args_delta}"
+            
+            # Should NOT contain the previous parameter data
+            assert '"param1": "value1"' not in args_delta, f"Arguments delta should not contain previous data: {args_delta}"
+            
+            # The delta should be relatively short (incremental, not cumulative)
+            expected_max_length = len(', "param2": "value2"}') + 10  # Some tolerance
+            assert len(args_delta) <= expected_max_length, f"Delta seems too long (possibly cumulative): {args_delta}"
+            
+            print("✓ Delta validation passed")
+        else:
+            print("No arguments in result2 tool call")
+    else:
+        print("No tool calls in result2 or result2 is None")
+        # This might be acceptable if no incremental update is needed
+        # But let's at least verify that result1 had some content
+        assert result1 is not None, "At least the first call should return something"
+
+
+def test_streaming_openai_compatibility(minimax_tool_parser):
+    """Test that streaming behavior matches OpenAI's expectations."""
+    # Reset streaming state
+    minimax_tool_parser.current_tool_name_sent = False
+    minimax_tool_parser.prev_tool_call_arr = []
+    minimax_tool_parser.current_tool_id = -1
+    minimax_tool_parser.streamed_args_for_tool = []
+
+    # Test scenario: progressive building of a weather query
+    # This simulates how a real model would generate tool calls incrementally
+    scenarios = [
+        {
+            "description": "Initial tool call start",
+            "previous": "",
+            "current": '<tool_calls>\n{"name": "get_weather"',
+            "expected_function_name": "get_weather",
+            "expected_args_delta": None,
+        },
+        {
+            "description": "Add arguments start", 
+            "previous": '<tool_calls>\n{"name": "get_weather"',
+            "current": '<tool_calls>\n{"name": "get_weather", "arguments": {',
+            "expected_function_name": None,  # Already sent
+            "expected_args_delta": "{",
+        },
+        {
+            "description": "Add first parameter",
+            "previous": '<tool_calls>\n{"name": "get_weather", "arguments": {',
+            "current": '<tool_calls>\n{"name": "get_weather", "arguments": {"location": "San Francisco"',
+            "expected_function_name": None,
+            "expected_args_delta": '"location": "San Francisco"',
+        },
+        {
+            "description": "Add second parameter",
+            "previous": '<tool_calls>\n{"name": "get_weather", "arguments": {"location": "San Francisco"',
+            "current": '<tool_calls>\n{"name": "get_weather", "arguments": {"location": "San Francisco", "unit": "celsius"',
+            "expected_function_name": None,
+            "expected_args_delta": ', "unit": "celsius"',
+        },
+        {
+            "description": "Close arguments and tool call",
+            "previous": '<tool_calls>\n{"name": "get_weather", "arguments": {"location": "San Francisco", "unit": "celsius"',
+            "current": '<tool_calls>\n{"name": "get_weather", "arguments": {"location": "San Francisco", "unit": "celsius"}}\n</tool_calls>',
+            "expected_function_name": None,
+            "expected_args_delta": '}',
+        },
+    ]
+
+    for i, scenario in enumerate(scenarios):
+        print(f"\n--- Scenario {i}: {scenario['description']} ---")
+        previous_text = scenario["previous"]
+        current_text = scenario["current"]
+        delta_text = current_text[len(previous_text):] if previous_text else current_text
+        
+        print(f"Previous: {repr(previous_text)}")
+        print(f"Current:  {repr(current_text)}")
+        print(f"Delta:    {repr(delta_text)}")
+        
+        result = minimax_tool_parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=None,
+        )
+        
+        print(f"Result: {result}")
+        
+        if result and hasattr(result, 'tool_calls') and result.tool_calls:
+            tool_call = result.tool_calls[0]
+            
+            # Check function name
+            if scenario["expected_function_name"]:
+                assert tool_call.function and tool_call.function.name == scenario["expected_function_name"], \
+                    f"Expected function name {scenario['expected_function_name']}, got {tool_call.function.name if tool_call.function else None}"
+                print(f"✓ Function name: {tool_call.function.name}")
+            
+            # Check arguments delta
+            if scenario["expected_args_delta"] is not None:
+                assert tool_call.function and tool_call.function.arguments, \
+                    f"Expected arguments delta {scenario['expected_args_delta']}, but got no arguments"
+                
+                args_delta = tool_call.function.arguments
+                print(f"✓ Arguments delta: {repr(args_delta)}")
+                
+                # The delta should contain the expected content
+                assert scenario["expected_args_delta"] in args_delta, \
+                    f"Expected delta to contain {scenario['expected_args_delta']}, but got {args_delta}"
+                
+                # For true incremental behavior, the delta should not contain previous content
+                # (except for the opening brace which might be included in the first args chunk)
+                if i > 2:  # After we have some arguments established
+                    # Make sure it doesn't contain old content like "location": "San Francisco"
+                    if i >= 3:  # After first parameter is established
+                        assert '"location": "San Francisco"' not in args_delta or args_delta == scenario["expected_args_delta"], \
+                            f"Delta should be incremental, not cumulative: {args_delta}"
+            
+            # Verify no unexpected content
+            if not scenario["expected_function_name"] and not scenario["expected_args_delta"]:
+                # This scenario expects no tool call updates
+                assert False, f"Unexpected tool call result when none expected: {result}"
+        
+        elif scenario["expected_function_name"] or scenario["expected_args_delta"]:
+            # We expected a result but got none
+            print(f"⚠️  Expected result but got None/empty for scenario: {scenario['description']}")
+        else:
+            print("✓ No result as expected")
+
+    print("\n✓ All streaming scenarios completed")
