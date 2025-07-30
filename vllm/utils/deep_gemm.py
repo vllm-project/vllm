@@ -18,11 +18,14 @@ from vllm.utils import has_deep_gemm
 
 
 @functools.cache
-def is_blackwell_deep_gemm_used() -> bool:
-    """Return ``True`` if vLLM is configured to use DeepGEMM on a
-    Blackwell-class GPU.
+def is_blackwell_deep_gemm_e8m0_used() -> bool:
+    """Return ``True`` if vLLM is configured to use DeepGEMM "
+    "E8M0 scale on a Blackwell-class GPU.
     """
     if not (envs.VLLM_USE_DEEP_GEMM and has_deep_gemm()):
+        return False
+
+    if not envs.VLLM_USE_DEEP_GEMM_E8M0:
         return False
 
     _lazy_init()
@@ -93,27 +96,37 @@ def fp8_gemm_nt(*args, **kwargs):
     _lazy_init()
     if _fp8_gemm_nt_impl is None:
         return _missing(*args, **kwargs)
-    return _fp8_gemm_nt_impl(*args, **kwargs)
+    return _fp8_gemm_nt_impl(
+        *args,
+        disable_ue8m0_cast=not is_blackwell_deep_gemm_e8m0_used(),
+        **kwargs)
 
 
 def m_grouped_fp8_gemm_nt_contiguous(*args, **kwargs):
     _lazy_init()
     if _grouped_impl is None:
         return _missing(*args, **kwargs)
-    return _grouped_impl(*args, **kwargs)
+    return _grouped_impl(
+        *args,
+        disable_ue8m0_cast=not is_blackwell_deep_gemm_e8m0_used(),
+        **kwargs)
 
 
 def fp8_m_grouped_gemm_nt_masked(*args, **kwargs):
     _lazy_init()
     if _grouped_masked_impl is None:
         return _missing(*args, **kwargs)
-    return _grouped_masked_impl(*args, **kwargs)
+    return _grouped_masked_impl(
+        *args,
+        disable_ue8m0_cast=not is_blackwell_deep_gemm_e8m0_used(),
+        **kwargs)
 
 
 def per_block_cast_to_fp8(x, *args, **kwargs):
     _lazy_init()
-    if _per_block_cast_impl is not None and is_blackwell_deep_gemm_used():
-        return _per_block_cast_impl(x, use_ue8m0=True)
+    if _per_block_cast_impl is not None:
+        return _per_block_cast_impl(
+            x, use_ue8m0=is_blackwell_deep_gemm_e8m0_used())
     # TODO: refactor the `per_block_cast_to_fp8` from tests to vllm utils
     from tests.kernels.quant_utils import per_block_cast_to_fp8 as _pbcf
     return _pbcf(x, *args, **kwargs)
@@ -141,5 +154,5 @@ __all__ = [
     "m_grouped_fp8_gemm_nt_contiguous",
     "fp8_m_grouped_gemm_nt_masked",
     "per_block_cast_to_fp8",
-    "is_blackwell_deep_gemm_used",
+    "is_blackwell_deep_gemm_e8m0_used",
 ]
