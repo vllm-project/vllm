@@ -699,13 +699,14 @@ class SupportsTranscription(Protocol):
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
-        # language codes in supported_languages that don't exist in the full language map
+        # language codes in supported_languages
+        # that don't exist in the full language map
         invalid = set(cls.supported_languages) - set(LANGUAGES.keys())
         if invalid:
             raise ValueError(
-                f"{cls.__name__}.supported_languages contains invalid language codes: "
-                f"{sorted(invalid)}\n. Valid choices are: {sorted(LANGUAGES.keys())}"
-            )
+                f"{cls.__name__}.supported_languages contains invalid "
+                f"language codes: {sorted(invalid)}\n. "
+                f"Valid choices are: {sorted(LANGUAGES.keys())}")
 
     @classmethod
     def get_generation_prompt(cls, audio: np.ndarray,
@@ -729,8 +730,10 @@ class SupportsTranscription(Protocol):
     @classmethod
     def validate_language(cls, language: Optional[str]) -> Optional[str]:
         """
-        Ensure the language specified in the transcription request is a valid ISO 639-1 language code.
-        If the request language is valid, but not natively supported by the model, trigger a warning (but not an exception).
+        Ensure the language specified in the transcription request 
+        is a valid ISO 639-1 language code. If the request language is 
+        valid, but not natively supported by the model, trigger a 
+        warning (but not an exception).
         """
         if language is None or language in cls.supported_languages:
             return language
