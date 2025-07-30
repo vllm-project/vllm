@@ -202,8 +202,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                                trust_remote_code=True),
     # TODO: Remove is_available_online once their config.json is fixed
     "HunYuanDenseV1ForCausalLM":_HfExamplesInfo("tencent/Hunyuan-7B-Instruct-0124",
-                                               trust_remote_code=True,
-                                               is_available_online=False),
+                                                trust_remote_code=True,
+                                                is_available_online=False),
     "HCXVisionForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
         trust_remote_code=True),
