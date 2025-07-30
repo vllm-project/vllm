@@ -711,8 +711,8 @@ class SupportsTranscription(Protocol):
     @classmethod
     def get_generation_prompt(cls, audio: np.ndarray,
                               stt_config: SpeechToTextConfig,
-                              model_config: ModelConfig, language: Optional[str],
-                              task_type: str,
+                              model_config: ModelConfig,
+                              language: Optional[str], task_type: str,
                               request_prompt: str) -> PromptType:
         """Get the prompt for the ASR model.
         The model has control over the construction, as long as it

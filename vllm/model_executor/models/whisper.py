@@ -788,8 +788,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
             request_prompt: str) -> PromptType:
         if language is None:
             raise ValueError(
-                "Language must be specified when creating the Whisper prompt"
-            )
+                "Language must be specified when creating the Whisper prompt")
         prompt = {
             "encoder_prompt": {
                 # Whisper does not support encoder prompt.
