@@ -1458,10 +1458,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
-            finished_sending=kv_connector_output.finished_sending
-            if kv_connector_output else None,
-            finished_recving=kv_connector_output.finished_recving
-            if kv_connector_output else None,
+            kv_connector_output=kv_connector_output,
         )
 
     @torch.inference_mode()
@@ -1754,10 +1751,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
-            finished_sending=kv_connector_output.finished_sending
-            if kv_connector_output else None,
-            finished_recving=kv_connector_output.finished_recving
-            if kv_connector_output else None,
+            kv_connector_output=kv_connector_output,
             num_nans_in_logits=num_nans_in_logits,
         )
 

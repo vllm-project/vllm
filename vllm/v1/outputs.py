@@ -2,9 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import NamedTuple, Optional
+from typing import TYPE_CHECKING, NamedTuple, Optional
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.kv_connector_model_runner_mixin import (
+        KVConnectorOutput)
 
 
 class LogprobsLists(NamedTuple):
@@ -104,9 +108,7 @@ class ModelRunnerOutput:
     # [num_reqs, hidden_size]
     pooler_output: list[Optional[torch.Tensor]]
 
-    # [req_ids]
-    finished_sending: Optional[set[str]] = None
-    finished_recving: Optional[set[str]] = None
+    kv_connector_output: Optional["KVConnectorOutput"]
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
@@ -119,6 +121,5 @@ EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               logprobs=None,
                                               prompt_logprobs_dict={},
                                               pooler_output=[],
-                                              finished_sending=None,
-                                              finished_recving=None,
+                                              kv_connector_output=None,
                                               num_nans_in_logits=None)

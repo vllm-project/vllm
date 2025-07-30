@@ -374,14 +374,13 @@ class Worker(WorkerBase):
                 return None
 
             # In case of PP with kv transfer, we need to pass through the
-            # finished_sending and finished_recving buffers.
+            # kv_connector_output
             if (not kv_connector_output.finished_sending
                     and not kv_connector_output.finished_recving):
                 return EMPTY_MODEL_RUNNER_OUTPUT
 
             output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-            output.finished_sending = kv_connector_output.finished_sending
-            output.finished_recving = kv_connector_output.finished_recving
+            output.kv_connector_output = kv_connector_output
             return output
 
         assert isinstance(output, ModelRunnerOutput)

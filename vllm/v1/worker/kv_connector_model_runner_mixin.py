@@ -78,8 +78,7 @@ class KVConnectorModelRunnerMixin:
             return EMPTY_MODEL_RUNNER_OUTPUT
 
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.finished_sending = kv_connector_output.finished_sending
-        output.finished_recving = kv_connector_output.finished_recving
+        output.kv_connector_output = kv_connector_output
         return output
 
     @staticmethod

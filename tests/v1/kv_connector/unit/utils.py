@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
 
 EOS_TOKEN_ID = 50256
 
@@ -188,8 +189,10 @@ def create_model_runner_output(
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=None,
-        finished_sending=finished_sending,
-        finished_recving=finished_recving,
+        kv_connector_output=KVConnectorOutput(
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
+        ),
     )
 
 

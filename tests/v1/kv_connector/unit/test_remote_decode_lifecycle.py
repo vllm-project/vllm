@@ -4,6 +4,7 @@ import copy
 
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.request import FinishReason, RequestStatus
+from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
 
 from .utils import (assert_scheduler_empty, create_model_runner_output,
                     create_request, create_scheduler, create_vllm_config)
@@ -86,7 +87,8 @@ def test_basic_lifecycle():
 
     # (3b): execute_model()
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
-    model_runner_output.finished_sending = [request_id]
+    model_runner_output.kv_connector_output = KVConnectorOutput(
+        finished_sending=[request_id])
 
     # (3c): update_from_output()
     scheduler.update_from_output(scheduler_output, model_runner_output)
@@ -176,7 +178,8 @@ def test_prefix_cache_lifecycle():
     scheduler_output = scheduler.schedule()
     scheduler.schedule()
     model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
-    model_runner_output.finished_sending = [request_remote.request_id]
+    model_runner_output.kv_connector_output = KVConnectorOutput(
+        finished_sending=[request_remote.request_id])
     scheduler.update_from_output(scheduler_output, model_runner_output)
     _ = scheduler.schedule()
     assert_scheduler_empty(scheduler)
