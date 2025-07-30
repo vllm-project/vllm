@@ -89,7 +89,7 @@ class MiniMaxVL01DummyInputsBuilder(LlavaDummyInputsBuilder):
 
 class MiniMaxVL01ProcessingInfo(LlavaNextProcessingInfo):
 
-    def get_hf_config(self):
+    def get_hf_config(self):  # Need to override the config type
         return self.ctx.get_hf_config(PretrainedConfig)
 
     def get_hf_processor(self, **kwargs: object):

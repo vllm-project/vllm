@@ -245,9 +245,6 @@ class VisualEmbedding(torch.nn.Embedding):
 
 class OvisProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_config(self):
-        return self.ctx.get_hf_config(PretrainedConfig)
-
     def get_hf_processor(self, **kwargs):
         return self.ctx.get_hf_processor(
             OvisProcessor,
