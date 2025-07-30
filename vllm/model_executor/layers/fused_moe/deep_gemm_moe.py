@@ -110,7 +110,7 @@ def warmup_deepgemm_kernels(w1: torch.Tensor, w2: torch.Tensor,
     MAX_M = compute_aligned_M(env.VLLM_FUSED_MOE_CHUNK_SIZE,
                               num_topk,
                               num_experts,
-                              deep_gemm_block_shape()[0],
+                              block_m,
                               expert_tokens_meta=None)
     expert_ids = torch.zeros((MAX_M, ), device=device, dtype=torch.int32)
 
@@ -118,7 +118,7 @@ def warmup_deepgemm_kernels(w1: torch.Tensor, w2: torch.Tensor,
 
         _, n, k = w.size()
         a1q = torch.empty((MAX_M, k), device=device).to(torch.float8_e4m3fn)
-        a1q_scales = torch.empty((MAX_M, k // 128),
+        a1q_scales = torch.empty((MAX_M, k // block_m),
                                  device=device,
                                  dtype=torch.float32)
         out = torch.empty((MAX_M, n), device=device, dtype=torch.bfloat16)
