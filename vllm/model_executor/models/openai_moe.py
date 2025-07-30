@@ -299,7 +299,7 @@ class OpenAIMoeForCausalLM(nn.Module):
         use_ep = self.vllm_config.parallel_config.enable_expert_parallel
         ep_size = get_ep_group().world_size
         ep_rank = get_ep_group().rank
-        num_experts = self.model_config.num_experts
+        num_experts = self.model_config.num_local_experts
         experts_per_rank = num_experts // ep_size
         ep_rank_start = ep_rank * experts_per_rank
         ep_rank_end = (ep_rank + 1) * experts_per_rank
