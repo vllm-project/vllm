@@ -50,8 +50,8 @@ version=$(unzip -p "$wheel" '**/METADATA' | grep '^Version: ' | cut -d' ' -f2)
 wheel_name=$(basename "$wheel")
 echo "FlashInfer version: $version"
 
-# Upload the wheel to S3 under flashinfer directory
-aws s3 cp "$wheel" "s3://vllm-wheels/flashinfer/"
+# Upload the wheel to S3 under flashinfer-python directory
+aws s3 cp "$wheel" "s3://vllm-wheels/flashinfer-python/"
 
 echo "✅ FlashInfer wheel built and uploaded successfully for CUDA ${CUDA_VERSION}"
 echo "📦 Wheel: $wheel_name (version $version)"
