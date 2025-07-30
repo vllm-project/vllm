@@ -13,8 +13,11 @@ from typing import Any, Callable, NoReturn
 import torch
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import has_deep_gemm
+
+logger = init_logger(__name__)
 
 
 @functools.cache
@@ -22,18 +25,30 @@ def is_blackwell_deep_gemm_e8m0_used() -> bool:
     """Return ``True`` if vLLM is configured to use DeepGEMM "
     "E8M0 scale on a Blackwell-class GPU.
     """
-    if not (envs.VLLM_USE_DEEP_GEMM and has_deep_gemm()):
+    if not (envs.VLLM_USE_DEEP_GEMM):
+        logger.debug_once("DeepGEMM E8M0 disabled: VLLM_USE_DEEP_GEMM=0.")
+        return False
+
+    if not has_deep_gemm():
+        logger.debug_once("DeepGEMM E8M0 disabled: DeepGEMM backend missing.")
         return False
 
     if not envs.VLLM_USE_DEEP_GEMM_E8M0:
+        logger.debug_once("DeepGEMM E8M0 disabled: VLLM_USE_DEEP_GEMM_E8M0=0.")
         return False
 
     _lazy_init()
     if _per_block_cast_impl is None:
         return False
 
-    return (current_platform.is_cuda()
-            and current_platform.is_device_capability(100))
+    enabled = (current_platform.is_cuda()
+               and current_platform.has_device_capability(100))
+    if enabled:
+        logger.debug_once("DeepGEMM E8M0 enabled on Blackwell GPU.")
+    else:
+        logger.debug_once(
+            "DeepGEMM E8M0 disabled: not running on Blackwell GPU.")
+    return enabled
 
 
 def _missing(*_: Any, **__: Any) -> NoReturn:
