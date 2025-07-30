@@ -167,22 +167,33 @@ class Gemma3nAltUp(nn.Module):
 class Gemma3nLaurelBlock(nn.Module):
     """Learned Augmented Residual Layer"""
 
-    def __init__(self, hidden_size: int, laurel_rank: int, rms_norm_eps: float,
-                 prefix: str):
+    def __init__(
+        self,
+        hidden_size: int,
+        laurel_rank: int,
+        rms_norm_eps: float,
+        *,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str,
+    ) -> None:
         super().__init__()
 
         self.linear_left = ColumnParallelLinear(
             hidden_size,
             laurel_rank,
             bias=False,
+            quant_config=quant_config,
             prefix=f"{prefix}.linear_left",
             return_bias=False,
         )
-        self.linear_right = RowParallelLinear(laurel_rank,
-                                              hidden_size,
-                                              bias=False,
-                                              prefix=f"{prefix}.linear_right",
-                                              return_bias=False)
+        self.linear_right = RowParallelLinear(
+            laurel_rank,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.linear_right",
+            return_bias=False,
+        )
         self.post_laurel_norm = RMSNorm(
             hidden_size=hidden_size,
             eps=rms_norm_eps,
@@ -297,8 +308,13 @@ class Gemma3nAttention(nn.Module):
                               has_weight=False)
 
         layer_idx = extract_layer_index(prefix)
-        if config.layer_types[layer_idx] == "sliding_attention":
-            self.sliding_window = config.sliding_window
+
+        is_sliding_window = (
+            getattr(config, "interleaved_sliding_window", None) is not None
+            and config.layer_types[layer_idx] == "sliding_attention")
+
+        if is_sliding_window:
+            self.sliding_window = config.interleaved_sliding_window
             rope_theta = config.rope_local_base_freq
             rope_scaling = {"rope_type": "default"}
         else:
@@ -412,6 +428,7 @@ class Gemma3nDecoderLayer(nn.Module):
             hidden_size=config.hidden_size,
             laurel_rank=config.laurel_rank,
             rms_norm_eps=config.rms_norm_eps,
+            quant_config=quant_config,
             prefix=f"{prefix}.laurel",
         )
 
@@ -422,6 +439,7 @@ class Gemma3nDecoderLayer(nn.Module):
             config.hidden_size,
             config.hidden_size_per_layer_input,
             bias=False,
+            quant_config=quant_config,
             prefix=f"{prefix}.per_layer_input_gate",
             return_bias=False,
         )
@@ -429,6 +447,7 @@ class Gemma3nDecoderLayer(nn.Module):
             config.hidden_size_per_layer_input,
             config.hidden_size,
             bias=False,
+            quant_config=quant_config,
             prefix=f"{prefix}.per_layer_projection",
             return_bias=False,
         )
@@ -542,6 +561,7 @@ class Gemma3nTextModel(nn.Module):
             bias=False,
             gather_output=True,
             return_bias=False,
+            quant_config=quant_config,
             prefix=f"{prefix}.per_layer_model_projection",
         )
         self.per_layer_projection_norm = RMSNorm(
@@ -561,6 +581,7 @@ class Gemma3nTextModel(nn.Module):
                 bias=False,
                 gather_output=True,
                 return_bias=False,
+                quant_config=quant_config,
                 prefix=f"{prefix}.{idx-1}.altup_projections",
             ) for idx in range(1, self.config.altup_num_inputs)
         ])
@@ -571,6 +592,7 @@ class Gemma3nTextModel(nn.Module):
                 bias=False,
                 gather_output=True,
                 return_bias=False,
+                quant_config=quant_config,
                 prefix=f"{prefix}.{idx-1}.altup_unembed_projections",
             ) for idx in range(1, self.config.altup_num_inputs)
         ])
@@ -771,6 +793,7 @@ class Gemma3nForConditionalGeneration(nn.Module):
         del lora_config  # Unused.
         super().__init__()
         self.config = config
+        self.cache_config = vllm_config.cache_config
         self.model = Gemma3nModel(vllm_config=vllm_config,
                                   prefix=maybe_prefix(prefix, "model"))
         self.logits_processor = LogitsProcessor(
