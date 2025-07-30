@@ -173,8 +173,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "ExaoneForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct",
                                          trust_remote_code=True),
     "Exaone4ForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-4.0-32B",
-                                         trust_remote_code=True,
-                                         min_transformers_version="4.54"),
+                                          min_transformers_version="4.54"),
     "Fairseq2LlamaForCausalLM": _HfExamplesInfo("mgleize/fairseq2-dummy-Llama-3.2-1B"),  # noqa: E501
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "FalconH1ForCausalLM":_HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base",
@@ -204,8 +203,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                                trust_remote_code=True),
     # TODO: Remove is_available_online once their config.json is fixed
     "HunYuanDenseV1ForCausalLM":_HfExamplesInfo("tencent/Hunyuan-7B-Instruct-0124",
-                                               trust_remote_code=True,
-                                               is_available_online=False),
+                                                trust_remote_code=True,
+                                                is_available_online=False),
     "HCXVisionForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
         trust_remote_code=True),
