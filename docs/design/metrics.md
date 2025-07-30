@@ -223,7 +223,7 @@ And the calculated intervals are:
 
 Put another way:
 
-![Interval calculations - common case](../../assets/design/v1/metrics/intervals-1.png)
+![Interval calculations - common case](../assets/design/metrics/intervals-1.png)
 
 We explored the possibility of having the frontend calculate these
 intervals using the timing of events visible by the frontend. However,
@@ -238,13 +238,13 @@ When a preemption occurs during decode, since any already generated
 tokens are reused, we consider the preemption as affecting the
 inter-token, decode, and inference intervals.
 
-![Interval calculations - preempted decode](../../assets/design/v1/metrics/intervals-2.png)
+![Interval calculations - preempted decode](../assets/design/metrics/intervals-2.png)
 
 When a preemption occurs during prefill (assuming such an event
 is possible), we consider the preemption as affecting the
 time-to-first-token and prefill intervals.
 
-![Interval calculations - preempted prefill](../../assets/design/v1/metrics/intervals-3.png)
+![Interval calculations - preempted prefill](../assets/design/metrics/intervals-3.png)
 
 ### Frontend Stats Collection
 

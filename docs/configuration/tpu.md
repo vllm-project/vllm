@@ -47,7 +47,7 @@ This initial compilation time ranges significantly and is impacted by many of th
 
 #### max model len vs. most model len
 
-![most_model_len](../assets/design/v1/tpu/most_model_len.png)
+![most_model_len](../assets/design/tpu/most_model_len.png)
 
 If most of your requests are shorter than the maximum model length but you still need to accommodate occasional longer requests, setting a high maximum model length can negatively impact performance. In these cases, you can try introducing most model len by specifying the `VLLM_TPU_MOST_MODEL_LEN` environment variable.
 
