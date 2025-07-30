@@ -18,10 +18,12 @@ In the example above, the KV cache in the first block can be uniquely identified
 * Block tokens: A tuple of tokens in this block. The reason to include the exact tokens is to reduce potential hash value collision.
 * Extra hashes: Other values required to make this block unique, such as LoRA IDs, multi-modality input hashes (see the example below), and cache salts to isolate caches in multi-tenant environments.
 
-> **Note 1:** We only cache full blocks.
+!!! note "Note 1"
+    We only cache full blocks.
 
-> **Note 2:** The above hash key structure is not 100% collision free. Theoretically it’s still possible for the different prefix tokens to have the same hash value. To avoid any hash collisions **in a multi-tenant setup, we advise to use SHA256** as hash function instead of the default builtin hash.
-SHA256 is supported since vLLM v0.8.3 and must be enabled with a command line argument. It comes with a performance impact of about 100-200ns per token (~6ms for 50k tokens of context).
+!!! note "Note 2"
+    The above hash key structure is not 100% collision free. Theoretically it’s still possible for the different prefix tokens to have the same hash value. To avoid any hash collisions **in a multi-tenant setup, we advise to use SHA256** as hash function instead of the default builtin hash.
+    SHA256 is supported since vLLM v0.8.3 and must be enabled with a command line argument. It comes with a performance impact of about 100-200ns per token (~6ms for 50k tokens of context).
 
 **A hashing example with multi-modality inputs**  
 In this example, we illustrate how prefix caching works with multi-modality inputs (e.g., images). Assuming we have a request with the following messages:
@@ -92,7 +94,8 @@ To improve privacy in shared environments, vLLM supports isolating prefix cache 
 
 With this setup, cache sharing is limited to users or requests that explicitly agree on a common salt, enabling cache reuse within a trust group while isolating others.
 
-> **Note:** Cache isolation is not supported in engine V0.
+!!! note
+    Cache isolation is not supported in engine V0.
 
 ## Data Structure
 
