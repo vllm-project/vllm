@@ -2,6 +2,7 @@
 #include "dispatch_utils.h"
 #include "../vectorization_utils.cuh"
 #include <c10/cuda/CUDAGuard.h>
+#include <ATen/cuda/Exceptions.h>
 
 #ifndef USE_ROCM
   #include <cub/cub.cuh>
@@ -192,7 +193,8 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   // scale tensor should be initialised to <=0 before reduction
-  scale.fill_(0.0f);
+  AT_CUDA_CHECK(
+      cudaMemsetAsync(scale.data_ptr<float>(), 0, sizeof(float), stream));
 
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "scaled_fp8_quant_kernel_scalar_type", [&] {
