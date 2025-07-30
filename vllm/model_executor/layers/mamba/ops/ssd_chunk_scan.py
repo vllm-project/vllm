@@ -454,7 +454,7 @@ def _chunk_scan_fwd(
     chunk_indices=None,
     chunk_offsets=None,
     initial_states=None,
-    preallocated_ssm_out=None,
+    out=None,
 ):
     batch, seqlen, nheads, headdim = x.shape
     _, _, nchunks, chunk_size = dt.shape
@@ -491,12 +491,7 @@ def _chunk_scan_fwd(
     else:
         chunk_indices, chunk_offsets = None, None
 
-    # Allocates output.
-    if preallocated_ssm_out is None:
-        out = torch.empty_like(x)
-    else:
-        assert preallocated_ssm_out.shape == x.shape
-        out = preallocated_ssm_out
+    assert out.shape == x.shape
 
     if z is not None:
         out_x = torch.empty_like(x)
@@ -582,4 +577,4 @@ def _chunk_scan_fwd(
         IS_TRITON_22=TRITON_22,
         HAS_INITSTATES=initial_states is not None,
     )
-    return out, out_x
+    return out_x

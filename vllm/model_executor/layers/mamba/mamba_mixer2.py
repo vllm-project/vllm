@@ -643,8 +643,8 @@ class MambaMixer2(MambaBase, CustomOp):
                         has_initial_states_p[:num_prefills, None, None, None],
                         ssm_state[state_indices_tensor_p], 0)
 
-            # NOTE: final output is an in-place update in pre_allocated_ssm_out
-            _, varlen_state = mamba_chunk_scan_combined(
+            # NOTE: final output is an in-place update of out tensor
+            varlen_state = mamba_chunk_scan_combined(
                 hidden_states_p.view(1, num_prefill_tokens,
                                      self.num_heads // self.tp_size,
                                      self.head_dim),
@@ -667,8 +667,8 @@ class MambaMixer2(MambaBase, CustomOp):
                 return_final_states=False,
                 dt_softplus=True,
                 dt_limit=(0.0, float("inf")),
-                preallocated_ssm_out=preallocated_ssm_out_p.view(
-                    1, num_prefill_tokens, -1, self.head_dim),
+                out=preallocated_ssm_out_p.view(1, num_prefill_tokens, -1,
+                                                self.head_dim),
             )
 
             # update ssm states
@@ -704,8 +704,8 @@ class MambaMixer2(MambaBase, CustomOp):
             # - the hidden is reshaped into (bs, num_heads, head_dim)
             # - mamba_cache_params.ssm_state's slots will be selected
             #   using state_indices_tensor_d
-            # NOTE: final output is an in-place update in pre_allocated_ssm_out
-            _ = selective_state_update(
+            # NOTE: final output is an in-place update of out tensor
+            selective_state_update(
                 ssm_state,
                 hidden_states_d,
                 dt_d,
@@ -717,8 +717,8 @@ class MambaMixer2(MambaBase, CustomOp):
                 dt_bias=dt_bias,
                 dt_softplus=True,
                 state_batch_indices=state_indices_tensor_d,
-                preallocated_ssm_out=preallocated_ssm_out_d.view(
-                    num_decodes, -1, self.head_dim),
+                out=preallocated_ssm_out_d.view(num_decodes, -1,
+                                                self.head_dim),
             )
 
         # 4. gated MLP
