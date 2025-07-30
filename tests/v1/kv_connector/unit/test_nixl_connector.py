@@ -17,7 +17,7 @@ import ray
 
 from vllm import LLM
 from vllm.config import KVTransferConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+from vllm.distributed.kv_transfer.kv_connector.nixl_connector import (
     KVConnectorRole, NixlAgentMetadata, NixlConnector, NixlConnectorMetadata,
     NixlConnectorWorker)
 from vllm.forward_context import ForwardContext
@@ -239,7 +239,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
 class TestNixlHandshake:
 
     @patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+        "vllm.distributed.kv_transfer.kv_connector.nixl_connector.NixlWrapper",
         FakeNixlWrapper)
     def test_multi_xfer_one_engine(
         self,
@@ -311,7 +311,7 @@ class TestNixlHandshake:
             connector.clear_connector_metadata()
 
     @patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+        "vllm.distributed.kv_transfer.kv_connector.nixl_connector.NixlWrapper",
         FakeNixlWrapper)
     @pytest.mark.parametrize("decode_tp_size, prefill_tp_size", [
         (1, 1),
@@ -369,7 +369,7 @@ class TestNixlHandshake:
         raise TimeoutError("Took too long to complete async handshake.")
 
     @patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+        "vllm.distributed.kv_transfer.kv_connector.nixl_connector.NixlWrapper",
         FakeNixlWrapper)
     def test_concurrent_load_kv(
         self,
@@ -426,9 +426,8 @@ class TestNixlHandshake:
 # we put here is important. First run ray, it will clean up the resources, then
 # the rest of the tests.
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", None])
-@patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
-    FakeNixlWrapper)
+@patch("vllm.distributed.kv_transfer.kv_connector.nixl_connector.NixlWrapper",
+       FakeNixlWrapper)
 def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
     """
     Test lifecycle of an aborted Remote Prefill request hitting the timeout.

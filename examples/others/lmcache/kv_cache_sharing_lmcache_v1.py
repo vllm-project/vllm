@@ -51,7 +51,7 @@ def run_store(store_done, prompts):
 
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
 
-    ktc = KVTransferConfig(kv_connector="LMCacheConnectorV1", kv_role="kv_both")
+    ktc = KVTransferConfig(kv_connector="LMCacheConnector", kv_role="kv_both")
     # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
     # memory. Reduce the value if your GPU has less memory.
     llm = LLM(
@@ -79,7 +79,7 @@ def run_retrieve(store_done, prompts, timeout=1):
 
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
 
-    ktc = KVTransferConfig(kv_connector="LMCacheConnectorV1", kv_role="kv_both")
+    ktc = KVTransferConfig(kv_connector="LMCacheConnector", kv_role="kv_both")
     # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
     # of memory. Reduce the value if your GPU has less memory.
     llm = LLM(

@@ -20,8 +20,8 @@ import zmq
 from vllm import envs
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    CopyBlocksOp, KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.base import (
+    CopyBlocksOp, KVConnectorBase, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
@@ -117,7 +117,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             self.reqs_to_recv[request_id] = _req
 
 
-class NixlConnector(KVConnectorBase_V1):
+class NixlConnector(KVConnectorBase):
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
         assert vllm_config.kv_transfer_config is not None

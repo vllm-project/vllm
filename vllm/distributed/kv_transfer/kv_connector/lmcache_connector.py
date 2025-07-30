@@ -1,99 +1,167 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-LMCache KV Cache Connector for Distributed Machine Learning Inference
-
-The LMCacheConnector can (1) transfer KV caches between prefill vLLM worker
-(KV cache producer) and decode vLLM worker (KV cache consumer) using LMCache;
-(2) offload and share KV caches.
-"""
-
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
+from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+from vllm.distributed.kv_transfer.kv_connector.base import (
+    KVConnectorBase, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
-from vllm.sequence import IntermediateTensors
+from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
+    from vllm.attention.backends.abstract import AttentionMetadata
+    from vllm.forward_context import ForwardContext
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
 
 class LMCacheConnector(KVConnectorBase):
 
-    def __init__(
+    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
+        super().__init__(vllm_config=vllm_config, role=role)
+        self._lmcache_engine = LMCacheConnectorV1Impl(vllm_config, role, self)
+
+    # ==============================
+    # Worker-side methods
+    # ==============================
+    def start_load_kv(self, forward_context: "ForwardContext",
+                      **kwargs) -> None:
+        """
+        Start loading the KV cache from the connector to vLLM's paged
+        KV buffer. This is called from the forward context before the
+        forward pass to enable async loading during model execution.
+
+        Args:
+            forward_context (ForwardContext): the forward context.
+            **kwargs: additional arguments for the load operation
+
+        Note:
+            The number of elements in kv_caches and layer_names should be 
+            the same.
+            
+        """
+        self._lmcache_engine.start_load_kv(forward_context, **kwargs)
+
+    def wait_for_layer_load(self, layer_name: str) -> None:
+        """
+        Block until the KV for a specific layer is loaded into vLLM's
+        paged buffer. This is called from within attention layer to ensure
+        async copying from start_load_kv is complete.
+        
+        This interface will be useful for layer-by-layer pipelining.
+
+        Args:
+            layer_name: the name of that layer
+        """
+        self._lmcache_engine.wait_for_layer_load(layer_name)
+
+    def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
+                      attn_metadata: "AttentionMetadata", **kwargs) -> None:
+        """
+        Start saving the a layer of KV cache from vLLM's paged buffer 
+        to the connector. This is called from within attention layer to
+        enable async copying during execution.
+
+        Args:
+            layer_name (str): the name of the layer.
+            kv_layer (torch.Tensor): the paged KV buffer of the current 
+                layer in vLLM.
+            attn_metadata (AttentionMetadata): the attention metadata.
+            **kwargs: additional arguments for the save operation.
+        """
+        self._lmcache_engine.save_kv_layer(layer_name, kv_layer, attn_metadata,
+                                           **kwargs)
+
+    def wait_for_save(self):
+        """
+        Block until all the save operations is done. This is called
+        as the forward context exits to ensure that the async saving
+        from save_kv_layer is complete before finishing the forward.
+
+        This prevents overwrites of paged KV buffer before saving done.
+        """
+        self._lmcache_engine.wait_for_save()
+
+    def get_finished(
+        self, finished_req_ids: set[str]
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        """
+        Notifies worker-side connector ids of requests that have
+        finished generating tokens.
+
+        Returns:
+            ids of requests that have finished asynchronous transfer
+            (requests that previously returned True from request_finished()),
+            tuple of (sending/saving ids, recving/loading ids).
+            The finished saves/sends req ids must belong to a set provided in a
+            call to this method (this call or a prior one).
+        """
+        return self._lmcache_engine.get_finished(finished_req_ids)
+
+    # ==============================
+    # Scheduler-side methods
+    # ==============================
+    def get_num_new_matched_tokens(
         self,
-        rank: int,
-        local_rank: int,
-        config: VllmConfig,
-    ):
+        request: "Request",
+        num_computed_tokens: int,
+    ) -> tuple[int, bool]:
+        """
+        Get number of new tokens that can be loaded from the
+        external KV cache beyond the num_computed_tokens.
+        
+        Args:
+            request (Request): the request object.
+            num_computed_tokens (int): the number of locally
+                computed tokens for this request
 
-        self.transfer_config = config.kv_transfer_config
-        self.vllm_config = config
+        Returns:
+            the number of tokens that can be loaded from the 
+            external KV cache beyond what is already computed.
+        """
+        return self._lmcache_engine.get_num_new_matched_tokens(
+            request, num_computed_tokens), False
 
-        from lmcache.experimental.cache_engine import LMCacheEngineBuilder
-        from lmcache.integration.vllm.utils import ENGINE_NAME
-        from lmcache.integration.vllm.vllm_adapter import (
-            RetrieveStatus, StoreStatus, init_lmcache_engine,
-            lmcache_retrieve_kv, lmcache_should_retrieve, lmcache_should_store,
-            lmcache_store_kv)
-        logger.info("Initializing LMCacheConfig under kv_transfer_config %s",
-                    self.transfer_config)
+    def update_state_after_alloc(self, request: "Request",
+                                 blocks: "KVCacheBlocks",
+                                 num_external_tokens: int):
+        """
+        Update KVConnector state after block allocation.
+        """
+        self._lmcache_engine.update_state_after_alloc(request,
+                                                      num_external_tokens)
 
-        # TODO (Jiayi): Find model_config, parallel_config, and cache_config
-        self.engine = init_lmcache_engine(config.model_config,
-                                          config.parallel_config,
-                                          config.cache_config)
-        self.lmcache_engine_name = ENGINE_NAME
-        self.lmcache_engine_builder = LMCacheEngineBuilder
+    def build_connector_meta(
+            self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
+        """
+        Build the connector metadata for this step.
 
-        self.model_config = config.model_config
-        self.parallel_config = config.parallel_config
-        self.cache_config = config.cache_config
-        self.lmcache_retrieve_kv = lmcache_retrieve_kv
-        self.lmcache_store_kv = lmcache_store_kv
-        self.lmcache_should_retrieve = lmcache_should_retrieve
-        self.lmcache_should_store = lmcache_should_store
-        self.store_status = StoreStatus
-        self.retrieve_status = RetrieveStatus
+        This function should NOT modify fields in the scheduler_output.
+        Also, calling this function will reset the state of the connector.
 
-    def recv_kv_caches_and_hidden_states(
-        self, model_executable: torch.nn.Module,
-        model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: list[torch.Tensor]
-    ) -> tuple[Union[torch.Tensor, IntermediateTensors], bool,
-               "ModelInputForGPUWithSamplingMetadata"]:
+        Args:
+            scheduler_output (SchedulerOutput): the scheduler output object.
+        """
+        return self._lmcache_engine.build_connector_meta(scheduler_output)
 
-        retrieve_status = self.lmcache_should_retrieve(model_input)
-        model_input, bypass_model_exec, hidden_or_intermediate_states =\
-            self.lmcache_retrieve_kv(
-                model_executable, model_input, self.cache_config, kv_caches,
-                retrieve_status)
-        return hidden_or_intermediate_states, bypass_model_exec, model_input
-
-    def send_kv_caches_and_hidden_states(
+    def request_finished(
         self,
-        model_executable: torch.nn.Module,
-        model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: list[torch.Tensor],
-        hidden_or_intermediate_states: Union[torch.Tensor,
-                                             IntermediateTensors],
-    ) -> None:
+        request: "Request",
+        block_ids: list[int],
+    ) -> tuple[bool, Optional[dict[str, Any]]]:
+        """
+        Called when a request has finished, before its blocks are freed.
 
-        store_status = self.lmcache_should_store(model_input)
-        self.lmcache_store_kv(
-            self.model_config,
-            self.parallel_config,
-            self.cache_config,
-            model_executable,
-            model_input,
-            kv_caches,
-            store_status,
-        )
-
-    def close(self):
-        self.lmcache_engine_builder.destroy(self.lmcache_engine_name)
+        Returns:
+            True if the request is being saved/sent asynchronously and blocks
+            should not be freed until the request_id is returned from
+            get_finished().
+            Optional KVTransferParams to be included in the request outputs
+            returned by the engine.
+        """
+        return self._lmcache_engine.request_finished(request, block_ids)

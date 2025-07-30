@@ -31,7 +31,7 @@ if [[ $1 == "prefiller" ]]; then
         --disable-log-requests \
         --enforce-eager \
         --kv-transfer-config \
-        '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}'
+        '{"kv_connector":"LMCacheConnector","kv_role":"kv_producer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}'
 
 
 elif [[ $1 == "decoder" ]]; then
@@ -49,7 +49,7 @@ elif [[ $1 == "decoder" ]]; then
         --disable-log-requests \
         --enforce-eager \
         --kv-transfer-config \
-        '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1"}}'
+        '{"kv_connector":"LMCacheConnector","kv_role":"kv_consumer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1"}}'
 
 
 else

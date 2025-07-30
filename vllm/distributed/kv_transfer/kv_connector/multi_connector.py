@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING, Any, Optional
 import torch
 
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.base import (
+    KVConnectorBase, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -29,7 +29,7 @@ class MultiKVConnectorMetadata(KVConnectorMetadata):
     extra_async_saves: Optional[dict[str, int]] = None
 
 
-class MultiConnector(KVConnectorBase_V1):
+class MultiConnector(KVConnectorBase):
     """
     A wrapper for using multiple KVConnectors at the same time.
 
@@ -41,7 +41,7 @@ class MultiConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
-        self._connectors: list[KVConnectorBase_V1] = []
+        self._connectors: list[KVConnectorBase] = []
         ktcs = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "connectors")
         assert ktcs is not None
@@ -52,7 +52,7 @@ class MultiConnector(KVConnectorBase_V1):
             temp_config.kv_transfer_config = KVTransferConfig(
                 **ktc, engine_id=engine_id)
             self._connectors.append(
-                KVConnectorFactory.create_connector_v1(temp_config, role))
+                KVConnectorFactory.create_connector(temp_config, role))
 
         # A mapping from request id to the index of the connector chosen to
         # load the request from (if any).
