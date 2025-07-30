@@ -223,9 +223,9 @@ class MultiConnector(KVConnectorBase_V1):
         for ktc in ktcs:
             kv_transfer_config = KVTransferConfig(**ktc)
             temp_vllm_config.kv_transfer_config = kv_transfer_config
-            required_kvcache_layout = KVConnectorFactory.get_connector_class(
-                kv_transfer_config).get_required_kvcache_layout(
-                    temp_vllm_config)
+            required_kvcache_layout = (
+                KVConnectorBase_V1.get_required_kvcache_layout(
+                    temp_vllm_config))
             if required_kvcache_layout is not None:
                 layouts.add(required_kvcache_layout)
 
