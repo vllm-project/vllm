@@ -14,7 +14,9 @@ from vllm.v1.sample.logits_processor.builtin import (LogitBiasLogitsProcessor,
 from vllm.v1.sample.logits_processor.interface import (BatchUpdate,
                                                        LogitsProcessor,
                                                        MoveDirectionality)
-from vllm.v1.sample.logits_processor.state import (BatchUpdateBuilder,
+from vllm.v1.sample.logits_processor.state import (DUMMY_ADDED_REQUEST,
+                                                   DUMMY_MOVED_REQUEST,
+                                                   BatchUpdateBuilder,
                                                    LogitsProcessors)
 
 if TYPE_CHECKING:
@@ -155,8 +157,15 @@ def _load_custom_logitsprocs(
             _load_logitsprocs_by_fqcns(logits_processors))
 
 
-def build_logitsprocs(vllm_config: "VllmConfig", device: torch.device,
-                      is_pin_memory: bool) -> LogitsProcessors:
+def build_logitsprocs(
+    vllm_config: "VllmConfig",
+    device: torch.device,
+    is_pin_memory: bool,
+    is_pooling_model: bool,
+) -> LogitsProcessors:
+    if is_pooling_model:
+        # Pooling models do not support logitsprocs
+        return LogitsProcessors()
     custom_logitsprocs_classes = _load_custom_logitsprocs(
         vllm_config.model_config.logits_processors)
     return LogitsProcessors(
@@ -174,4 +183,6 @@ __all__ = [
     "MoveDirectionality",
     "LogitsProcessors",
     "build_logitsprocs",
+    "DUMMY_ADDED_REQUEST",
+    "DUMMY_MOVED_REQUEST",
 ]
