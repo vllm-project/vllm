@@ -25,14 +25,14 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ConfigFormat, ConfigType, ConvertOption,
                          DecodingConfig, DetailedTraceModules, Device,
                          DeviceConfig, DistributedExecutorBackend,
-                         GuidedDecodingBackend, GuidedDecodingBackendV1,
-                         HfOverrides, KVEventsConfig, KVTransferConfig,
-                         LoadConfig, LogprobsMode, LoRAConfig, ModelConfig,
-                         ModelDType, ModelImpl, MultiModalConfig,
-                         ObservabilityConfig, ParallelConfig, PoolerConfig,
-                         PrefixCachingHashAlgo, RunnerOption, SchedulerConfig,
-                         SchedulerPolicy, SpeculativeConfig, TaskOption,
-                         TokenizerMode, VllmConfig, get_attr_docs, get_field)
+                         GuidedDecodingBackend, HfOverrides, KVEventsConfig,
+                         KVTransferConfig, LoadConfig, LogprobsMode,
+                         LoRAConfig, ModelConfig, ModelDType, ModelImpl,
+                         MultiModalConfig, ObservabilityConfig, ParallelConfig,
+                         PoolerConfig, PrefixCachingHashAlgo, RunnerOption,
+                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
+                         TaskOption, TokenizerMode, VllmConfig, get_attr_docs,
+                         get_field)
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -108,15 +108,19 @@ def get_type(type_hints: set[TypeHint], type: TypeHintT) -> TypeHintT:
 
 
 def literal_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
-    """Convert Literal type hints to argparse kwargs."""
+    """Get the `type` and `choices` from a `Literal` type hint in `type_hints`.
+
+    If `type_hints` also contains `str`, we use `metavar` instead of `choices`.
+    """
     type_hint = get_type(type_hints, Literal)
-    choices = get_args(type_hint)
-    choice_type = type(choices[0])
-    if not all(isinstance(choice, choice_type) for choice in choices):
+    options = get_args(type_hint)
+    option_type = type(options[0])
+    if not all(isinstance(option, option_type) for option in options):
         raise ValueError(
-            "All choices must be of the same type. "
-            f"Got {choices} with types {[type(c) for c in choices]}")
-    return {"type": choice_type, "choices": sorted(choices)}
+            "All options must be of the same type. "
+            f"Got {options} with types {[type(c) for c in options]}")
+    kwarg = "metavar" if contains_type(type_hints, str) else "choices"
+    return {"type": option_type, kwarg: sorted(options)}
 
 
 def is_not_builtin(type_hint: TypeHint) -> bool:
@@ -441,6 +445,9 @@ class EngineArgs:
     # DEPRECATED
     enable_prompt_adapter: bool = False
 
+    kv_sharing_fast_prefill: bool = \
+        CacheConfig.kv_sharing_fast_prefill
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -693,6 +700,8 @@ class EngineArgs:
                                  **cache_kwargs["cpu_offload_gb"])
         cache_group.add_argument("--calculate-kv-scales",
                                  **cache_kwargs["calculate_kv_scales"])
+        cache_group.add_argument("--kv-sharing-fast-prefill",
+                                 **cache_kwargs["kv_sharing_fast_prefill"])
 
         # Multimodal related configs
         multimodal_kwargs = get_kwargs(MultiModalConfig)
@@ -1065,6 +1074,7 @@ class EngineArgs:
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
+            kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
         )
 
         # Get the current placement group if Ray is initialized and
@@ -1337,14 +1347,6 @@ class EngineArgs:
         if self.scheduler_delay_factor != SchedulerConfig.delay_factor:
             _raise_or_fallback(feature_name="--scheduler-delay-factor",
                                recommend_to_remove=True)
-            return False
-
-        if self.guided_decoding_backend not in get_args(
-                GuidedDecodingBackendV1):
-            _raise_or_fallback(
-                feature_name=
-                f"--guided-decoding-backend={self.guided_decoding_backend}",
-                recommend_to_remove=False)
             return False
 
         # Need at least Ampere for now (FA support required).

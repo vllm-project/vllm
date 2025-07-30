@@ -107,8 +107,6 @@ class ModelRunnerOutput:
     # [req_ids]
     finished_sending: Optional[set[str]] = None
     finished_recving: Optional[set[str]] = None
-    # req_id -> actual_load_token from connector
-    finished_loading_dict: Optional[dict[str, int]] = None
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
@@ -123,5 +121,4 @@ EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               pooler_output=[],
                                               finished_sending=None,
                                               finished_recving=None,
-                                              finished_loading_dict=None,
                                               num_nans_in_logits=None)

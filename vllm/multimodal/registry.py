@@ -129,7 +129,7 @@ class MultiModalRegistry:
         seq_len = model_config.max_model_len
         mm_limits = self.get_mm_limits_per_prompt(model_config)
 
-        return profiler.get_mm_max_tokens(
+        return profiler.get_mm_max_contiguous_tokens(
             seq_len,
             {
                 modality: 1

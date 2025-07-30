@@ -20,19 +20,19 @@ the failure?
 
 - **Use this title format:**
 
-    ```
+    ```text
     [CI Failure]: failing-test-job - regex/matching/failing:test
     ```
 
 - **For the environment field:**
 
-    ```
- Still failing on main as of commit abcdef123
+    ```text
+    Still failing on main as of commit abcdef123
     ```
 
 - **In the description, include failing tests:**
 
-    ```
+    ```text
     FAILED failing/test.py:failing_test1 - Failure description
     FAILED failing/test.py:failing_test2 - Failure description
     https://github.com/orgs/vllm-project/projects/20

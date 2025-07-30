@@ -6,8 +6,9 @@ import os
 import signal
 import time
 import uuid
+from dataclasses import dataclass
 from threading import Thread
-from typing import Optional
+from typing import Optional, Union
 from unittest.mock import MagicMock
 
 import pytest
@@ -288,6 +289,68 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
                 await core_client.call_utility_async("echo", None, "help!")
 
             assert str(e_info.value) == "Call to echo method failed: help!"
+        finally:
+            client.shutdown()
+
+
+@dataclass
+class MyDataclass:
+    message: str
+
+
+# Dummy utility function to monkey-patch into engine core.
+def echo_dc(
+    self,
+    msg: str,
+    return_list: bool = False,
+) -> Union[MyDataclass, list[MyDataclass]]:
+    print(f"echo dc util function called: {msg}")
+    # Return dataclass to verify support for returning custom types
+    # (for which there is special handling to make it work with msgspec).
+    return [MyDataclass(msg) for _ in range(3)] if return_list \
+        else MyDataclass(msg)
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_engine_core_client_util_method_custom_return(
+        monkeypatch: pytest.MonkeyPatch):
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+
+        # Must set insecure serialization to allow returning custom types.
+        m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+        # Monkey-patch core engine utility function to test.
+        m.setattr(EngineCore, "echo_dc", echo_dc, raising=False)
+
+        engine_args = EngineArgs(model=MODEL_NAME, enforce_eager=True)
+        vllm_config = engine_args.create_engine_config(
+            usage_context=UsageContext.UNKNOWN_CONTEXT)
+        executor_class = Executor.get_class(vllm_config)
+
+        with set_default_torch_num_threads(1):
+            client = EngineCoreClient.make_client(
+                multiprocess_mode=True,
+                asyncio_mode=True,
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                log_stats=True,
+            )
+
+        try:
+            # Test utility method returning custom / non-native data type.
+            core_client: AsyncMPClient = client
+
+            result = await core_client.call_utility_async(
+                "echo_dc", "testarg2", False)
+            assert isinstance(result,
+                              MyDataclass) and result.message == "testarg2"
+            result = await core_client.call_utility_async(
+                "echo_dc", "testarg2", True)
+            assert isinstance(result, list) and all(
+                isinstance(r, MyDataclass) and r.message == "testarg2"
+                for r in result)
         finally:
             client.shutdown()
 

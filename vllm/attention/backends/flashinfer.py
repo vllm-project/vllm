@@ -1104,7 +1104,12 @@ class FlashInferImpl(AttentionImpl):
         window_left = window_size[0] if window_size is not None else -1
 
         prefill_output: Optional[torch.Tensor] = None
-        decode_output: Optional[torch.Tensor] = None
+        if num_decode_tokens > 0:
+            decode_output = torch.empty(decode_query.shape,
+                                        dtype=decode_query.dtype,
+                                        device=decode_query.device)
+        else:
+            decode_output = None
         stride_order = FlashInferBackend.get_kv_cache_stride_order()
         if prefill_meta := attn_metadata.prefill_metadata:
             # We will use flash attention for prefill
@@ -1155,17 +1160,18 @@ class FlashInferImpl(AttentionImpl):
                     num_decode_tokens, attn_metadata.max_decode_seq_len,
                     kv_cache_dtype, attn_metadata.num_qo_heads,
                     attn_metadata.num_kv_heads, attn_metadata.head_dim):
-                decode_output = decode_meta.decode_wrapper.run(
+                decode_meta.decode_wrapper.run(
                     decode_query,
                     kv_cache.permute(*stride_order),
                     k_scale=layer._k_scale_float,
                     v_scale=layer._v_scale_float,
+                    out=decode_output,
                 )
             else:
                 workspace_buffer = (
-                    decode_meta.decode_wrapper._int_workspace_buffer)
+                    decode_meta.decode_wrapper._float_workspace_buffer)
                 assert FlashInferState.get_kv_cache_layout() == "HND"
-                decode_output = trtllm_batch_decode_with_kv_cache(
+                trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
                     kv_cache=kv_cache.permute(*stride_order),
                     workspace_buffer=workspace_buffer,
@@ -1174,6 +1180,7 @@ class FlashInferImpl(AttentionImpl):
                     max_seq_len=attn_metadata.max_decode_seq_len,
                     bmm1_scale=layer._k_scale_float * softmax_scale,
                     bmm2_scale=layer._v_scale_float,
+                    out=decode_output,
                 )
 
         if prefill_output is None and decode_output is not None:

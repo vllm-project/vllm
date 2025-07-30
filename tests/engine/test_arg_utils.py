@@ -72,6 +72,10 @@ def test_get_type(type_hints, type, expected):
         "type": int,
         "choices": [1, 2]
     }),
+    ({str, Literal["x", "y"]}, {
+        "type": str,
+        "metavar": ["x", "y"]
+    }),
     ({Literal[1, "a"]}, Exception),
 ])
 def test_literal_to_kwargs(type_hints, expected):

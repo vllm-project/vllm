@@ -13,6 +13,8 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.factory import (
+    KVConnectorFactory)
 from vllm.logger import init_logger
 from vllm.v1.outputs import ModelRunnerOutput
 
@@ -103,15 +105,14 @@ def get_kv_connector_cache_layout():
     # used for faster transfer.
     vllm_config = get_current_vllm_config()
     kv_config = vllm_config.kv_transfer_config
-    if kv_config is not None and vllm_config.model_config is None:
-        logger.warning_once("Unable to detect current VLLM config. " \
-        "Defaulting to NHD kv cache layout.")
-    elif kv_config is not None:
-        use_mla = vllm_config.model_config.use_mla
-        if not use_mla and kv_config.kv_connector == "NixlConnector":
-            logger.info_once("NixlConnector detected. Setting KV cache " \
-            "layout to HND for better xfer performance.")
-            return "HND"
+    if kv_config is not None:
+        connector_cls = KVConnectorFactory.get_connector_class(kv_config)
+        required_kvcache_layout = connector_cls.get_required_kvcache_layout(
+            vllm_config)
+        if required_kvcache_layout is not None:
+            return required_kvcache_layout
+        logger.info_once("Connectors do not specify a " \
+                         "kv cache layout, defaulting to NHD.")
     return "NHD"
 
 
@@ -139,27 +140,13 @@ class KVOutputAggregator:
                     finished_set.add(req_id)
                     del remaining_count_dict[req_id]
 
-        def update_finished_load_dict(worker_finished_loading_dict: dict[str,
-                                                                         int],
-                                      finished_loading_dict: dict[str, int]):
-            for req_id, num_actual_load_tokens in (worker_finished_loading_dict
-                                                   or {}).items():
-                if req_id in finished_loading_dict:
-                    finished_loading_dict[req_id] = min(
-                        finished_loading_dict[req_id], num_actual_load_tokens)
-                else:
-                    finished_loading_dict[req_id] = num_actual_load_tokens
-
         finished_sending = set[str]()
         finished_recving = set[str]()
-        finished_loading_dict: dict[str, int] = {}
         for output in outputs:
             update_finished_set(output.finished_sending,
                                 self._send_remaining_count, finished_sending)
             update_finished_set(output.finished_recving,
                                 self._recv_remaining_count, finished_recving)
-            update_finished_load_dict(output.finished_loading_dict,
-                                      finished_loading_dict)
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
@@ -171,7 +158,7 @@ class KVOutputAggregator:
         # send/recv
         output.finished_sending = finished_sending if finished_sending else None
         output.finished_recving = finished_recving if finished_recving else None
-        output.finished_loading_dict = finished_loading_dict or None
+
         return output
 
     def async_aggregate(self,
