@@ -125,7 +125,7 @@ def warmup_deepgemm_gg_contiguous_kernels(w1: torch.Tensor, w2: torch.Tensor,
         out = torch.empty((MAX_M, n), device=device, dtype=torch.bfloat16)
 
         pbar = tqdm(total=MAX_M // block_m,
-                    desc=f"DeepGemm warmup (MAX_M={MAX_M})")
+                    desc=f"DeepGemmExperts GEMM warmup (MAX_M={MAX_M})")
         num_tokens = MAX_M
         while num_tokens > 0:
             m_grouped_fp8_gemm_nt_contiguous(
