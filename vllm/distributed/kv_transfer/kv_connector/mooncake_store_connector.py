@@ -310,6 +310,8 @@ class MooncakeStoreConnector(KVConnectorBase):
         seq_lens_tensor = model_input.attn_metadata.seq_lens_tensor
         seq_lens = seq_lens_tensor.tolist() #2D list
         block_indices_list = attn_metadata.block_indices.tolist() 
+        # block_indices was 2D and the second dimension was padded to block size.
+        padded_num_blocks = (attn_metadata.slot_mapping.size(1) + self.block_size -1 ) // self.block_size
 
         hidden_or_intermediate_states_for_one_req = []
         input_tokens_list = []
@@ -324,7 +326,7 @@ class MooncakeStoreConnector(KVConnectorBase):
         # 4. hidden_or_intermediate_states [1, hidden_size]
         for idx, slen in enumerate(seq_lens):
             current_tokens = input_tokens_tensor_cpu[idx][:slen]
-            num_blocks = (slen + 127) // 128
+            num_blocks = (slen + self.block_size - 1) // self.block_size
             end_block_idx = start_block_idx + num_blocks
             # self.block_indice_place_holder[:num_blocks] = attn_metadata.block_indices[start_block_idx:end_block_idx]
             block_indices_tensor = torch.tensor(block_indices_list[start_block_idx:end_block_idx], device="hpu", dtype=torch.int32 )
@@ -348,7 +350,7 @@ class MooncakeStoreConnector(KVConnectorBase):
                     #         )
                 # the first one should never be padding, so we can append the first one.
                 hidden_or_intermediate_states_for_one_req.append(hidden_or_intermediate_states_for_one_req[0])
-                start_block_idx = end_block_idx
+                start_block_idx += padded_num_blocks
                 continue
 
             # get roi for current seq
@@ -399,7 +401,7 @@ class MooncakeStoreConnector(KVConnectorBase):
                         block_indices_tensor,
                         None,
                         )
-            start_block_idx = end_block_idx
+            start_block_idx += padded_num_blocks
             hidden_or_intermediate_states_for_one_req.append(hidden.to("hpu"))
             htorch.core.mark_step()
         if not bypass_model_exec:
