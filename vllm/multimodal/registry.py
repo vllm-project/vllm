@@ -129,7 +129,7 @@ class MultiModalRegistry:
         seq_len = model_config.max_model_len
         mm_limits = self.get_mm_limits_per_prompt(model_config)
 
-        return profiler.get_mm_max_tokens(
+        return profiler.get_mm_max_contiguous_tokens(
             seq_len,
             {
                 modality: 1
@@ -266,7 +266,7 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             raise ValueError(f"{model_config.model} is not a multimodal model")
 
-        if tokenizer is None:
+        if tokenizer is None and not model_config.skip_tokenizer_init:
             tokenizer = cached_tokenizer_from_config(model_config)
         if disable_cache is None:
             mm_config = model_config.get_multimodal_config()

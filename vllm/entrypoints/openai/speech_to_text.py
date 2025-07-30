@@ -11,6 +11,7 @@ from typing import Callable, Literal, Optional, TypeVar, Union, cast
 import numpy as np
 from fastapi import Request
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
@@ -24,7 +25,6 @@ from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader import get_model_cls
 from vllm.model_executor.models import SupportsTranscription
 from vllm.outputs import RequestOutput
 from vllm.utils import PlaceholderModule
@@ -38,10 +38,6 @@ SpeechToTextResponse = Union[TranscriptionResponse, TranslationResponse]
 T = TypeVar("T", bound=SpeechToTextResponse)
 
 logger = init_logger(__name__)
-
-# As per https://platform.openai.com/docs/guides/speech-to-text#overview.
-# TODO configurable
-MAX_AUDIO_CLIP_FILESIZE_MB = 25
 
 
 class OpenAISpeechToText(OpenAIServing):
@@ -71,6 +67,8 @@ class OpenAISpeechToText(OpenAIServing):
         self.asr_config = self.model_cls.get_speech_to_text_config(
             model_config, task_type)
 
+        self.max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
+
         if self.default_sampling_params:
             logger.info(
                 "Overwriting default completion sampling param with: %s",
@@ -78,6 +76,7 @@ class OpenAISpeechToText(OpenAIServing):
 
     @cached_property
     def model_cls(self) -> type[SupportsTranscription]:
+        from vllm.model_executor.model_loader import get_model_cls
         model_cls = get_model_cls(self.model_config)
         return cast(type[SupportsTranscription], model_cls)
 
@@ -93,7 +92,7 @@ class OpenAISpeechToText(OpenAIServing):
         lang = request.language or "en"
         self.model_cls.validate_language(lang)
 
-        if len(audio_data) / 1024**2 > MAX_AUDIO_CLIP_FILESIZE_MB:
+        if len(audio_data) / 1024**2 > self.max_audio_filesize_mb:
             raise ValueError("Maximum file size exceeded.")
 
         with io.BytesIO(audio_data) as bytes_:
@@ -112,6 +111,7 @@ class OpenAISpeechToText(OpenAIServing):
             prompt = self.model_cls.get_generation_prompt(
                 audio=chunk,
                 stt_config=self.asr_config,
+                model_config=self.model_config,
                 language=lang,
                 task_type=self.task_type,
                 request_prompt=request.prompt)
@@ -149,18 +149,11 @@ class OpenAISpeechToText(OpenAIServing):
             raw_request.state.request_metadata = request_metadata
 
         try:
-            (
-                lora_request,
-                prompt_adapter_request,
-            ) = self._maybe_get_adapters(request)
+            lora_request = self._maybe_get_adapters(request)
 
             if lora_request:
                 return self.create_error_response(
                     "Currently do not support LoRA for "
-                    f"{self.task_type.title()}.")
-            if prompt_adapter_request:
-                return self.create_error_response(
-                    f"Currently do not support PromptAdapter for "
                     f"{self.task_type.title()}.")
 
             prompts, duration_s = await self._preprocess_speech_to_text(
@@ -187,8 +180,7 @@ class OpenAISpeechToText(OpenAIServing):
                 # It will not display special tokens like <|startoftranscript|>
                 request.prompt,
                 params=sampling_params,
-                lora_request=None,
-                prompt_adapter_request=None)
+                lora_request=None)
 
             list_result_generator = [
                 self.engine_client.generate(

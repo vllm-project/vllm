@@ -4,7 +4,6 @@ import argparse
 import multiprocessing
 import time
 import weakref
-from collections import defaultdict
 from collections.abc import Sequence
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
@@ -14,14 +13,12 @@ from typing import (TYPE_CHECKING, Any, Callable, Generic, Optional, TypeVar,
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.models.utils import extract_layer_index
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import (get_open_port, get_open_zmq_ipc_path, get_tcp_uri,
                         kill_process_tree)
 
 if TYPE_CHECKING:
-    from vllm.attention.layer import Attention
     from vllm.v1.engine.coordinator import DPCoordinator
     from vllm.v1.engine.utils import (CoreEngineActorManager,
                                       CoreEngineProcManager)
@@ -275,51 +272,6 @@ def shutdown(procs: list[BaseProcess]):
             kill_process_tree(pid)
 
 
-def bind_kv_cache(
-    kv_caches: dict[str, torch.Tensor],
-    forward_context: dict[str, "Attention"],
-    runner_kv_caches: list[torch.Tensor],
-) -> None:
-    """
-    Bind the allocated KV cache to both ModelRunner and forward context so
-    that the KV cache can be used in the forward pass.
-
-    This function:
-      1) Fills the ModelRunner's kv cache list (`runner_kv_caches`) with
-         kv_caches.
-      2) Associates each attention layer in the `forward_context` with its 
-         corresponding KV cache in kv_caches.
-
-    Args:
-        kv_caches: The allocated kv_caches with layer names as keys.
-        forward_context: The global forward context containing all Attention 
-        layers with layer names as keys.
-        runner_kv_caches: The kv_cache declared by ModelRunner.
-    """
-    # Bind kv_caches to ModelRunner
-    assert len(runner_kv_caches) == 0
-
-    # Convert kv_caches dict to a list of tensors in the order of layer_index.
-    index2name = defaultdict(list)
-    for layer_name in kv_caches:
-        index2name[extract_layer_index(layer_name)].append(layer_name)
-
-    for layer_index in sorted(index2name.keys()):
-        layer_names = index2name[layer_index]
-        if len(layer_names) > 1:
-            # One typical case is encoder-decoder model, e.g., bart.
-            # The cross attention and self attention in the same decoder layer
-            # has different layer_name but the same layer_index.
-            raise NotImplementedError
-        layer_name = layer_names[0]
-        runner_kv_caches.append(kv_caches[layer_name])
-
-    # Bind kv_caches to forward context
-    for layer_name, kv_cache in kv_caches.items():
-        # NOTE: Use list because of v0 PP virtual engine.
-        forward_context[layer_name].kv_cache = [kv_cache]
-
-
 def copy_slice(from_tensor: torch.Tensor, to_tensor: torch.Tensor,
                length: int) -> torch.Tensor:
     """
@@ -366,8 +318,6 @@ def report_usage_stats(
             # Feature flags
             "enable_lora":
             bool(vllm_config.lora_config),
-            "enable_prompt_adapter":
-            bool(vllm_config.prompt_adapter_config),
             "enable_prefix_caching":
             vllm_config.cache_config.enable_prefix_caching,
             "enforce_eager":

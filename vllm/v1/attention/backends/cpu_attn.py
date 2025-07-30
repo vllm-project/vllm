@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
 import torch
@@ -12,13 +12,12 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType,
                                               is_quantized_kv_cache)
 from vllm.attention.backends.utils import CommonAttentionState
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.block_table import BlockTable
-from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 try:
@@ -36,6 +35,10 @@ logger = init_logger(__name__)
 
 class TorchSDPABackend(AttentionBackend):
     accept_output_buffer: bool = False
+
+    @classmethod
+    def get_supported_dtypes(cls) -> list[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.float32]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
@@ -312,19 +315,21 @@ class TorchSDPAMetadata(AttentionMetadata):
 
 class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
 
-    def __init__(self, runner: CPUModelRunner, kv_cache_spec: AttentionSpec,
-                 block_table: BlockTable) -> None:
-        self.runner = runner
-        self.block_table = block_table
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
+                 vllm_config: VllmConfig, device: torch.device) -> None:
+        self.kv_cache_spec = kv_cache_spec
+        self.vllm_config = vllm_config
+        self.scheduler_config = vllm_config.scheduler_config
+
         # For reorder
-        self.reorder_prompt_req_index_list = np.empty(self.runner.max_num_reqs,
-                                                      dtype=np.int64)
-        self.reorder_decode_req_index_list = np.empty(self.runner.max_num_reqs,
-                                                      dtype=np.int64)
+        self.reorder_prompt_req_index_list = np.empty(
+            vllm_config.scheduler_config.max_num_seqs, dtype=np.int64)
+        self.reorder_decode_req_index_list = np.empty(
+            vllm_config.scheduler_config.max_num_seqs, dtype=np.int64)
         self.num_prompt_req: int = 0
 
         self.seq_start_loc_cpu = torch.zeros(
-            runner.max_num_reqs + 1,
+            vllm_config.scheduler_config.max_num_seqs + 1,
             dtype=torch.int32,
             device="cpu",
         )
@@ -374,15 +379,15 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
 
         return True
 
-    def build(self, common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata):
+    def build(self,
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata,
+              fast_build: bool = False) -> TorchSDPAMetadata:
         num_reqs = common_attn_metadata.num_reqs
-        num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
 
-        runner = self.runner
-        block_table = self.block_table
-        seq_lens_np = runner.seq_lens_np[:num_reqs]
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+        seq_lens_np = seq_lens_cpu.numpy()
         num_prompt_req = self.num_prompt_req
         max_prefill_seq_len = seq_lens_np[:num_prompt_req].max().item(
         ) if num_prompt_req > 0 else 0
@@ -390,34 +395,36 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
         ) if num_prompt_req < num_reqs else 0
         self.seq_start_loc_np[0] = 0
         np.cumsum(seq_lens_np, out=self.seq_start_loc_np[1:num_reqs + 1])
-        num_prefill_tokens = runner.query_start_loc_np[num_prompt_req].item()
-        num_decode_tokens = runner.query_start_loc_np[num_reqs].item(
-        ) - num_prefill_tokens
-        slot_mapping = block_table.slot_mapping_cpu[:num_actual_tokens].long()
-        block_table_tensor = block_table.get_device_tensor()
+
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        num_prefill_tokens = int(query_start_loc_cpu[num_prompt_req].item())
+        num_decode_tokens = int(query_start_loc_cpu[num_reqs].item() -
+                                num_prefill_tokens)
+
+        slot_mapping = common_attn_metadata.slot_mapping.long()
+        block_table_tensor = common_attn_metadata.block_table_tensor
+
         attn_metadata = TorchSDPAMetadata(
             num_prefills=num_prompt_req,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             slot_mapping=slot_mapping,
             # to ensure inference when chunked_prefill is disabled
-            seq_lens=runner.seq_lens_cpu[:num_reqs].tolist(),
-            seq_lens_tensor=runner.
-            seq_lens_cpu[num_prompt_req:num_reqs],  # decode
+            seq_lens=seq_lens_cpu.tolist(),
+            seq_lens_tensor=seq_lens_cpu[num_prompt_req:num_reqs],  # decode
             max_decode_seq_len=max_decode_seq_len,  # decode
             block_tables=block_table_tensor[num_prompt_req:num_reqs],  # decode
-            chunked_prefill=self.runner.scheduler_config.
-            chunked_prefill_enabled,
+            chunked_prefill=self.scheduler_config.chunked_prefill_enabled,
             max_query_len=max_query_len,
             max_kv_len=max_prefill_seq_len,
-            prefill_query_start_loc=runner.
-            query_start_loc_cpu[:num_prompt_req + 1],  # prefill
+            prefill_query_start_loc=query_start_loc_cpu[:num_prompt_req +
+                                                        1],  # prefill
             kv_start_loc=self.seq_start_loc_cpu[:num_prompt_req +
                                                 1],  # prefill
             prefill_block_tables=block_table_tensor[:
                                                     num_prompt_req],  # prefill
-            query_start_loc=runner.query_start_loc_cpu[:num_reqs +
-                                                       1],  # for logits index
+            query_start_loc=query_start_loc_cpu[:num_reqs +
+                                                1],  # for logits index
             multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=False,
         )
@@ -436,24 +443,15 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
-        use_irope: bool = False,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported in V0.")
-        if blocksparse_params is not None:
-            raise ValueError(
-                "Torch SPDA does not support block-sparse attention.")
         if logits_soft_cap is not None:
             logger.warning_once("Torch SPDA does not support logits soft cap. "
                                 "Outputs may be slightly off.")
-        if use_irope:
-            logger.warning_once(
-                "Using irope in Torch SPDA is not supported yet, it will fall"
-                " back to global attention for long context.")
         self.paged_attn_impl = _get_paged_attn_impl()
         self.num_heads = num_heads
         self.head_size = head_size
