@@ -19,35 +19,33 @@ server.
 
 Here is a sample of `LLM` class usage:
 
-??? code
+```python
+from vllm import LLM, SamplingParams
 
-    ```python
-    from vllm import LLM, SamplingParams
+# Define a list of input prompts
+prompts = [
+    "Hello, my name is",
+    "The capital of France is",
+    "The largest ocean is",
+]
 
-    # Define a list of input prompts
-    prompts = [
-        "Hello, my name is",
-        "The capital of France is",
-        "The largest ocean is",
-    ]
+# Define sampling parameters
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
-    # Define sampling parameters
-    sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+# Initialize the LLM engine with the OPT-125M model
+llm = LLM(model="facebook/opt-125m")
 
-    # Initialize the LLM engine with the OPT-125M model
-    llm = LLM(model="facebook/opt-125m")
+# Generate outputs for the input prompts
+outputs = llm.generate(prompts, sampling_params)
 
-    # Generate outputs for the input prompts
-    outputs = llm.generate(prompts, sampling_params)
+# Print the generated outputs
+for output in outputs:
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+```
 
-    # Print the generated outputs
-    for output in outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-    ```
-
-More API details can be found in the [Offline Inference](#offline-inference-api) section of the API docs.
+More API details can be found in the [Offline Inference](../serving/offline-inference.md) section of the API docs.
 
 The code for the `LLM` class can be found in <gh-file:vllm/entrypoints/llm.py>.
 
@@ -137,7 +135,7 @@ configurations affect the class we ultimately get.
 The following figure shows the class hierarchy of vLLM:
 
 > <figure markdown="span">
->   ![](../assets/design/hierarchy.png){ align="center" alt="query" width="100%" }
+>   <img src="../assets/design/hierarchy.png" alt="query" style="display: block; margin: 0 auto; width: 100%;" />
 > </figure>
 
 There are several important design choices behind this class hierarchy:
@@ -171,40 +169,39 @@ vision-language model.
 !!! note
     To support this change, all vLLM models' signatures have been updated to:
 
-    ```python
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-    ```
+```python
+def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+```
 
     To avoid accidentally passing incorrect arguments, the constructor is now keyword-only. This ensures that the constructor will raise an error if old configurations are passed. vLLM developers have already made this change for all models within vLLM. For out-of-tree registered models, developers need to update their models, for example by adding shim code to adapt the old constructor signature to the new one:
 
-    ??? code
 
-        ```python
-        class MyOldModel(nn.Module):
-            def __init__(
-                self,
-                config,
-                cache_config: Optional[CacheConfig] = None,
-                quant_config: Optional[QuantizationConfig] = None,
-                lora_config: Optional[LoRAConfig] = None,
-                prefix: str = "",
-            ) -> None:
-                ...
+```python
+class MyOldModel(nn.Module):
+    def __init__(
+        self,
+        config,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        ...
 
-        from vllm.config import VllmConfig
-        class MyNewModel(MyOldModel):
-            def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-                config = vllm_config.model_config.hf_config
-                cache_config = vllm_config.cache_config
-                quant_config = vllm_config.quant_config
-                lora_config = vllm_config.lora_config
-                super().__init__(config, cache_config, quant_config, lora_config, prefix)
+from vllm.config import VllmConfig
+class MyNewModel(MyOldModel):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        super().__init__(config, cache_config, quant_config, lora_config, prefix)
 
-        if __version__ >= "0.6.4":
-            MyModel = MyNewModel
-        else:
-            MyModel = MyOldModel
-        ```
+if __version__ >= "0.6.4":
+    MyModel = MyNewModel
+else:
+    MyModel = MyOldModel
+```
 
     This way, the model can work with both old and new versions of vLLM.
 

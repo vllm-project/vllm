@@ -362,15 +362,15 @@ later steps. Now, it should store the normalized softmax result of
 ## Value
 
 <figure markdown="span">
-  ![](../assets/design/paged_attention/value.png){ align="center" alt="value" width="70%" }
+  <img src="../assets/design/paged_attention/value.png" alt="value" style="display: block; margin: 0 auto; width: 70%;" />
 </figure>
 
 <figure markdown="span">
-  ![](../assets/design/paged_attention/logits_vec.png){ align="center" alt="logits_vec" width="50%" }
+  <img src="../assets/design/paged_attention/logits_vec.png" alt="logits_vec" style="display: block; margin: 0 auto; width: 50%;" />
 </figure>
 
 <figure markdown="span">
-  ![](../assets/design/paged_attention/v_vec.png){ align="center" alt="v_vec" width="70%" }
+  <img src="../assets/design/paged_attention/v_vec.png" alt="v_vec" style="display: block; margin: 0 auto; width: 70%;" />
 </figure>
 
 Now we need to retrieve the value data and perform dot multiplication
@@ -449,29 +449,29 @@ elements of the entire head for all context tokens. However, overall,
 all results for output have been calculated but are just stored in
 different thread register memory.
 
-??? code
 
-    ```cpp
-    float* out_smem = reinterpret_cast<float*>(shared_mem);
-    for (int i = NUM_WARPS; i > 1; i /= 2) {
-        // Upper warps write to shared memory.
+
+```cpp
+float* out_smem = reinterpret_cast<float*>(shared_mem);
+for (int i = NUM_WARPS; i > 1; i /= 2) {
+    // Upper warps write to shared memory.
+    ...
+    float* dst = &out_smem[(warp_idx - mid) * HEAD_SIZE];
+    for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
         ...
-        float* dst = &out_smem[(warp_idx - mid) * HEAD_SIZE];
-        for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
-            ...
-            dst[row_idx] = accs[i];
-        }
-
-        // Lower warps update the output.
-        const float* src = &out_smem[warp_idx * HEAD_SIZE];
-        for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
-            ...
-            accs[i] += src[row_idx];
-        }
-
-        // Write out the accs.
+        dst[row_idx] = accs[i];
     }
-    ```
+
+    // Lower warps update the output.
+    const float* src = &out_smem[warp_idx * HEAD_SIZE];
+    for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
+        ...
+        accs[i] += src[row_idx];
+    }
+
+    // Write out the accs.
+}
+```
 
 ## Output
 
