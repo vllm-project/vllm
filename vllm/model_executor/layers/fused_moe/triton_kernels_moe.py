@@ -179,7 +179,7 @@ class BatchedOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         num_experts = local_num_experts
         max_num_tokens = self.max_num_tokens
         workspace2 = (0, 0, 0)
-        output = (num_experts, max_num_tokens * num_dp, K)
+        output = (num_experts, max_num_tokens * num_dp, N)
         return (output, workspace2, output, a.dtype)
 
     def apply(

@@ -244,7 +244,6 @@ def test_equiv(num_token, a_dtype, w_dtype, tp):
         M, K, N, E, a_dtype, w_dtype, num_warps=8)
 
     out_triton_monolithic = triton_kernel_moe_forward(
-        output_tensor=None,
         hidden_states=x_tri,
         w1=w1_tri,
         w2=w2_tri,

@@ -290,6 +290,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 self.w2_weight_triton_tensor,
                 topk_weights,
                 topk_ids,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
                 w1_bias=layer.w13_bias,
                 w2_bias=layer.w2_bias,
             )
