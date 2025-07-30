@@ -6,8 +6,6 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
 import torch.nn.functional as F
-from quantization.utils.flashinfer_utils import (
-    apply_flashinfer_per_tensor_scale_fp8)
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
@@ -26,7 +24,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    rotate_flashinfer_fp8_moe_weights, swap_w13_to_w31)
+    apply_flashinfer_per_tensor_scale_fp8, rotate_flashinfer_fp8_moe_weights,
+    swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     get_col_major_tma_aligned_tensor, requant_weight_ue8m0_inplace)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (

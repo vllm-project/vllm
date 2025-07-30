@@ -4,8 +4,6 @@
 from typing import Any, Callable, Optional, Union
 
 import torch
-from quantization.utils.flashinfer_utils import (
-    apply_flashinfer_per_tensor_scale_fp8)
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
@@ -27,7 +25,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    rotate_flashinfer_fp8_moe_weights, swap_w13_to_w31)
+    apply_flashinfer_per_tensor_scale_fp8, rotate_flashinfer_fp8_moe_weights,
+    swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear, is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin, prepare_moe_fp4_layer_for_marlin)

@@ -73,7 +73,7 @@ def apply_flashinfer_per_tensor_scale_fp8(
     global_num_experts: int,
     apply_router_weight_on_input: bool,
 ) -> torch.Tensor:
-    from flashinfer.fushed_moe import RoutingMethodType
+    from flashinfer.fused_moe import RoutingMethodType
 
     from vllm.model_executor.models.llama4 import Llama4MoE
     assert layer.custom_routing_function == Llama4MoE.custom_routing_function, \
@@ -96,5 +96,5 @@ def apply_flashinfer_per_tensor_scale_fp8(
         local_expert_offset=layer.ep_rank * layer.local_num_experts,
         local_num_experts=layer.local_num_experts,
         use_routing_scales_on_input=apply_router_weight_on_input,
-        routing_method=RoutingMethodType.Llama4,
+        routing_method_type=RoutingMethodType.Llama4,
     )
