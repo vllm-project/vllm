@@ -651,7 +651,11 @@ steps:
   - csrc/quantization/fp4/
   - csrc/attention/mla/
   - csrc/quantization/cutlass_w8a8/moe/
+  - vllm/model_executor/layers/fused_moe/cutlass_moe.py
+  - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_moe.py
+  - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_prepare_finalize.py
   - vllm/v1/attention/backends/flashinfer.py
+  - vllm/compilation/fusion.py
   commands:
     - nvidia-smi
     - python3 examples/offline_inference/basic/chat.py
