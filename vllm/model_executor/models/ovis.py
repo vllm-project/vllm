@@ -25,7 +25,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.nn.functional import gumbel_softmax, pad, softmax
-from transformers import BaseImageProcessor, BatchFeature
+from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -48,8 +48,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.ovis import (BaseVisualTokenizerConfig,
-                                                  OvisConfig)
 from vllm.transformers_utils.processors.ovis import OvisProcessor
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -83,7 +81,7 @@ class VisualTokenizer(torch.nn.Module):
 
     def __init__(
         self,
-        config: BaseVisualTokenizerConfig,
+        config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
@@ -107,7 +105,7 @@ class VisualTokenizer(torch.nn.Module):
 
     def _init_backbone(
         self,
-        config: BaseVisualTokenizerConfig,
+        config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> nn.Module:
@@ -246,9 +244,6 @@ class VisualEmbedding(torch.nn.Embedding):
 
 
 class OvisProcessingInfo(BaseProcessingInfo):
-
-    def get_hf_config(self):
-        return self.ctx.get_hf_config(OvisConfig)
 
     def get_hf_processor(self, **kwargs):
         return self.ctx.get_hf_processor(
@@ -417,7 +412,7 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
-        self.config: OvisConfig = config
+        self.config: PretrainedConfig = config
         self.llm = init_vllm_registered_model(
             vllm_config=vllm_config.with_hf_config(config.get_text_config()),
             prefix=maybe_prefix(prefix, "llm"),

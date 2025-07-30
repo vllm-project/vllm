@@ -8,6 +8,7 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
+from transformers import PretrainedConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -25,7 +26,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.mpt import MPTConfig
 
 from .interfaces import SupportsPP
 from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
@@ -50,7 +50,7 @@ class MPTAttention(nn.Module):
 
     def __init__(
         self,
-        config: MPTConfig,
+        config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -144,7 +144,7 @@ class MPTMLP(nn.Module):
 
     def __init__(
         self,
-        config: MPTConfig,
+        config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -176,7 +176,7 @@ class MPTBlock(nn.Module):
 
     def __init__(
         self,
-        config: MPTConfig,
+        config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
