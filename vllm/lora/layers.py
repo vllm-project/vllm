@@ -19,6 +19,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.utils import divide
+from vllm.model_executor.custom_op import CustomOp
 # yapf: disable
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
@@ -133,8 +134,8 @@ class BaseLayerWithLoRA(nn.Module):
         """Returns True if the layer can be replaced by this LoRA layer."""
         raise NotImplementedError
 
-
-class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
+@CustomOp.register("vocab_parallel_embedding_with_lora")
+class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA, CustomOp):
 
     def __init__(self, base_layer: VocabParallelEmbedding) -> None:
         super().__init__()
@@ -235,7 +236,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 assert self.embeddings_weights is not None
                 self.embeddings_weights[:embeddings.shape[0]].copy_(embeddings)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         added_tokens_mask = torch.where(x > self.base_layer.org_vocab_size - 1,
                                         1, 0)
 
