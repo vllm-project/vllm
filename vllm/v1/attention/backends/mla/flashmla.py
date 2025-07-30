@@ -71,7 +71,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         num_sms = device_properties.multi_processor_count
 
         if self.compilation_config.full_cuda_graph:
-            self.cg_buf_tile_scheduler_metadata = torch.empty(
+            self.cg_buf_tile_scheduler_metadata = torch.zeros(
                 # Upper bound on size (<= #SMs, TileSchedulerMetaDataSize)
                 # TileSchedulerMetaDataSize = 8
                 (num_sms, 8),
@@ -96,14 +96,13 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             assert self.cg_buf_tile_scheduler_metadata is not None
             assert self.cg_buf_num_splits is not None
 
-            # Metadata per-SM, upper bound on size (<= #SMs, TileMetadataSize)
-            assert (self.cg_buf_tile_scheduler_metadata.size(0)
-                    >= tile_scheduler_metadata.size(0))
             sm_parts = tile_scheduler_metadata.size(0)
-            self.cg_buf_tile_scheduler_metadata[:sm_parts].\
-                copy_(tile_scheduler_metadata)
-            tile_scheduler_metadata = \
+            # Metadata per-SM, upper bound on size (<= #SMs, TileMetadataSize)
+            assert sm_parts <= self.cg_buf_tile_scheduler_metadata.size(0)
+            tile_scheduler_metadata_view = \
                 self.cg_buf_tile_scheduler_metadata[:sm_parts]
+            tile_scheduler_metadata_view.copy_(tile_scheduler_metadata)
+            tile_scheduler_metadata = tile_scheduler_metadata_view
 
             # Num splits is per-batch, varying size (batch_size,)
             n = num_splits.size(0)
