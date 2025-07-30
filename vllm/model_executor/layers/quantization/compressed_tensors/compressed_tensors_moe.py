@@ -101,9 +101,9 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
 
     def __init__(self):
-        from vllm.model_executor.layers.quantization.utils.nvfp4_support import (  # noqa: E501
-            detect_nvfp4_support)
-        _nvfp4 = detect_nvfp4_support(self.__class__.__name__, logger)
+        from vllm.model_executor.layers.quantization.utils.nvfp4_moe_support import (  # noqa: E501
+            detect_nvfp4_moe_support)
+        _nvfp4 = detect_nvfp4_moe_support(self.__class__.__name__)
         self.cutlass_nvfp4_supported = _nvfp4.cutlass_supported
         self.allow_flashinfer_cutlass = _nvfp4.allow_flashinfer_cutlass
         self.use_marlin = _nvfp4.use_marlin

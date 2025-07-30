@@ -11,7 +11,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported)
 
-__all__ = ["detect_nvfp4_support", "NvFp4Support"]
+__all__ = ["detect_nvfp4_moe_support", "NvFp4Support"]
 
 _logger = init_logger(__name__)
 
@@ -25,22 +25,19 @@ class NvFp4Support:
     use_marlin: bool
 
 
-def detect_nvfp4_support(class_name: str = "", logger=None) -> NvFp4Support:
+def detect_nvfp4_moe_support(class_name: str = "") -> NvFp4Support:
     """Detect platform support for NV-FP4 fused-MoE path"""
-    if logger is None:
-        logger = _logger
-
     cutlass_supported = cutlass_fp4_supported()
 
     allow_flashinfer = (cutlass_supported
                         and is_flashinfer_fp4_cutlass_moe_available())
 
     if allow_flashinfer:
-        logger.info_once("Using FlashInfer kernels for %s.", class_name
-                         or "NVFP4 path")
+        _logger.info_once("Using FlashInfer kernels for %s.", class_name
+                          or "NVFP4 path")
     else:
         if envs.VLLM_USE_FLASHINFER_MOE_FP4:
-            logger.warning_once(
+            _logger.warning_once(
                 "FlashInfer kernels unavailable for %s on current platform.",
                 class_name or "NVFP4 path",
             )
@@ -49,7 +46,7 @@ def detect_nvfp4_support(class_name: str = "", logger=None) -> NvFp4Support:
     if not cutlass_supported:
         if is_fp4_marlin_supported():
             use_marlin = True
-            logger.info_once("Falling back to Marlin FP4 MoE kernel.")
+            _logger.info_once("Falling back to Marlin FP4 MoE kernel.")
         else:
             raise ValueError(
                 "Current platform does not support NVFP4 quantization. "
