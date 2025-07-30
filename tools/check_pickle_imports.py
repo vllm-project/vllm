@@ -34,7 +34,6 @@ ALLOWED_FILES = set([
     'vllm/model_executor/models/registry.py',
     'tests/test_utils.py',
     'tests/tokenization/test_cached_tokenizer.py',
-    'tests/model_executor/test_guided_processors.py',
     'vllm/distributed/utils.py',
     'vllm/distributed/parallel_state.py',
     'vllm/engine/multiprocessing/client.py',
