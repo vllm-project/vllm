@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from copy import deepcopy
 from typing import Any, Callable, Optional
 
 import torch
@@ -10,7 +11,8 @@ import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
+    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported,
+    UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod,
                                                set_weight_attrs)
@@ -34,6 +36,17 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
+
+
+def get_moe_quant_method(
+    config: QuantizationConfig,
+    layer: torch.nn.Module,
+    prefix: str,
+    moe_method_cls: type,
+):
+    if isinstance(layer, FusedMoE) and is_layer_skipped_awq(prefix, config.modules_to_not_convert):
+        return UnquantizedFusedMoEMethod(layer.moe_config)
+    return moe_method_cls(config)
 
 
 class AWQMarlinConfig(QuantizationConfig):
@@ -147,7 +160,8 @@ class AWQMarlinConfig(QuantizationConfig):
                     "Falling back to Moe WNA16 kernels.")
                 return MoeWNA16Config.from_config(
                     self.full_config).get_quant_method(layer, prefix)
-            return AWQMoEMethod(self)
+            return get_moe_quant_method(self, layer, prefix,
+                                        AWQMoEMethod)
         return None
 
     @classmethod
