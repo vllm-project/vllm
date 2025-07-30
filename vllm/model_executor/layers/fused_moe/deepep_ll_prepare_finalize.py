@@ -127,14 +127,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             f"{self.SUPPORTED_HIDDEN_SIZES}")
 
         if self.use_fp8_dispatch:
-            assert hidden_size % 128 == 0, \
+            assert quant_config.is_block_quantized and hidden_size % 128 == 0, \
             "DeepEP kernels quantize the inputs in blocks of shape 128"
-
-        has_per_token_scales = a1_scale.numel(
-        ) != 1 if a1_scale is not None else (
-            a2_scale.numel() != 1 if a2_scale is not None else False)
-        assert not has_per_token_scales, (
-            "low_latency kernels doesn't support dispatching per-token scales")
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
