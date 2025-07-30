@@ -99,8 +99,11 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided(
   const int token_idx = blockIdx.x;
   const int tid = threadIdx.x;
 
-  const scalar_t* token_in = input + token_idx * in_row_stride;
-  fp8_type* token_out = out + token_idx * out_row_stride;
+  // Use int64 to avoid overflowing an int32 when calculating this offset
+  int64_t in_offset = static_cast<int64_t>(token_idx) * in_row_stride;
+  int64_t out_offset = static_cast<int64_t>(token_idx) * out_row_stride;
+  const scalar_t* token_in = input + in_offset;
+  fp8_type* token_out = out + out_offset;
 
   // 1) per-token absmax
   float absmax_val = 0.f;
