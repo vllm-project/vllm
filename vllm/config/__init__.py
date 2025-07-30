@@ -41,6 +41,7 @@ from vllm.config.multimodal import (MMCacheType, MMEncoderTPMode,
 from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
                                   ParallelConfig)
 from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
+from vllm.config.signature_verification import SignatureVerificationConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.config.utils import ConfigType, config
 from vllm.logger import init_logger
@@ -446,6 +447,9 @@ class ModelConfig:
     definitions"""
     io_processor_plugin: Optional[str] = None
     """IOProcessor plugin name to load at model startup"""
+    signature_verification_config: \
+        Optional[SignatureVerificationConfig] = None
+    """The model's signature verification configuration."""
 
     # Multimodal config and init vars
     multimodal_config: Optional[MultiModalConfig] = None

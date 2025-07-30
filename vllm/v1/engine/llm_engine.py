@@ -75,6 +75,12 @@ class LLMEngine:
         if self.log_stats:
             self.stat_logger = PrometheusStatLogger(vllm_config)
 
+        svc = self.model_config.signature_verification_config
+        if svc.signature_verification_needed():
+            raise Exception("Signature verification was requested but was not "
+                            "done since a code path was taken that is not yet "
+                            "instrumented for signature verification.")
+
         # important: init dp group before init the engine_core
         # In the decoupled engine case this is handled in EngineCoreProc.
         parallel_config = vllm_config.parallel_config
