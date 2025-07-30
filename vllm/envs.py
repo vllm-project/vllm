@@ -964,6 +964,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE":
     lambda: int(os.getenv("VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE", "163840")),
 
+    # MoE routing strategy selector. Available strategies:
+    # - "softmax": Standard softmax-based routing
+    # - "uniform_random": Uniform random routing for perfect load balancing
+    # - "weighted_random": Weighted random routing with temperature scaling
+    # Note: custom strategies may not produce correct model outputs
+    "VLLM_MOE_ROUTING_STRATEGY":
+    lambda: os.environ.get("VLLM_MOE_ROUTING_STRATEGY", "").lower(),
+
     # Regex timeout for use by the vLLM tool parsing plugins.
     "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS":
     lambda: int(os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")),

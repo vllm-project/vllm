@@ -28,6 +28,8 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_moe_enabled)
+from vllm.model_executor.layers.fused_moe.routing_simulator import (
+    RoutingSimulator)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
@@ -1243,6 +1245,33 @@ class FusedMoE(torch.nn.Module):
         self.logical_replica_count = logical_replica_count[moe_layer_idx]
 
     @staticmethod
+    def select_experts_with_simulated_strategy(
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        strategy: str = "softmax",
+        indices_type: Optional[torch.dtype] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Select experts using the specified routing strategy.
+
+        Args:
+            hidden_states: Input hidden states [num_tokens, hidden_size]
+            router_logits: Router logits [num_tokens, num_experts]
+            top_k: Number of experts to select per token
+            strategy: Routing strategy name
+            indices_type: Data type for expert indices
+
+        Returns:
+            Tuple of (topk_weights, topk_ids)
+        """
+        return RoutingSimulator.simulate_routing(hidden_states=hidden_states,
+                                                 router_logits=router_logits,
+                                                 strategy_name=strategy,
+                                                 top_k=top_k,
+                                                 indices_type=indices_type)
+
+    @staticmethod
     def select_experts(
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
@@ -1274,6 +1303,16 @@ class FusedMoE(torch.nn.Module):
             plain MoE implementations without redundant experts.
         """
         from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+
+        # Check if we should use a routing simulation strategy
+        routing_strategy = envs.VLLM_MOE_ROUTING_STRATEGY
+        if routing_strategy != "":
+            return FusedMoE.select_experts_with_simulated_strategy(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                top_k=top_k,
+                strategy=routing_strategy,
+                indices_type=indices_type)
 
         # DeepSeekv2 uses grouped_top_k
         if use_grouped_topk:
