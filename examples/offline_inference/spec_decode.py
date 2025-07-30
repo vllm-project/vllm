@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from transformers import AutoTokenizer
 
@@ -79,12 +80,11 @@ def main():
         trust_remote_code=True,
         tensor_parallel_size=args.tp,
         enable_chunked_prefill=args.enable_chunked_prefill,
-        max_num_batched_tokens=args.max_num_batched_tokens,
         enforce_eager=args.enforce_eager,
-        max_num_seqs=args.max_num_seqs,
         gpu_memory_utilization=0.8,
         speculative_config=speculative_config,
         disable_log_stats=False,
+        max_model_len=16384,
     )
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)

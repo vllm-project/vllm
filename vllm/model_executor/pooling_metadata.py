@@ -38,6 +38,13 @@ class PoolingMetadata:
                 f"seq_data={self.seq_data}, "
                 f"prompt_lens={self.prompt_lens})")
 
+    def __getitem__(self, indices: slice):
+        return PoolingMetadata(
+            seq_groups=self.seq_groups[indices],
+            seq_data=dict(list(self.seq_data.items())[indices]),
+            prompt_lens=self.prompt_lens[indices],
+        )
+
 
 @dataclass
 class PoolingTensors:

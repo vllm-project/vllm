@@ -1,3 +1,4 @@
+
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
@@ -62,12 +63,16 @@ ARG PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL=https://download.pytorch.org/whl/nightly
 ARG PIP_KEYRING_PROVIDER=disabled
 ARG UV_KEYRING_PROVIDER=${PIP_KEYRING_PROVIDER}
 
+# Flag enables built-in KV-connector dependency libs into docker images
+ARG INSTALL_KV_CONNECTORS=false
+
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
 FROM ${BUILD_BASE_IMAGE} AS base
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
 ARG TARGETPLATFORM
+ARG INSTALL_KV_CONNECTORS=false
 ENV DEBIAN_FRONTEND=noninteractive
 
 ARG DEADSNAKES_MIRROR_URL
@@ -202,6 +207,10 @@ ARG SCCACHE_ENDPOINT
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
 ARG SCCACHE_S3_NO_CREDENTIALS=0
+
+# Flag to control whether to use pre-built vLLM wheels
+ARG VLLM_USE_PRECOMPILED=""
+
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
@@ -217,6 +226,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && export SCCACHE_S3_NO_CREDENTIALS=${SCCACHE_S3_NO_CREDENTIALS} \
         && export SCCACHE_IDLE_TIMEOUT=0 \
         && export CMAKE_BUILD_TYPE=Release \
+        && export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
+        && export VLLM_DOCKER_BUILD_CONTEXT=1 \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
         && sccache --show-stats; \
@@ -230,7 +241,20 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         # Clean any existing CMake artifacts
         rm -rf .deps && \
         mkdir -p .deps && \
+        export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" && \
+        export VLLM_DOCKER_BUILD_CONTEXT=1 && \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
+    fi
+
+# When using precompiled wheels, keep only the newest manylinux1 wheel and delete others
+RUN if [ "$VLLM_USE_PRECOMPILED" = "1" ]; then \
+        echo "Cleaning up extra wheels in dist/..." && \
+        # Identify the most recent manylinux1_x86_64 wheel
+        KEEP_WHEEL=$(ls -t dist/*manylinux1_x86_64.whl 2>/dev/null | head -n1) && \
+        if [ -n "$KEEP_WHEEL" ]; then \
+            echo "Keeping wheel: $KEEP_WHEEL"; \
+            find dist/ -type f -name "*.whl" ! -path "${KEEP_WHEEL}" -delete; \
+        fi; \
     fi
 
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
@@ -247,7 +271,7 @@ RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
 #################### EXTENSION Build IMAGE ####################
 
 #################### DEV IMAGE ####################
-FROM base as dev
+FROM base AS dev
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -257,10 +281,6 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
-
-# Workaround for #17068
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
 
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test.txt requirements/test.txt
@@ -276,6 +296,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM ${FINAL_BASE_IMAGE} AS vllm-base
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
+ARG INSTALL_KV_CONNECTORS=false
 WORKDIR /vllm-workspace
 ENV DEBIAN_FRONTEND=noninteractive
 ARG TARGETPLATFORM
@@ -369,28 +390,36 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 # -rw-rw-r-- 1 mgoin mgoin 205M Jun  9 18:03 flashinfer_python-0.2.6.post1-cp39-abi3-linux_x86_64.whl
 # $ # upload the wheel to a public location, e.g. https://wheels.vllm.ai/flashinfer/v0.2.6.post1/flashinfer_python-0.2.6.post1-cp39-abi3-linux_x86_64.whl
 
-# Allow specifying a version, Git revision or local .whl file
-ARG FLASHINFER_CUDA128_INDEX_URL="https://download.pytorch.org/whl/cu128/flashinfer"
-ARG FLASHINFER_CUDA128_WHEEL="flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl"
+# Install FlashInfer from source
 ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
-ARG FLASHINFER_GIT_REF="v0.2.6.post1"
-RUN --mount=type=cache,target=/root/.cache/uv \
-. /etc/environment && \
-if [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
-    # FlashInfer already has a wheel for PyTorch 2.7.0 and CUDA 12.8. This is enough for CI use
-    if [[ "$CUDA_VERSION" == 12.8* ]]; then \
-        uv pip install --system ${FLASHINFER_CUDA128_INDEX_URL}/${FLASHINFER_CUDA128_WHEEL} ; \
-    else \
-        export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0a 10.0a 12.0' && \
-        git clone ${FLASHINFER_GIT_REPO} --single-branch --branch ${FLASHINFER_GIT_REF} --recursive && \
-        # Needed to build AOT kernels
-        (cd flashinfer && \
-            python3 -m flashinfer.aot && \
-            uv pip install --system --no-build-isolation . \
-        ) && \
-        rm -rf flashinfer; \
-    fi \
-fi
+# Keep this in sync with https://github.com/vllm-project/vllm/blob/main/requirements/cuda.txt
+# We use `--force-reinstall --no-deps` to avoid issues with the existing FlashInfer wheel.
+ARG FLASHINFER_GIT_REF="v0.2.9rc2"
+RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
+  . /etc/environment
+    git clone --depth 1 --recursive --shallow-submodules \
+        --branch ${FLASHINFER_GIT_REF} \
+        ${FLASHINFER_GIT_REPO} flashinfer
+    # Exclude CUDA arches for older versions (11.x and 12.0-12.7)
+    # TODO: Update this to allow setting TORCH_CUDA_ARCH_LIST as a build arg.
+    if [[ "${CUDA_VERSION}" == 11.* ]]; then
+        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
+    elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then
+        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
+    else
+        # CUDA 12.8+ supports 10.0a and 12.0
+        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"
+    fi
+    echo "🏗️  Building FlashInfer for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
+    # Needed to build AOT kernels
+    pushd flashinfer
+        TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
+            python3 -m flashinfer.aot
+        TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
+            uv pip install --system --no-build-isolation --force-reinstall --no-deps .
+    popd
+    rm -rf flashinfer
+BASH
 COPY examples examples
 COPY benchmarks benchmarks
 COPY ./vllm/collect_env.py .
@@ -427,10 +456,6 @@ ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 
-# Workaround for #17068
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
-
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
@@ -464,6 +489,7 @@ RUN mv mkdocs.yaml test_docs/
 # base openai image with additional requirements, for any subsequent openai-style images
 FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
+ARG INSTALL_KV_CONNECTORS=false
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -472,13 +498,19 @@ ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 
+COPY requirements/kv_connectors.txt requirements/kv_connectors.txt
+
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
+        uv pip install --system -r requirements/kv_connectors.txt; \
+    fi; \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        uv pip install --system accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.42.0' 'timm==0.9.10' boto3 runai-model-streamer runai-model-streamer[s3]; \
+        BITSANDBYTES_VERSION="0.42.0"; \
     else \
-        uv pip install --system accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.45.3' 'timm==0.9.10' boto3 runai-model-streamer runai-model-streamer[s3]; \
-    fi
+        BITSANDBYTES_VERSION="0.46.1"; \
+    fi; \
+    uv pip install --system accelerate hf_transfer modelscope "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm==0.9.10' boto3 runai-model-streamer runai-model-streamer[s3]
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 

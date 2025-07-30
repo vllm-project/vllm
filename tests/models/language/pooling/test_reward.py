@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -84,13 +86,16 @@ def test_prm_models(
     dtype: str,
     monkeypatch,
 ) -> None:
+    if current_platform.is_cpu() and os.environ.get("VLLM_USE_V1", "0") == "0":
+        pytest.skip("CPU only supports V1")
+
     if current_platform.is_rocm():
         # ROCm Triton FA does not currently support sliding window attention
         # switch to use ROCm CK FA backend
         monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", "False")
 
     with vllm_runner(model, max_model_len=1024, dtype=dtype) as vllm_model:
-        vllm_outputs = vllm_model.encode(math_step_prompts)
+        vllm_outputs = vllm_model.reward(math_step_prompts)
 
     with hf_runner(model, dtype=dtype, auto_cls=AutoModel) as hf_model:
         hf_model = step_reward_patch_hf_model(hf_model)
