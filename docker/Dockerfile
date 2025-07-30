@@ -268,6 +268,17 @@ RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
     else \
         echo "Skipping wheel size check."; \
     fi
+#################### FLASHINFER WHEEL BUILD IMAGE ####################
+FROM base AS flashinfer-wheel-builder
+ARG CUDA_VERSION
+ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
+ARG FLASHINFER_GIT_REF="v0.2.9rc2"
+
+COPY tools/build-flashinfer.sh /tmp/build-flashinfer.sh
+RUN --mount=type=cache,target=/root/.cache/uv \
+    . /etc/environment && \
+    BUILD_WHEEL=true /tmp/build-flashinfer.sh
+
 #################### EXTENSION Build IMAGE ####################
 
 #################### DEV IMAGE ####################
@@ -395,31 +406,10 @@ ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
 # Keep this in sync with https://github.com/vllm-project/vllm/blob/main/requirements/cuda.txt
 # We use `--force-reinstall --no-deps` to avoid issues with the existing FlashInfer wheel.
 ARG FLASHINFER_GIT_REF="v0.2.9rc2"
-RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
-  . /etc/environment
-    git clone --depth 1 --recursive --shallow-submodules \
-        --branch ${FLASHINFER_GIT_REF} \
-        ${FLASHINFER_GIT_REPO} flashinfer
-    # Exclude CUDA arches for older versions (11.x and 12.0-12.7)
-    # TODO: Update this to allow setting TORCH_CUDA_ARCH_LIST as a build arg.
-    if [[ "${CUDA_VERSION}" == 11.* ]]; then
-        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
-    elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then
-        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
-    else
-        # CUDA 12.8+ supports 10.0a and 12.0
-        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"
-    fi
-    echo "🏗️  Building FlashInfer for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
-    # Needed to build AOT kernels
-    pushd flashinfer
-        TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-            python3 -m flashinfer.aot
-        TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-            uv pip install --system --no-build-isolation --force-reinstall --no-deps .
-    popd
-    rm -rf flashinfer
-BASH
+COPY tools/build-flashinfer.sh /tmp/build-flashinfer.sh
+RUN --mount=type=cache,target=/root/.cache/uv \
+    . /etc/environment && \
+    /tmp/build-flashinfer.sh
 COPY examples examples
 COPY benchmarks benchmarks
 COPY ./vllm/collect_env.py .
