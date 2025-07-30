@@ -6,13 +6,13 @@ toc_depth: 4
 
 The vllm command-line tool is used to run and manage vLLM models. You can start by viewing the help message with:
 
-```
+```bash
 vllm --help
 ```
 
 Available Commands:
 
-```
+```bash
 vllm {chat,complete,serve,bench,collect-env,run-batch}
 ```
 

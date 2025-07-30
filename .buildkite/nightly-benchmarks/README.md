@@ -28,6 +28,7 @@ See [vLLM performance dashboard](https://perf.vllm.ai) for the latest performanc
 ## Trigger the benchmark
 
 Performance benchmark will be triggered when:
+
 - A PR being merged into vllm.
 - Every commit for those PRs with `perf-benchmarks` label AND `ready` label.
 
@@ -38,6 +39,7 @@ bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
 ```
 
 Runtime environment variables:
+
 - `ON_CPU`: set the value to '1' on Intel® Xeon® Processors. Default value is 0.
 - `SERVING_JSON`: JSON file to use for the serving tests. Default value is empty string (use default file).
 - `LATENCY_JSON`: JSON file to use for the latency tests. Default value is empty string (use default file).
@@ -46,12 +48,14 @@ Runtime environment variables:
 - `REMOTE_PORT`: Port for the remote vLLM service to benchmark. Default value is empty string.
 
 Nightly benchmark will be triggered when:
+
 - Every commit for those PRs with `perf-benchmarks` label and `nightly-benchmarks` label.
 
 ## Performance benchmark details
 
 See [performance-benchmarks-descriptions.md](performance-benchmarks-descriptions.md) for detailed descriptions, and use `tests/latency-tests.json`, `tests/throughput-tests.json`, `tests/serving-tests.json` to configure the test cases.
 > NOTE: For Intel® Xeon® Processors, use `tests/latency-tests-cpu.json`, `tests/throughput-tests-cpu.json`, `tests/serving-tests-cpu.json` instead.
+>
 ### Latency test
 
 Here is an example of one test inside `latency-tests.json`:
@@ -149,6 +153,7 @@ Here is an example using the script to compare result_a and result_b without det
 
 Here is an example using the script to compare result_a and result_b with detail test name.
 `python3 compare-json-results.py -f results_a/benchmark_results.json -f results_b/benchmark_results.json`
+
 |   | results_a/benchmark_results.json_name | results_a/benchmark_results.json | results_b/benchmark_results.json_name | results_b/benchmark_results.json | perf_ratio        |
 |---|---------------------------------------------|----------------------------------------|---------------------------------------------|----------------------------------------|----------|
 | 0 | serving_llama8B_tp1_sharegpt_qps_1          | 142.633982                             | serving_llama8B_tp1_sharegpt_qps_1          | 156.526018                             | 1.097396 |

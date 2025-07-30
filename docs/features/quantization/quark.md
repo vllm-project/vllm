@@ -213,6 +213,7 @@ lm_eval --model vllm \
 ```
 
 ## Quark Quantization Script
+
 In addition to the example of Python API above, Quark also offers a
 [quantization script](https://quark.docs.amd.com/latest/pytorch/example_quark_torch_llm_ptq.html)
 to quantize large language models more conveniently. It supports quantizing models with variety
