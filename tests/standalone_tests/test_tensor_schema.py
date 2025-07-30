@@ -4,8 +4,8 @@
 import pytest
 import torch
 
-from vllm.model_executor.models.fuyu import FuyuImagePatchInputs
 from vllm.model_executor.models.glm4_1v import Glm4vImageEmbeddingInputs
+from vllm.model_executor.models.minicpmv import MiniCPMVImagePixelInputs
 from vllm.model_executor.models.phi3v import Phi3VImagePixelInputs
 
 
@@ -129,23 +129,31 @@ def test_tensor_schema_with_invalid_resolve_binding_dims():
 
 
 def test_tensor_schema_with_list_of_symbolic_dim():
-    flat_data = torch.stack([torch.randn(768) for _ in range(3)])  # (bn=3, fn)
-    patches_per_image = [64, 64, 64]  # len = bn = 3
+    # Simulate 2 images with 2 slices each → bns = 4
+    pixel_values = [torch.randn(3, 224, 224)
+                    for _ in range(4)]  # (bns=4, 3, H, W)
+    tgt_sizes = torch.randint(0, 256, (4, 2))  # (bns=4, 2)
+    num_slices = torch.tensor([2, 2])  # (bn=2)
 
-    FuyuImagePatchInputs(
-        flat_data=flat_data,
-        patches_per_image=patches_per_image,
+    MiniCPMVImagePixelInputs(
+        pixel_values=pixel_values,
+        tgt_sizes=tgt_sizes,
+        num_slices=num_slices,
     )
 
 
 def test_tensor_schema_with_list_of_symbolic_dim_mismatch_in_length():
-    flat_data = torch.stack([torch.randn(768) for _ in range(4)])  # (bn=4, fn)
-    patches_per_image = [64, 64, 64]  # len = 3 ≠ bn
+    # pixel_values = 4 images → bns = 4
+    pixel_values = [torch.randn(3, 224, 224) for _ in range(4)]
+    # tgt_sizes = (3, 2) → bns = 3 (inconsistent)
+    tgt_sizes = torch.randint(0, 256, (3, 2))
+    num_slices = torch.tensor([2, 2])
 
-    with pytest.raises(ValueError, match="expected 'bn'=4, got 3"):
-        FuyuImagePatchInputs(
-            flat_data=flat_data,
-            patches_per_image=patches_per_image,
+    with pytest.raises(ValueError, match="expected 'bns'=4, got 3"):
+        MiniCPMVImagePixelInputs(
+            pixel_values=pixel_values,
+            tgt_sizes=tgt_sizes,
+            num_slices=num_slices,
         )
 
 
