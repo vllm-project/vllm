@@ -8,7 +8,7 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import MptConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -50,7 +50,7 @@ class MPTAttention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: MptConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -59,15 +59,15 @@ class MPTAttention(nn.Module):
         self.d_model = config.d_model
         self.total_num_heads = config.n_heads
         self.head_dim = self.d_model // self.total_num_heads
-        self.clip_qkv = config.attn_config["clip_qkv"]
-        self.qk_ln = config.attn_config["qk_ln"]
-        self.alibi_bias_max = config.attn_config["alibi_bias_max"]
+        self.clip_qkv = config.attn_config.clip_qkv
+        self.qk_ln = config.attn_config.qk_ln
+        self.alibi_bias_max = config.attn_config.alibi_bias_max
         if "kv_n_heads" in config.attn_config:
-            self.total_num_kv_heads = config.attn_config['kv_n_heads']
+            self.total_num_kv_heads = config.attn_config.kv_n_heads
         else:
             self.total_num_kv_heads = self.total_num_heads
-        assert not config.attn_config["prefix_lm"]
-        assert config.attn_config["alibi"]
+        assert not config.attn_config.prefix_lm
+        assert config.attn_config.alibi
 
         # pylint: disable=invalid-name
         self.Wqkv = QKVParallelLinear(
@@ -144,7 +144,7 @@ class MPTMLP(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: MptConfig,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -176,7 +176,7 @@ class MPTBlock(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: MptConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
