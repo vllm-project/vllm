@@ -10,6 +10,7 @@ from PIL import Image
 
 from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.video import rescale_video_size, sample_frames_from_video
+from vllm.utils import set_default_torch_num_threads
 
 from ....conftest import (IMAGE_ASSETS, VIDEO_ASSETS, PromptImageInput,
                           PromptVideoInput, VllmRunner)
@@ -263,19 +264,22 @@ def run_embedding_input_test(
     processor = AutoProcessor.from_pretrained(model)
 
     # max_model_len should be greater than image_feature_size
-    with vllm_runner(model,
-                     runner="generate",
-                     max_model_len=4000,
-                     max_num_seqs=3,
-                     dtype=dtype,
-                     limit_mm_per_prompt={
-                         "image": mm_limit,
-                         "video": mm_limit
-                     },
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend
-                     ) as vllm_model:
+    with set_default_torch_num_threads(1):
+        vllm_model = vllm_runner(
+            model,
+            runner="generate",
+            max_model_len=4000,
+            max_num_seqs=3,
+            dtype=dtype,
+            limit_mm_per_prompt={
+                "image": mm_limit,
+                "video": mm_limit
+            },
+            tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend=distributed_executor_backend,
+        )
 
+    with vllm_model:
         outputs_per_case_for_original_input = [
             vllm_model.generate_greedy_logprobs(prompts,
                                                 max_tokens,
