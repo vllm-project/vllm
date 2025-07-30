@@ -12,9 +12,11 @@ def parse_args():
     parser = EngineArgs.add_cli_args(parser)
     # Set example specific arguments
     parser.set_defaults(
-        model="intfloat/e5-small",
+        model="internlm/internlm2-1_8b-reward",
         runner="pooling",
         enforce_eager=True,
+        max_model_len=1024,
+        trust_remote_code=True,
     )
     return parser.parse_args()
 
@@ -29,20 +31,20 @@ def main(args: Namespace):
     ]
 
     # Create an LLM.
-    # You should pass runner="pooling" for embedding models
+    # You should pass runner="pooling" for reward models
     llm = LLM(**vars(args))
 
-    # Generate embedding. The output is a list of EmbeddingRequestOutputs.
-    outputs = llm.embed(prompts)
+    # Generate rewards. The output is a list of PoolingRequestOutput.
+    outputs = llm.reward(prompts)
 
     # Print the outputs.
     print("\nGenerated Outputs:\n" + "-" * 60)
     for prompt, output in zip(prompts, outputs):
-        embeds = output.outputs.embedding
-        embeds_trimmed = (
-            (str(embeds[:16])[:-1] + ", ...]") if len(embeds) > 16 else embeds
+        rewards = output.outputs.data
+        rewards_trimmed = (
+            (str(rewards[:16])[:-1] + ", ...]") if len(rewards) > 16 else rewards
         )
-        print(f"Prompt: {prompt!r} \nEmbeddings: {embeds_trimmed} (size={len(embeds)})")
+        print(f"Prompt: {prompt!r} \nReward: {rewards_trimmed} (size={len(rewards)})")
         print("-" * 60)
 
 
