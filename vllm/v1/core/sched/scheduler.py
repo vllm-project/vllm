@@ -881,10 +881,10 @@ class Scheduler(SchedulerInterface):
             if len(stopped_running_reqs) == 1:
                 # Fast path for single request removal (most common case)
                 stopped_req = next(iter(stopped_running_reqs))
-                if stopped_req in self.running:
+                try:
                     self.running.remove(stopped_req)
-                else:
-                    # Log unexpected state but don't break execution
+                except ValueError:
+                    # Request not in running list - log for debugging
                     logger.warning(
                         "Request %s marked as stopped but not found in running "
                         "queue. This may indicate a state management issue.",
