@@ -157,6 +157,10 @@ def test_all_reduce_fusion_pass_replace(test_model: torch.nn.Module,
                                         batch_size: int, seq_len: int,
                                         hidden_size: int, dtype: torch.dtype):
     num_processes = 2
+    if (test_model == TestAllReduceFusedAddRMSNormStaticQuantFP4Model
+            and not current_platform.has_device_capability(100)):
+        pytest.skip("Skip as nvfp4 is only supported on "
+                    "devices with compute capability 10.0 (Blackwell)")
 
     def run_torch_spawn(fn, nprocs):
         torch.multiprocessing.spawn(fn,
