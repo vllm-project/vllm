@@ -17,6 +17,7 @@ from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.utils import opcheck, stack_and_dev, torch_moe
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.parallel_state import init_distributed_environment
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.fused_moe.fused_moe import (
@@ -142,6 +143,10 @@ def test_fused_moe(
     # Setup test data
     #
 
+    #
+    # Setup test data
+    #
+
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
@@ -169,7 +174,8 @@ def test_fused_moe(
                                               use_int8_w8a8=False,
                                               use_int8_w8a16=False,
                                               use_int4_w4a16=False,
-                                              per_channel_quant=False,
+                                              use_mxfp4_w4a4=False,
+                                              per_act_token_quant=False,
                                               block_shape=None)
 
     def m_fused_moe(
@@ -364,6 +370,13 @@ def test_mixtral_moe(dtype: torch.dtype, padding: bool, use_rocm_aiter: bool,
 
         if dtype == torch.float32:
             pytest.skip("AITER ROCm test skip for float32")
+
+    monkeypatch.setenv('RANK', "0")
+    monkeypatch.setenv('LOCAL_RANK', "0")
+    monkeypatch.setenv('WORLD_SIZE', "1")
+    monkeypatch.setenv('MASTER_ADDR', 'localhost')
+    monkeypatch.setenv('MASTER_PORT', '12345')
+    init_distributed_environment()
 
     # Instantiate our and huggingface's MoE blocks
     vllm_config.compilation_config.static_forward_context = dict()

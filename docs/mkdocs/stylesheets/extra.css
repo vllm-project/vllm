@@ -39,6 +39,8 @@ body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .
 :root {
   --md-admonition-icon--announcement: url('data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16"><path d="M3.25 9a.75.75 0 0 1 .75.75c0 2.142.456 3.828.733 4.653a.122.122 0 0 0 .05.064.212.212 0 0 0 .117.033h1.31c.085 0 .18-.042.258-.152a.45.45 0 0 0 .075-.366A16.743 16.743 0 0 1 6 9.75a.75.75 0 0 1 1.5 0c0 1.588.25 2.926.494 3.85.293 1.113-.504 2.4-1.783 2.4H4.9c-.686 0-1.35-.41-1.589-1.12A16.4 16.4 0 0 1 2.5 9.75.75.75 0 0 1 3.25 9Z"></path><path d="M0 6a4 4 0 0 1 4-4h2.75a.75.75 0 0 1 .75.75v6.5a.75.75 0 0 1-.75.75H4a4 4 0 0 1-4-4Zm4-2.5a2.5 2.5 0 1 0 0 5h2v-5Z"></path><path d="M15.59.082A.75.75 0 0 1 16 .75v10.5a.75.75 0 0 1-1.189.608l-.002-.001h.001l-.014-.01a5.775 5.775 0 0 0-.422-.25 10.63 10.63 0 0 0-1.469-.64C11.576 10.484 9.536 10 6.75 10a.75.75 0 0 1 0-1.5c2.964 0 5.174.516 6.658 1.043.423.151.787.302 1.092.443V2.014c-.305.14-.669.292-1.092.443C11.924 2.984 9.713 3.5 6.75 3.5a.75.75 0 0 1 0-1.5c2.786 0 4.826-.484 6.155-.957.665-.236 1.154-.47 1.47-.64.144-.077.284-.161.421-.25l.014-.01a.75.75 0 0 1 .78-.061Z"></path></svg>');
   --md-admonition-icon--important: url('data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16"><path d="M4.47.22A.749.749 0 0 1 5 0h6c.199 0 .389.079.53.22l4.25 4.25c.141.14.22.331.22.53v6a.749.749 0 0 1-.22.53l-4.25 4.25A.749.749 0 0 1 11 16H5a.749.749 0 0 1-.53-.22L.22 11.53A.749.749 0 0 1 0 11V5c0-.199.079-.389.22-.53Zm.84 1.28L1.5 5.31v5.38l3.81 3.81h5.38l3.81-3.81V5.31L10.69 1.5ZM8 4a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 8 4Zm0 8a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>');
+  --md-admonition-icon--code: url('data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="m11.28 3.22 4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.275-.326.75.75 0 0 1 .215-.734L13.94 8l-3.72-3.72a.749.749 0 0 1 .326-1.275.75.75 0 0 1 .734.215m-6.56 0a.75.75 0 0 1 1.042.018.75.75 0 0 1 .018 1.042L2.06 8l3.72 3.72a.749.749 0 0 1-.326 1.275.75.75 0 0 1-.734-.215L.47 8.53a.75.75 0 0 1 0-1.06Z"/></svg>');
+  --md-admonition-icon--console: url('data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M0 2.75C0 1.784.784 1 1.75 1h12.5c.966 0 1.75.784 1.75 1.75v10.5A1.75 1.75 0 0 1 14.25 15H1.75A1.75 1.75 0 0 1 0 13.25Zm1.75-.25a.25.25 0 0 0-.25.25v10.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25V2.75a.25.25 0 0 0-.25-.25ZM7.25 8a.75.75 0 0 1-.22.53l-2.25 2.25a.749.749 0 0 1-1.275-.326.75.75 0 0 1 .215-.734L5.44 8 3.72 6.28a.749.749 0 0 1 .326-1.275.75.75 0 0 1 .734.215l2.25 2.25c.141.14.22.331.22.53m1.5 1.5h3a.75.75 0 0 1 0 1.5h-3a.75.75 0 0 1 0-1.5"/></svg>');
 }
 
 .md-typeset .admonition.announcement,
@@ -49,6 +51,14 @@ body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .
 .md-typeset details.important {
   border-color: rgb(239, 85, 82);
 }
+.md-typeset .admonition.code,
+.md-typeset details.code {
+  border-color: #64dd17
+}
+.md-typeset .admonition.console,
+.md-typeset details.console {
+  border-color: #64dd17
+}
 
 .md-typeset .announcement > .admonition-title,
 .md-typeset .announcement > summary {
@@ -57,6 +67,14 @@ body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .
 .md-typeset .important > .admonition-title,
 .md-typeset .important > summary {
   background-color: rgb(239, 85, 82, 0.1);
+}
+.md-typeset .code > .admonition-title,
+.md-typeset .code > summary {
+  background-color: #64dd171a;
+}
+.md-typeset .console > .admonition-title,
+.md-typeset .console > summary {
+  background-color: #64dd171a;
 }
 
 .md-typeset .announcement > .admonition-title::before,
@@ -70,6 +88,18 @@ body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .
   background-color: rgb(239, 85, 82);
   -webkit-mask-image: var(--md-admonition-icon--important);
           mask-image: var(--md-admonition-icon--important);
+}
+.md-typeset .code > .admonition-title::before,
+.md-typeset .code > summary::before {
+  background-color: #64dd17;
+  -webkit-mask-image: var(--md-admonition-icon--code);
+          mask-image: var(--md-admonition-icon--code);
+}
+.md-typeset .console > .admonition-title::before,
+.md-typeset .console > summary::before {
+  background-color: #64dd17;
+  -webkit-mask-image: var(--md-admonition-icon--console);
+          mask-image: var(--md-admonition-icon--console);
 }
 
 /* Make label fully visible on hover */
@@ -133,4 +163,23 @@ body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .
   height: 28px;
   opacity: 0.9;
   transform: translateY(2px);
+}
+
+/* For logo css */
+[data-md-color-scheme="default"] .logo-dark {
+  display: none;
+}
+
+[data-md-color-scheme="slate"] .logo-light {
+  display: none;
+}
+
+/* Outline for content tabs */
+.md-typeset .tabbed-set {
+  border: 0.075rem solid var(--md-default-fg-color);
+  border-radius: 0.2rem;
+}
+
+.md-typeset .tabbed-content {
+  padding: 0 0.6em;
 }
