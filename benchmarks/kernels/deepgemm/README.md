@@ -8,7 +8,7 @@ Currently this just includes dense GEMMs and only works on Hopper GPUs.
 
 You need to install vLLM in your usual fashion, then install DeepGEMM from source in its own directory:
 
-```
+```bash
 git clone --recursive https://github.com/deepseek-ai/DeepGEMM
 cd DeepGEMM
 python setup.py install
@@ -17,7 +17,7 @@ uv pip install -e .
 
 ## Usage
 
-```
+```console
 python benchmark_fp8_block_dense_gemm.py
 INFO 02-26 21:55:13 [__init__.py:207] Automatically detected platform cuda.
 ===== STARTING FP8 GEMM BENCHMARK =====
