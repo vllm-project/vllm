@@ -266,17 +266,18 @@ class MsgpackDecoder:
             if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
                 raise TypeError("VLLM_ALLOW_INSECURE_SERIALIZATION must "
                                 "be set to use custom utility result types")
-            if isinstance(result_type, list):
+            assert isinstance(result_type, list)
+            if len(result_type) == 2 and isinstance(result_type[0], str):
+                result = self._convert_result(result_type, result)
+            else:
                 assert isinstance(result, list)
                 result = [
                     self._convert_result(rt, r)
                     for rt, r in zip(result_type, result)
                 ]
-            else:
-                result = self._convert_result(result_type, result)
         return UtilityResult(result)
 
-    def _convert_result(self, result_type: tuple[str, str], result: Any):
+    def _convert_result(self, result_type: Sequence[str], result: Any):
         mod_name, name = result_type
         mod = importlib.import_module(mod_name)
         result_type = getattr(mod, name)
