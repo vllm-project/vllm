@@ -49,7 +49,7 @@ steps:
     depends_on: block-build-flashinfer-wheel
     id: build-upload-flashinfer-wheel
     agents:
-      queue: cpu_queue_postmerge
+      queue: gpu_1_queue
     commands:
       - "bash .buildkite/scripts/build-upload-flashinfer-wheel.sh 12.8.1"
     env:
