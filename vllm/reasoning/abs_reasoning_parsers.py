@@ -48,8 +48,8 @@ class ReasoningParser:
         """
         Check if the reasoning content ends in the input_ids.
 
-        It is used in structured engines like `xgrammar` to check if the
-        reasoning content ends in the model output.
+        It is used in structured engines like `xgrammar` or stop checks 
+        to check if the reasoning content ends in the model output.
 
         Parameters:
         input_ids: list[int]

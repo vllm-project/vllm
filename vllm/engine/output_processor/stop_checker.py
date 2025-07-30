@@ -4,6 +4,7 @@
 from typing import Callable, List, Optional, Tuple
 
 from vllm.lora.request import LoRARequest
+from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Sequence, SequenceStatus
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -16,11 +17,16 @@ class StopChecker:
     emitted, or if we have exceeded the max model len.
     """
 
-    def __init__(self, max_model_len: int,
-                 get_tokenizer_for_seq: Callable[[Sequence], AnyTokenizer]):
+    def __init__(
+        self,
+        max_model_len: int,
+        get_tokenizer_for_seq: Callable[[Sequence], AnyTokenizer],
+        reasoner: Optional[ReasoningParser] = None,
+    ):
         # Do not use it directly, but use `self._get_max_model_len`.
         self._max_model_len = max_model_len
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
+        self.reasoner = reasoner
 
     def _get_max_model_len(self, lora_req: Optional[LoRARequest]):
         if lora_req and lora_req.long_lora_max_len:
@@ -44,6 +50,10 @@ class StopChecker:
         # Check if the minimum number of tokens has been generated yet;
         # skip the stop string/token checks if not
         if seq.get_output_len() < sampling_params.min_tokens:
+            return
+
+        if self.reasoner is not None and \
+            not self.reasoner.is_reasoning_end(seq.get_token_ids()):
             return
 
         # Check if the sequence has generated the EOS token.
