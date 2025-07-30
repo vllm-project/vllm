@@ -97,7 +97,7 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-# Acknowledgement
+## Acknowledgement
 
 Special thanks to open-source low precision libraries such as AutoGPTQ, AutoAWQ, GPTQModel, Triton, Marlin, and
 ExLLaMAV2 for providing low-precision CUDA kernels, which are leveraged in AutoRound.

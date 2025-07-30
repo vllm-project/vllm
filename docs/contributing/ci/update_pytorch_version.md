@@ -106,6 +106,7 @@ releases (which would take too much time), they can be built from
 source to unblock the update process.
 
 ### FlashInfer
+
 Here is how to build and install it from source with `torch2.7.0+cu128` in vLLM [Dockerfile](https://github.com/vllm-project/vllm/blob/27bebcd89792d5c4b08af7a65095759526f2f9e1/docker/Dockerfile#L259-L271):
 
 ```bash
@@ -121,6 +122,7 @@ public location for immediate installation, such as [this FlashInfer wheel link]
 team if you want to get the package published there.
 
 ### xFormers
+
 Similar to FlashInfer, here is how to build and install xFormers from source:
 
 ```bash
@@ -138,7 +140,7 @@ uv pip install --system \
 
 ### causal-conv1d
 
-```
+```bash
 uv pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
 ```
 
