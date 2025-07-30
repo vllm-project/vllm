@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class LMCacheConnectorV1(KVConnectorBase):
+class LMCacheConnector(KVConnectorBase):
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)

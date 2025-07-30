@@ -82,9 +82,9 @@ KVConnectorFactory.register_connector(
     "P2pNcclConnector")
 
 KVConnectorFactory.register_connector(
-    "LMCacheConnectorV1",
+    "LMCacheConnector",
     "vllm.distributed.kv_transfer.kv_connector.lmcache_connector",
-    "LMCacheConnectorV1")
+    "LMCacheConnector")
 
 KVConnectorFactory.register_connector(
     "NixlConnector",
