@@ -44,6 +44,7 @@ serving_column_mapping = {
     "test_name": "Test name",
     "gpu_type": "GPU",
     "completed": "# of req.",
+    "max_concurrency": "# of max concurrency.",
     "request_throughput": "Tput (req/s)",
     "total_token_throughput": "Total Token Tput (tok/s)",
     "output_throughput": "Output Tput (tok/s)",
