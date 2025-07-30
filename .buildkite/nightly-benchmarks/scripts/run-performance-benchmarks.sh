@@ -33,7 +33,7 @@ check_gpus() {
 
 check_cpus() {
   # check the number of CPUs and NUMA Node and GPU type.
-  declare -g numa_count=$(python3 -c  "from numa import info;numa_size = info.get_num_configured_nodes(); print(numa_size)")
+  declare -g numa_count=$(lscpu | grep "NUMA node(s):" | awk '{print $3}')
   if [[ $numa_count -gt 0 ]]; then
     echo "NUMA found."
     echo $numa_count
