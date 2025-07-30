@@ -192,7 +192,6 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             self.req_id_to_seq_id: Dict[str, int] = {}
             self.empty_slots = list(range(self.scheduler_config.max_num_seqs))
             self.seq_groups_to_batch_slot: Dict[int, int] = {}
-            self.prev_seq_groups_list: Optional[List[int]] = None
             if self.async_torch_proc:
                 self.cached_read_events: List[Any] = [
                 ]  # Only used for multi-step execution
@@ -430,17 +429,14 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                                                    dim=1)
 
         if self.dp_kv_cache:
+            prev_seq_groups_list = list(self.seq_groups_to_batch_slot.keys())
 
-            if self.prev_seq_groups_list is None:
-                self.prev_seq_groups_list = seq_groups_list
-
-            # check for pe-empted requests
-            if seq_groups_list != self.prev_seq_groups_list and not is_prompt:
+            # check for preempted requests
+            if seq_groups_list != prev_seq_groups_list and not is_prompt:
                 finished_requests_seq_ids_current = [
-                    seq_id for seq_id in self.prev_seq_groups_list
+                    seq_id for seq_id in prev_seq_groups_list
                     if seq_id not in seq_groups_list
                 ]
-                self.prev_seq_groups_list = seq_groups_list
             else:
                 finished_requests_seq_ids_current = []
 
@@ -448,9 +444,6 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             for seq_id in finished_requests_seq_ids:
                 if seq_id not in finished_requests_seq_ids_current:
                     finished_requests_seq_ids_current.append(seq_id)
-                    # remove seq_id from prev_seq_groups_list
-                    if seq_id in self.prev_seq_groups_list:
-                        self.prev_seq_groups_list.remove(seq_id)
 
             # update the empty slots
             for req in finished_requests_seq_ids_current:
