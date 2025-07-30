@@ -50,6 +50,7 @@ Here is an example of how to enable FP8 quantization:
     ```
 
 The `kv_cache_dtype` argument specifies the data type for KV cache storage:
+
 - `"auto"`: Uses the model's default "unquantized" data type
 - `"fp8"` or `"fp8_e4m3"`: Supported on CUDA 11.8+ and ROCm (AMD GPU)
 - `"fp8_e5m2"`: Supported on CUDA 11.8+
