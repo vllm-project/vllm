@@ -17,7 +17,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
-from vllm.utils import has_deep_gemm
+from vllm.utils import has_deep_gemm, run_once
 from vllm.utils.deep_gemm import m_grouped_fp8_gemm_nt_contiguous
 
 logger = init_logger(__name__)
@@ -80,6 +80,74 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
         return False
 
     return True
+
+
+@run_once
+def warmup_deepgemm_kernels(w1: torch.Tensor, w2: torch.Tensor,
+                            w1_scale: torch.Tensor, w2_scale: torch.Tensor):
+
+    MAX_TOKENS = 65536
+    num_experts = w1.size(0)
+    assert w2.size(0) == num_experts
+    #expert_ids = torch.randint(low=0,
+    #                           high=num_experts,
+    #                           size=(MAX_TOKENS, ),
+    #                           dtype=torch.int32)
+
+    from tqdm import tqdm
+
+    def warmup(w: torch.Tensor, w_scale: torch.Tensor):
+        _, n, k = w.size()
+        #a1q = torch.zeros((MAX_TOKENS, k),
+        #  device=w.device).to(torch.float8_e4m3fn)
+        #out = torch.zeros((MAX_TOKENS, n),
+        #  device=w.device, dtype=torch.bfloat16)
+
+        pbar = tqdm(total=MAX_TOKENS // 128, desc="DeepGemm warmup")
+        num_tokens = MAX_TOKENS
+        while num_tokens > 0:
+            #a1q_ = a1q[:num_tokens, ]
+            #a1q_scales_ = a1q_scales[:num_tokens, ]
+            #out_ = out[:num_tokens, ]
+            #expert_ids_ = expert_ids[:num_tokens, ]
+            print(f"num tokens {num_tokens}")
+
+            a1q_ = torch.zeros((num_tokens, k),
+                               device=w.device).to(torch.float8_e4m3fn)
+            out_ = torch.zeros((num_tokens, n),
+                               device=w.device,
+                               dtype=torch.bfloat16)
+            a1q_scales_ = torch.ones((num_tokens, k // 128),
+                                     device=w.device,
+                                     dtype=torch.float32)
+            ##expert_ids_ = torch.randint(low = 0, high = num_experts,
+            # size=(num_tokens, ), dtype=torch.int32)
+            expert_ids_ = torch.zeros((num_tokens, ),
+                                      device=w.device,
+                                      dtype=torch.int32)
+
+            #a1q_scales_ = torch.zeros(k // 128, num_tokens,
+            # device='cuda', dtype=torch.float32)
+            #a1q_scales_ = torch.transpose(a1q_scales_, 0, 1)
+
+            print(f"a1q : {a1q_.shape} |  a1q_scales_ {a1q_scales_.shape} "
+                  f"{a1q_scales_.stride()} | w {w.shape} | "
+                  f"w_scale {w_scale.shape} | out_ {out_.shape} "
+                  f"| expert_ids_ {expert_ids_.shape}")
+
+            m_grouped_fp8_gemm_nt_contiguous((a1q_, a1q_scales_), (w, w_scale),
+                                             out_, expert_ids_)
+
+            #m_grouped_fp8_gemm_nt_contiguous((a1q[:num_tokens, i],
+            #                                  a1q_scales[:num_tokens, ]),
+            #                                 (w, w_scale),
+            #                                 out[:num_tokens, ],
+            #                                 expert_ids[:num_tokens, ])
+            pbar.update(1)
+            num_tokens = num_tokens - 128
+
+    warmup(w1, w1_scale)
+    warmup(w2, w2_scale)
 
 
 class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -156,6 +224,10 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         assert self.block_shape is not None
         assert a1q_scale is not None
+        assert w1_scale is not None
+        assert w2_scale is not None
+
+        warmup_deepgemm_kernels(w1, w2, w1_scale, w2_scale)
 
         a1q = hidden_states
         _, N, K = w1.size()
