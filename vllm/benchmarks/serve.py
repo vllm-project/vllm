@@ -39,7 +39,7 @@ from vllm.benchmarks.endpoint_request_func import (ASYNC_REQUEST_FUNCS,
                                                    RequestFuncInput,
                                                    RequestFuncOutput)
 from vllm.benchmarks.utils import (convert_to_pytorch_benchmark_format,
-                                   write_to_json, maybe_increase_ulimit)
+                                   maybe_increase_ulimit, write_to_json)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
