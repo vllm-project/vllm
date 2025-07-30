@@ -449,13 +449,15 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                 sliding_window=self.config.interleaved_sliding_window)
 
         # Set correct attn and init on "meta" to delay allocating GPU tensors
+        # TODO: @raushan, use the public `model.set_attn_implementation()`
+        # method once its checks are fixed in Transformers.
+        self.text_config._attn_implementation = "vllm"
         with init_on_device_without_buffers("meta"), config_override:
             self.model: PreTrainedModel = AutoModel.from_config(
                 self.config,
                 torch_dtype=self.model_config.dtype,
                 trust_remote_code=self.model_config.trust_remote_code,
             )
-            self.model.set_attn_implementation("vllm")
 
         self.pipeline_parallel()
         self.tensor_parallel()
