@@ -1,7 +1,7 @@
-# vLLM Paged Attention
+# Paged Attention
 
 !!! warning
-    This document is being kept in the vLLM documentation for historical purposes.
+    This is a historical document based on the [original paper for vLLM](https://arxiv.org/abs/2309.06180).
     It no longer describes the code used in vLLM today.
 
 Currently, vLLM utilizes its own implementation of a multi-head query
@@ -499,3 +499,14 @@ for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
 Finally, we need to iterate over different assigned head positions
 and write out the corresponding accumulated result based on the
 `out_ptr`.
+
+## Citation
+
+```bibtex
+@inproceedings{kwon2023efficient,
+  title={Efficient Memory Management for Large Language Model Serving with PagedAttention},
+  author={Woosuk Kwon and Zhuohan Li and Siyuan Zhuang and Ying Sheng and Lianmin Zheng and Cody Hao Yu and Joseph E. Gonzalez and Hao Zhang and Ion Stoica},
+  booktitle={Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles},
+  year={2023}
+}
+```
