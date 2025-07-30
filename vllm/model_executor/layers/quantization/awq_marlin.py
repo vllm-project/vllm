@@ -46,7 +46,7 @@ def get_moe_quant_method(
 ):
 
     if isinstance(layer, FusedMoE) and is_layer_skipped_awq(
-                        prefix, getattr(config, "modules_to_not_convert", [])):
+            prefix, getattr(config, "modules_to_not_convert", [])):
         return UnquantizedFusedMoEMethod(layer.moe_config)
     return moe_method_cls(config)
 
@@ -162,7 +162,7 @@ class AWQMarlinConfig(QuantizationConfig):
                     "Falling back to Moe WNA16 kernels.")
                 return MoeWNA16Config.from_config(
                     self.full_config).get_quant_method(layer, prefix)
-            return get_moe_quant_method(self, layer, prefix,AWQMoEMethod)
+            return get_moe_quant_method(self, layer, prefix, AWQMoEMethod)
         return None
 
     @classmethod
