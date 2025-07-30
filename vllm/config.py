@@ -3628,16 +3628,22 @@ def _get_and_verify_max_len(
                 f"User-specified max_model_len ({max_model_len}) is greater "
                 f"than the derived max_model_len ({max_len_key}="
                 f"{derived_max_model_len} or model_max_length="
-                f"{model_max_length} in model's config.json). This may lead "
-                "to incorrect model outputs or CUDA errors.")
+                f"{model_max_length} in model's config.json).")
+
             if envs.VLLM_ALLOW_LONG_MAX_MODEL_LEN:
-                logger.warning(
-                    "%s Make sure the value is correct and within the "
-                    "model context size.", msg)
+                msg += ("\nPlease using VLLM_ALLOW_LONG_MAX_MODEL_LEN "
+                        "with great caution.\n"
+                        "  - If the model uses rope position encoding, "
+                        "positions exceeding derived_max_model_len "
+                        "lead to nan.\n"
+                        "  - If the model uses absolute position encoding, "
+                        "positions exceeding derived_max_model_len will "
+                        "cause a CUDA array out-of-bounds error.")
+                logger.warning_once(msg)
             else:
-                raise ValueError(
-                    f"{msg} To allow overriding this maximum, set "
-                    "the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN=1")
+                msg += (" This may lead to incorrect model outputs "
+                        "or CUDA errors.")
+                raise ValueError(msg)
     return int(max_model_len)
 
 
