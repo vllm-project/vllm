@@ -477,6 +477,6 @@ class SequenceParallelismPass(VllmInductorPass):
         self.begin()
         self.dump_graph(graph, "before_sequence_parallelism_pass")
         count = self.patterns.apply(graph)
-        logger.debug("Replaced %s patterns", count)
+        logger.debug("Replaced %s patterns with sequence parallelism", count)
         self.dump_graph(graph, "after_sequence_parallelism_pass")
         self.end_and_log()
