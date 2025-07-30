@@ -203,7 +203,7 @@ else:
     MyModel = MyOldModel
 ```
 
-    This way, the model can work with both old and new versions of vLLM.
+This way, the model can work with both old and new versions of vLLM.
 
 3\. **Sharding and Quantization at Initialization**: Certain features require
 changing the model weights. For example, tensor parallelism needs to shard the
