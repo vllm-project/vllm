@@ -2,17 +2,7 @@
 
 ## Ray observability
 
-Debugging a distributed system can be challenging due to the large scale and complexity. Ray provides a suite of tools to help monitor, debug, and optimize Ray applications and clusters:
-
-- Ray Dashboard – real-time cluster and application metrics, centralized logs, and granular observability into individual tasks, actors, nodes, and more.
-- Ray Tracing (OpenTelemetry) – distributed execution traces for performance bottleneck analysis
-- Ray Distributed Debugger – step-through execution of remote tasks with breakpoints, and port-mortem debugging of unhandled exceptions.
-- Ray State CLI & State API – programmatic access to jobs, actors, tasks, objects, and node state
-- Ray Logs CLI – programmatic access to Ray logs at the task, actor, cluster, node, job, or worker levels.
-- Ray Metrics (Prometheus & Grafana) – scrapeable metrics that can be integrated with existing monitoring systems.
-- Distributed Profiling – diagnose performance bottlenecks with integrated tools for analyzing CPU, memory, and GPU usage across a cluster.
-
-For more information about Ray observability, visit the [official Ray observability docs](https://docs.ray.io/en/latest/ray-observability/index.html). For more information about debugging Ray applications, visit the [Ray Debugging Guide](https://docs.ray.io/en/latest/ray-observability/user-guides/debug-apps/index.html). For information about troubleshooting Kubernetes clusters, see the
+Debugging a distributed system can be challenging due to the large scale and complexity. Ray provides a suite of tools to help monitor, debug, and optimize Ray applications and clusters. For more information about Ray observability, visit the [official Ray observability docs](https://docs.ray.io/en/latest/ray-observability/index.html). For more information about debugging Ray applications, visit the [Ray Debugging Guide](https://docs.ray.io/en/latest/ray-observability/user-guides/debug-apps/index.html). For information about troubleshooting Kubernetes clusters, see the
 [official KubeRay troubleshooting guide](https://docs.ray.io/en/latest/serve/advanced-guides/multi-node-gpu-troubleshooting.html).
 
 ## Optimizing network communication for tensor parallelism
