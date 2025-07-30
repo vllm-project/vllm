@@ -19,13 +19,16 @@ RTOL = 0.08
 def launch_lm_eval(eval_config, tp_size):
     trust_remote_code = eval_config.get("trust_remote_code", False)
     max_model_len = eval_config.get("max_model_len", 4096)
+    gpu_memory_utilization = eval_config.get("gpu_memory_utilization", 1.0)
+    batch_size = eval_config.get("batch_size", "auto")
     model_args = (
         f"pretrained={eval_config['model_name']},"
         f"tensor_parallel_size={tp_size},"
         f"enforce_eager=true,"
         f"add_bos_token=true,"
         f"trust_remote_code={trust_remote_code},"
-        f"max_model_len={max_model_len}"
+        f"max_model_len={max_model_len},"
+        f"gpu_memory_utilization={gpu_memory_utilization}"
     )
     results = lm_eval.simple_evaluate(
         model=eval_config["backend"],
@@ -33,11 +36,11 @@ def launch_lm_eval(eval_config, tp_size):
         tasks=[task["name"] for task in eval_config["tasks"]],
         num_fewshot=eval_config["num_fewshot"],
         limit=eval_config["limit"],
-        batch_size="auto",
         # TODO(yeq): using chat template w/ fewshot_as_multiturn is supposed help
         # text models. however, this is regressing measured strict-match for
         # existing text models in CI, so only apply it for mm.
         apply_chat_template=eval_config["backend"] == "vllm-vlm",
+        batch_size=batch_size,
     )
     return results
 
