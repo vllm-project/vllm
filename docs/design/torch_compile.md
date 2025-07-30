@@ -1,4 +1,4 @@
-# vLLM's `torch.compile` integration
+# `torch.compile` integration
 
 In vLLM's V1 architecture, `torch.compile` is enabled by default and is a critical part of the framework. This document gives a simple walk-through example to show how to understand the `torch.compile` usage.
 
