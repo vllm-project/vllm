@@ -117,11 +117,12 @@ class FusedMoEModularKernel:
         # execute fused_experts
         fe_out = self.fused_experts.apply(Aq, A_scale, workspace13, workspace2, ...)
 
-        # war_impl is an object of type TopKWeightAndReduceNoOp if the fused_experts implementations performs the TopK Weight Application and Reduction.
+        # war_impl is an object of type TopKWeightAndReduceNoOp if the fused_experts implementations
+        # performs the TopK Weight Application and Reduction.
         war_impl = self.fused_experts.finalize_weight_and_reduce_impl()
 
         output = self.prepare_finalize.finalize(fe_out, war_impl,...)
-                                
+
         return output
 ```
 
