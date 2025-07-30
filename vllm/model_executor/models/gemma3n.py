@@ -793,6 +793,7 @@ class Gemma3nForConditionalGeneration(nn.Module):
         del lora_config  # Unused.
         super().__init__()
         self.config = config
+        self.cache_config = vllm_config.cache_config
         self.model = Gemma3nModel(vllm_config=vllm_config,
                                   prefix=maybe_prefix(prefix, "model"))
         self.logits_processor = LogitsProcessor(
