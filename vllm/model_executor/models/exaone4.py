@@ -26,6 +26,7 @@ from typing import Any, Optional, Union
 
 import torch
 from torch import nn
+from transformers import PretrainedConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -45,7 +46,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.exaone4 import Exaone4Config
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
@@ -96,7 +96,7 @@ class Exaone4Attention(nn.Module):
 
     def __init__(
         self,
-        config: Exaone4Config,
+        config: PretrainedConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -224,7 +224,7 @@ class Exaone4DecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: Exaone4Config,
+        config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",

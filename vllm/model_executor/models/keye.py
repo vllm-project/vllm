@@ -980,9 +980,6 @@ class KeyeMultiModalDataParser(MultiModalDataParser):
 
 class KeyeProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_config(self):
-        return self.ctx.get_hf_config(PretrainedConfig)
-
     def get_hf_processor(
         self,
         *,
