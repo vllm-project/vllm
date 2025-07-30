@@ -387,9 +387,9 @@ def use_flashinfer_prefill() -> bool:
 
 
 def use_cudnn_prefill() -> bool:
-    return (envs.VLLM_USE_CUDNN_PREFILL and flashinfer_available
-            and has_nvidia_artifactory()
-            and current_platform.is_device_capability(100))
+    return (flashinfer_available and envs.VLLM_USE_CUDNN_PREFILL
+            and current_platform.is_device_capability(100)
+            and has_nvidia_artifactory())
 
 
 # Currently 394MB, this can be tuned based on GEMM sizes used.
