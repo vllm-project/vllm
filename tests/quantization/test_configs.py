@@ -52,11 +52,14 @@ MODEL_ARG_EXPTYPES = [
     ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "gptq", "ERROR"),
 ]
 
+
 @pytest.mark.parametrize("model_arg_exptype", MODEL_ARG_EXPTYPES)
 def test_auto_gptq(model_arg_exptype: tuple[str, None, str]) -> None:
     model_path, quantization_arg, expected_type = model_arg_exptype
-    
-    if current_platform.is_rocm() and expected_type in ("marlin", "gptq_marlin", "awq_marlin"):
+
+    if current_platform.is_rocm() and expected_type in ("marlin",
+                                                        "gptq_marlin",
+                                                        "awq_marlin"):
         pytest.skip("Marlin kernels are not supported on ROCm")
 
     try:

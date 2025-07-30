@@ -16,7 +16,6 @@ from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_dynamic_override)
 from vllm.platforms import current_platform
 
-
 PROMPT = "On the surface of Mars, we found"
 
 # The first layer is quantized using bits=4, group_size=128
@@ -32,7 +31,7 @@ MODEL_QUANT = [
 if current_platform.is_rocm():
     MODEL_QUANT = [
         ("ModelCloud/Qwen1.5-1.8B-Chat-GPTQ-4bits-dynamic-cfg-with-lm_head-symFalse",
-        False),
+         False),
     ]
 
 

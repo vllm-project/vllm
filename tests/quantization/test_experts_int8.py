@@ -7,9 +7,8 @@ doesn't test correctness
 """
 import pytest
 
-from vllm.platforms import current_platform
-
 from tests.quantization.utils import is_quant_method_supported
+from vllm.platforms import current_platform
 
 MODELS = ["ai21labs/Jamba-tiny-random", "pfnet/plamo-2-1b"]
 

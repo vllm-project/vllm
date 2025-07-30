@@ -25,6 +25,7 @@ if current_platform.is_rocm():
         "nm-testing/Qwen2-0.5B-Instruct-FP8-SkipQKV",
     ]
 
+
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="FP8 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_id", MODELS)

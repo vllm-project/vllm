@@ -14,6 +14,8 @@ from vllm.model_executor.layers.quantization.ptpc_fp8 import (
 from vllm.platforms import current_platform
 
 from ..utils import create_new_process_for_each_test
+
+
 @pytest.mark.skipif(not is_quant_method_supported("ptpc_fp8"),
                     reason="PTPC FP8 is not supported on this GPU type.")
 @pytest.mark.skipif(not current_platform.is_rocm(),
@@ -21,7 +23,8 @@ from ..utils import create_new_process_for_each_test
 @pytest.mark.parametrize("dtype", ["auto", "bfloat16", "float16"])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
 @create_new_process_for_each_test()
-def test_ptpc_fp8_rocm(vllm_runner, monkeypatch, dtype: str, kv_cache_dtype: str) -> None:
+def test_ptpc_fp8_rocm(vllm_runner, monkeypatch, dtype: str,
+                       kv_cache_dtype: str) -> None:
 
     monkeypatch.setenv('VLLM_ENABLE_V1_MULTIPROCESSING', '0')
 

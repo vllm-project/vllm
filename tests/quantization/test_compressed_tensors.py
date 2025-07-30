@@ -660,7 +660,8 @@ def test_compressed_tensors_2of4_sparse_compressed(vllm_runner, args_2of4):
     [("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16",
       CompressedTensorsW4A16Fp4),
      ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4", CompressedTensorsW4A4Fp4)])
-@pytest.mark.skipif(current_platform.is_rocm(), reason="nvfp4 is not supported on ROCm")
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="nvfp4 is not supported on ROCm")
 def test_compressed_tensors_nvfp4(vllm_runner, args):
     model, scheme = args
     with vllm_runner(model, enforce_eager=True) as llm:
