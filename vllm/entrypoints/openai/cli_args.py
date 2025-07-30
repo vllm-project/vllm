@@ -194,7 +194,9 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
 
         # Special case: Tool call parser shows built-in options.
         valid_tool_parsers = list(ToolParserManager.tool_parsers.keys())
-        frontend_kwargs["tool_call_parser"]["choices"] = valid_tool_parsers
+        parsers_str = ",".join(valid_tool_parsers)
+        frontend_kwargs["tool_call_parser"]["metavar"] = (
+            f"{{{parsers_str}}} or name registered in --tool-parser-plugin")
 
         frontend_group = parser.add_argument_group(
             title="Frontend",
