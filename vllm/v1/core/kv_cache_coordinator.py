@@ -130,10 +130,10 @@ class KVCacheCoordinator(ABC):
 
         Args:
             request_id: The request ID.
-            block_hashes: The block hashes of the request.
+            num_running_requests: The number of requests in the RUNNING state.
 
         Returns:
-            The number of common prefix blocks.
+            list[int]: The number of common prefix blocks.
         """
         num_blocks_per_group = [
             manager.get_num_common_prefix_blocks(request_id,
