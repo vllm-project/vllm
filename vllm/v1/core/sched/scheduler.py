@@ -151,17 +151,11 @@ class Scheduler(SchedulerInterface):
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
 
-        enable_caching = self.cache_config.enable_prefix_caching or False
-        if self.is_encoder_decoder:
-            # prefix caching for encoder-decoder models is not currently
-            # supported
-            enable_caching = False
-
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
-            enable_caching=enable_caching,
+            enable_caching=self.cache_config.enable_prefix_caching,
             caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,

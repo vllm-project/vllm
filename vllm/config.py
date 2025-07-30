@@ -1897,6 +1897,13 @@ class CacheConfig:
         elif cpu_memory_usage > 0.4 * total_cpu_memory:
             logger.warning("Possibly too large swap space. %s", msg)
 
+    def verify_with_model_config(self, model_config: "ModelConfig") -> None:
+        if model_config.is_encoder_decoder:
+            self.enable_prefix_caching = False
+            logger.warning(
+                "Prefix caching is not supported for encoder-decoder "
+                "models. Disabling it.")
+
 
 @config
 @dataclass
