@@ -226,6 +226,12 @@ class LLMEngine:
             use_cached_outputs,
         )
 
+        svc = self.model_config.signature_verification_config
+        if svc.signature_verification_needed():
+            raise Exception("Signature verification was requested but was not "
+                            "done since a code path was taken that is not yet "
+                            "instrumented for signature verification.")
+
         self.log_stats = log_stats
         self.use_cached_outputs = use_cached_outputs
 
