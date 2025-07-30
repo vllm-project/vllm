@@ -84,70 +84,57 @@ def _valid_deep_gemm(hidden_states: torch.Tensor, w1: torch.Tensor,
 
 @run_once
 def warmup_deepgemm_kernels(w1: torch.Tensor, w2: torch.Tensor,
-                            w1_scale: torch.Tensor, w2_scale: torch.Tensor):
-
-    MAX_TOKENS = 65536
-    num_experts = w1.size(0)
-    assert w2.size(0) == num_experts
-    #expert_ids = torch.randint(low=0,
-    #                           high=num_experts,
-    #                           size=(MAX_TOKENS, ),
-    #                           dtype=torch.int32)
+                            w1_scale: torch.Tensor, w2_scale: torch.Tensor,
+                            num_topk: int):
+    """
+    DeepGemm JITs the grouped-gemm kernels. The JIT'ing happens based on the
+    input tensor shapes. In this function, we construct all possible input
+    tensor shapes so all the kernels are JIT'ed and cached.
+    Note that this warmup is expected to happen during the model profile
+    call and not during actual model inference.
+    """
 
     from tqdm import tqdm
 
-    def warmup(w: torch.Tensor, w_scale: torch.Tensor):
+    import vllm.envs as env
+
+    assert w1.size(0) == w2.size(0), (
+        "w1 and w2 must have the same number of experts")
+
+    block_m = deep_gemm_block_shape()[0]
+    num_experts = w1.size(0)
+    device = w1.device
+
+    # This is the maximum GroupedGemm M size that we expect to run
+    # the grouped_gemm with.
+    MAX_M = compute_aligned_M(env.VLLM_FUSED_MOE_CHUNK_SIZE,
+                              num_topk,
+                              num_experts,
+                              deep_gemm_block_shape()[0],
+                              expert_tokens_meta=None)
+    expert_ids = torch.zeros((MAX_M, ), device=device, dtype=torch.int32)
+
+    def _warmup(w: torch.Tensor, w_scale: torch.Tensor):
+
         _, n, k = w.size()
-        #a1q = torch.zeros((MAX_TOKENS, k),
-        #  device=w.device).to(torch.float8_e4m3fn)
-        #out = torch.zeros((MAX_TOKENS, n),
-        #  device=w.device, dtype=torch.bfloat16)
+        a1q = torch.empty((MAX_M, k), device=device).to(torch.float8_e4m3fn)
+        a1q_scales = torch.empty((MAX_M, k // 128),
+                                 device=device,
+                                 dtype=torch.float32)
+        out = torch.empty((MAX_M, n), device=device, dtype=torch.bfloat16)
 
-        pbar = tqdm(total=MAX_TOKENS // 128, desc="DeepGemm warmup")
-        num_tokens = MAX_TOKENS
+        pbar = tqdm(total=MAX_M // block_m,
+                    desc=f"DeepGemm warmup (MAX_M={MAX_M})")
+        num_tokens = MAX_M
         while num_tokens > 0:
-            #a1q_ = a1q[:num_tokens, ]
-            #a1q_scales_ = a1q_scales[:num_tokens, ]
-            #out_ = out[:num_tokens, ]
-            #expert_ids_ = expert_ids[:num_tokens, ]
-            print(f"num tokens {num_tokens}")
-
-            a1q_ = torch.zeros((num_tokens, k),
-                               device=w.device).to(torch.float8_e4m3fn)
-            out_ = torch.zeros((num_tokens, n),
-                               device=w.device,
-                               dtype=torch.bfloat16)
-            a1q_scales_ = torch.ones((num_tokens, k // 128),
-                                     device=w.device,
-                                     dtype=torch.float32)
-            ##expert_ids_ = torch.randint(low = 0, high = num_experts,
-            # size=(num_tokens, ), dtype=torch.int32)
-            expert_ids_ = torch.zeros((num_tokens, ),
-                                      device=w.device,
-                                      dtype=torch.int32)
-
-            #a1q_scales_ = torch.zeros(k // 128, num_tokens,
-            # device='cuda', dtype=torch.float32)
-            #a1q_scales_ = torch.transpose(a1q_scales_, 0, 1)
-
-            print(f"a1q : {a1q_.shape} |  a1q_scales_ {a1q_scales_.shape} "
-                  f"{a1q_scales_.stride()} | w {w.shape} | "
-                  f"w_scale {w_scale.shape} | out_ {out_.shape} "
-                  f"| expert_ids_ {expert_ids_.shape}")
-
-            m_grouped_fp8_gemm_nt_contiguous((a1q_, a1q_scales_), (w, w_scale),
-                                             out_, expert_ids_)
-
-            #m_grouped_fp8_gemm_nt_contiguous((a1q[:num_tokens, i],
-            #                                  a1q_scales[:num_tokens, ]),
-            #                                 (w, w_scale),
-            #                                 out[:num_tokens, ],
-            #                                 expert_ids[:num_tokens, ])
+            m_grouped_fp8_gemm_nt_contiguous(
+                (a1q[:num_tokens], a1q_scales[:num_tokens]), (w, w_scale),
+                out[:num_tokens], expert_ids[:num_tokens])
             pbar.update(1)
-            num_tokens = num_tokens - 128
+            num_tokens = num_tokens - block_m
 
-    warmup(w1, w1_scale)
-    warmup(w2, w2_scale)
+    _warmup(w1, w1_scale)
+    _warmup(w2, w2_scale)
 
 
 class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -227,7 +214,16 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert w1_scale is not None
         assert w2_scale is not None
 
-        warmup_deepgemm_kernels(w1, w2, w1_scale, w2_scale)
+        # DeepGemm JITs the grouped-gemm kernels. We don't want the JIT'ing
+        # to happen during actual model-inference. The `warmup_deepgemm_kernels`
+        # function is a `run_once` decorated that executes during the model
+        # profile run. This warmup is should create all the required JITs for
+        # this model.
+        warmup_deepgemm_kernels(w1,
+                                w2,
+                                w1_scale,
+                                w2_scale,
+                                num_topk=topk_ids.size(1))
 
         a1q = hidden_states
         _, N, K = w1.size()
