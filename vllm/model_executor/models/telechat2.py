@@ -123,6 +123,18 @@ class TeleChat2ForCausalLM(LlamaForCausalLM):
         },
     )
 
+    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+
+        vllm_config.model_config.hf_config.attribute_map = {
+            "num_hidden_layers": "n_layer",
+            "num_attention_heads": "n_head",
+            "intermediate_size": "ffn_hidden_size",
+            "rms_norm_eps": "layer_norm_epsilon"
+        }
+        vllm_config.model_config.hf_config.hidden_act = "silu"
+
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
     def _init_model(self,
                     vllm_config: VllmConfig,
                     prefix: str = "",
