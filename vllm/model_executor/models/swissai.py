@@ -21,12 +21,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only SwissAI model compatible with HuggingFace weights."""
+"""Inference-only Apertus model compatible with HuggingFace weights."""
 from typing import Any, Dict, Iterable, Optional, Set, Tuple, Type, Union
 
 import torch
 from torch import nn
-from transformers import SwissAIConfig
+from transformers import ApertusConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -55,7 +55,7 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     maybe_prefix)
 
 
-class SwissAIMLP(nn.Module):
+class ApertusMLP(nn.Module):
 
     def __init__(
         self,
@@ -93,10 +93,10 @@ class SwissAIMLP(nn.Module):
         return x
 
 
-class SwissAIAttention(nn.Module):
+class ApertusAttention(nn.Module):
 
     def __init__(self,
-                 config: SwissAIConfig,
+                 config: ApertusConfig,
                  hidden_size: int,
                  num_heads: int,
                  num_kv_heads: int,
@@ -157,7 +157,7 @@ class SwissAIAttention(nn.Module):
 
         is_neox_style = True
         is_gguf = quant_config and quant_config.get_name() == "gguf"
-        if is_gguf and config.model_type == "swissai":
+        if is_gguf and config.model_type == "apertus":
             is_neox_style = False
 
         self.rotary_emb = get_rope(
@@ -213,11 +213,11 @@ class SwissAIAttention(nn.Module):
         return output
 
 
-class SwissAIDecoderLayer(nn.Module):
+class ApertusDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: SwissAIConfig,
+        config: ApertusConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -241,7 +241,7 @@ class SwissAIDecoderLayer(nn.Module):
         if hasattr(config, 'qkv_bias'):
             attention_bias = config.qkv_bias
 
-        self.self_attn = SwissAIAttention(
+        self.self_attn = ApertusAttention(
             config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -256,7 +256,7 @@ class SwissAIDecoderLayer(nn.Module):
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
         )
-        self.mlp = SwissAIMLP(
+        self.mlp = ApertusMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
@@ -293,13 +293,13 @@ class SwissAIDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class SwissAIModel(nn.Module):
+class ApertusModel(nn.Module):
 
     def __init__(self,
                  *,
                  vllm_config: VllmConfig,
                  prefix: str = "",
-                 layer_type: Type[SwissAIDecoderLayer] = SwissAIDecoderLayer):
+                 layer_type: Type[ApertusDecoderLayer] = ApertusDecoderLayer):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -438,7 +438,7 @@ class SwissAIModel(nn.Module):
         return loaded_params
 
 
-class SwissAIForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class ApertusForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"]
     }
@@ -495,7 +495,7 @@ class SwissAIForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.model.make_empty_intermediate_tensors)
 
     def _init_model(self, vllm_config: VllmConfig, prefix: str = ""):
-        return SwissAIModel(vllm_config=vllm_config, prefix=prefix)
+        return ApertusModel(vllm_config=vllm_config, prefix=prefix)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
