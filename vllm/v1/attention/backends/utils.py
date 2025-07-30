@@ -70,8 +70,8 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     full_cudagraph_supported: ClassVar[bool] = False
 
     @abstractmethod
-    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
-                 device: torch.device):
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
+                 vllm_config: VllmConfig, device: torch.device):
         self.kv_cache_spec = kv_cache_spec
 
     @abstractmethod
@@ -164,14 +164,14 @@ class PerLayerParameters:
 
 
 def get_per_layer_parameters(
-        vllm_config: VllmConfig,
+        vllm_config: VllmConfig, layer_names: list[str],
         cls_: type['AttentionImpl']) -> dict[str, PerLayerParameters]:
     """
-    Scan all attention layers and determine some hyperparameters
+    Scan layers in `layer_names` and determine some hyperparameters
     to use during `plan`.
     """
 
-    layers = get_layers_from_vllm_config(vllm_config, Attention)
+    layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
     per_layer_params: dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():
@@ -208,6 +208,10 @@ def infer_global_hyperparameters(
     param_sets = list(per_layer_params.values())
     global_params = param_sets[0]
     for params in param_sets:
+        if params.window_left != global_params.window_left:
+            raise ValueError(
+                "Window left is not the same for all layers. One potential fix "
+                "is to set disable_sliding_window=True")
         assert params == global_params, (
             "FlashInfer backend currently only supports models in which all "
             "layers share the same values for the following hyperparameters: "
