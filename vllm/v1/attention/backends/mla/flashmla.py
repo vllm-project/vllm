@@ -111,7 +111,8 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             assert n <= self.cg_buf_num_splits.size(0)
             num_splits_view = self.cg_buf_num_splits[:n]
             num_splits_view.copy_(num_splits)
-            self.cg_buf_num_splits[n:].fill_(0)  # fill the rest with 0s
+            # Num splits needs to monotonically increasing
+            self.cg_buf_num_splits[n:].fill_(num_splits[-1])
             num_splits = num_splits_view
 
         return FlashMLADecodeMetadata(
