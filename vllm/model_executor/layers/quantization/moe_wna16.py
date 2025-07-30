@@ -176,6 +176,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
     """
 
     def __init__(self, quant_config: MoeWNA16Config):
+        super().__init__()
         self.quant_config = quant_config
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -302,6 +303,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert self.fused_experts is None
+
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `MoeWNA16Method` yet.")

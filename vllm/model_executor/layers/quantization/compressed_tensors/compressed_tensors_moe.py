@@ -57,6 +57,8 @@ __all__ = [
 
 
 class CompressedTensorsMoEMethod(FusedMoEMethodBase):
+    def __init_(self):
+        super().__init__()
 
     @staticmethod
     def get_moe_method(
@@ -103,12 +105,12 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
     def __init__(self):
         from vllm.model_executor.layers.quantization.utils.nvfp4_moe_support import (  # noqa: E501
             detect_nvfp4_moe_support)
+        super().__init__()
         _nvfp4 = detect_nvfp4_moe_support(self.__class__.__name__)
         self.cutlass_nvfp4_supported = _nvfp4.cutlass_supported
         self.allow_flashinfer = _nvfp4.allow_flashinfer
         self.use_marlin = _nvfp4.use_marlin
         self.group_size = 16
-        self.fused_experts = None  # type: ignore[assignment]
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -301,6 +303,8 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert self.fused_experts is None
+
         if enable_eplb:
             raise NotImplementedError("EPLB not supported for "
                                       "`CompressedTensorsW4A4MoeMethod` yet.")
@@ -387,6 +391,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             self,
             quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
     ):
+        super().__init__()
         self.quant_config = quant_config
         self.weight_quant = self.quant_config.target_scheme_map["Linear"].get(
             "weights")
@@ -429,7 +434,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             self.weight_quant, self.input_quant)
         self.use_cutlass = (quant_config._is_fp8_w8a8_sm90(
             self.weight_quant, self.input_quant) or self.is_fp8_w8a8_sm100)
-        self.fused_experts = None  # type: ignore[assignment]
         self.disable_expert_map = False
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -837,6 +841,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             self,
             quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
     ):
+        super().__init__()
         self.quant_config = quant_config
         self.weight_quant = self.quant_config.target_scheme_map["Linear"].get(
             "weights")
@@ -934,6 +939,8 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert self.fused_experts is None
+
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for "
@@ -978,6 +985,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             self,
             quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
     ):
+        super().__init__()
         self.quant_config = quant_config
         # TODO: @dsikka: refactor this to use schemes as other kernels
         # are supported + check if the layer is being ignored.
@@ -1233,6 +1241,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert self.fused_experts is None
+
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for "
@@ -1282,6 +1292,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             self,
             quant_config: "CompressedTensorsConfig"  # type: ignore # noqa E501
     ):
+        super().__init__()
         self.quant_config = quant_config
         # TODO: @dsikka: refactor this to use schemes as other kernels
         # are supported + check if the layer is being ignored.
@@ -1459,6 +1470,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert self.fused_experts is None
+
         if enable_eplb:
             raise NotImplementedError("EPLB not supported for "
                                       "`CompressedTensorsWNA16MoEMethod` yet.")

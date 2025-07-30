@@ -480,8 +480,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     """
 
     def __init__(self, quant_config: Fp8Config):
-
         from vllm.model_executor.layers.fused_moe import fused_experts
+        super().__init__()
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
 

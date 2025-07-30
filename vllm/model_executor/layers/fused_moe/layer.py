@@ -80,7 +80,11 @@ class FusedMoeWeightScaleSupported(Enum):
 
 class FusedMoEMethodBase(QuantizeMethodBase):
 
-    moe: FusedMoEConfig
+    def __init__(self):
+        super().__init__()
+        self.fused_experts = None
+        self.moe = None
+        self.topk_indices_dtype = None
 
     @abstractmethod
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -195,13 +199,15 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     ) -> Optional[FusedMoEPrepareAndFinalize]:
         return FusedMoEMethodBase._maybe_make_prepare_finalize(moe)
 
-    def init_prepare_finalize(self, moe: FusedMoEConfig):
-        self.moe = moe
+    def init_prepare_finalize(self): #, moe: FusedMoEConfig):
+        assert self.moe is not None
         prepare_finalize = self.maybe_make_prepare_finalize(
             self.moe)
 
         self.topk_indices_dtype = None
         if prepare_finalize is not None:
+            # TBD
+            #assert self.fused_experts is None, f"FUSED_EXPERTS {self.fused_experts}"
             logger.debug("%s", prepare_finalize.__class__.__name__)
             self.topk_indices_dtype = prepare_finalize.topk_indices_dtype()
             experts = self.select_gemm_impl(prepare_finalize, self.moe)
@@ -220,12 +226,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         raise NotImplementedError(
             f"{self.__class__.__name__} must select appropriate gemm "
             "implementation based on the prepare_finalize")
-
-    def maybe_swap_experts_impl(
-        self,
-        moe_parallel_config: FusedMoEParallelConfig,
-    ):
-        pass
 
     @abstractmethod
     def apply(
@@ -257,10 +257,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
-    def __init__(self, moe: FusedMoEConfig):
+    def __init__(self):
         super().__init__()
-        self.fused_experts = fused_experts  # type: ignore
-        self.topk_indices_dtype = None
         self.moe = moe
         self.has_bias = self.moe.has_bias
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
@@ -482,8 +480,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input)
         else:
-            # add w1_bias/w2_bias to kwargs if they exist
-            kwargs = dict(
+            return fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
@@ -495,17 +492,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
             )
-            if isinstance(self.fused_experts,
-                          FusedMoEModularKernel) and self.has_bias:
-                raise ValueError(
-                    "FusedMoEModularKernel does not support bias.")
-            if self.has_bias:
-                kwargs.update({
-                    "w1_bias": getattr(layer, "w13_bias", None),
-                    "w2_bias": getattr(layer, "w2_bias", None),
-                })
-
-            return self.fused_experts(**kwargs)
 
     def forward_cpu(
         self,
@@ -837,11 +823,13 @@ class FusedMoE(CustomOp):
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
         quant_method: Optional[QuantizeMethodBase] = None
-        quant_method = (UnquantizedFusedMoEMethod(moe) if quant_config is None
+        quant_method = (UnquantizedFusedMoEMethod() if quant_config is None
                         else quant_config.get_quant_method(self, prefix))
 
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
+        assert quant_method.moe is None
+        quant_method.moe = moe
         self.quant_method = quant_method
 
         if self.enable_eplb:

@@ -50,7 +50,7 @@ def get_moe_quant_method(
         if get_dynamic_override(  # noqa: E712
                 cloned_config,  # noqa: E712
                 layer_name=prefix) == False:  # noqa: E712
-            return UnquantizedFusedMoEMethod(layer.moe_config)
+            return UnquantizedFusedMoEMethod()
 
         if prefix:
             # Dynamic per module/layer rules may override base config
@@ -376,6 +376,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
     """MoE Marlin method with quantization."""
 
     def __init__(self, quant_config: GPTQMarlinConfig) -> None:
+        super().__init__()
         self.quant_config = quant_config
         if self.quant_config.quant_type.size_bits == 4:
             self.quant_type = scalar_types.uint4b8
@@ -646,6 +647,8 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert self.fused_experts is None
+
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `GPTQMarlinMoEMethod` yet.")

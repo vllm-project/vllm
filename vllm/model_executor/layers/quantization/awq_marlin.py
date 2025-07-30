@@ -329,6 +329,7 @@ class AWQMarlinLinearMethod(LinearMethodBase):
 class AWQMoEMethod(FusedMoEMethodBase):
 
     def __init__(self, quant_config: AWQMarlinConfig):
+        super().__init__()
         self.quant_config = quant_config
         if self.quant_config.weight_bits != 4:
             raise ValueError("AWQMoEMethod only supports 4bit now.")
@@ -500,6 +501,8 @@ class AWQMoEMethod(FusedMoEMethodBase):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert self.fused_experts is None
+
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `AWQMoEMethod` yet.")
