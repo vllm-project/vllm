@@ -37,7 +37,7 @@ __global__ void segmented_max_reduction_strided(
     float* __restrict__ scale, const scalar_t* __restrict__ input,
     int hidden_size, int64_t in_row_stride, int64_t num_tokens) {
   __shared__ float cache[256];
-  int tid = threadIdx.x;
+  const int tid = threadIdx.x;
   int64_t token_idx = blockIdx.x;
 
   // one block per token. Guard in case gridDim.x > num_tokens.
@@ -57,7 +57,7 @@ __global__ void segmented_max_reduction_strided(
   cache[tid] = thread_max;
   __syncthreads();
 
-  // prallel reduction to find row max.
+  // parallel reduction to find row max.
   for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
     if (tid < offset) {
       cache[tid] = fmaxf(cache[tid], cache[tid + offset]);
@@ -114,7 +114,8 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided(
 
   using BlockReduce = cub::BlockReduce<float, 256>;
   __shared__ typename BlockReduce::TempStorage tmp;
-  float block_max = BlockReduce(tmp).Reduce(absmax_val, cub::Max{}, blockDim.x);
+  const float block_max =
+      BlockReduce(tmp).Reduce(absmax_val, cub::Max{}, blockDim.x);
 
   __shared__ float token_scale;
   if (tid == 0) {
@@ -200,7 +201,8 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
               vllm::segmented_max_reduction_strided<scalar_t, fp8_t>
                   <<<grid, block, 0, stream>>>(
                       scale.data_ptr<float>(), input.data_ptr<scalar_t>(),
-                      hidden_size, in_row_stride, (int64_t)num_tokens);
+                      hidden_size, in_row_stride,
+                      static_cast<int64_t>(num_tokens));
 
               vllm::scaled_fp8_quant_kernel_strided_dynamic<scalar_t, fp8_t>
                   <<<grid, block, 0, stream>>>(
