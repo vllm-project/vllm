@@ -716,7 +716,7 @@ def cutlass_moe_fp4(
                                 "is currently not supported for "
                                 "ModelOptNvFp4FusedMoE's cutlass_moe_fp4.")
     fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
+        MoEPrepareAndFinalizeNoEP(),  # skip quant?
         CutlassExpertsFp4(
             g1_alphas,
             g2_alphas,
@@ -724,7 +724,7 @@ def cutlass_moe_fp4(
             a2_gscale,
             device,
             max_experts_per_worker=e,
-            out_dtype=a.dtype,  # XXXXXXXXXXX
+            out_dtype=a.dtype,  # XXXXXXXXXXX TODO: double check or None?
             per_act_token_quant=False,
             per_out_ch_quant=False,
             use_batched_format=False,

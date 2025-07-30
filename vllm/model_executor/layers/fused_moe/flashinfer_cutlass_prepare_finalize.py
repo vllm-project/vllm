@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
@@ -23,7 +23,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self,
         use_dp: bool,
         a1_gscale: torch.Tensor,
-        quant_dtype: Optional[torch.dtype] = None,
+        quant_dtype: Union[torch.dtype, str, None] = None,
         per_channel_quant: bool = False,
         block_shape: Optional[list[int]] = None,
         num_dispatchers: int = 1,
