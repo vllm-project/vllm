@@ -40,6 +40,7 @@ repos:
   hooks:
   - id: markdownlint-fix
     exclude: '.*\.inc\.md'
+    stages: [manual] # Only run in CI
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
