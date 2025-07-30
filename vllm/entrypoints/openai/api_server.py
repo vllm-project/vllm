@@ -642,7 +642,10 @@ async def cancel_responses(response_id: str, raw_request: Request):
                  },
                  HTTPStatus.INTERNAL_SERVER_ERROR.value: {
                      "model": ErrorResponse
-                 }
+                 },
+                 HTTPStatus.SERVICE_UNAVAILABLE.value: {
+                     "model": ErrorResponse
+                 },
              })
 @with_cancellation
 @load_aware_call
@@ -680,6 +683,9 @@ async def create_chat_completion(request: ChatCompletionRequest,
                      "model": ErrorResponse
                  },
                  HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.SERVICE_UNAVAILABLE.value: {
                      "model": ErrorResponse
                  },
              })

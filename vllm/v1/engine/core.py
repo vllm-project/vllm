@@ -6,6 +6,7 @@ import signal
 import sys
 import threading
 import time
+import traceback
 from collections import deque
 from collections.abc import Generator
 from concurrent.futures import Future
@@ -34,7 +35,7 @@ from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
-                            EngineCoreRequestType,
+                            EngineCoreRequestType, EngineErrorPayload,
                             ReconfigureDistributedRequest, ReconfigureRankType,
                             UtilityOutput)
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
@@ -637,9 +638,11 @@ class EngineCoreProc(EngineCore):
             else:
                 set_process_title("EngineCore")
                 engine_core = EngineCoreProc(*args, **kwargs)
-
-            engine_core.run_busy_loop()
-
+            while True:
+                try:
+                    engine_core.run_busy_loop()
+                except ValueError as e:
+                    engine_core._send_engine_error(e)
         except SystemExit:
             logger.debug("EngineCore exiting.")
             raise
@@ -749,6 +752,20 @@ class EngineCoreProc(EngineCore):
         if self.output_thread.is_alive():
             logger.fatal("vLLM shutdown signal from EngineCore failed "
                          "to send. Please report this issue.")
+
+    def _send_engine_error(self, exc: BaseException):
+        """Send CustomEngineError status to the EngineCoreClient."""
+
+        # Put CustomEngineError in the queue.
+        self.output_queue.put_nowait((
+            0,
+            EngineCoreOutputs(engine_error=EngineErrorPayload(
+                exc_type=type(exc).__name__,
+                exc_module=type(exc).__module__,
+                exc_args=list(exc.args),
+                exc_traceback=traceback.format_exc(),
+            )),
+        ))
 
     def process_input_sockets(self, input_addresses: list[str],
                               coord_input_address: Optional[str],
