@@ -552,7 +552,8 @@ def _process_utility_output(output: UtilityOutput,
     if output.failure_message is not None:
         future.set_exception(Exception(output.failure_message))
     else:
-        future.set_result(output.result)
+        assert output.result is not None
+        future.set_result(output.result.result)
 
 
 class SyncMPClient(MPClient):

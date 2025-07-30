@@ -26,8 +26,8 @@ from vllm.lora.request import LoRARequest
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import (bind_process_name, make_zmq_socket,
-                        resolve_obj_by_qualname)
+from vllm.utils import (make_zmq_socket, resolve_obj_by_qualname,
+                        set_process_title)
 from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
                                          unify_kv_cache_configs)
 from vllm.v1.core.sched.interface import SchedulerInterface
@@ -36,7 +36,7 @@ from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType,
                             ReconfigureDistributedRequest, ReconfigureRankType,
-                            UtilityOutput)
+                            UtilityOutput, UtilityResult)
 from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
 from vllm.v1.engine.utils import EngineHandshakeMetadata, EngineZmqAddresses
 from vllm.v1.executor.abstract import Executor
@@ -207,6 +207,11 @@ class EngineCore:
 
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
+        # Validate the request_id type.
+        if not isinstance(request.request_id, str):
+            raise TypeError(
+                f"request_id must be a string, got {type(request.request_id)}")
+
         if pooling_params := request.pooling_params:
             supported_pooling_tasks = [
                 task for task in self.get_supported_tasks()
@@ -425,7 +430,6 @@ class EngineCoreProc(EngineCore):
         client_handshake_address: Optional[str] = None,
         engine_index: int = 0,
     ):
-        bind_process_name(self.__class__.__name__, f"{engine_index}")
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
                                               bytes]]()
@@ -630,11 +634,13 @@ class EngineCoreProc(EngineCore):
             parallel_config: ParallelConfig = kwargs[
                 "vllm_config"].parallel_config
             if parallel_config.data_parallel_size > 1 or dp_rank > 0:
+                set_process_title("DPEngineCore", str(dp_rank))
                 # Set data parallel rank for this engine process.
                 parallel_config.data_parallel_rank = dp_rank
                 parallel_config.data_parallel_rank_local = local_dp_rank
                 engine_core = DPEngineCoreProc(*args, **kwargs)
             else:
+                set_process_title("EngineCore")
                 engine_core = EngineCoreProc(*args, **kwargs)
 
             engine_core.run_busy_loop()
@@ -709,8 +715,8 @@ class EngineCoreProc(EngineCore):
             output = UtilityOutput(call_id)
             try:
                 method = getattr(self, method_name)
-                output.result = method(
-                    *self._convert_msgspec_args(method, args))
+                result = method(*self._convert_msgspec_args(method, args))
+                output.result = UtilityResult(result)
             except BaseException as e:
                 logger.exception("Invocation of %s method failed", method_name)
                 output.failure_message = (f"Call to {method_name} method"
