@@ -215,11 +215,11 @@ class Hermes2ProToolParser(ToolParser):
                         # the empty argument {}
                         if isinstance(diff, dict) and not diff:
                             return DeltaMessage(tool_calls=[
-                            DeltaToolCall(index=self.current_tool_id,
-                                          function=DeltaFunctionCall(
-                                              arguments="{}").model_dump(
-                                                  exclude_none=True))
-                            ])
+                                DeltaToolCall(index=self.current_tool_id,
+                                              function=DeltaFunctionCall(
+                                                  arguments="{}").model_dump(
+                                                      exclude_none=True))
+                             ])
                         else:
                             return None
 
