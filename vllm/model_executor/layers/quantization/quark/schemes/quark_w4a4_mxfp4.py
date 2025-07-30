@@ -95,7 +95,7 @@ try:
             gemm_a4w4(x_q,
                       weight,
                       x_s,
-                      weight_scale,
+                      weight_scale.view(x_s.dtype),
                       y,
                       y,
                       bpreshuffle=False)
