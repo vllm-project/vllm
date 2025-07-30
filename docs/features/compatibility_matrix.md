@@ -36,9 +36,9 @@ th:not(:first-child) {
 
 | Feature | [CP][chunked-prefill] | [APC](automatic_prefix_caching.md) | [LoRA](lora.md) | [SD](spec_decode.md) | CUDA graph | [pooling](../models/pooling_models.md) | <abbr title="Encoder-Decoder Models">enc-dec</abbr> | <abbr title="Logprobs">logP</abbr> | <abbr title="Prompt Logprobs">prmpt logP</abbr> | <abbr title="Async Output Processing">async output</abbr> | multi-step | <abbr title="Multimodal Inputs">mm</abbr> | best-of | beam-search |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| [CP][chunked-prefill] | ✅ | | | | | | | | | | | | | | |
-| [APC](automatic_prefix_caching.md) | ✅ | ✅ | | | | | | | | | | | | | |
-| [LoRA](lora.md) | ✅ | ✅ | ✅ | | | | | | | | | | | | |
+| [CP][chunked-prefill] | ✅ | | | | | | | | | | | | | |
+| [APC](automatic_prefix_caching.md) | ✅ | ✅ | | | | | | | | | | | | |
+| [LoRA](lora.md) | ✅ | ✅ | ✅ | | | | | | | | | | | |
 | [SD](spec_decode.md) | ✅ | ✅ | ❌ | ✅ | | | | | | | | | | |
 | CUDA graph | ✅ | ✅ | ✅ | ✅ | ✅ | | | | | | | | | |
 | [pooling](../models/pooling_models.md) | ✅\* | ✅\* | ✅ | ❌ | ✅ | ✅ | | | | | | | | |
