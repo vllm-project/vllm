@@ -4,12 +4,15 @@ from typing import Optional
 
 import torch
 
+from vllm.reasoning import ReasoningParser
 from vllm.v1.request import Request, RequestStatus
 
 
 def check_stop(request: Request,
                max_model_len: int,
-               pooler_output: Optional[torch.Tensor] = None) -> bool:
+               pooler_output: Optional[torch.Tensor] = None,
+               reasoner: Optional[ReasoningParser] = None) -> bool:
+
     if (request.num_tokens >= max_model_len
             or request.num_output_tokens >= request.max_tokens):
         request.status = RequestStatus.FINISHED_LENGTH_CAPPED
@@ -30,6 +33,11 @@ def check_stop(request: Request,
         return True
 
     if last_token_id in (sampling_params.stop_token_ids or ()):
+        if reasoner is not None and not reasoner.is_reasoning_end(
+                request.all_token_ids):
+            # Reasoning it not ended yet, not to stop
+            return False
+
         request.status = RequestStatus.FINISHED_STOPPED
         request.stop_reason = last_token_id
         return True

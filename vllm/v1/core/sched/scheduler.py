@@ -17,6 +17,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -58,6 +60,17 @@ class Scheduler(SchedulerInterface):
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
+        self.tokenizer = init_tokenizer_from_configs(
+            model_config=self.vllm_config.model_config,
+            scheduler_config=self.vllm_config.scheduler_config,
+            lora_config=self.vllm_config.lora_config,
+        ).get_lora_tokenizer(None)
+        self.reasoner: Optional[ReasoningParser] = None
+        reasoning_backend = vllm_config.decoding_config.reasoning_backend
+        if reasoning_backend:
+            reasoner_cls = ReasoningParserManager.get_reasoning_parser(
+                reasoning_backend)
+            self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -812,7 +825,7 @@ class Scheduler(SchedulerInterface):
             # Check for stop and update request status.
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
-                    request, new_token_ids)
+                    request, new_token_ids, self.reasoner)
 
             # Stop checking for pooler models.
             pooler_output = None
@@ -915,6 +928,7 @@ class Scheduler(SchedulerInterface):
         self,
         request: Request,
         new_token_ids: list[int],
+        reasoner: Optional[ReasoningParser] = None,
     ) -> tuple[list[int], bool]:
         # Append generated tokens and check for stop. Note that if
         # a request is still being prefilled, we expect the model runner
@@ -925,7 +939,7 @@ class Scheduler(SchedulerInterface):
 
             # Check for stop and update request state.
             # This must be called before we make the EngineCoreOutput.
-            stopped = check_stop(request, self.max_model_len)
+            stopped = check_stop(request, self.max_model_len, reasoner)
             if stopped:
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break

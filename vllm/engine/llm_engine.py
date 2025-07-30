@@ -371,12 +371,11 @@ class LLMEngine:
                 self.observability_config.otlp_traces_endpoint)
 
         # Initialize reasoning parser if reasoning backend is set.
-        self.reasoner = None
+        self.reasoner: Optional[ReasoningParser] = None
         if self.decoding_config.reasoning_backend is not None:
             reasoner_cls = ReasoningParserManager.get_reasoning_parser(
                 self.decoding_config.reasoning_backend)
-            self.reasoner: ReasoningParser = reasoner_cls(
-                self.tokenizer.get_lora_tokenizer())
+            self.reasoner = reasoner_cls(self.tokenizer.get_lora_tokenizer())
 
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.

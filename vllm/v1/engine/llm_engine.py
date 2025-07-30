@@ -17,6 +17,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
+from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.transformers_utils.tokenizer_group import (
@@ -91,6 +92,13 @@ class LLMEngine:
                 scheduler_config=vllm_config.scheduler_config,
                 lora_config=vllm_config.lora_config)
 
+        self.reasoner: Optional[ReasoningParser] = None
+        reasoning_backend = vllm_config.decoding_config.reasoning_backend
+        if reasoning_backend:
+            reasoner_cls = ReasoningParserManager.get_reasoning_parser(
+                reasoning_backend)
+            self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
+
         # Processor (convert Inputs --> EngineCoreRequests)
         self.processor = Processor(vllm_config=vllm_config,
                                    tokenizer=self.tokenizer,
@@ -98,7 +106,8 @@ class LLMEngine:
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(self.tokenizer,
-                                                log_stats=self.log_stats)
+                                                log_stats=self.log_stats,
+                                                reasoner=self.reasoner)
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(

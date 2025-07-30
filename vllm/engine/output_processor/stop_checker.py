@@ -14,7 +14,7 @@ class StopChecker:
     """LLMEngine helper class which separates out the logic involving stop
     checking. This checks things such as: whether the eos token was emitted,
     whether the max_tokens has been consumed, whether a stop string has been
-    emitted, or if we have exceeded the max model len.
+    emitted in output stage, or if we have exceeded the max model len.
     """
 
     def __init__(
@@ -52,10 +52,6 @@ class StopChecker:
         if seq.get_output_len() < sampling_params.min_tokens:
             return
 
-        if self.reasoner is not None and \
-            not self.reasoner.is_reasoning_end(seq.get_token_ids()):
-            return
-
         # Check if the sequence has generated the EOS token.
         if ((not sampling_params.ignore_eos)
                 and seq.get_last_token_id() == seq.eos_token_id):
@@ -65,6 +61,21 @@ class StopChecker:
                     not sampling_params.include_stop_str_in_output):
                 seq.output_text = seq.output_text[:-new_char_count]
             seq.status = SequenceStatus.FINISHED_STOPPED
+            return
+
+        # Check if the sequence has reached max_model_len.
+        if seq.get_len() >= self._get_max_model_len(lora_req):
+            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
+            return
+
+        # Check if the sequence has reached max_tokens.
+        if seq.get_output_len() == sampling_params.max_tokens:
+            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
+            return
+
+        # ignore stop tokens or stop strings if still in a reasoning stage
+        if self.reasoner is not None and \
+            not self.reasoner.is_reasoning_end(seq.get_token_ids()):
             return
 
         # Check if a stop token was encountered.
@@ -89,16 +100,6 @@ class StopChecker:
                 seq.output_text = seq.output_text[:truncate_to]
             seq.status = SequenceStatus.FINISHED_STOPPED
             seq.stop_reason = stop_str
-            return
-
-        # Check if the sequence has reached max_model_len.
-        if seq.get_len() >= self._get_max_model_len(lora_req):
-            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
-            return
-
-        # Check if the sequence has reached max_tokens.
-        if seq.get_output_len() == sampling_params.max_tokens:
-            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 
     @staticmethod
