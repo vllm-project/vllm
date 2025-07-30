@@ -880,9 +880,8 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[NestedTensors] = None,
     ) -> torch.Tensor:
-        # TODO: This method just returns the decoder sequence embeddings since
-        # Whisper does not have encoder text tokens. Refactor this once
-        # encoder/decoder support is implemented in V1.
+        # This method just returns the decoder sequence embeddings since
+        # Whisper does not have encoder text tokens.
         return self.model.decoder.get_input_embeddings(input_ids)
 
     def _parse_and_validate_audio_input(

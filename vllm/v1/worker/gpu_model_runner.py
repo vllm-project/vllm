@@ -165,13 +165,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         self.max_num_encoder_input_tokens = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
-        if self.model_config.is_encoder_decoder:
-            # If specified in the model config, this attribute defines the
-            # maximum length of the encoder input.
-            self.max_encoder_len = getattr(self.model_config.hf_config,
-                                           'max_source_positions', 0)
-        else:
-            self.max_encoder_len = 0
+        # Maximum length of the encoder input, only for encoder-decoder models.
+        self.max_encoder_len = self.mm_registry.\
+            get_encdec_max_encoder_len(model_config)
 
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
@@ -1308,6 +1304,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
 
             for mm_input_id in encoder_input_ids:
+                # TODO (NickLucche) this is very whisper specific atm, refactor
                 if mm_input_id < len(req_state.mm_inputs):
                     mm_input = req_state.mm_inputs[mm_input_id]
                     # Extract input_features from MM input kwargs
@@ -1315,8 +1312,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         features = mm_input["input_features"]
                         input_features_list.append(features)
                         # Calculate encoder sequence length for this input
-                        total_encoder_tokens += (
-                            self._get_encoder_sequence_length(features))
+                        num_features = len(features) if isinstance(
+                            features, list) else 1
+                        total_encoder_tokens += num_features * \
+                            self.max_encoder_len
 
         if not input_features_list:
             return {}
@@ -1328,7 +1327,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         input_features = input_features.to(device=self.device,
                                            dtype=self.model_config.dtype)
 
-        # Create encoder positions (similar to how V0 does it)
+        # Create encoder positions
         encoder_positions = torch.arange(total_encoder_tokens,
                                          dtype=torch.long,
                                          device=self.device)
@@ -1343,19 +1342,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             "encoder_input_ids": encoder_input_ids,
             "encoder_positions": encoder_positions,
         }
-
-    def _get_encoder_sequence_length(
-            self, features: Union[torch.Tensor, list]) -> int:
-        """Get the encoder sequence length for the given features."""
-        # For Whisper: use max_source_positions from config
-        # which represents the encoder sequence length
-        encoder_seq_len = getattr(self.model_config.hf_config,
-                                  'max_source_positions', 1500)
-
-        if isinstance(features, list):
-            return len(features) * encoder_seq_len
-        else:
-            return encoder_seq_len
 
     def _process_input_features(self,
                                 input_features_list: list) -> torch.Tensor:

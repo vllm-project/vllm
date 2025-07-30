@@ -132,8 +132,8 @@ class Scheduler(SchedulerInterface):
         )
 
         # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
-        # projector if needed). Currently, we assume that the encoder also
-        # has the Transformer architecture (e.g., ViT).
+        # projector if needed) for MM models as well as encoder-decoder
+        # transformers.
         self.max_num_encoder_input_tokens = encoder_compute_budget
         # NOTE: For the models without encoder (e.g., text-only models),
         # the encoder cache will not be initialized because cache size is 0
@@ -151,17 +151,11 @@ class Scheduler(SchedulerInterface):
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
 
-        enable_caching = self.cache_config.enable_prefix_caching or False
-        if self.is_encoder_decoder:
-            # prefix caching for encoder-decoder models is not currently
-            # supported
-            enable_caching = False
-
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
-            enable_caching=enable_caching,
+            enable_caching=self.cache_config.enable_prefix_caching,
             caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
@@ -450,8 +444,9 @@ class Scheduler(SchedulerInterface):
                             # encoder length. This is a single static allocation
                             # and does not grow with the number of decoder
                             # tokens.
-                            max_encoder_len = (self.vllm_config.model_config.
-                                               hf_config.max_source_positions)
+                            max_encoder_len = MULTIMODAL_REGISTRY.\
+                                get_encdec_max_encoder_len(
+                                self.vllm_config.model_config)
                             new_cross_blocks = (self.kv_cache_manager.
                                                 allocate_slots_for_cross_attn(
                                                     request,
