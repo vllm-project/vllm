@@ -13,6 +13,8 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.factory import (
+    KVConnectorFactory)
 from vllm.logger import init_logger
 from vllm.v1.outputs import ModelRunnerOutput
 
@@ -103,15 +105,14 @@ def get_kv_connector_cache_layout():
     # used for faster transfer.
     vllm_config = get_current_vllm_config()
     kv_config = vllm_config.kv_transfer_config
-    if kv_config is not None and vllm_config.model_config is None:
-        logger.warning_once("Unable to detect current VLLM config. " \
-        "Defaulting to NHD kv cache layout.")
-    elif kv_config is not None:
-        use_mla = vllm_config.model_config.use_mla
-        if not use_mla and kv_config.kv_connector == "NixlConnector":
-            logger.info_once("NixlConnector detected. Setting KV cache " \
-            "layout to HND for better xfer performance.")
-            return "HND"
+    if kv_config is not None:
+        connector_cls = KVConnectorFactory.get_connector_class(kv_config)
+        required_kvcache_layout = connector_cls.get_required_kvcache_layout(
+            vllm_config)
+        if required_kvcache_layout is not None:
+            return required_kvcache_layout
+        logger.info_once("Connectors do not specify a " \
+                         "kv cache layout, defaulting to NHD.")
     return "NHD"
 
 
@@ -120,8 +121,8 @@ class KVOutputAggregator:
     output corresponding to Rank 0 for scheduler."""
 
     def __init__(self, world_size: int):
-        # Complete transfer tracker. Used by to track finished requests
-        # [req_id -> n_finished_workers]
+        # Complete transfer tracker. Used to track finished requests
+        # [req_id -> n_remaining_workers]
         self._recv_remaining_count = defaultdict[str, int](lambda: world_size)
         self._send_remaining_count = defaultdict[str, int](lambda: world_size)
 
@@ -134,12 +135,10 @@ class KVOutputAggregator:
                                 remaining_count_dict: dict[str, int],
                                 finished_set: set[str]) -> None:
             for req_id in req_ids or ():
-                new_count = remaining_count_dict[req_id] - 1
-                if new_count == 0:
+                remaining_count_dict[req_id] -= 1
+                if remaining_count_dict[req_id] == 0:
                     finished_set.add(req_id)
                     del remaining_count_dict[req_id]
-                else:
-                    remaining_count_dict[req_id] = new_count
 
         finished_sending = set[str]()
         finished_recving = set[str]()
