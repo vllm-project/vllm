@@ -38,24 +38,26 @@ __global__ void segmented_max_reduction_strided(
     int hidden_size, int64_t in_row_stride, int64_t num_tokens) {
   __shared__ float cache[256];
   int tid = threadIdx.x;
+  int64_t token_idx = blockIdx.x;
 
-  // Each thread processes multiple rows in a round-robin fashion.
-  float local_max = 0.0f;
-  for (int64_t token = blockIdx.x * blockDim.x + tid; token < num_tokens;
-       token += blockDim.x * gridDim.x) {
-    const scalar_t* row_ptr = input + token * in_row_stride;
-    // Traverse the row
-#pragma unroll 4
-    for (int e = 0; e < hidden_size; ++e) {
-      float v = fabsf(static_cast<float>(row_ptr[e]));
-      local_max = fmaxf(local_max, v);
-    }
+  // one block per token. Guard in case gridDim.x > num_tokens.
+  if (token_idx >= num_tokens) {
+    return;
   }
 
-  cache[tid] = local_max;
+  const scalar_t* row_ptr = input + token_idx * in_row_stride;
+
+  // each thread scans elements of the row in a strided fashion.
+  float thread_max = 0.0f;
+  for (int e = tid; e < hidden_size; e += blockDim.x) {
+    float v = fabsf(static_cast<float>(row_ptr[e]));
+    thread_max = fmaxf(thread_max, v);
+  }
+
+  cache[tid] = thread_max;
   __syncthreads();
 
-  // Reduction inside block
+  // prallel reduction to find row max.
   for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
     if (tid < offset) {
       cache[tid] = fmaxf(cache[tid], cache[tid + offset]);
@@ -63,6 +65,7 @@ __global__ void segmented_max_reduction_strided(
     __syncthreads();
   }
 
+  // thread 0 updates global scale (per-tensor) atomically.
   if (tid == 0) {
     atomicMaxFloat(scale, cache[0] / quant_type_max_v<fp8_type>);
   }
