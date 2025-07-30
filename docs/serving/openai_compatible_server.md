@@ -249,12 +249,12 @@ and passing a list of `messages` in the request. Refer to the examples below for
 
     To serve the model:
 
-```bash
-vllm serve TIGER-Lab/VLM2Vec-Full --runner pooling \
-  --trust-remote-code \
-  --max-model-len 4096 \
-  --chat-template examples/template_vlm2vec.jinja
-```
+    ```bash
+    vllm serve TIGER-Lab/VLM2Vec-Full --runner pooling \
+      --trust-remote-code \
+      --max-model-len 4096 \
+      --chat-template examples/template_vlm2vec.jinja
+    ```
 
     !!! important
         Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass `--runner pooling`
