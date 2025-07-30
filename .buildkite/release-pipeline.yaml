@@ -41,37 +41,17 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
 
-  - block: "Build FlashInfer wheels"
-    key: block-build-flashinfer-wheels
+  - block: "Build FlashInfer wheel"
+    key: block-build-flashinfer-wheel
     depends_on: ~
 
-  - label: "Build FlashInfer wheels - CUDA 12.8"
-    depends_on: block-build-flashinfer-wheels
-    id: build-flashinfer-wheel-cuda-12-8
+  - label: "Build and upload FlashInfer wheel - CUDA 12.8"
+    depends_on: block-build-flashinfer-wheel
+    id: build-upload-flashinfer-wheel
     agents:
       queue: cpu_queue_postmerge
     commands:
-      - "bash .buildkite/scripts/build-flashinfer-wheel.sh 12.8.1"
-    env:
-      DOCKER_BUILDKIT: "1"
-
-  - label: "Build FlashInfer wheels - CUDA 12.6"
-    depends_on: block-build-flashinfer-wheels
-    id: build-flashinfer-wheel-cuda-12-6
-    agents:
-      queue: cpu_queue_postmerge
-    commands:
-      - "bash .buildkite/scripts/build-flashinfer-wheel.sh 12.6.3"
-    env:
-      DOCKER_BUILDKIT: "1"
-
-  - label: "Build FlashInfer wheels - CUDA 11.8"
-    depends_on: block-build-flashinfer-wheels
-    id: build-flashinfer-wheel-cuda-11-8
-    agents:
-      queue: cpu_queue_postmerge
-    commands:
-      - "bash .buildkite/scripts/build-flashinfer-wheel.sh 11.8.0"
+      - "bash .buildkite/scripts/build-upload-flashinfer-wheel.sh 12.8.1"
     env:
       DOCKER_BUILDKIT: "1"
 

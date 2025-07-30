@@ -274,10 +274,10 @@ ARG CUDA_VERSION
 ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
 ARG FLASHINFER_GIT_REF="v0.2.9rc2"
 
-COPY tools/build-flashinfer.sh /tmp/build-flashinfer.sh
+COPY tools/flashinfer-build.sh /tmp/flashinfer-build.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     . /etc/environment && \
-    BUILD_WHEEL=true /tmp/build-flashinfer.sh
+    BUILD_WHEEL=true /tmp/flashinfer-build.sh
 
 #################### EXTENSION Build IMAGE ####################
 
@@ -406,10 +406,10 @@ ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
 # Keep this in sync with https://github.com/vllm-project/vllm/blob/main/requirements/cuda.txt
 # We use `--force-reinstall --no-deps` to avoid issues with the existing FlashInfer wheel.
 ARG FLASHINFER_GIT_REF="v0.2.9rc2"
-COPY tools/build-flashinfer.sh /tmp/build-flashinfer.sh
+COPY tools/flashinfer-build.sh /tmp/flashinfer-build.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     . /etc/environment && \
-    /tmp/build-flashinfer.sh
+    /tmp/flashinfer-build.sh
 COPY examples examples
 COPY benchmarks benchmarks
 COPY ./vllm/collect_env.py .
