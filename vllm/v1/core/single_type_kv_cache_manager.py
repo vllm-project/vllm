@@ -183,7 +183,7 @@ class SingleTypeKVCacheManager(ABC):
 
         Args:
             request_id: The request ID.
-            num_running_requests: The number of requests in the RUNNING
+            num_running_requests: The total number of requests in the RUNNING
                 state.
 
         Returns:
