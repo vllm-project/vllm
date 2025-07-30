@@ -271,7 +271,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
-        moe: FusedMoEConfig,
+        moe: FusedMoEConfig,  # Remove?  every layer should have an moe config object
     ) -> FusedMoEPermuteExpertsUnpermute:
         if (prepare_finalize.activation_format ==
                 FusedMoEActivationFormat.BatchedExperts):
@@ -480,7 +480,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input)
         else:
-            return fused_experts(
+            return self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
