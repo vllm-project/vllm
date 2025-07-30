@@ -477,9 +477,6 @@ class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             conv_L_cache - 1,
             hidden_size // world_size,
         )
-        if not use_v1:
-            conv_state_shape = (conv_state_shape[1], conv_state_shape[0])
-
         return (conv_state_shape, )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -490,6 +487,7 @@ class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         scheduler_config = vllm_config.scheduler_config
         assert (not cache_config.enable_prefix_caching
                 ), "Lfm2 currently does not support prefix caching"
+        assert envs.VLLM_USE_V1, ("V0 has been deprecated for Lfm2ForCausalLM")
 
         super().__init__()
         self.config = config
@@ -537,7 +535,6 @@ class Lfm2ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         **kwargs,
     ) -> torch.Tensor:
         conv_cache_params = None
-        assert envs.VLLM_USE_V1, ("V0 has been deprecated for Lfm2ForCausalLM")
         hidden_states = self.model(input_ids, positions, conv_cache_params,
                                    intermediate_tensors, inputs_embeds)
         return hidden_states

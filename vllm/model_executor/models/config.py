@@ -223,11 +223,11 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """
-        Ensure that page size of attention layers is greater than or equal
-        to the constant-state/static-cache layers (e.g. mamba, short-conv).
-        If not, automatically set the attention block size to ensure that it is.
-        If the attention page size is strictly greater than the cache page
-        size, we pad the cache page size to make them equal.
+        Ensure that page size of attention layers is greater than or
+        equal to the mamba layers. If not, automatically set the attention
+        block size to ensure that it is. If the attention page size is
+        strictly greater than the mamba page size, we pad the mamba page size
+        to make them equal.
 
         Args:
             vllm_config: vLLM Config

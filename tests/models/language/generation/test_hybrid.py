@@ -325,10 +325,7 @@ def test_state_cleanup(
     If its not cleaned, an error would be expected.
     """
     try:
-        with vllm_runner(
-                model,
-                max_num_seqs=MAX_NUM_SEQS,
-        ) as vllm_model:
+        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
             for _ in range(10):
                 vllm_model.generate_greedy([example_prompts[0]] * 100, 1)
     except ValueError:
