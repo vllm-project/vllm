@@ -17,11 +17,13 @@ import torch
 import torch.distributed
 import vllm_hpu_extension.environment as environment
 from vllm_hpu_extension.bucketing.common import HPUBucketingManager
+from vllm_hpu_extension.defragmentation import OnlineDefragmenter
 from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
                                          HabanaMemoryProfiler,
                                          HabanaProfilerCounterHelper,
-                                         format_bytes)
-from vllm_hpu_extension.runtime import get_config
+                                         format_bytes, setup_profiler)
+from vllm_hpu_extension.runtime import finalize_config, get_config
+from vllm_hpu_extension.utils import pad_list
 
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
@@ -57,25 +59,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _TYPE_CACHE: dict[str, dict[str, Any]] = {}
-
-
-def setup_profiler(warmup, active):
-    schedule = torch.profiler.schedule(wait=0,
-                                       warmup=warmup,
-                                       active=active,
-                                       repeat=1)
-    activities = [
-        torch.profiler.ProfilerActivity.CPU,
-        torch.profiler.ProfilerActivity.HPU
-    ]
-    profiler = torch.profiler.profile(
-        schedule=schedule,
-        activities=activities,
-        on_trace_ready=torch.profiler.tensorboard_trace_handler('.',
-                                                                use_gzip=True),
-        record_shapes=False,
-        with_stack=True)
-    return profiler
 
 
 @dataclass
@@ -541,13 +524,6 @@ def round_up(value: int, k: int):
     return (value + k - 1) // k * k
 
 
-def pad_list(input, target_len, val_generator):
-    padding = target_len - len(input)
-    if padding > 0:
-        input.extend(itertools.islice(val_generator, padding))
-    return input
-
-
 class HPUModelRunner:
 
     def __init__(
@@ -558,6 +534,8 @@ class HPUModelRunner:
     ):
         # TODO: use ModelRunnerBase.__init__(self, vllm_config=vllm_config)
         environment.set_vllm_config(vllm_config)
+        finalize_config()
+
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -670,6 +648,8 @@ class HPUModelRunner:
         # High-level profiler
         self.profiler = HabanaHighLevelProfiler()
         self.profiler_counter_helper = HabanaProfilerCounterHelper()
+
+        self.defragmenter = OnlineDefragmenter()
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
@@ -1075,6 +1055,7 @@ class HPUModelRunner:
             num_blocks = round_up(context_len + query_len,
                                   self.block_size) // self.block_size
             blocks = block_table_cpu_tensor[batch_idx, :num_blocks].tolist()
+            blocks = [self.defragmenter.resolve(b) for b in blocks]
 
             prompt_tokens = self.input_batch.num_prompt_tokens[batch_idx]
             #TODO: Fix non-prompt case
@@ -1311,6 +1292,8 @@ class HPUModelRunner:
                                                   dim=1,
                                                   index=(index //
                                                          self.block_size))
+        block_number.apply_(self.defragmenter.resolve)
+
         block_offsets = padded_index % self.block_size
         slot_mapping = block_number * self.block_size + block_offsets
         # set an out of range value for the padding tokens so that they
@@ -1319,6 +1302,8 @@ class HPUModelRunner:
         dummy_slots = itertools.cycle(
             range(self._PAD_SLOT_ID, self._PAD_SLOT_ID + self.block_size))
         slot_mapping[num_decodes:].apply_(lambda _, ds=dummy_slots: next(ds))
+
+        block_tables_list = self.defragmenter.resolve_all(block_tables_list)
 
         # CONTEXT_LENS [batch_size]
         block_list, block_groups, block_usage = \
@@ -1597,6 +1582,20 @@ class HPUModelRunner:
         # Transfer [tokD0, tokD1, tokD2, 0, tokP0, tokP1, tokP2, 0] to CPU
         # On CPU, sanitize [tokD0, tokD1, tokD2, 0, tokP0, tokP1, tokP2, 0] -> [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2] # noqa
         # Return [tokD0, tokD1, tokD2, tokP0, tokP1, tokP2]
+
+        if self.defragmenter.enabled and self.kv_caches:
+            new = {
+                req.req_id: flatten(req.block_ids)
+                for req in scheduler_output.scheduled_new_reqs if req.block_ids
+            }
+            cached = {
+                req.req_id: flatten(req.new_block_ids)
+                for req in scheduler_output.scheduled_cached_reqs
+                if req.new_block_ids
+            }
+            self.defragmenter.update_state(new | cached,
+                                           scheduler_output.finished_req_ids)
+            self.defragmenter.defragment()
 
         batch_changed = self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
@@ -2202,6 +2201,7 @@ class HPUModelRunner:
 
     @torch.inference_mode()
     def warmup_model(self) -> None:
+        self.defragmenter.initialize(self.kv_caches, self.block_size)
         if not self.enable_bucketing:
             return
         prompt_profile_cfg, decode_profile_cfg = self._read_profiling_cfg()

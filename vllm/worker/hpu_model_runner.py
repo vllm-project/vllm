@@ -36,7 +36,7 @@ from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
                                          HabanaMemoryProfiler,
                                          HabanaProfilerCounterHelper,
                                          format_bytes)
-from vllm_hpu_extension.runtime import get_config
+from vllm_hpu_extension.runtime import finalize_config, get_config
 
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
@@ -968,7 +968,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         is_causal: bool = True,
     ):
         ModelRunnerBase.__init__(self, vllm_config=vllm_config)
+
         environment.set_vllm_config(vllm_config)
+        finalize_config()
+
         self.is_driver_worker = is_driver_worker
         self.return_hidden_states = return_hidden_states
 
