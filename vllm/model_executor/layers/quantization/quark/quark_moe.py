@@ -7,7 +7,8 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
+from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
+                                                  FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     OCP_MX_BLOCK_SIZE)
@@ -24,8 +25,9 @@ __all__ = [
 
 
 class QuarkMoEMethod(FusedMoEMethodBase):
-    def __init__(self):
-        super().__init__()
+
+    def __init__(self, moe: FusedMoEConfig):
+        super().__init__(moe)
 
     @staticmethod
     def get_moe_method(
@@ -44,18 +46,24 @@ class QuarkMoEMethod(FusedMoEMethodBase):
         input_config = layer_quant_config.get("input_tensors")
 
         if quant_config._is_fp8_w8a8(weight_config, input_config):
-            return QuarkW8A8Fp8MoEMethod(weight_config, input_config)
+            return QuarkW8A8Fp8MoEMethod(weight_config, input_config,
+                                         module.moe_config)
         elif quant_config._is_mx_fp4(weight_config, input_config):
-            return QuarkW4A4MXFp4MoEMethod(weight_config, input_config)
+            return QuarkW4A4MXFp4MoEMethod(weight_config, input_config,
+                                           module.moe_config)
         else:
             raise RuntimeError("Unsupported FusedMoe scheme")
 
 
 class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
 
-    def __init__(self, weight_config: dict[str, Any], input_config: dict[str,
-                                                                         Any]):
-        super().__init__()
+    def __init__(
+        self,
+        weight_config: dict[str, Any],
+        input_config: dict[str, Any],
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
         self.weight_quant = weight_config
         self.input_quant = input_config
 
@@ -236,7 +244,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype)
 
         return fused_experts(
             x,
@@ -258,9 +267,13 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
 
 class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
 
-    def __init__(self, weight_config: dict[str, Any], input_config: dict[str,
-                                                                         Any]):
-        super().__init__()
+    def __init__(
+        self,
+        weight_config: dict[str, Any],
+        input_config: dict[str, Any],
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
         self.weight_quant = weight_config
         self.input_quant = input_config
 
@@ -297,7 +310,7 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
                 "layers computed in high precision.")
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
-                      hidden_size: int, intermediate_size_per_partition: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
 
         # Add the quantization method used (per tensor/grouped/channel)
@@ -393,7 +406,8 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype)
 
         out = fused_experts(
             x,

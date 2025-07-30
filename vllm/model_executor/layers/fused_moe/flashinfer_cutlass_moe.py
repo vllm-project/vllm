@@ -46,7 +46,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         g2_alphas: torch.Tensor,
         a1_gscale: torch.Tensor,
         a2_gscale: torch.Tensor,
-        out_dtype: torch.dtype, # Optional?
+        out_dtype: torch.dtype,  # Optional?
         use_nvfp4_w4a4: bool = False,  # undo defaults?
         use_dp: bool = False,
         ep_rank: int = 0,

@@ -7,7 +7,7 @@ import torch
 
 from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
+    FusedMoE, FusedMoEConfig, FusedMoEMethodBase, FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -160,7 +160,7 @@ class MoeWNA16Config(QuantizationConfig):
             else:
                 raise ValueError("moe_wna16 only support gptq and awq.")
         elif isinstance(layer, FusedMoE):
-            return MoeWNA16Method(self)
+            return MoeWNA16Method(self, layer.moe_config)
         return None
 
 
@@ -175,8 +175,12 @@ class MoeWNA16Method(FusedMoEMethodBase):
         quant_config: The MOE WNA16 (W8A16/W4A16) quantization config.
     """
 
-    def __init__(self, quant_config: MoeWNA16Config):
-        super().__init__()
+    def __init__(
+        self,
+        quant_config: MoeWNA16Config,
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
         self.quant_config = quant_config
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -321,7 +325,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype)
 
         weight_bits = self.quant_config.weight_bits
         has_zp = self.quant_config.has_zp

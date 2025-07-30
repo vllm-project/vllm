@@ -12,8 +12,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-    TopKWeightAndReduceDelegate,
-    TopKWeightAndReduceNoOP)
+    TopKWeightAndReduceDelegate, TopKWeightAndReduceNoOP)
 from vllm.model_executor.layers.fused_moe.utils import (_fp8_perm,
                                                         _fp8_quantize,
                                                         _resize_cache)
@@ -486,8 +485,9 @@ def run_cutlass_moe_fp4(
     e_w1, nx2_w1, half_k_w1 = w1_fp4.shape
     e_w2, k_w2, half_n_w2 = w2_fp4.shape
 
-    assert (e_w1 == e_w2 and e_w1 == e), (f"Number of experts must match",
-                                          f" between weights. {e_w1}, {e_w2}, {e}")
+    assert (e_w1 == e_w2
+            and e_w1 == e), ("Number of experts must match",
+                             f" between weights. {e_w1}, {e_w2}, {e}")
     assert (k_a == half_k_w1 * 2
             and k == k_w2), ("Hidden size mismatch between a, w1 and w2")
     assert (nx2_w1 == n * 2 and half_n_w2 * 2 == n), ("mismatch in "
@@ -568,7 +568,7 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         g2_alphas: torch.Tensor,
         a1_gscale: torch.Tensor,
         a2_gscale: torch.Tensor,
-        device: torch.device,         # needed?
+        device: torch.device,  # needed?
         max_experts_per_worker: int,
         out_dtype: torch.dtype,
         per_act_token_quant: bool,
@@ -724,7 +724,7 @@ def cutlass_moe_fp4(
             a2_gscale,
             device,
             max_experts_per_worker=e,
-            out_dtype=a.dtype, # XXXXXXXXXXX
+            out_dtype=a.dtype,  # XXXXXXXXXXX
             per_act_token_quant=False,
             per_out_ch_quant=False,
             use_batched_format=False,

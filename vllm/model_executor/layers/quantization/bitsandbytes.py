@@ -7,6 +7,7 @@ import torch
 from packaging import version
 
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
+                                                        FusedMoEConfig,
                                                         FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod,
@@ -132,7 +133,7 @@ class BitsAndBytesConfig(QuantizationConfig):
                 return UnquantizedLinearMethod()
             return BitsAndBytesLinearMethod(self)
         elif isinstance(layer, FusedMoE):
-            return BitsAndBytesMoEMethod(self)
+            return BitsAndBytesMoEMethod(self, layer.moe_config)
         return None
 
 
@@ -411,8 +412,12 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
        quant_config: The BitsAndBytes quantization config.
     """
 
-    def __init__(self, quant_config: BitsAndBytesConfig):
-        super().__init__()
+    def __init__(
+        self,
+        quant_config: BitsAndBytesConfig,
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
         try:
             import bitsandbytes
             if version.parse(
@@ -423,7 +428,6 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             raise ImportError("Please install bitsandbytes>=0.46.1 via "
                               "`pip install bitsandbytes>=0.46.1` to use "
                               "bitsandbytes quantizer.") from err
-        self.topk_indices_dtype = None
         self.quant_config = quant_config
 
     def create_weights(
