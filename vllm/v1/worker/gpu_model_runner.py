@@ -2427,8 +2427,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         "Non-Attention backend is not supported by V1 "
                         "GPUModelRunner.")
             elif isinstance(kv_cache_spec, MambaSpec):
-                # ShortConv uses many of the same attributes as Mamba2 path,
-                # except chunking
                 attn_backend_i = Mamba2AttentionBackend
             else:
                 raise ValueError(
@@ -2524,7 +2522,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             corresponding memory buffer for KV cache.
         """
         kv_caches: dict[str, torch.Tensor] = {}
-        has_attn, has_mamba_like_layers = False, False
+        has_attn, has_mamba = False, False
         for i, kv_cache_group_spec in enumerate(
                 kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
@@ -2563,7 +2561,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         layer_name].view(dtype).view(kv_cache_shape).permute(
                             *inv_order)
                 elif isinstance(kv_cache_spec, MambaSpec):
-                    has_mamba_like_layers = True
+                    has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     dtype = kv_cache_spec.dtype
                     num_element_per_page = (kv_cache_spec.page_size_bytes //
@@ -2587,7 +2585,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     raise NotImplementedError
 
-        if has_attn and has_mamba_like_layers:
+        if has_attn and has_mamba:
             self._verify_hybrid_attention_mamba_layout(kv_cache_config,
                                                        kv_cache_raw_tensors)
 

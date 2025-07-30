@@ -529,8 +529,9 @@ class MambaManager(SingleTypeKVCacheManager):
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
     ) -> tuple[list[KVCacheBlock], ...]:
-        assert isinstance(kv_cache_spec, (MambaSpec)), (
-            "MambaManager can only be used for mamba/shortconv groups")
+        assert isinstance(
+            kv_cache_spec,
+            MambaSpec), ("MambaManager can only be used for mamba groups")
         # Prefix caching is not supported for mamba now. Always return empty
         # list.
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
