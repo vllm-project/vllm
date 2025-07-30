@@ -41,17 +41,18 @@ th:not(:first-child) {
 | [LoRA](lora.md) | ✅ | ✅ | ✅ | | | | | | | | | | | |
 | [SD](spec_decode.md) | ✅ | ✅ | ❌ | ✅ | | | | | | | | | | |
 | CUDA graph | ✅ | ✅ | ✅ | ✅ | ✅ | | | | | | | | | |
-| [pooling](../models/pooling_models.md) | ✅\* | ✅\* | ✅ | ❌ | ✅ | ✅ | | | | | | | | |
+| [pooling](../models/pooling_models.md) | 🟠\* | 🟠\* | ✅ | ❌ | ✅ | ✅ | | | | | | | | |
 | <abbr title="Encoder-Decoder Models">enc-dec</abbr> | ❌ | [❌](gh-issue:7366) | ❌ | [❌](gh-issue:7366) | ✅ | ✅ | ✅ | | | | | | | |
 | <abbr title="Logprobs">logP</abbr> | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | | | | | | |
 | <abbr title="Prompt Logprobs">prmpt logP</abbr> | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | | | | | |
 | <abbr title="Async Output Processing">async output</abbr> | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | | | | |
 | multi-step | ❌ | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | | | |
-| [mm](multimodal_inputs.md) | ✅ | ✅ | [🟠](gh-pr:4194) | ❔ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❔ | ✅ | | |
+| [mm](multimodal_inputs.md) | ✅ | ✅ | [🟠](gh-pr:4194)<sup>^</sup> | ❔ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❔ | ✅ | | |
 | best-of | ✅ | ✅ | ✅ | [❌](gh-issue:6137) | ✅ | ❌ | ✅ | ✅ | ✅ | ❔ | [❌](gh-issue:7968) | ✅ | ✅ | |
 | beam-search | ✅ | ✅ | ✅ | [❌](gh-issue:6137) | ✅ | ❌ | ✅ | ✅ | ✅ | ❔ | [❌](gh-issue:7968) | ❔ | ✅ | ✅ |
 
-\* Chunked prefill and prefix caching are only applicable to last-token pooling.
+\* Chunked prefill and prefix caching are only applicable to last-token pooling.  
+<sup>^</sup> LoRA is only applicable to the language backbone of multimodal models.
 
 [](){ #feature-x-hardware }
 
