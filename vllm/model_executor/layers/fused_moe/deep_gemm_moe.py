@@ -113,7 +113,14 @@ def warmup_deepgemm_gg_contiguous_kernels(w1: torch.Tensor, w2: torch.Tensor,
                               num_experts,
                               block_m,
                               expert_tokens_meta=None)
-    expert_ids = torch.zeros((MAX_M, ), device=device, dtype=torch.int32)
+    # Distribute expert-ids evenly.
+    MAX_BLOCKS = MAX_M // block_m
+    expert_ids_block = torch.randint(low=0,
+                                     high=num_experts,
+                                     size=(MAX_BLOCKS, ),
+                                     device=device,
+                                     dtype=torch.int32)
+    expert_ids = torch.repeat_interleave(expert_ids_block, block_m, dim=0)
 
     def _warmup(w: torch.Tensor, w_scale: torch.Tensor):
 
@@ -124,7 +131,7 @@ def warmup_deepgemm_gg_contiguous_kernels(w1: torch.Tensor, w2: torch.Tensor,
                                  dtype=torch.float32)
         out = torch.empty((MAX_M, n), device=device, dtype=torch.bfloat16)
 
-        pbar = tqdm(total=MAX_M // block_m,
+        pbar = tqdm(total=MAX_BLOCKS,
                     desc=f"DeepGemmExperts GEMM warmup (MAX_M={MAX_M})")
         num_tokens = MAX_M
         while num_tokens > 0:
