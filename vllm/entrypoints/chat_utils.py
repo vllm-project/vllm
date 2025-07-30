@@ -388,7 +388,7 @@ def resolve_hf_chat_template(
     chat_template: Optional[str],
     tools: Optional[list[dict[str, Any]]],
     *,
-    model_config: ModelConfig
+    model_config: ModelConfig,
 ) -> Optional[str]:
     # 1st priority: The given chat template
     if chat_template is not None:
