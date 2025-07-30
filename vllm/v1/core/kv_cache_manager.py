@@ -370,7 +370,7 @@ class KVCacheManager:
             group.
         """
         assert request.status == RequestStatus.RUNNING
-        return self.coordinator.get_num_common_prefix_blocks_for_kv_groups(
+        return self.coordinator.get_num_common_prefix_blocks(
             request.request_id, num_running_requests)
 
     def free_block_hashes(self, request: Request) -> None:
