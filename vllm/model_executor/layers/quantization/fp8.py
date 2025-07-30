@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import functools
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
@@ -142,7 +141,7 @@ class Fp8Config(QuantizationConfig):
                 return UnquantizedLinearMethod()
             return Fp8LinearMethod(self)
         elif isinstance(layer, FusedMoE):
-            return Fp8MoEMethod(self)
+            return Fp8MoEMethod(self, layer.moe_config)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
         return None
@@ -479,9 +478,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         quant_config: The quantization config.
     """
 
-    def __init__(self, quant_config: Fp8Config):
-        from vllm.model_executor.layers.fused_moe import fused_experts
-        super().__init__()
+    def __init__(self, quant_config: Fp8Config, moe: FusedMoEConfig):
+        super().__init__(moe)
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
 
@@ -528,15 +526,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             logger.warning_once(
                 "CutlassBlockScaledGroupedGemm not supported on the current "
                 "platform.")
-
-        self.topk_indices_dtype = None
-        self.fused_experts = functools.partial(  # type: ignore
-            fused_experts,
-            use_fp8_w8a8=True,
-            block_shape=self.quant_config.weight_block_size,
-            allow_deep_gemm=self.allow_deep_gemm,
-            allow_cutlass_block_scaled_grouped_gemm=(
-                self.allow_cutlass_block_scaled_grouped_gemm))
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
@@ -1032,7 +1021,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     num_expert_group=num_expert_group,
                     topk_group=topk_group,
                     apply_router_weight_on_input=apply_router_weight_on_input)
-        else:
+        elif self.fused_experts is not None:
             return self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -1051,6 +1040,30 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 a1_scale=layer.w13_input_scale,
                 a2_scale=layer.w2_input_scale,
             )
+        else:
+            from vllm.model_executor.layers.fused_moe import fused_experts
+            return fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                expert_map=expert_map,
+                w1_scale=(layer.w13_weight_scale_inv
+                          if self.block_quant else layer.w13_weight_scale),
+                w2_scale=(layer.w2_weight_scale_inv
+                          if self.block_quant else layer.w2_weight_scale),
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale,
+                use_fp8_w8a8=True,
+                block_shape=self.quant_config.weight_block_size,
+                allow_deep_gemm=self.allow_deep_gemm,
+                allow_cutlass_block_scaled_grouped_gemm=(
+                    self.allow_cutlass_block_scaled_grouped_gemm))
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):

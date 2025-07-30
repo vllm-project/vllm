@@ -80,10 +80,11 @@ class FusedMoeWeightScaleSupported(Enum):
 
 class FusedMoEMethodBase(QuantizeMethodBase):
 
-    def __init__(self):
+    # TODO: also pass quant_config???
+    def __init__(self, moe: FusedMoEConfig):
         super().__init__()
+        self.moe = moe
         self.fused_experts = None
-        self.moe = None
         self.topk_indices_dtype = None
 
     @abstractmethod
@@ -104,8 +105,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @staticmethod
     def _maybe_make_prepare_finalize(
-        moe: FusedMoEConfig,
-    ) -> Optional[FusedMoEPrepareAndFinalize]:
+        moe: FusedMoEConfig, ) -> Optional[FusedMoEPrepareAndFinalize]:
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
 
@@ -199,15 +199,13 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     ) -> Optional[FusedMoEPrepareAndFinalize]:
         return FusedMoEMethodBase._maybe_make_prepare_finalize(moe)
 
-    def init_prepare_finalize(self): #, moe: FusedMoEConfig):
+    def init_prepare_finalize(self):
         assert self.moe is not None
-        prepare_finalize = self.maybe_make_prepare_finalize(
-            self.moe)
+        prepare_finalize = self.maybe_make_prepare_finalize(self.moe)
 
-        self.topk_indices_dtype = None
         if prepare_finalize is not None:
-            # TBD
-            #assert self.fused_experts is None, f"FUSED_EXPERTS {self.fused_experts}"
+            assert self.topk_indices_dtype is None
+            assert self.fused_experts is None
             logger.debug("%s", prepare_finalize.__class__.__name__)
             self.topk_indices_dtype = prepare_finalize.topk_indices_dtype()
             experts = self.select_gemm_impl(prepare_finalize, self.moe)
@@ -257,9 +255,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
-    def __init__(self):
-        super().__init__()
-        self.moe = moe
+    def __init__(self, moe: FusedMoEConfig):
+        super().__init__(moe)
         self.has_bias = self.moe.has_bias
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
         if self.rocm_aiter_moe_enabled:
@@ -271,7 +268,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
-        moe: FusedMoEConfig,  # Remove?  every layer should have an moe config object
+        moe:
+        FusedMoEConfig,  # Remove?  every layer should have an moe config object
     ) -> FusedMoEPermuteExpertsUnpermute:
         if (prepare_finalize.activation_format ==
                 FusedMoEActivationFormat.BatchedExperts):
@@ -479,11 +477,26 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 expert_map=expert_map,
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input)
-        else:
+        elif self.fused_experts is not None:
             return self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+            )
+        else:
+            return fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                w1_bias=layer.w13_bias if self.has_bias else None,
+                w2_bias=layer.w2_bias if self.has_bias else None,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=True,
@@ -823,13 +836,11 @@ class FusedMoE(CustomOp):
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
         quant_method: Optional[QuantizeMethodBase] = None
-        quant_method = (UnquantizedFusedMoEMethod() if quant_config is None
+        quant_method = (UnquantizedFusedMoEMethod(moe) if quant_config is None
                         else quant_config.get_quant_method(self, prefix))
 
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
-        assert quant_method.moe is None
-        quant_method.moe = moe
         self.quant_method = quant_method
 
         if self.enable_eplb:

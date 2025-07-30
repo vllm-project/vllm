@@ -71,7 +71,7 @@ class FusedMoEQuantConfig:
     block_shape: Optional[list[int]] = None
 
     # TODO: add rest of gscale + alphas?
-    is_fp4_scale_swizzled: bool = False   # ???????????
+    is_fp4_scale_swizzled: bool = False  # ???????????
 
     # TODO: add col major flag?
     # add detailed quant info for input, intermediates, weights, etc?
@@ -491,17 +491,3 @@ class FusedMoEConfig:
             max_num_tokens=max_num_tokens,
             has_bias=has_bias,
         )
-
-
-@dataclass
-class FusedMoERuntimeConfig:
-    w1: torch.Tensor
-    w2: torch.Tensor
-    activation: str
-    w1_scale: Optional[torch.Tensor] = None
-    w2_scale: Optional[torch.Tensor] = None
-    w1_zp: Optional[torch.Tensor] = None
-    w2_zp: Optional[torch.Tensor] = None
-    a1q_scale: Optional[torch.Tensor] = None
-    a2_scale: Optional[torch.Tensor] = None
-    apply_router_weight_on_input: bool = False

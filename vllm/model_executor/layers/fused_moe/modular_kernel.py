@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from math import prod
-from typing import Any, Optional, final
+from typing import Optional, final
 
 import torch
 
@@ -556,7 +556,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
         num_chunks = cdiv(M, CHUNK_SIZE)
 
-        # TODO: get rid of one level here, update slice functions to nops on num_chunks==1
+        # TODO: get rid of one level here, update slice functions
+        # to nops on num_chunks==1
 
         if not self.fused_experts.supports_chunking() or num_chunks == 1:
             return self._do_fused_experts(
@@ -644,9 +645,6 @@ class FusedMoEModularKernel(torch.nn.Module):
                 c_expert_tokens_meta = slice_expert_tokens_metadata(
                     expert_tokens_meta, c_topk_ids, local_num_experts,
                     expert_map)
-
-            s = chunk_idx * CHUNK_SIZE
-            e = min(s + CHUNK_SIZE, M)
 
             self._do_fused_experts(
                 fused_out=slice_output_tensor(chunk_idx),
@@ -785,7 +783,10 @@ class FusedMoEModularKernel(torch.nn.Module):
             )
 
         self.prepare_finalize.finalize(
-            output, fused_out, topk_weights, topk_ids,
+            output,
+            fused_out,
+            topk_weights,
+            topk_ids,
             apply_router_weight_on_input,
             self.fused_experts.finalize_weight_and_reduce_impl(),
         )

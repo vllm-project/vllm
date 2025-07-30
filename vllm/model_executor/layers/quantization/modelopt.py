@@ -176,7 +176,7 @@ class ModelOptFp8Config(QuantizationConfig):
         elif isinstance(layer, Attention):
             return ModelOptFp8KVCacheMethod(self)
         elif isinstance(layer, FusedMoE):
-            return ModelOptFp8MoEMethod(self)
+            return ModelOptFp8MoEMethod(self, layer.moe_config)
         return None
 
 
@@ -272,8 +272,12 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         quant_config: The ModelOpt quantization config.
     """
 
-    def __init__(self, quant_config: ModelOptFp8Config) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        quant_config: ModelOptFp8Config,
+        moe: FusedMoEConfig,
+    ) -> None:
+        super().__init__(moe)
         self.quant_config = quant_config
         from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
             cutlass_fp8_supported)
@@ -485,6 +489,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype,
         )
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_experts)
@@ -700,7 +705,15 @@ class ModelOptNvFp4Config(QuantizationConfig):
         elif isinstance(layer, Attention):
             return ModelOptFp8KVCacheMethod(self)
         elif isinstance(layer, FusedMoE):
-            return ModelOptNvFp4FusedMoE(self)
+            return ModelOptNvFp4FusedMoE(
+                self,
+                layer.moe_config,
+                g1_alphas=layer.g1_alphas,
+                g2_alphas=layer.g2_alphas,
+                a1_gscale=layer.w13_input_scale_quant,
+                a2_gscale=layer.w2_input_scale_quant,
+            )
+
         return None
 
 
@@ -887,11 +900,23 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         quant_config: NVFP4 Quant Config
     """
 
-    def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
-        super().__init__()
-        self.quant_config = quant_config
+    def __init__(
+        self,
+        quant_config: ModelOptNvFp4Config,
+        moe: FusedMoEConfig,
+        g1_alphas: torch.Tensor,
+        g2_alphas: torch.Tensor,
+        a1_gscale: torch.Tensor,
+        a2_gscale: torch.Tensor,
+    ) -> None:
         from vllm.model_executor.layers.quantization.utils.nvfp4_moe_support import (  # noqa: E501
             detect_nvfp4_moe_support)
+        super().__init__(moe)
+        self.quant_config = quant_config
+        self.g1_alphas = g1_alphas
+        self.g2_alphas = g2_alphas
+        self.a1_gscale = a1_gscale
+        self.a2_gscale = a2_gscale
         _nvfp4 = detect_nvfp4_moe_support(self.__class__.__name__)
         self.cutlass_nvfp4_supported = _nvfp4.cutlass_supported
         self.allow_flashinfer = _nvfp4.allow_flashinfer
@@ -927,22 +952,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
         logger.debug_once("FlashInferExperts")
 
+        assert False, "fixme"
         XXXXXXX build_flashinfer_fp4_cutlass_moe_kernel,
 
         # default to TP/EP case only
 
-        use_nvfp4_w4a4 = True
         use_dp = moe_parallel_config.dp_size > 1
-        # ep_rank = moe_parallel_config.ep_rank
-        # ep_size = moe_parallel_config.ep_size
-        # tp_rank = moe_parallel_config.tp_rank
-        # tp_size = moe_parallel_config.tp_size
-        a1_gscale = layer.w13_input_scale_quant
 
         return FlashInferCutlassMoEPrepareAndFinalize(
             use_dp,
-            a1_gscale,
-            quant_dtype=None, #torch.uint8,
+            self.a1_gscale,
+            quant_dtype=None,  #torch.uint8,  # TODO: make sure this works
             #meaning 2x e2m1 packed in one, kernel requirement
         )
 
@@ -950,9 +970,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     # only prepare_finalize is not None call select_gemm_impl
     # so when native cutlass fp4, fused_expert is in fuse_moe.py fused_expert
     # when it's not called(TP case), we still have 2 kernels to use.
-    def select_gemm_impl(self, prepare_finalize,
-                         moe) -> mk.FusedMoEPermuteExpertsUnpermute:
-
+    def select_gemm_impl(
+        self,
+        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
+        moe: FusedMoEConfig,
+    ) -> mk.FusedMoEPermuteExpertsUnpermute:
         assert False, "fixme"
         # assert moe is not None and prepare_finalize is not None
         # from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (  # noqa: E501
@@ -966,16 +988,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         experts = None
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
-
         if self.allow_flashinfer_cutlass:
             from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
                 FlashInferExperts)
             logger.debug_once("Using FlashInferExperts")
             experts = FlashInferExperts(
-                g1_alphas=layer.g1_alphas,
-                g2_alphas=layer.g2_alphas,
-                a1_gscale=layer.w13_input_scale_quant,
-                a2_gscale=layer.w2_input_scale_quant,
+                g1_alphas=self.g1_alphas,
+                g2_alphas=self.g2_alphas,
+                a1_gscale=self.w13_input_scale_quant,
+                a2_gscale=self.w2_input_scale_quant,
                 out_dtype=moe.in_dtype,  # TODO: double check
                 use_nvfp4_w4a4=True,
                 use_dp=moe.moe_parallel_config.dp_size > 1,
@@ -1382,7 +1403,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype)
 
         if self.use_marlin:
             return torch.ops.vllm.fused_marlin_moe(

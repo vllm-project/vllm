@@ -11,6 +11,7 @@ from torch.nn.parameter import Parameter, UninitializedParameter
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
+                                                        FusedMoEConfig,
                                                         FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -58,7 +59,7 @@ class GGUFConfig(QuantizationConfig):
         elif isinstance(layer, VocabParallelEmbedding):
             return GGUFEmbeddingMethod(self)
         elif isinstance(layer, FusedMoE):
-            return GGUFMoEMethod(self)
+            return GGUFMoEMethod(self, layer.moe_config)
         return None
 
 
@@ -445,8 +446,12 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         quant_config: The GGUF quantization config.
     """
 
-    def __init__(self, quant_config: GGUFConfig):
-        super().__init__()
+    def __init__(
+        self,
+        quant_config: GGUFConfig,
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
         self.quant_config = quant_config
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -548,7 +553,8 @@ class GGUFMoEMethod(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype)
         return fused_moe_gguf(x, layer.w13_qweight, layer.w2_qweight,
                               topk_weights, topk_ids,
                               layer.w13_qweight_type.weight_type,

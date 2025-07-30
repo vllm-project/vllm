@@ -70,15 +70,14 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1"
             a1.mul_(topk_weights.to(a1.dtype))
 
-        local_tokens = a1.shape[0]
-
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
             self.a1_gscale,
             quant_config.quant_dtype,
             self.per_channel_quant,
             self.block_shape,
-            is_fp4_scale_swizzled=not self.use_dp  # Swizzling after communication
+            is_fp4_scale_swizzled=not self.
+            use_dp  # Swizzling after communication
         )
         if self.use_dp:
             topk_weights, topk_ids, a1q, a1q_scale = \
