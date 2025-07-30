@@ -140,10 +140,15 @@ def run_multi_api_server(args: argparse.Namespace):
     num_api_servers = args.api_server_count
     assert num_api_servers > 0
 
+    orig_disable_mm_preprocessor_cache = args.disable_mm_preprocessor_cache
+
     # set_process_title("ProcManager")
 
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
+
+        # Not compatible with API server scale-out
+        args.disable_mm_preprocessor_cache = True
 
     listen_address, sock = setup_server(args)
 
@@ -161,11 +166,9 @@ def run_multi_api_server(args: argparse.Namespace):
                              "with api_server_count > 1")
 
         if model_config.is_multimodal_model and not (
-                model_config.disable_mm_preprocessor_cache):
-            logger.warning(
-                "Multi-model preprocessor cache will be disabled for"
-                " api_server_count > 1")
-            model_config.disable_mm_preprocessor_cache = True
+                orig_disable_mm_preprocessor_cache):
+            logger.warning("Multi-model preprocessor cache will be disabled "
+                           "for api_server_count > 1")
 
     executor_class = Executor.get_class(vllm_config)
     log_stats = not engine_args.disable_log_stats
