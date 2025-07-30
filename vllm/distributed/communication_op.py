@@ -51,3 +51,8 @@ def tensor_model_parallel_use_symmetric_memory():
     if torch.compiler.is_compiling():
         return dummy_symmetric_memory()
     return use_symmetric_memory(get_tp_group())
+
+def tensor_model_parallel_maybe_get_symm_buffer(shape, dtype):
+    # in case symm memory is available for this process group, we return a
+    # tensor in symm memory, otherwise we return a regular torch tensor.
+    return get_tp_group().maybe_get_symm_buffer(shape, dtype)

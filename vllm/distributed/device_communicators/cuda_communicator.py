@@ -285,3 +285,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
         assert self.all2all_manager is not None
         hidden_states = self.all2all_manager.combine(hidden_states)
         return hidden_states
+
+    def get_symm_buffer(self, shape, dtype):
+        with torch.cuda.use_mem_pool(get_nccl_mem_pool()):
+            new_buffer = torch.empty(shape, dtype=dtype, device=self.device)
+        return new_buffer

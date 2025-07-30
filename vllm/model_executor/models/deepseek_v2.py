@@ -617,7 +617,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             positions=positions,
             hidden_states=hidden_states,
         )
-        hidden_states.symmetric_memory = True
 
         if hidden_states.dtype == torch.float16:
             # Fix FP16 overflow
