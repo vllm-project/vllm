@@ -9,7 +9,6 @@ from torch import nn
 from transformers import BertConfig
 
 from vllm.attention import Attention, AttentionType
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, PoolerConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -334,7 +333,6 @@ class BertOutput(nn.Module):
         return hidden_states
 
 
-@support_torch_compile
 class BertModel(nn.Module, SupportsQuant):
 
     is_pooling_model = True
