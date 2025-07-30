@@ -38,7 +38,6 @@ async def wait_for_endpoint(
     
     with tqdm(
         total=timeout_seconds, 
-        desc="Waiting for endpoint", 
         bar_format="{desc} |{bar}| {elapsed} elapsed, {remaining} remaining",
         unit="s",
     ) as pbar:
