@@ -214,4 +214,4 @@ If desired, you can also manually set the backend of your choice by configuring 
 
 !!! warning
     There are no pre-built vllm wheels containing Flash Infer, so you must install it in your environment first. Refer to the [Flash Infer official docs](https://docs.flashinfer.ai/) or see <gh-file:docker/Dockerfile> for instructions on how to install it. For environments using PyTorch 2.7.1 + CUDA 12.8, install the matching wheel with `pip install --no-index --find-links=https://download.pytorch.org/whl/flashinfer-python flashinfer-python`.
-
+    
