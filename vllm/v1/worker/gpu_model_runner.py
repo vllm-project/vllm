@@ -1340,7 +1340,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.model,
             is_dummy,
             is_profile,
-            log_stats=self.parallel_config.eplb_log_balancedness,
+            log_stats=self.parallel_config.eplb_config.log_balancedness,
         )
 
     def get_dp_padding(self,
