@@ -205,7 +205,6 @@ class Step3TextDecoderLayer(nn.Module):
                  config: ModelConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 use_fused_moe: bool = False,
                  prefix: str = "") -> None:
         super().__init__()
         config = config.hf_config
@@ -291,17 +290,13 @@ class Step3TextDecoderLayer(nn.Module):
 @support_torch_compile
 class Step3TextModel(nn.Module):
 
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 prefix: str = "",
-                 use_fused_moe: bool = False) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.vocab_size = config.vocab_size
         self.config = config
-        self.use_fused_moe = use_fused_moe
 
         if get_pp_group().is_first_rank or (config.tie_word_embeddings
                                             and get_pp_group().is_last_rank):
@@ -314,12 +309,11 @@ class Step3TextModel(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Step3TextDecoderLayer(
-                config=vllm_config.model_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                use_fused_moe=self.use_fused_moe,
-                prefix=prefix),
+            lambda prefix: Step3TextDecoderLayer(config=vllm_config.
+                                                 model_config,
+                                                 cache_config=cache_config,
+                                                 quant_config=quant_config,
+                                                 prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         if get_pp_group().is_last_rank:

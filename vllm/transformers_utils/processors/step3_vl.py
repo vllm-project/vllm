@@ -8,6 +8,8 @@ from PIL import Image
 from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
 
+from vllm.platforms import current_platform
+
 
 class GPUToTensor(torch.nn.Module):
 
@@ -17,7 +19,7 @@ class GPUToTensor(torch.nn.Module):
             return transforms.ToTensor()(raw_image)
         if raw_image.ndim == 2:
             raw_image = raw_image[:, :, None].repeat(3, -1)
-        if torch.cuda.is_available():
+        if current_platform.is_cuda():
             device = torch.device("cuda")
         else:
             device = torch.device("cpu")
