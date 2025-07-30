@@ -343,7 +343,7 @@ Here is a simple example using Phi-3.5-Vision.
 First, launch the OpenAI-compatible server:
 
 ```bash
-vllm serve microsoft/Phi-3.5-vision-instruct --task generate \
+vllm serve microsoft/Phi-3.5-vision-instruct --runner generate \
   --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt '{"image":2}'
 ```
 
@@ -422,7 +422,7 @@ Instead of `image_url`, you can pass a video file via `video_url`. Here is a sim
 First, launch the OpenAI-compatible server:
 
 ```bash
-vllm serve llava-hf/llava-onevision-qwen2-0.5b-ov-hf --task generate --max-model-len 8192
+vllm serve llava-hf/llava-onevision-qwen2-0.5b-ov-hf --runner generate --max-model-len 8192
 ```
 
 Then, you can use the OpenAI client as follows:
@@ -588,7 +588,9 @@ Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for
 
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
 pass a tensor of shape to the corresponding field of the multi-modal dictionary.
+
 #### Image Embedding Inputs
+
 For image embeddings, you can pass the base64-encoded tensor to the `image_embeds` field.
 The following example demonstrates how to pass image embeddings to the OpenAI server:
 
