@@ -17,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal.utils import get_encdec_max_encoder_len
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -132,8 +133,8 @@ class Scheduler(SchedulerInterface):
         )
 
         # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
-        # projector if needed). Currently, we assume that the encoder also
-        # has the Transformer architecture (e.g., ViT).
+        # projector if needed) for MM models as well as encoder-decoder
+        # transformers.
         self.max_num_encoder_input_tokens = encoder_compute_budget
         # NOTE: For the models without encoder (e.g., text-only models),
         # the encoder cache will not be initialized because cache size is 0
@@ -444,8 +445,8 @@ class Scheduler(SchedulerInterface):
                             # encoder length. This is a single static allocation
                             # and does not grow with the number of decoder
                             # tokens.
-                            max_encoder_len = (self.vllm_config.model_config.
-                                               hf_config.max_source_positions)
+                            max_encoder_len = get_encdec_max_encoder_len(
+                                self.vllm_config.model_config)
                             new_cross_blocks = (self.kv_cache_manager.
                                                 allocate_slots_for_cross_attn(
                                                     request,
