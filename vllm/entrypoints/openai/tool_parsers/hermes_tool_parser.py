@@ -219,7 +219,7 @@ class Hermes2ProToolParser(ToolParser):
                                               function=DeltaFunctionCall(
                                                   arguments="{}").model_dump(
                                                       exclude_none=True))
-                             ])
+                            ])
                         else:
                             return None
 
