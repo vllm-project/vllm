@@ -127,8 +127,10 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             f"{self.SUPPORTED_HIDDEN_SIZES}")
 
         if self.use_fp8_dispatch:
-            assert quant_config.is_block_quantized and hidden_size % 128 == 0, \
-            "DeepEP kernels quantize the inputs in blocks of shape 128"
+            assert ((quant_config.is_block_quantized)
+                    and (hidden_size % DEEPEP_QUANT_BLOCK_SIZE == 0)), (
+                        "DeepEP kernels quantize the inputs in blocks of size "
+                        f"{DEEPEP_QUANT_BLOCK_SIZE}")
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
