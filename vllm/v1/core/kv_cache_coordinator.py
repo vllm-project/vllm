@@ -135,8 +135,8 @@ class KVCacheCoordinator(ABC):
                 state.
 
         Returns:
-            list[int]: The number of common prefix blocks for all requests in the RUNNING
-                state for each kv cache group.
+            list[int]: The number of common prefix blocks for all requests in
+                the RUNNING state for each kv cache group.
         """
         num_blocks_per_group = [
             manager.get_num_common_prefix_blocks(request_id,
