@@ -28,7 +28,7 @@ def test_smaller_truncation_size(vllm_runner,
 
     with vllm_runner(model_name, runner="pooling",
                      max_model_len=max_model_len) as vllm_model:
-        vllm_output = vllm_model.llm.encode(
+        vllm_output = vllm_model.llm.embed(
             input_str, truncate_prompt_tokens=truncate_prompt_tokens)
 
     prompt_tokens = vllm_output[0].prompt_token_ids
@@ -43,7 +43,7 @@ def test_max_truncation_size(vllm_runner,
 
     with vllm_runner(model_name, runner="pooling",
                      max_model_len=max_model_len) as vllm_model:
-        vllm_output = vllm_model.llm.encode(
+        vllm_output = vllm_model.llm.embed(
             input_str, truncate_prompt_tokens=truncate_prompt_tokens)
 
     prompt_tokens = vllm_output[0].prompt_token_ids
@@ -61,7 +61,7 @@ def test_bigger_truncation_size(vllm_runner,
             model_name, runner="pooling",
             max_model_len=max_model_len) as vllm_model:
 
-        llm_output = vllm_model.llm.encode(
+        llm_output = vllm_model.llm.embed(
             input_str, truncate_prompt_tokens=truncate_prompt_tokens)
 
         assert llm_output == f"""truncate_prompt_tokens value 

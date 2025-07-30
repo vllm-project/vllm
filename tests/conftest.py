@@ -1053,6 +1053,10 @@ class VllmRunner:
         req_outputs = self.llm.encode(prompts)
         return [req_output.outputs.data for req_output in req_outputs]
 
+    def reward(self, prompts: list[str]) -> list[list[float]]:
+        req_outputs = self.llm.reward(prompts)
+        return [req_output.outputs.data for req_output in req_outputs]
+
     def score(
         self,
         text_1: Union[str, list[str]],

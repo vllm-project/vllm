@@ -45,14 +45,14 @@ Each pooling model in vLLM supports one or more of these tasks according to
 [Pooler.get_supported_tasks][vllm.model_executor.layers.pooler.Pooler.get_supported_tasks],
 enabling the corresponding APIs:
 
-| Task       | APIs               |
-|------------|--------------------|
-| `encode`   | `encode`           |
-| `embed`    | `embed`, `score`\* |
-| `classify` | `classify`         |
-| `score`    | `score`            |
+| Task       | APIs                                 |
+|------------|--------------------------------------|
+| `encode`   | `LLM.reward(...)`                    |
+| `embed`    | `LLM.embed(...)`, `LLM.score(...)`\* |
+| `classify` | `LLM.classify(...)`                  |
+| `score`    | `LLM.score(...)`                     |
 
-\* The `score` API falls back to `embed` task if the model does not support `score` task.
+\* The `LLM.score(...)` API falls back to `embed` task if the model does not support `score` task.
 
 ### Pooler Configuration
 
@@ -66,11 +66,11 @@ you can override some of its attributes via the `--override-pooler-config` optio
 If the model has been converted via `--convert` (see above),
 the pooler assigned to each task has the following attributes by default:
 
-| Task       | Pooling Type   | Normalization | Softmax |
-|------------|----------------|---------------|---------|
-| `encode`   | `ALL`          | ❌            | ❌      |
-| `embed`    | `LAST`         | ✅︎            | ❌      |
-| `classify` | `LAST`         | ❌            | ✅︎      |
+| Task       | Pooling Type | Normalization | Softmax |
+|------------|--------------|---------------|---------|
+| `reward`   | `ALL`        | ❌            | ❌     |
+| `embed`    | `LAST`       | ✅︎            | ❌      |
+| `classify` | `LAST`       | ❌            | ✅︎      |
 
 When loading [Sentence Transformers](https://huggingface.co/sentence-transformers) models,
 its Sentence Transformers configuration file (`modules.json`) takes priority over the model's defaults.
@@ -83,21 +83,6 @@ which takes priority over both the model's and Sentence Transformers's defaults.
 The [LLM][vllm.LLM] class provides various methods for offline inference.
 See [configuration][configuration] for a list of options when initializing the model.
 
-### `LLM.encode`
-
-The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
-It returns the extracted hidden states directly, which is useful for reward models.
-
-```python
-from vllm import LLM
-
-llm = LLM(model="Qwen/Qwen2.5-Math-RM-72B", runner="pooling")
-(output,) = llm.encode("Hello, my name is")
-
-data = output.outputs.data
-print(f"Data: {data!r}")
-```
-
 ### `LLM.embed`
 
 The [embed][vllm.LLM.embed] method outputs an embedding vector for each prompt.
@@ -106,7 +91,7 @@ It is primarily designed for embedding models.
 ```python
 from vllm import LLM
 
-llm = LLM(model="intfloat/e5-mistral-7b-instruct", runner="pooling")
+llm = LLM(model="intfloat/e5-small", runner="pooling")
 (output,) = llm.embed("Hello, my name is")
 
 embeds = output.outputs.embedding
@@ -153,6 +138,46 @@ print(f"Score: {score}")
 ```
 
 A code example can be found here: <gh-file:examples/offline_inference/basic/score.py>
+
+### `LLM.reward`
+
+The [reward][vllm.LLM.reward] method is available to all reward models in vLLM.
+It returns the extracted hidden states directly.
+
+```python
+from vllm import LLM
+
+llm = LLM(model="internlm/internlm2-1_8b-reward", runner="pooling", trust_remote_code=True)
+(output,) = llm.reward("Hello, my name is")
+
+data = output.outputs.data
+print(f"Data: {data!r}")
+```
+
+A code example can be found here: <gh-file:examples/offline_inference/basic/reward.py>
+
+### `LLM.encode`
+
+The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
+It returns the extracted hidden states directly.
+
+!!! note
+    Please use one of the more specific methods or set the task directly when using `LLM.encode`:
+
+    - For embeddings, use `LLM.embed(...)` or `pooling_task="embed"`.
+    - For classification logits, use `LLM.classify(...)` or `pooling_task="classify"`.
+    - For rewards, use `LLM.reward(...)` or `pooling_task="reward"`.
+    - For similarity scores, use `LLM.score(...)`.  
+
+```python
+from vllm import LLM
+
+llm = LLM(model="intfloat/e5-small", runner="pooling")
+(output,) = llm.encode("Hello, my name is", pooling_task="embed")
+
+data = output.outputs.data
+print(f"Data: {data!r}")
+```
 
 ## Online Serving
 
