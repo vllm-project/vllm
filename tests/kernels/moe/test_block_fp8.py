@@ -92,7 +92,7 @@ MNK_FACTORS_DG = [
 ]
 
 BLOCK_SIZE = [[128, 128]]
-E = [2, 8, 16]  # [128, 256]
+E = [2, 8, 16, 258]  # [128, 256]
 TOP_KS = [1, 2, 6]
 SEEDS = [0]
 
@@ -161,6 +161,9 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
     a = torch.randn((M, K), dtype=dtype) / 10
     score = torch.randn((M, E), dtype=dtype)
 
+    if E == 258:
+        monkeypatch.setenv("VLLM_SHARED_EXPERT_FUSION_REPLICAS", "2")
+
     _, w1, w1_s, _, w2, w2_s = make_test_weights(E,
                                                  N,
                                                  K,
@@ -173,6 +176,7 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
                                            use_int8_w8a8=False,
                                            use_int8_w8a16=False,
                                            use_int4_w4a16=False,
+                                           use_mxfp4_w4a4=False,
                                            per_act_token_quant=False,
                                            block_shape=block_size)
 
