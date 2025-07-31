@@ -3334,13 +3334,23 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
     file.write = write_with_prefix  # type: ignore[method-assign]
 
 
-def decorate_logs(process_name: Optional[str] = None,
-                  pid: Optional[int] = None) -> None:
-    # Add process-specific prefix to stdout and stderr before
-    # we initialize the api_server/engine_core/worker class.
+def decorate_logs(process_name: Optional[str] = None) -> None:
+    """
+    Adds a process-specific prefix to each line of output written to stdout and
+    stderr.
+
+    This function is intended to be called before initializing the api_server,
+    engine_core, or worker classes, so that all subsequent output from the
+    process is prefixed with the process name and PID. This helps distinguish
+    log output from different processes in multi-process environments.
+
+    Args:
+        process_name: Optional; the name of the process to use in the prefix.
+            If not provided, the current process name from the multiprocessing
+            context is used.
+    """
     if process_name is None:
         process_name = get_mp_context().current_process().name
-    if pid is None:
-        pid = os.getpid()
+    pid = os.getpid()
     _add_prefix(sys.stdout, process_name, pid)
     _add_prefix(sys.stderr, process_name, pid)
