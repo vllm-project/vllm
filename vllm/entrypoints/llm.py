@@ -1259,7 +1259,8 @@ class LLM:
         if len(data_1) == 1:
             data_1 = data_1 * len(data_2)
 
-        pooling_params = PoolingParams(task="score")
+        default_pooling_params = PoolingParams(task="score")
+        pooling_params = list[PoolingParams]()
         tokenization_kwargs: dict[str, Any] = {}
 
         _validate_truncation_size(model_config.max_model_len,
@@ -1269,34 +1270,26 @@ class LLM:
 
         input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
 
-        if model_config.is_multimodal_model:
-            for q, d in input_pairs:
-                _, engine_prompt = get_score_prompt(
-                    model_config=model_config,
-                    data_1=q,
-                    data_2=d,
-                    tokenizer=tokenizer,
-                    tokenization_kwargs=tokenization_kwargs,
-                )
+        model_config = self.llm_engine.model_config
 
-                parsed_prompts.append(engine_prompt)
-        else:
-            for q, t in input_pairs:
-                if model_config.use_pad_token:
-                    # cross_encoder models defaults to using pad_token.
-                    prompt_inputs = tokenizer(
-                        text=q,  # type: ignore[arg-type]
-                        text_pair=t,  # type: ignore[arg-type]
-                        **tokenization_kwargs)
-                else:
-                    # `llm as reranker` models defaults to not using pad_token.
-                    prompt_inputs = tokenizer(
-                        text=q + t,  # type: ignore[operator]
-                        **tokenization_kwargs)
-                engine_prompt = TokensPrompt(
-                    prompt_token_ids=prompt_inputs["input_ids"],
-                    token_type_ids=prompt_inputs.get("token_type_ids"))
-                parsed_prompts.append(engine_prompt)
+        for q, d in input_pairs:
+            _, engine_prompt = get_score_prompt(
+                model_config=model_config,
+                data_1=q,
+                data_2=d,
+                tokenizer=tokenizer,
+                tokenization_kwargs=tokenization_kwargs,
+            )
+
+            if (token_type_ids := engine_prompt.pop("token_type_ids", None)):
+                pooling_params.append(
+                    PoolingParams(
+                        task="score",
+                        extra_args={"token_type_ids": token_type_ids}))
+            else:
+                pooling_params.append(default_pooling_params)
+
+            parsed_prompts.append(engine_prompt)
 
         self._validate_and_add_requests(
             prompts=parsed_prompts,

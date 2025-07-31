@@ -28,7 +28,7 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
 
-from .interfaces import SupportsCrossEncoding, SupportsQuant, SupportsV0Only
+from .interfaces import SupportsCrossEncoding, SupportsQuant
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
@@ -60,9 +60,7 @@ class BertEmbedding(nn.Module):
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        input_shape = input_ids.size()
 
         # Input embeddings.
         inputs_embeds = self.word_embeddings(input_ids)
@@ -70,10 +68,7 @@ class BertEmbedding(nn.Module):
         # Position embeddings.
         position_embeddings = self.position_embeddings(position_ids)
 
-        if token_type_ids is None:
-            token_type_ids = torch.zeros(input_shape,
-                                         dtype=torch.long,
-                                         device=inputs_embeds.device)
+        token_type_ids = _decode_token_type_ids(input_ids)
 
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
@@ -361,14 +356,12 @@ class BertModel(nn.Module, SupportsQuant):
         position_ids: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
-        token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
         else:
             hidden_states = self.embeddings(input_ids=input_ids,
-                                            position_ids=position_ids,
-                                            token_type_ids=token_type_ids)
+                                            position_ids=position_ids)
         return self.encoder(hidden_states)
 
     def _load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
@@ -468,13 +461,11 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
-        token_type_ids: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return self.model(input_ids=input_ids,
                           position_ids=positions,
-                          token_type_ids=token_type_ids,
                           inputs_embeds=inputs_embeds,
                           intermediate_tensors=intermediate_tensors)
 
@@ -508,8 +499,31 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
         })
 
 
-class BertForSequenceClassification(nn.Module, SupportsV0Only,
-                                    SupportsCrossEncoding, SupportsQuant):
+TOKEN_TYPE_SHIFT = 30
+
+
+def _encode_token_type_ids(input_ids: torch.tensor,
+                           token_type_ids: torch.tensor) -> None:
+
+    input_ids.bitwise_or_(token_type_ids << TOKEN_TYPE_SHIFT)
+
+
+def _decode_token_type_ids(input_ids: torch.tensor) -> torch.tensor:
+
+    ids_mask = torch.ones(input_ids.shape,
+                          dtype=torch.int32,
+                          device=input_ids.device) << TOKEN_TYPE_SHIFT
+    tokens_mask = ids_mask.bitwise_not()
+
+    token_type_ids = input_ids.bitwise_and(ids_mask) >> TOKEN_TYPE_SHIFT
+
+    input_ids.bitwise_and_(tokens_mask)
+
+    return token_type_ids
+
+
+class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
+                                    SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
@@ -554,6 +568,8 @@ class BertForSequenceClassification(nn.Module, SupportsV0Only,
             ),
         })
 
+        assert config.vocab_size < (1 << TOKEN_TYPE_SHIFT)
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights)
@@ -567,8 +583,12 @@ class BertForSequenceClassification(nn.Module, SupportsV0Only,
         inputs_embeds: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+
+        if token_type_ids is not None:
+            assert input_ids is not None
+            _encode_token_type_ids(input_ids, token_type_ids)
+
         return self.bert(input_ids=input_ids,
                          position_ids=positions,
                          inputs_embeds=inputs_embeds,
-                         intermediate_tensors=intermediate_tensors,
-                         token_type_ids=token_type_ids)
+                         intermediate_tensors=intermediate_tensors)

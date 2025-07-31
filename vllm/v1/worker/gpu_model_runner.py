@@ -321,6 +321,44 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
 
+    def _maybe_add_model_args(self, num_tokens: int, model_kwargs: dict[str,
+                                                                        Any]):
+        num_reqs = self.input_batch.num_reqs
+
+        pooling_params = self.input_batch.pooling_metadata.pooling_params
+
+        num_pooling_reqs = len(pooling_params)
+
+        if num_pooling_reqs == 0:
+            return
+
+        assert num_pooling_reqs == num_reqs
+
+        token_type_id_requests = dict[int, Any]()
+        for i, param in enumerate(pooling_params):
+            if param.extra_args is not None and \
+            (token_types := param.extra_args.get("token_type_ids")) \
+                is not None:
+                token_type_id_requests[i] = token_types
+
+        if len(token_type_id_requests) == 0:
+            return
+
+        seq_lens = self.seq_lens[:num_reqs]
+        token_type_ids = []
+
+        for i in range(num_reqs):
+            if (ids := token_type_id_requests.get(i)) is not None:
+                token_type_ids.append(
+                    torch.tensor(ids, dtype=torch.int32, device=self.device))
+            else:
+                token_type_ids.append(
+                    torch.zeros(seq_lens[i],
+                                dtype=torch.int32,
+                                device=self.device))
+
+        model_kwargs["token_type_ids"] = torch.concat(token_type_ids)
+
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
         Update the order of requests in the batch based on the attention
@@ -1464,13 +1502,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             mm_embeds = []
 
+        model_kwargs: dict[str, Any] = {}
+
         if self.is_multimodal_model and get_pp_group().is_first_rank:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             input_ids = self.input_ids[:num_scheduled_tokens]
+            self._maybe_add_model_args(num_scheduled_tokens, model_kwargs)
 
-            model_kwargs = self._init_model_kwargs_for_multimodal_model(
+            model_mm_kwargs = self._init_model_kwargs_for_multimodal_model(
                 scheduler_output=scheduler_output)
             inputs_embeds = self.model.get_input_embeddings(
                 input_ids=input_ids,
@@ -1487,8 +1528,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # multimodal models, it is not desirable for performance since
             # then the embedding layer is not included in the CUDA graph.
             input_ids = self.input_ids[:num_input_tokens]
+            self._maybe_add_model_args(num_input_tokens, model_kwargs)
             inputs_embeds = None
-            model_kwargs = {}
+            model_mm_kwargs = {}
         if self.uses_mrope:
             positions = self.mrope_positions[:, :num_input_tokens]
         else:
@@ -1522,9 +1564,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
                 **MultiModalKwargs.as_kwargs(
-                    model_kwargs,
+                    model_mm_kwargs,
                     device=self.device,
                 ),
+                **model_kwargs,
             )
 
             self.maybe_wait_for_kv_save()
@@ -2167,15 +2210,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
             model = self.model
+            model_kwargs: dict[str, Any] = {}
+            self._maybe_add_model_args(num_tokens, model_kwargs)
             if self.is_multimodal_model:
-                model_kwargs = self._init_model_kwargs_for_multimodal_model(
+                model_mm_kwargs = self._init_model_kwargs_for_multimodal_model(
                     num_reqs=num_reqs)
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
             else:
                 input_ids = self.input_ids[:num_tokens]
                 inputs_embeds = None
-                model_kwargs = {}
+                model_mm_kwargs = {}
 
             if self.uses_mrope:
                 positions = self.mrope_positions[:, :num_tokens]
@@ -2206,9 +2251,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     intermediate_tensors=intermediate_tensors,
                     inputs_embeds=inputs_embeds,
                     **MultiModalKwargs.as_kwargs(
-                        model_kwargs,
+                        model_mm_kwargs,
                         device=self.device,
                     ),
+                    **model_kwargs,
                 )
 
             if self.use_aux_hidden_state_outputs:

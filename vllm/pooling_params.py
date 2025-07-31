@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import msgspec
 
@@ -31,6 +31,9 @@ class PoolingParams(
     """Internal use only."""
 
     requires_token_ids: bool = False
+    """Internal use only."""
+
+    extra_args: Optional[dict[str, Any]] = None
     """Internal use only."""
 
     def clone(self) -> "PoolingParams":
