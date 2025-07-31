@@ -429,7 +429,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/build.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
-# Install Expert Parallel and DeepPrompt libraries
+# Install EP kernels(pplx-kernels and DeepEP), NixL and DeepGEMM
 COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
 COPY tools/install_nixl.sh install_nixl.sh
 COPY tools/install_deepgemm.sh install_deepgemm.sh
