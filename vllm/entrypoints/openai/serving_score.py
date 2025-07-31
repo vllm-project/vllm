@@ -18,11 +18,15 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse, RerankDocument,
                                               ScoreResponseData, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.score_utils import (ScoreContentPartParam,
                                           ScoreMultiModalParam,
                                           _cosine_similarity,
                                           _validate_score_input_lens,
+                                          compress_token_type_ids,
                                           get_score_prompt)
+# yapf: enable
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
@@ -223,7 +227,10 @@ class ServingScores(OpenAIServing):
 
             if (token_type_ids := engine_prompt.pop("token_type_ids", None)):
                 pooling_params = deepcopy(default_pooling_params)
-                pooling_params.extra_args = {"token_type_ids": token_type_ids}
+                compressed = compress_token_type_ids(token_type_ids)
+                pooling_params.extra_args = {
+                    "compressed_token_type_ids": compressed
+                }
             else:
                 pooling_params = (default_pooling_params)
 

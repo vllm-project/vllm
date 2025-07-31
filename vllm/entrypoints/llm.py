@@ -28,11 +28,15 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_mistral_chat_template,
                                          parse_chat_messages,
                                          resolve_chat_template_content_format)
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.score_utils import (ScoreContentPartParam,
                                           ScoreMultiModalParam,
                                           _cosine_similarity,
                                           _validate_score_input_lens,
+                                          compress_token_type_ids,
                                           get_score_prompt)
+# yapf: enable
 from vllm.entrypoints.utils import (_validate_truncation_size,
                                     log_non_default_args)
 from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
@@ -1282,10 +1286,11 @@ class LLM:
             )
 
             if (token_type_ids := engine_prompt.pop("token_type_ids", None)):
+                compressed = compress_token_type_ids(token_type_ids)
                 pooling_params.append(
                     PoolingParams(
                         task="score",
-                        extra_args={"token_type_ids": token_type_ids}))
+                        extra_args={"compressed_token_type_ids": compressed}))
             else:
                 pooling_params.append(default_pooling_params)
 
