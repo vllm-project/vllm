@@ -162,7 +162,7 @@ class CudaPlatformBase(Platform):
                 if cls.is_device_capability(100):
                     # Blackwell => Force CutlassMLA.
                     use_cutlass_mla = True
-                    envs.VLLM_ATTENTION_BACKEND = "CUTLASS_MLA_VLLM_V1"
+                    envs.VLLM_ATTENTION_BACKEND = "CUTLASS_MLA"
                 else:
                     # Not Blackwell
                     use_flashmla = True
@@ -170,7 +170,7 @@ class CudaPlatformBase(Platform):
                 # Forced case
                 use_flashmla = (envs.VLLM_ATTENTION_BACKEND == "FLASHMLA")
                 use_cutlass_mla = (
-                    envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA_VLLM_V1")
+                    envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA")
 
             from vllm.attention.ops.flashmla import is_flashmla_supported
             if use_flashmla and is_flashmla_supported()[0] \
@@ -182,7 +182,7 @@ class CudaPlatformBase(Platform):
             if use_cutlass_mla and cache_config.block_size != 128:
                 cache_config.block_size = 128
                 logger.info("Forcing kv cache block size to 128 for "
-                            "CUTLASS_MLA_VLLM_V1 backend.")
+                            "CUTLASS_MLA backend.")
 
         compilation_config = vllm_config.compilation_config
         if (envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
@@ -211,9 +211,9 @@ class CudaPlatformBase(Platform):
                              kv_cache_dtype, block_size, use_v1,
                              use_mla) -> str:
         if use_mla:
-            # TODO(lucas): refactor to  be more concise
+            # TODO(lucas): refactor to be more concise
             #  we should probably consider factoring out V1 here
-            if selected_backend == _Backend.CUTLASS_MLA_VLLM_V1:
+            if selected_backend == _Backend.CUTLASS_MLA:
                 if use_v1:
                     logger.info_once("Using Cutlass MLA backend on V1 engine.")
                     return ("vllm.v1.attention.backends.mla."
