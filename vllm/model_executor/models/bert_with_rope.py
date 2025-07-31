@@ -8,7 +8,6 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionType
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -26,7 +25,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models import SupportsV0Only
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.utils import set_weight_attrs
@@ -360,7 +358,6 @@ class BertWithRopeBlock(nn.Module):
         return hidden_states
 
 
-@support_torch_compile
 class BertWithRopeEncoder(nn.Module):
 
     def __init__(self,
@@ -394,7 +391,7 @@ class BertWithRopeEncoder(nn.Module):
         return hidden_states
 
 
-class BertWithRope(nn.Module, SupportsV0Only, SupportsQuant):
+class BertWithRope(nn.Module, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
