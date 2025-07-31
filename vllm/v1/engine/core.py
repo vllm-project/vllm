@@ -3,7 +3,6 @@
 import os
 import queue
 import signal
-import socket
 import sys
 import threading
 import time
@@ -17,9 +16,7 @@ from typing import Any, Callable, Optional, TypeVar, Union
 
 import msgspec
 import zmq
-from viztracer import VizTracer
 
-import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.executor.multiproc_worker_utils import _add_prefix
@@ -144,16 +141,6 @@ class EngineCore:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
-
-        if envs.VLLM_TORCH_PROFILER_DIR:
-            # Reuse torch profiler's directory for simplicity.
-            self.tracer = VizTracer()
-            self.tracer_output_file = os.path.join(
-                envs.VLLM_TORCH_PROFILER_DIR,
-                f"{socket.gethostname()}_{os.getpid()}.v1_engine_core.trace.json"
-            )
-        else:
-            self.tracer = None
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
@@ -359,14 +346,6 @@ class EngineCore:
             self.scheduler.shutdown()
 
     def profile(self, is_start: bool = True):
-        if self.tracer is not None:
-            if is_start:
-                self.tracer.start()
-            else:
-                self.tracer.stop()
-                self.tracer.save(self.tracer_output_file)
-                logger.info("Saved EngineCore CPU trace to %s",
-                            self.tracer_output_file)
         self.model_executor.profile(is_start)
 
     def reset_mm_cache(self):

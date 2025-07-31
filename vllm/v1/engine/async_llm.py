@@ -9,7 +9,7 @@ from copy import copy
 from typing import Any, Optional, Union
 
 import numpy as np
-from viztracer import VizTracer
+import torch
 
 import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
@@ -145,13 +145,24 @@ class AsyncLLM(EngineClient):
             pass
 
         if envs.VLLM_TORCH_PROFILER_DIR:
-            # Reuse torch profiler's directory for simplicity.
-            self.tracer = VizTracer()
-            self.tracer_output_file = os.path.join(
-                envs.VLLM_TORCH_PROFILER_DIR,
-                f"{socket.gethostname()}_{os.getpid()}.async_llm.trace.json")
+            logger.info(
+                f"Torch profiler enabled. AsyncLLM CPU traces will be collected under {envs.VLLM_TORCH_PROFILER_DIR}"
+            )
+            worker_name = f"{socket.gethostname()}_{os.getpid()}.async_llm"
+            self.profiler = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                ],
+                with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    envs.VLLM_TORCH_PROFILER_DIR,
+                    worker_name=worker_name,
+                    use_gzip=True))
         else:
-            self.tracer = None
+            logger.info(
+                "Torch profiler disabled. AsyncLLM CPU traces will not be collected."
+            )
+            self.profiler = None
 
     @classmethod
     def from_vllm_config(
@@ -562,17 +573,16 @@ class AsyncLLM(EngineClient):
             raise self.dead_error
 
     async def start_profile(self) -> None:
-        if self.tracer is not None:
-            self.tracer.start()
-        await self.engine_core.profile_async(True)
+        coros = [self.engine_core.profile_async(True)]
+        if self.profiler is not None:
+            coros.append(asyncio.to_thread(self.profiler.start))
+        await asyncio.gather(*coros)
 
     async def stop_profile(self) -> None:
-        if self.tracer is not None:
-            self.tracer.stop()
-            self.tracer.save(self.tracer_output_file)
-            logger.info("Saved AsyncLLM CPU trace to %s",
-                        self.tracer_output_file)
-        await self.engine_core.profile_async(False)
+        coros = [self.engine_core.profile_async(False)]
+        if self.profiler is not None:
+            coros.append(asyncio.to_thread(self.profiler.stop))
+        await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
         self.processor.mm_registry.reset_processor_cache()
