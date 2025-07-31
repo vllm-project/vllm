@@ -38,6 +38,8 @@ from typing_extensions import TypeVar
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.awq import AWQConfig
+from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
 from vllm.model_executor.layers.resampler import (BaseResampler, Resampler2,
                                                   get_2d_sincos_pos_embed)
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
@@ -1297,6 +1299,14 @@ class MiniCPMV4_0(MiniCPMV2_6):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
+    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
+        # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
+        # seems to avoid vision encoder sections for some models.
+        # See: https://huggingface.co/openbmb/MiniCPM-o-2_6-int4
+        if isinstance(quant_config, (AWQConfig, AWQMarlinConfig)):
+            return None
+        return quant_config
+
     def init_llm(
         self,
         vllm_config: VllmConfig,
@@ -1307,6 +1317,27 @@ class MiniCPMV4_0(MiniCPMV2_6):
         else:
             raise ValueError(f"Unsupported version: {self.version}")
 
+    def init_vision_module(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> nn.Module:
+        quant_config = self._maybe_ignore_quant_config(quant_config)
+        return super().init_vision_module(config, quant_config, prefix)        
+
+    def init_resampler(
+        self,
+        embed_dim: int,
+        vision_dim: int,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> nn.Module:
+        # MiniCPMO GPTQ model leave resampler unquantized.
+        quant_config = self._maybe_ignore_quant_config(quant_config)
+        return super().init_resampler(embed_dim, vision_dim, quant_config,
+                                      prefix)
+    
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
