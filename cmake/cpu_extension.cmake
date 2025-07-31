@@ -101,8 +101,8 @@ else()
     find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
     find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
     find_isa(${CPUINFO} "S390" S390_FOUND)
-    find_isa(${CPUINFO} "v" RVV_FOUND) # Check for RVV support
-    find_isa(${CPUINFO} "zvfbfmin" RISCV_BF16_FOUND) # Check for RISCV BF16 support 
+    find_isa(${CPUINFO} "zvfhmin" RVV_FOUND) # Check for RISC-V Vector FP16 support
+    find_isa(${CPUINFO} "zvfbfmin" RVV_BF16_FOUND) # Check for RISC-V Vector BF16 support
 endif()
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
@@ -181,7 +181,7 @@ elseif (S390_FOUND)
         "-mtune=native")
 elseif (RVV_FOUND)
     message(STATUS "RVV detected")
-    if(RISCV_BF16_FOUND)
+    if(RVV_BF16_FOUND)
         message(STATUS "BF16 extension detected")
         set(MARCH_FLAGS -march=rv64gcv_zvfh_zfbfmin_zvfbfmin_zvl128b -mrvv-vector-bits=zvl -mabi=lp64d)
         add_compile_definitions(RISCV_BF16_SUPPORT)
