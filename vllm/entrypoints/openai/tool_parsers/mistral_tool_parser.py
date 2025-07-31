@@ -243,16 +243,27 @@ class MistralToolParser(ToolParser):
 
         delta_tool_calls = self._generate_delta_tool_call(delta_text)
         if not additional_content and len(delta_tool_calls) == 0:
-            return None
+            if self.streaming_state in [
+                    StreamingState.PARSING_ARGUMENTS,
+                    StreamingState.PARSING_ARGUMENTS_COMPLETED,
+                    StreamingState.TOOL_COMPLETE,
+                    StreamingState.ALL_TOOLS_COMPLETE
+            ]:
+                # Return an empty DeltaMessage once the tool calls are all done
+                # so that finish_reason gets set.
+                return DeltaMessage()
+            else:
+                # return None when the tool is not likely to be finished
+                # This can occur when the name is being parsed for example
+                # and we wait for the name to be complete
+                # before sendingthe function name
+                return None
 
         delta = DeltaMessage()
-        if len(delta_tool_calls) > 0:
+        if additional_content:
             delta.content = additional_content
+        if len(delta_tool_calls) > 0:
             delta.tool_calls = delta_tool_calls
-        else:
-            # Return an empty DeltaMessage once the tool calls are all done
-            # so that finish_reason gets set.
-            delta.content = additional_content if additional_content else ""
 
         # HACK: serving_chat.py inspects the internal state of tool parsers
         # when determining it's final streaming delta, automatically
