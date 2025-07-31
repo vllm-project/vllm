@@ -4,7 +4,6 @@ import multiprocessing
 import os
 import pickle
 import signal
-import sys
 import threading
 import time
 import traceback
@@ -28,10 +27,11 @@ from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.executor.multiproc_worker_utils import (
-    _add_prefix, set_multiprocessing_worker_envs)
+    set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
-from vllm.utils import (get_distributed_init_method, get_loopback_ip,
-                        get_mp_context, get_open_port, set_process_title)
+from vllm.utils import (decorate_logs, get_distributed_init_method,
+                        get_loopback_ip, get_mp_context, get_open_port,
+                        set_process_title)
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -384,9 +384,7 @@ class WorkerProc:
         suffix = f"{pp_str}{'_' if pp_str and tp_str else ''}{tp_str}"
         if suffix:
             set_process_title(suffix, append=True)
-        pid = os.getpid()
-        _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)
-        _add_prefix(sys.stderr, f"VllmWorker rank={rank}", pid)
+        decorate_logs(f"VllmWorker rank={rank}")
 
         # Initialize MessageQueue for receiving SchedulerOutput
         self.rpc_broadcast_mq = MessageQueue.create_from_handle(

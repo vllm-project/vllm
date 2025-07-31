@@ -3,7 +3,6 @@
 import os
 import queue
 import signal
-import sys
 import threading
 import time
 from collections import deque
@@ -19,15 +18,14 @@ import zmq
 
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
-from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import (make_zmq_socket, resolve_obj_by_qualname,
-                        set_process_title)
+from vllm.utils import (decorate_logs, make_zmq_socket,
+                        resolve_obj_by_qualname, set_process_title)
 from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
                                          unify_kv_cache_configs)
 from vllm.v1.core.sched.interface import SchedulerInterface
@@ -444,8 +442,6 @@ class EngineCoreProc(EngineCore):
         client_handshake_address: Optional[str] = None,
         engine_index: int = 0,
     ):
-        self._decorate_logs()
-
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[Union[tuple[int, EngineCoreOutputs],
                                               bytes]]()
@@ -651,12 +647,14 @@ class EngineCoreProc(EngineCore):
                 "vllm_config"].parallel_config
             if parallel_config.data_parallel_size > 1 or dp_rank > 0:
                 set_process_title("DPEngineCore", str(dp_rank))
+                decorate_logs()
                 # Set data parallel rank for this engine process.
                 parallel_config.data_parallel_rank = dp_rank
                 parallel_config.data_parallel_rank_local = local_dp_rank
                 engine_core = DPEngineCoreProc(*args, **kwargs)
             else:
                 set_process_title("EngineCore")
+                decorate_logs()
                 engine_core = EngineCoreProc(*args, **kwargs)
 
             engine_core.run_busy_loop()
@@ -674,15 +672,6 @@ class EngineCoreProc(EngineCore):
         finally:
             if engine_core is not None:
                 engine_core.shutdown()
-
-    def _decorate_logs(self):
-        # Add process-specific prefix to stdout and stderr before
-        # we initialize the engine.
-        from multiprocessing import current_process
-        process_name = current_process().name
-        pid = os.getpid()
-        _add_prefix(sys.stdout, process_name, pid)
-        _add_prefix(sys.stderr, process_name, pid)
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
@@ -1148,9 +1137,6 @@ class DPEngineCoreActor(DPEngineCoreProc):
                 f"local range: [{local_dp_rank * world_size}, "
                 f"{(local_dp_rank + 1) * world_size}) "
                 f"base value: \"{os.getenv(device_control_env_var)}\"") from e
-
-    def _decorate_logs(self):
-        pass
 
     @contextmanager
     def _perform_handshakes(self, handshake_address: str, identity: bytes,
