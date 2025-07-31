@@ -1270,7 +1270,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
         )
 
         if config.model_type == "glm4v":
-            architectures = ["Glm4vForCausalLM"]
+            architectures = ["Glm4ForCausalLM"]
         elif config.model_type == "glm4v_moe":
             architectures = ["Glm4MoeForCausalLM"]
         else:
