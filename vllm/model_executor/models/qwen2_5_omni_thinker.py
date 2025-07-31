@@ -135,7 +135,7 @@ class Qwen2_5OmniThinkerProcessingInfo(Qwen2AudioProcessingInfo,
     def get_hf_processor(self, **kwargs: object) -> Qwen2_5OmniProcessor:
         return self.ctx.get_hf_processor(
             Qwen2_5OmniProcessor,
-            use_fast=True,
+            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
 
