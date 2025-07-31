@@ -97,60 +97,6 @@ class UniformRandomRouting(RoutingStrategy):
         return topk_weights, topk_ids
 
 
-class SoftmaxRouting(RoutingStrategy):
-    """
-    Standard softmax-based routing strategy.
-
-    This is the default routing strategy that uses softmax on router logits
-    to select the top-k experts for each token.
-    """
-
-    def __init__(self, renormalize: bool = True):
-        """
-        Initialize softmax routing.
-
-        Args:
-            renormalize: Whether to renormalize the selected expert weights
-        """
-        self.renormalize = renormalize
-
-    def route_tokens(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        indices_type: Optional[torch.dtype] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Select top-k experts using softmax routing.
-
-        Args:
-            hidden_states: Input hidden states [num_tokens, hidden_size]
-            router_logits: Router logits [num_tokens, num_experts]
-            top_k: Number of experts to select per token
-            indices_type: Data type for expert indices
-
-        Returns:
-            tuple of (topk_weights, topk_ids)
-        """
-        # Apply softmax to get probabilities
-        routing_weights = F.softmax(router_logits, dim=-1)
-
-        # Select top-k experts
-        topk_weights, topk_ids = torch.topk(routing_weights, top_k, dim=-1)
-
-        # Renormalize weights if requested
-        if self.renormalize:
-            topk_weights = topk_weights / topk_weights.sum(dim=-1,
-                                                           keepdim=True)
-
-        # Convert indices to requested type
-        if indices_type is not None:
-            topk_ids = topk_ids.to(dtype=indices_type)
-
-        return topk_weights, topk_ids
-
-
 class WeightedRandomRouting(RoutingStrategy):
     """
     Weighted random routing strategy.
@@ -168,6 +114,10 @@ class WeightedRandomRouting(RoutingStrategy):
         Args:
             temperature: Temperature for softmax sampling (lower = more
             deterministic)
+            * Controls the "sharpness" of the probability distribution
+            * `temperature = 1.0`: Normal softmax probabilities
+            * `temperature < 1.0`: More deterministic (sharper distribution)
+            * `temperature > 1.0`: More random (flatter distribution)
         """
         self.temperature = temperature
 
@@ -224,7 +174,6 @@ class RoutingSimulator:
     # Class-level registry of routing strategies
     _routing_strategies = {
         "uniform_random": UniformRandomRouting(),
-        "softmax": SoftmaxRouting(),
         "weighted_random": WeightedRandomRouting(),
     }
 

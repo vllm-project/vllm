@@ -24,56 +24,49 @@ def device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-@pytest.fixture
-def test_data(device):
-    """Fixture to provide common test data."""
-    num_tokens = 100
-    hidden_size = 64
-    num_experts = 4
-    top_k = 2
+@pytest.mark.parametrize("num_tokens", [1, 16, 256])
+@pytest.mark.parametrize("hidden_size", [64, 1024])
+@pytest.mark.parametrize("num_experts", [16, 128])
+@pytest.mark.parametrize("top_k", [1, 4])
+def test_basic_functionality(
+    num_tokens: int,
+    hidden_size: int,
+    num_experts: int,
+    top_k: int,
+):
+    """Test basic functionality of the routing simulator."""
+    # Test each routing strategy
+    strategies = RoutingSimulator.get_available_strategies()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     hidden_states = torch.randn(num_tokens, hidden_size, device=device)
     router_logits = torch.randn(num_tokens, num_experts, device=device)
 
-    return {
-        "num_tokens": num_tokens,
-        "hidden_size": hidden_size,
-        "num_experts": num_experts,
-        "top_k": top_k,
-        "hidden_states": hidden_states,
-        "router_logits": router_logits,
-    }
-
-
-def test_basic_functionality(test_data):
-    """Test basic functionality of the routing simulator."""
-    # Test each routing strategy
-    strategies = ["uniform_random", "softmax", "weighted_random"]
-
     for strategy in strategies:
         # Simulate routing
         topk_weights, topk_ids = RoutingSimulator.simulate_routing(
-            hidden_states=test_data["hidden_states"],
-            router_logits=test_data["router_logits"],
+            hidden_states=hidden_states,
+            router_logits=router_logits,
             strategy_name=strategy,
-            top_k=test_data["top_k"],
+            top_k=top_k,
         )
 
         # Check output shapes
         assert topk_weights.shape == (
-            test_data["num_tokens"],
-            test_data["top_k"],
+            num_tokens,
+            top_k,
         ), f"Wrong weights shape for {strategy}"
         assert topk_ids.shape == (
-            test_data["num_tokens"],
-            test_data["top_k"],
+            num_tokens,
+            top_k,
         ), f"Wrong ids shape for {strategy}"
 
         # Check that expert IDs are valid
         assert (topk_ids.min()
                 >= 0), f"Invalid expert ID (negative) for {strategy}"
-        assert (topk_ids.max() < test_data["num_experts"]
-                ), f"Invalid expert ID (too large) for {strategy}"
+        assert (topk_ids.max()
+                < num_experts), f"Invalid expert ID (too large) for {strategy}"
 
 
 def test_routing_strategy_integration(device):
@@ -95,8 +88,9 @@ def test_routing_strategy_integration(device):
     router_logits = torch.randn(num_tokens, num_experts, device=device)
 
     # Test different routing strategies
-    strategies = ["softmax", "uniform_random", "weighted_random"]
-    original_env_value = os.environ.get("VLLM_MOE_ROUTING_STRATEGY", "softmax")
+    strategies = RoutingSimulator.get_available_strategies()
+    original_env_value = os.environ.get("VLLM_MOE_ROUTING_STRATEGY",
+                                        "uniform_random")
 
     try:
         for strategy in strategies:
@@ -150,7 +144,7 @@ def test_direct_routing_simulator_methods(device):
     router_logits = torch.randn(num_tokens, num_experts, device=device)
 
     # Test the new select_experts_with_simulated_strategy method
-    strategies = ["softmax", "uniform_random", "weighted_random"]
+    strategies = ["uniform_random", "weighted_random"]
 
     for strategy in strategies:
         topk_weights, topk_ids = \
@@ -172,15 +166,16 @@ def test_static_methods():
     """Test that static methods work without instantiation."""
     # Test that we can register strategies without creating an instance
     from vllm.model_executor.layers.fused_moe.routing_simulator import (
-        SoftmaxRouting)
+        UniformRandomRouting)
 
     # Register a custom strategy
-    custom_strategy = SoftmaxRouting(renormalize=False)
-    RoutingSimulator.register_strategy("custom_softmax", custom_strategy)
+    custom_strategy = UniformRandomRouting()
+    name = "custom_uniform"
+    RoutingSimulator.register_strategy(name, custom_strategy)
 
     # Verify it was registered
     available_strategies = RoutingSimulator.get_available_strategies()
-    assert "custom_softmax" in available_strategies
+    assert name in available_strategies
 
     # Test that we can use the static simulate_routing method
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -190,7 +185,7 @@ def test_static_methods():
     topk_weights, topk_ids = RoutingSimulator.simulate_routing(
         hidden_states=hidden_states,
         router_logits=router_logits,
-        strategy_name="custom_softmax",
+        strategy_name=name,
         top_k=2)
 
     assert topk_weights.shape == (10, 2)
@@ -208,7 +203,7 @@ def test_instance_compatibility():
     topk_weights, topk_ids = RoutingSimulator.simulate_routing(
         hidden_states=hidden_states,
         router_logits=router_logits,
-        strategy_name="softmax",
+        strategy_name="uniform_random",
         top_k=2)
 
     assert topk_weights.shape == (10, 2)
