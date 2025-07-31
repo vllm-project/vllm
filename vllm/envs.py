@@ -95,6 +95,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
+    VLLM_ROCM_USE_AITER_CK_TILE_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
@@ -750,6 +751,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True").lower() in
              ("true", "1")),
 
+    "VLLM_ROCM_USE_AITER_CK_TILE_LINEAR":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_CK_TILE_LINEAR", "True").lower() in
+             ("true", "1")),
+    
     # Whether to use aiter moe ops.
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE":
