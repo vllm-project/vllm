@@ -382,9 +382,11 @@ class WorkerProc:
         pp_str = f"PP{rank // tp_size}" if pp_size > 1 else ""
         tp_str = f"TP{rank % tp_size}" if tp_size > 1 else ""
         suffix = f"{pp_str}{'_' if pp_str and tp_str else ''}{tp_str}"
+        process_name = "VllmWorker"
         if suffix:
             set_process_title(suffix, append=True)
-        decorate_logs(f"VllmWorker {suffix}")
+            process_name = f"{process_name} {suffix}"
+        decorate_logs(process_name)
 
         # Initialize MessageQueue for receiving SchedulerOutput
         self.rpc_broadcast_mq = MessageQueue.create_from_handle(
