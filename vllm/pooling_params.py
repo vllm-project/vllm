@@ -42,6 +42,7 @@ class PoolingParams(
             dimensions=self.dimensions,
             task=self.task,
             requires_token_ids=self.requires_token_ids,
+            extra_args=self.extra_args,
         )
 
     def verify(self, task: PoolingTask, model_config: "ModelConfig") -> None:
@@ -77,7 +78,8 @@ class PoolingParams(
         return (f"PoolingParams("
                 f"dimensions={self.dimensions}, "
                 f"task={self.task}, "
-                f"requires_token_ids={self.requires_token_ids})")
+                f"requires_token_ids={self.requires_token_ids}, "
+                f"extra_args={self.extra_args})")
 
     def __post_init__(self) -> None:
         assert self.output_kind == RequestOutputKind.FINAL_ONLY,\

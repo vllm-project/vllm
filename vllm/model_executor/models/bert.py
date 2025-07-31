@@ -62,13 +62,10 @@ class BertEmbedding(nn.Module):
         position_ids: torch.Tensor,
     ) -> torch.Tensor:
 
-        # Input embeddings.
-        inputs_embeds = self.word_embeddings(input_ids)
-
-        # Position embeddings.
-        position_embeddings = self.position_embeddings(position_ids)
-
         token_type_ids = _decode_token_type_ids(input_ids)
+
+        inputs_embeds = self.word_embeddings(input_ids)
+        position_embeddings = self.position_embeddings(position_ids)
 
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
