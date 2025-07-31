@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
 import itertools
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
@@ -67,7 +68,7 @@ def _load_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
 
 
 def _load_logitsprocs_by_fqcns(
-    logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]]
+    logits_processors: Optional[Sequence[Union[str, type[LogitsProcessor]]]]
 ) -> list[type[LogitsProcessor]]:
     """Load logit processor types, identifying them by fully-qualified class
     names (FQCNs).
@@ -132,7 +133,7 @@ def _load_logitsprocs_by_fqcns(
 
 
 def _load_custom_logitsprocs(
-    logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]],
+    logits_processors: Optional[Sequence[Union[str, type[LogitsProcessor]]]],
 ) -> list[type[LogitsProcessor]]:
     """Load all custom logits processors.
 
@@ -162,12 +163,12 @@ def build_logitsprocs(
     device: torch.device,
     is_pin_memory: bool,
     is_pooling_model: bool,
+    custom_logitsprocs: Sequence[Union[str, type[LogitsProcessor]]] = (),
 ) -> LogitsProcessors:
     if is_pooling_model:
         # Pooling models do not support logitsprocs
         return LogitsProcessors()
-    custom_logitsprocs_classes = _load_custom_logitsprocs(
-        vllm_config.model_config.logits_processors)
+    custom_logitsprocs_classes = _load_custom_logitsprocs(custom_logitsprocs)
     return LogitsProcessors(
         ctor(vllm_config, device, is_pin_memory) for ctor in itertools.chain(
             BUILTIN_LOGITS_PROCESSORS, custom_logitsprocs_classes))

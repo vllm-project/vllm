@@ -219,9 +219,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.cache_config.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
-            logitsprocs=build_logitsprocs(self.vllm_config, self.device,
-                                          self.pin_memory,
-                                          self.is_pooling_model),
+            logitsprocs=build_logitsprocs(
+                self.vllm_config, self.device, self.pin_memory,
+                self.is_pooling_model,
+                self.vllm_config.model_config.logits_processors),
             is_pooling_model=self.is_pooling_model,
         )
 
