@@ -258,12 +258,12 @@ async def benchmark(
         raise ValueError(f"Unknown backend: {backend}")
 
     test_prompt, test_prompt_len, test_output_len, test_mm_content = (
-            input_requests[0].prompt,
-            input_requests[0].prompt_len,
-            input_requests[0].expected_output_len,
-            input_requests[0].multi_modal_data,
-        )
-    
+        input_requests[0].prompt,
+        input_requests[0].prompt_len,
+        input_requests[0].expected_output_len,
+        input_requests[0].multi_modal_data,
+    )
+
     if not disable_test_run:
         print("Starting initial single prompt test run...")
 
