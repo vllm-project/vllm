@@ -225,7 +225,8 @@ class Step3ToolParser(ToolParser):
                         self.current_tool_id]["finished"] = True
 
                     final_args = self._cast_arguments(
-                        function_name, tool_call_arr.get("parameters", {}),
+                        function_name,
+                        tool_call_arr.get("parameters", {}),  # type: ignore
                         request)
                     if final_args:
                         final_args_json = json.dumps(final_args,
