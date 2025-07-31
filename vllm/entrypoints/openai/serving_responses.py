@@ -16,11 +16,12 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption)
+from vllm.entrypoints.context import (ConversationContext, HarmonyContext,
+                                      SimpleContext)
 from vllm.entrypoints.harmony_utils import (
     get_developer_message, get_stop_tokens_for_assistant_actions,
-    get_streamable_parser_for_assistant, get_system_message, get_user_message,
-    parse_output_message, parse_response_input, parse_response_output,
-    render_for_completion)
+    get_system_message, get_user_message, parse_output_message,
+    parse_response_input, parse_response_output, render_for_completion)
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -33,6 +34,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.tool import HarmonyBrowserTool, HarmonyPythonTool
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -96,9 +98,9 @@ class OpenAIServingResponses(OpenAIServing):
             logger.info("Using default chat sampling params from %s: %s",
                         source, self.default_sampling_params)
 
-        self.use_harmony = True
         self.supports_browsing = False
         self.supports_code_interpreter = False
+        self.use_harmony = True  # FIXME
         if self.use_harmony:
             # OpenAI models have two EOS-like tokens: <|return|> and <|call|>.
             # We need to add them to the stop token ids.
@@ -106,6 +108,11 @@ class OpenAIServingResponses(OpenAIServing):
                 self.default_sampling_params["stop_token_ids"] = []
             self.default_sampling_params["stop_token_ids"].extend(
                 get_stop_tokens_for_assistant_actions())
+
+            self.browser_tool = HarmonyBrowserTool()
+            self.supports_browsing = self.browser_tool.enabled
+            self.python_tool = HarmonyPythonTool()
+            self.supports_code_interpreter = self.python_tool.enabled
 
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: This causes a memory leak since we never remove responses
@@ -181,18 +188,20 @@ class OpenAIServingResponses(OpenAIServing):
                 sampling_params = request.to_sampling_params(
                     default_max_tokens, self.default_sampling_params)
 
-                self._log_inputs(request.request_id,
-                                 request_prompts[i],
-                                 params=sampling_params,
-                                 lora_request=lora_request)
-
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))
 
-                generator = self.engine_client.generate(
+                if self.use_harmony:
+                    context = HarmonyContext(messages, self.browser_tool,
+                                             self.python_tool)
+                else:
+                    context = SimpleContext()
+                generator = self._generate_with_builtin_tools(
+                    request.request_id,
+                    request_prompts[i],
                     engine_prompt,
                     sampling_params,
-                    request.request_id,
+                    context,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     priority=request.priority,
@@ -252,6 +261,7 @@ class OpenAIServingResponses(OpenAIServing):
                 request,
                 sampling_params,
                 result_generator,
+                context,
                 model_name,
                 tokenizer,
                 request_metadata,
@@ -292,6 +302,7 @@ class OpenAIServingResponses(OpenAIServing):
         request: ResponsesRequest,
         sampling_params: SamplingParams,
         result_generator: AsyncIterator[RequestOutput],
+        context: ConversationContext,
         model_name: str,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
@@ -299,40 +310,44 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> Union[ErrorResponse, ResponsesResponse]:
         if created_time is None:
             created_time = int(time.time())
-        final_res: Optional[RequestOutput] = None
 
         try:
-            async for res in result_generator:
-                final_res = res
+            async for _ in result_generator:
+                pass
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-        assert final_res is not None
-        assert len(final_res.outputs) == 1
-        final_output = final_res.outputs[0]
-
         if self.use_harmony:
-            output = self._make_response_output_items_with_harmony(
-                final_output)
+            output = self._make_response_output_items_with_harmony(context)
+            num_prompt_tokens = context.num_prompt_tokens
+            num_generated_tokens = context.num_output_tokens
+            num_cached_tokens = context.num_cached_tokens
         else:
+            final_res = context.last_output
+            assert final_res is not None
+            assert len(final_res.outputs) == 1
+            final_output = final_res.outputs[0]
+
             output = self._make_response_output_items(request, final_output,
                                                       tokenizer)
 
-        # Calculate usage.
-        assert final_res.prompt_token_ids is not None
-        num_prompt_tokens = len(final_res.prompt_token_ids)
-        num_generated_tokens = len(final_output.token_ids)
+            # Calculate usage.
+            assert final_res.prompt_token_ids is not None
+            num_prompt_tokens = len(final_res.prompt_token_ids)
+            num_generated_tokens = len(final_output.token_ids)
+            num_cached_tokens = final_res.num_cached_tokens
+
         usage = UsageInfo(
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
-        if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
+        if self.enable_prompt_tokens_details and num_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=final_res.num_cached_tokens)
+                cached_tokens=num_cached_tokens)
         request_metadata.final_usage_info = usage
 
         response = ResponsesResponse.from_request(
@@ -400,15 +415,12 @@ class OpenAIServingResponses(OpenAIServing):
 
     def _make_response_output_items_with_harmony(
         self,
-        final_output: CompletionOutput,
+        context: HarmonyContext,
     ):
-        parser = get_streamable_parser_for_assistant()
-        for token_id in final_output.token_ids:
-            parser.process(token_id)
-
         output_items = []
-        for msg in parser.messages:
-            assert msg.author.role == "assistant"
+        num_init_messages = context.num_init_messages
+        for msg in context.messages[num_init_messages:]:
+            print(msg)
             output_items.extend(parse_output_message(msg))
         return output_items
 
@@ -459,10 +471,15 @@ class OpenAIServingResponses(OpenAIServing):
             # New conversation.
             reasoning_effort = (request.reasoning.effort
                                 if request.reasoning else None)
+            tool_types = [tool.type for tool in request.tools]
+            enable_browsing = ("web_search_preview" in tool_types
+                               and self.supports_browsing)
+            enable_code_interpreter = ("code_interpreter" in tool_types
+                                       and self.supports_code_interpreter)
             sys_msg = get_system_message(
                 reasoning_effort=reasoning_effort,
-                enable_browsing=self.supports_browsing,
-                enable_python=self.supports_code_interpreter,
+                enable_browsing=enable_browsing,
+                enable_python=enable_code_interpreter,
             )
             messages.append(sys_msg)
             dev_msg = get_developer_message(request.instructions)

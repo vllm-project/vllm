@@ -18,8 +18,8 @@ from openai.types.chat.chat_completion_message import (
     Annotation as OpenAIAnnotation)
 # yapf: enable
 from openai.types.responses import (ResponseInputParam, ResponseOutputItem,
-                                    ResponseOutputMessage, ResponsePrompt,
-                                    ResponseStatus, ResponseTextConfig)
+                                    ResponsePrompt, ResponseStatus,
+                                    ResponseTextConfig)
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
@@ -1718,7 +1718,7 @@ class ResponsesResponse(OpenAIBaseModel):
     metadata: Optional[Metadata] = None
     model: str
     object: Literal["response"] = "response"
-    output: list[Union[ResponseOutputMessage, ResponseReasoningItem]]
+    output: list[Union[ResponseOutputItem, ResponseReasoningItem]]
     parallel_tool_calls: bool
     temperature: float
     tool_choice: ToolChoice
@@ -1745,7 +1745,7 @@ class ResponsesResponse(OpenAIBaseModel):
         sampling_params: SamplingParams,
         model_name: str,
         created_time: int,
-        output: list[ResponseOutputItem],
+        output: list[Union[ResponseOutputItem, ResponseReasoningItem]],
         status: ResponseStatus,
         usage: Optional[UsageInfo] = None,
     ) -> "ResponsesResponse":
