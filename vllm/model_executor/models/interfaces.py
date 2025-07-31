@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable, MutableSequence
+from collections.abc import Iterable, Mapping, MutableSequence
 from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
                     Union, overload, runtime_checkable)
 
 import numpy as np
 import torch
 from torch import Tensor
+from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
 from vllm.config import ModelConfig, SpeechToTextConfig
@@ -685,6 +686,8 @@ class SupportsQuant:
 @runtime_checkable
 class SupportsTranscription(Protocol):
     """The interface required for all models that support transcription."""
+    # Mapping from ISO639_1 language codes: language names
+    supported_languages: ClassVar[Mapping[str, str]]
 
     supports_transcription: ClassVar[Literal[True]] = True
 
@@ -694,11 +697,22 @@ class SupportsTranscription(Protocol):
     `True`.
     """
 
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # language codes in supported_languages
+        # that don't exist in the full language map
+        invalid = set(cls.supported_languages) - set(LANGUAGES.keys())
+        if invalid:
+            raise ValueError(
+                f"{cls.__name__}.supported_languages contains invalid "
+                f"language codes: {sorted(invalid)}\n. "
+                f"Valid choices are: {sorted(LANGUAGES.keys())}")
+
     @classmethod
     def get_generation_prompt(cls, audio: np.ndarray,
                               stt_config: SpeechToTextConfig,
-                              model_config: ModelConfig, language: str,
-                              task_type: str,
+                              model_config: ModelConfig,
+                              language: Optional[str], task_type: str,
                               request_prompt: str) -> PromptType:
         """Get the prompt for the ASR model.
         The model has control over the construction, as long as it
@@ -706,9 +720,36 @@ class SupportsTranscription(Protocol):
         ...
 
     @classmethod
-    def validate_language(cls, language: str) -> bool:
-        """Check if the model supports a specific ISO639_1 language."""
-        ...
+    def get_other_languages(cls) -> Mapping[str, str]:
+        # other possible language codes from the whisper map
+        return {
+            k: v
+            for k, v in LANGUAGES.items() if k not in cls.supported_languages
+        }
+
+    @classmethod
+    def validate_language(cls, language: Optional[str]) -> Optional[str]:
+        """
+        Ensure the language specified in the transcription request 
+        is a valid ISO 639-1 language code. If the request language is 
+        valid, but not natively supported by the model, trigger a 
+        warning (but not an exception).
+        """
+        if language is None or language in cls.supported_languages:
+            return language
+        elif language in cls.get_other_languages():
+            logger.warning(
+                "Language %r is not natively supported by %s; "
+                "results may be less accurate. Supported languages: %r",
+                language,
+                cls.__name__,
+                list(cls.supported_languages.keys()),
+            )
+            return language
+        else:
+            raise ValueError(
+                f"Unsupported language: {language!r}.  Must be one of "
+                f"{list(cls.supported_languages.keys())}.")
 
     @classmethod
     def get_speech_to_text_config(
