@@ -799,7 +799,7 @@ class NixlConnectorWorker:
         to Rank 0 once their transaction is done + Rank 0 returns
         finished sets to Scheduler only once all ranks are done.
         """
-        logger.debug(f'buke: get_finished: |{scheduler_output=}|{vars(scheduler_output.kv_connector_metadata)=}')
+        logger.debug(f'buke: get_finished: {self.engine_id=}|{scheduler_output=}|{vars(scheduler_output.kv_connector_metadata)=}')
         #print(f"buke: get_finished: {self.kv_caches_hpu['model.layers.0.self_attn.attn'][0].data_ptr()=}|{self.kv_caches_hpu['model.layers.0.self_attn.attn'][1].data_ptr()=}|")
         k00,v00 = self.kv_caches_hpu['model.layers.0.self_attn.attn']
         #print(f'buke: get_finished hpu: {k00.shape=}|{k00.sum(dim=[1,2])[100:400]=}', flush=True)
@@ -810,9 +810,10 @@ class NixlConnectorWorker:
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
         requests = scheduler_output.kv_connector_metadata.requests
-        logger.debug(f'buke get_finished: {self._transfering_req_meta=}')
-        
-        #logger.debug(f'buke: get_finished: {done_sending=}|{done_recving=}|{requests=}')
+        logger.debug(f'buke get_finished: {self._transfering_req_meta=}')        
+        logger.debug(f'buke: get_finished: {done_sending=}|{done_recving=}|{requests=}')
+        if len(requests) == 0:
+            done_sending = set()
         if len(done_sending) > 0 or len(done_recving) > 0:
             k00,v00 = self.kv_caches_cpu['model.layers.0.self_attn.attn']
             #logger.debug(f'buke: get_finished cpu: {k00.shape=}|{k00.sum(dim=[1,2])[100:400]=}')
@@ -834,7 +835,6 @@ class NixlConnectorWorker:
                         self.kv_caches_hpu[layer][1][start:end].copy_(v[start:end], non_blocking = False)
             k00,v00 = self.kv_caches_hpu['model.layers.0.self_attn.attn']
             del self._transfering_req_meta[req]
-            
             logger.debug(f'buke: get_finished hpu: {k00.shape=}|{k00.sum(dim=[1,2])[100:400]=}')
             logger.debug(
                 "Rank %s, get_finished: %s requests done sending "
@@ -895,6 +895,7 @@ class NixlConnectorWorker:
         notified_req_ids: set[str] = set()
         for notifs in self.nixl_wrapper.get_new_notifs().values():
             for notif in notifs:
+                logger.debug(f'buke _get_new_notifs: {notif.decode("utf-8")=}')
                 req_id, tp_ratio = notif.decode("utf-8").rsplit(":", 1)
                 self.consumer_notification_counts_by_req[req_id] += 1
                 # Wait all consumers (D) to be done reading before freeing.
@@ -919,6 +920,8 @@ class NixlConnectorWorker:
             for handle, xfer_stime in handles:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
+                    xfer_end_time = time.perf_counter()
+                    logger.debug(f"buke _pop_done_transfers: {req_id=}|{handle=}|{xfer_end_time=}|{xfer_end_time-xfer_stime=}")
                     self.nixl_wrapper.release_xfer_handle(handle)
                     done_req_ids.add(req_id)
                     del transfers[req_id]
@@ -934,7 +937,8 @@ class NixlConnectorWorker:
         Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
-        #print(f'buke start_load_kv: {len(metadata.requests)=}')
+        #logger.debug(f'buke start_load_kv: {self._get_new_notifs()=}')
+        logger.debug(f'buke start_load_kv: {len(metadata.requests)=}|{self.engine_id=}')
         for req_id, meta in metadata.requests.items():
             logger.debug(
                 "start_load_kv for request %s from remote engine %s. "
@@ -997,6 +1001,7 @@ class NixlConnectorWorker:
             remote_rank = self.tp_rank // tp_ratio
             agent_name = self._remote_agents[dst_engine_id][remote_rank]
             self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
+            #logger.debug(f'buke send_notif: {agent_name=}|{notif_id=}')
             return
 
         # Partial prefix cache hit: just read uncomputed blocks.
@@ -1058,10 +1063,11 @@ class NixlConnectorWorker:
             remote_block_descs_ids,
             notif_msg=notif_id,
         )
-        logger.debug(f'buke: >>>>> real transfer start >>>>> {remote_block_descs_ids=}|{local_block_descs_ids=}')
+        logger.debug(f'buke: >>>>> real transfer start >>>>> {remote_block_descs_ids=}|{local_block_descs_ids=}|{notif_id=}|{time.perf_counter()=}')
         # Begin async xfer.
+        time_before_async_trans = time.perf_counter()
         self.nixl_wrapper.transfer(handle)
-
+        logger.debug(f'buke: transfer {time.perf_counter()-time_before_async_trans=}')
         # Use handle to check completion in future step().
         # TODO (NickLucche) surface xfer elapsed time
         self._recving_transfers[request_id].append(
