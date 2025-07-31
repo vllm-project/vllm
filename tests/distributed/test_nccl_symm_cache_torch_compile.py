@@ -4,6 +4,7 @@ import torch.distributed as dist
 import logging
 import tempfile
 from contextlib import nullcontext
+from typing import List
 
 import torch.distributed
 from torch.cuda.memory import CUDAPluggableAllocator
@@ -105,33 +106,59 @@ direct_register_custom_op(
     fake_impl=pynccl_all_reduce_fake,
 )
 
+buffer_cache = {}
+def get_symm_input_impl(size: List[int], dtype: torch.dtype) -> torch.Tensor:
+    if buffer_cache.get(size, dtype) is None:
+      buffer_cache[size, dtype] = torch.ops.nccl_symm_cache.nccl_malloc_tensor(
+          size,
+          dtype,
+          'cuda',
+      )
+      _WORLD.device_communicator.pynccl_comm.register_comm_window(
+          buffer_cache[size, dtype])
+    return buffer_cache[size, dtype]
+
+def get_symm_input_fake(size: List[int], dtype: torch.dtype) -> torch.Tensor:
+    return torch.empty(size, dtype=dtype, device='cuda')
+
+direct_register_custom_op(
+    op_name="get_symm_input",
+    op_func=get_symm_input_impl,
+    mutates_args=[],
+    fake_impl=get_symm_input_fake,
+)
+
 class simple_model(torch.nn.Module):
-    def __init__(self, size, dtype):
+    def __init__(self):
         super().__init__()
-        self.symm_input = torch.ops.nccl_symm_cache.nccl_malloc_tensor(
-            size,
-            dtype,
-            'cuda',
-            )
+        # self.symm_input = get_symm_input(size, dtype)
     def forward(self, x):
         y =torch.add(x,x)
         z = torch.add(y,x)
-        torch.add(z,x,out=self.symm_input)
+        symm_input = torch.ops.vllm.get_symm_input(size, dtype)
+        torch.add(z,x,out=symm_input)
         torch.ops.vllm.pynccl_all_reduce(
-            self.symm_input,
-            self.symm_input,
+            symm_input,
+            symm_input,
         )
-        a = torch.add(self.symm_input,self.symm_input)
+        a = torch.add(symm_input,symm_input)
         b = torch.add(a,a)
         return b
 
 use_compiled = True
 size = [1024,1024]
 dtype = torch.float16
-model = simple_model(size, dtype)
+model = simple_model()
 if use_compiled:
     compiled_model = torch.compile(model, backend="inductor", fullgraph=True)
 x = torch.full(size, local_rank, dtype=dtype, device="cuda")
+for _ in range(10):
+    y = compiled_model(x) if use_compiled else model(x)
+print(y)
+
+size = [512,512]
+dtype = torch.float16
+x = torch.full(size, local_rank*2, dtype=dtype, device="cuda")
 for _ in range(10):
     y = compiled_model(x) if use_compiled else model(x)
 print(y)
