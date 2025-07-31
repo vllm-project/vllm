@@ -28,7 +28,7 @@ Submit some sample requests to the server:
 ```bash
 wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 
-python3 ../../../benchmarks/benchmark_serving.py \
+vllm bench serve \
     --model mistralai/Mistral-7B-v0.1 \
     --tokenizer mistralai/Mistral-7B-v0.1 \
     --endpoint /v1/completions \

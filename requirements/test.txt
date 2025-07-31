@@ -421,7 +421,7 @@ lxml==5.3.0
     #   sacrebleu
 mako==1.3.10
     # via alembic
-mamba-ssm==2.2.4
+mamba-ssm==2.2.5
     # via -r requirements/test.in
 markdown==3.8.2
     # via mlflow
@@ -447,7 +447,7 @@ mbstrdecoder==1.1.3
     #   typepy
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.8.0
+mistral-common==1.8.2
     # via -r requirements/test.in
 mlflow==2.22.0
     # via terratorch
@@ -661,7 +661,7 @@ pathvalidate==3.2.1
     # via pytablewriter
 patsy==1.0.1
     # via statsmodels
-peft==0.13.2
+peft==0.16.0
     # via
     #   -r requirements/test.in
     #   lm-eval
@@ -999,8 +999,11 @@ soundfile==0.12.1
     # via
     #   -r requirements/test.in
     #   librosa
+    #   mistral-common
 soxr==0.5.0.post1
-    # via librosa
+    # via
+    #   librosa
+    #   mistral-common
 sqlalchemy==2.0.41
     # via
     #   alembic
@@ -1149,7 +1152,9 @@ transformers==4.53.2
 transformers-stream-generator==0.0.5
     # via -r requirements/test.in
 triton==3.3.1
-    # via torch
+    # via
+    #   mamba-ssm
+    #   torch
 tritonclient==2.51.0
     # via
     #   -r requirements/test.in
