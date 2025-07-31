@@ -370,6 +370,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi
 
 # Install vllm wheel first, so that torch etc will be installed.
+# !bang
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system dist/*.whl --verbose \
