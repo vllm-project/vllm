@@ -5,8 +5,9 @@
 import os
 from collections import defaultdict, deque
 from collections.abc import Iterable, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Callable, NamedTuple, Optional
+from typing import Any, Callable, Optional, TypeAlias
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -21,18 +22,54 @@ from vllm.v1.request import Request
 logger = init_logger(__name__)
 
 
-class BlockHash(NamedTuple):
+class BlockHash:
     """Hash value of a block (int), the token IDs in the block, and extra keys.
     We keep a tuple of token IDs and extra keys to reduce the likelihood of
     hash collisions when the hash value is the same. By using SHA256 however,
     hash collisions are practically impossible.
     """
-    # Hash value of the block in an integer.
-    hash_value: int
-    # Token IDs in the block.
-    token_ids: tuple[int, ...]
-    # Extra keys for the block.
-    extra_keys: Optional[Any] = None
+
+    def __init__(self,
+                 hash_value: int,
+                 token_ids: tuple[int, ...],
+                 extra_keys: Optional[Any] = None) -> None:
+        # Hash value of the block in an integer.
+        self.hash_value: int = hash_value
+        # Token IDs in the block.
+        self.token_ids: tuple[int, ...] = token_ids
+        # Extra keys for the block.
+        self.extra_keys: Optional[Any] = extra_keys
+
+    def reset(self,
+              hash_value: int,
+              token_ids: tuple[int, ...],
+              extra_keys: Optional[Any] = None) -> None:
+        self.hash_value = hash_value
+        self.token_ids = tuple(token_ids)
+        self.extra_keys = deepcopy(
+            extra_keys) if extra_keys is not None else None
+
+    def reset_all(self, other: "BlockHash") -> None:
+        self.reset(other.hash_value, other.token_ids, other.extra_keys)
+
+    def deepcopy(self) -> "BlockHash":
+        return BlockHash(
+            self.hash_value, self.token_ids,
+            deepcopy(self.extra_keys) if self.extra_keys is not None else None)
+
+    def __hash__(self) -> int:
+        return self.hash_value
+
+    def __eq__(self, other: Any) -> bool:
+        if type(other) is not BlockHash:
+            return False
+        return (self.hash_value == other.hash_value
+                and self.token_ids == other.token_ids
+                and self.extra_keys == other.extra_keys)
+
+
+CreateBlockHashFunc: TypeAlias = Callable[
+    [int, tuple[int, ...], Optional[Any]], BlockHash]
 
 
 class BlockHashWithGroupId:
@@ -41,12 +78,12 @@ class BlockHashWithGroupId:
         # The hash value for the contents (e.g., token_ids) of a block without
         # group ID. The value is the same for blocks representing
         # the same tokens but for different groups.
-        self.block_hash: BlockHash = block_hash
+        self.block_hash: BlockHash = block_hash.deepcopy()
         # The KV cache group ID.
         self.group_id: int = group_id
 
     def reset(self, block_hash: BlockHash, group_id: int) -> None:
-        self.block_hash = block_hash
+        self.block_hash.reset_all(block_hash)
         self.group_id = group_id
 
     def get_hash_value(self) -> int:
@@ -541,6 +578,7 @@ def generate_block_hash_extra_keys(
 
 def hash_block_tokens(
         hash_function: Callable,
+        create_block_hash_function: CreateBlockHashFunc,
         parent_block_hash: Optional[int],
         curr_block_token_ids: Sequence[int],
         extra_keys: Optional[tuple[Any, ...]] = None) -> BlockHash:
@@ -564,14 +602,15 @@ def hash_block_tokens(
         parent_block_hash = NONE_HASH
 
     curr_block_token_ids_tuple = tuple(curr_block_token_ids)
-    return BlockHash(
+    return create_block_hash_function(
         hash_function(
             (parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
         curr_block_token_ids_tuple, extra_keys)
 
 
-def hash_request_tokens(hash_function: Any, block_size: int,
-                        request: Request) -> list[BlockHash]:
+def hash_request_tokens(hash_function: Any,
+                        create_block_hash_function: CreateBlockHashFunc,
+                        block_size: int, request: Request) -> list[BlockHash]:
     """Computes hash values of a chain of blocks given a sequence of
     token IDs. The hash value is used for prefix caching.
 
@@ -602,7 +641,9 @@ def hash_request_tokens(hash_function: Any, block_size: int,
             req_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
                 request, start, end, curr_mm_idx)
 
-        block_hash = hash_block_tokens(hash_function, parent_block_hash_value,
+        block_hash = hash_block_tokens(hash_function,
+                                       create_block_hash_function,
+                                       parent_block_hash_value,
                                        block_token_ids, req_extra_keys)
         ret.append(block_hash)
         parent_block_hash_value = block_hash.hash_value

@@ -6,7 +6,8 @@ from typing import Callable
 
 from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import (BlockHash, CreateBlockHashFunc,
+                                         KVCacheBlock)
 from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
                                         FullAttentionSpec, KVCacheSpec,
                                         MambaSpec, SlidingWindowSpec)
@@ -42,6 +43,7 @@ class SingleTypeKVCacheManager(ABC):
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
         # is finished.
+        # TODO(Jialin): Maybe GC
         self.req_to_blocks: defaultdict[str,
                                         list[KVCacheBlock]] = defaultdict(list)
 
@@ -130,7 +132,8 @@ class SingleTypeKVCacheManager(ABC):
             return new_blocks
 
     def cache_blocks(self, request: Request, block_hashes: list[BlockHash],
-                     num_tokens: int) -> None:
+                     num_tokens: int,
+                     create_block_hash_func: CreateBlockHashFunc) -> None:
         """
         Cache the blocks for the request.
 
@@ -152,6 +155,7 @@ class SingleTypeKVCacheManager(ABC):
             block_size=self.block_size,
             kv_cache_group_id=self.kv_cache_group_id,
             hash_fn=self.caching_hash_fn,
+            create_block_hash_func=create_block_hash_func,
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks

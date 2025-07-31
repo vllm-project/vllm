@@ -4,7 +4,8 @@ from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
+from vllm.v1.core.kv_cache_utils import (BlockHash, CreateBlockHashFunc,
+                                         KVCacheBlock)
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager, get_manager_for_kv_cache_spec)
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
@@ -99,7 +100,8 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers)
 
     def cache_blocks(self, request: Request, block_hashes: list[BlockHash],
-                     num_computed_tokens: int) -> None:
+                     num_computed_tokens: int,
+                     create_block_hash_func: CreateBlockHashFunc) -> None:
         """
         Cache the blocks for the request.
 
@@ -110,7 +112,8 @@ class KVCacheCoordinator(ABC):
                 (including tokens that are already cached).
         """
         for manager in self.single_type_managers:
-            manager.cache_blocks(request, block_hashes, num_computed_tokens)
+            manager.cache_blocks(request, block_hashes, num_computed_tokens,
+                                 create_block_hash_func)
 
     def free(self, request_id: str) -> None:
         """

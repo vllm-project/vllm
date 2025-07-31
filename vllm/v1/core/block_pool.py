@@ -8,6 +8,7 @@ from vllm.distributed.kv_events import (AllBlocksCleared, BlockRemoved,
                                         BlockStored, KVCacheEvent)
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
+                                         CreateBlockHashFunc,
                                          FreeKVCacheBlockQueue, KVCacheBlock,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens)
@@ -156,6 +157,7 @@ class BlockPool:
         block_size: int,
         kv_cache_group_id: int,
         hash_fn: Callable,
+        create_block_hash_func: CreateBlockHashFunc,
     ) -> None:
         """Cache a list of full blocks for prefix caching.
         This function takes a list of blocks that will have their block hash
@@ -225,7 +227,8 @@ class BlockPool:
                     request, start_token_idx, end_token_idx, -1)
 
                 # Compute the hash of the current block.
-                block_hash = hash_block_tokens(hash_fn, prev_block_hash_value,
+                block_hash = hash_block_tokens(hash_fn, create_block_hash_func,
+                                               prev_block_hash_value,
                                                block_tokens, extra_keys)
                 block_hashes.append(block_hash)
 

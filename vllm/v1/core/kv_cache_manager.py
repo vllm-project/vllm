@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections import defaultdict
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
@@ -64,6 +63,41 @@ class KVCacheBlocks:
         return KVCacheBlocks(tuple([] for _ in range(len(self.blocks))))
 
 
+class RequestBlockHashCache:
+
+    def __init__(self) -> None:
+        self.cache: dict[str, list[BlockHash]] = {}
+        self.block_hash_lists: list[list[BlockHash]] = []
+        self.block_hashes: list[BlockHash] = []
+
+    def get_or_create(self, request_id: str) -> list[BlockHash]:
+        block_hash_list = self.cache.get(request_id)
+        if block_hash_list is None:
+            if len(self.block_hash_lists) == 0:
+                block_hash_list = []
+            else:
+                block_hash_list = self.block_hash_lists.pop()
+                block_hash_list.clear()
+            self.cache[request_id] = block_hash_list
+        return block_hash_list
+
+    def create_block_hash(self,
+                          hash_value: int,
+                          token_ids: tuple[int, ...],
+                          extra_keys: Optional[Any] = None) -> BlockHash:
+        if len(self.block_hashes) == 0:
+            return BlockHash(hash_value, token_ids, extra_keys)
+        block_hash = self.block_hashes.pop()
+        block_hash.reset(hash_value, token_ids, extra_keys)
+        return block_hash
+
+    def pop(self, request_id: str) -> None:
+        if block_hash_list := self.cache.pop(request_id):
+            self.block_hashes.extend(block_hash_list)
+            block_hash_list.clear()
+            self.block_hash_lists.append(block_hash_list)
+
+
 class KVCacheManager:
 
     def __init__(
@@ -117,8 +151,8 @@ class KVCacheManager:
         # Mapping from request ID to kv block hashes.
         # This is to avoid recomputing the block hashes for each call of
         # `get_computed_blocks` or `allocate_slots`.
-        self.req_to_block_hashes: defaultdict[
-            str, list[BlockHash]] = defaultdict(list)
+        self.req_to_block_hashes: RequestBlockHashCache = RequestBlockHashCache(
+        )
 
     @property
     def usage(self) -> float:
@@ -163,12 +197,14 @@ class KVCacheManager:
 
         # The block hashes for the request may already be computed
         # if the scheduler has tried to schedule the request before.
-        block_hashes = self.req_to_block_hashes[request.request_id]
+        block_hashes = self.req_to_block_hashes.get_or_create(
+            request.request_id)
         if not block_hashes:
             assert self.block_size is not None
-            block_hashes = hash_request_tokens(self.caching_hash_fn,
-                                               self.block_size, request)
-            self.req_to_block_hashes[request.request_id] = block_hashes
+            block_hashes.extend(
+                hash_request_tokens(self.caching_hash_fn,
+                                    self.req_to_block_hashes.create_block_hash,
+                                    self.block_size, request))
 
         if self.log_stats:
             assert self.prefix_cache_stats is not None
@@ -301,8 +337,9 @@ class KVCacheManager:
                                   request.num_tokens)
         self.coordinator.cache_blocks(
             request,
-            self.req_to_block_hashes[request.request_id],
+            self.req_to_block_hashes.get_or_create(request.request_id),
             num_tokens_to_cache,
+            self.req_to_block_hashes.create_block_hash,
         )
 
         return KVCacheBlocks(new_blocks)
@@ -382,7 +419,7 @@ class KVCacheManager:
         NOTE: Unlike `free`, this method should be called only when the request
         is finished, not when it is preempted.
         """
-        self.req_to_block_hashes.pop(request.request_id, None)
+        self.req_to_block_hashes.pop(request.request_id)
 
     def take_events(self) -> list[KVCacheEvent]:
         """Take the KV cache events from the block pool.
@@ -400,9 +437,11 @@ class KVCacheManager:
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request, if enabled."""
         if self.enable_caching:
-            block_hashes = self.req_to_block_hashes[request.request_id]
-            self.coordinator.cache_blocks(request, block_hashes,
-                                          num_computed_tokens)
+            block_hashes = self.req_to_block_hashes.get_or_create(
+                request.request_id)
+            self.coordinator.cache_blocks(
+                request, block_hashes, num_computed_tokens,
+                self.req_to_block_hashes.create_block_hash)
 
     def create_empty_block_list(self) -> KVCacheBlocks:
         """Creates a new KVCacheBlocks instance with no blocks."""
