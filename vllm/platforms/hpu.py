@@ -69,10 +69,6 @@ class HpuPlatform(Platform):
         return cls.device_name
 
     @classmethod
-    def inference_mode(cls):
-        return torch.no_grad()
-
-    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
 
         scheduler_config = vllm_config.scheduler_config
