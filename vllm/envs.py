@@ -158,6 +158,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRTLLM_ATTENTION: Optional[str] = None
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
+    VLLM_USE_DEFAULT_STREAM: bool = True
 
 
 def get_default_cache_root():
@@ -1120,6 +1121,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #    never removed from memory until the server terminates.
     "VLLM_ENABLE_RESPONSES_API_STORE":
     lambda: bool(int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))),
+
+    # Environment variable to control the use of the default stream.
+    # If set to 1, the default stream is used for model forward. Otherwise,
+    # a separate stream is used for model forward.
+    "VLLM_USE_DEFAULT_STREAM":
+    lambda: bool(int(os.getenv("VLLM_USE_DEFAULT_STREAM", "1"))),
 }
 
 # --8<-- [end:env-vars-definition]
