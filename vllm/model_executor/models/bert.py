@@ -502,7 +502,9 @@ TOKEN_TYPE_SHIFT = 30
 def _encode_token_type_ids(input_ids: torch.tensor,
                            token_type_ids: torch.tensor) -> None:
 
-    input_ids.bitwise_or_(token_type_ids << TOKEN_TYPE_SHIFT)
+    # input_ids can be padded to the right
+    input_ids[:token_type_ids.shape[0]].bitwise_or_(
+        token_type_ids << TOKEN_TYPE_SHIFT)
 
 
 def _decode_token_type_ids(input_ids: torch.tensor) -> torch.tensor:
