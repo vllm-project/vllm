@@ -21,7 +21,7 @@ API_KEY=${API_KEY:-"your-api-key"}
 # Enhanced pooling configuration with model-specific defaults
 POOLING_TYPE=${POOLING_TYPE:-"auto"}  # auto, MEAN, CLS, LAST
 export VLLM_ENABLE_CHUNKED_PROCESSING=true
-# export CUDA_VISIBLE_DEVICES=2,3,4,5
+export CUDA_VISIBLE_DEVICES=2,3,4,5
 # export VLLM_ATTENTION_BACKEND=XFORMERS
 
 echo "🚀 Starting vLLM Embedding Server with Enhanced Chunked Processing"
@@ -106,7 +106,6 @@ vllm serve "$MODEL_NAME" \
   --override-pooler-config "$POOLER_CONFIG" \
   --served-model-name ${MODEL_CODE} \
   --task embed \
-  --use-v2-block-manager \
   --api-key "$API_KEY" \
   --trust-remote-code \
   --port "$PORT" \
