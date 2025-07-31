@@ -7,8 +7,8 @@ from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig
 from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
-from vllm.multimodal import (MULTIMODAL_REGISTRY, BaseMultiModalProcessor,
-                             MultiModalKwargs)
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
