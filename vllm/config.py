@@ -33,6 +33,7 @@ from vllm import version
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
@@ -4740,9 +4741,8 @@ class VllmConfig:
                         "Only \"last\" pooling supports chunked "
                         "prefill and prefix caching; disabling both.")
             elif self.model_config.is_encoder_decoder:
-                from vllm.multimodal.utils import get_encdec_max_encoder_len
                 self.scheduler_config.max_num_encoder_input_tokens = \
-                    get_encdec_max_encoder_len(self.model_config)
+                    MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(self.model_config)
                 logger.debug(
                     "Encoder-decoder model detected: setting "
                     "`max_num_encoder_input_tokens` to encoder length (%s)",

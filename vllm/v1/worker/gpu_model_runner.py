@@ -38,8 +38,7 @@ from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
-from vllm.multimodal.utils import (get_encdec_max_encoder_len,
-                                   group_mm_inputs_by_modality)
+from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors, PoolerOutput
@@ -157,7 +156,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.max_num_encoder_input_tokens = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
         # Maximum length of the encoder input, only for encoder-decoder models.
-        self.max_encoder_len = get_encdec_max_encoder_len(model_config)
+        self.max_encoder_len = self.mm_registry.\
+            get_encdec_max_encoder_len(model_config)
 
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
