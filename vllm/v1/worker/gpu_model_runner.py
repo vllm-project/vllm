@@ -355,7 +355,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 token_type_ids.append(
                     torch.zeros(seq_lens[i], dtype=torch.int32))
 
-        model_kwargs["token_type_ids"] = torch.concat(token_type_ids)
+        model_kwargs["token_type_ids"] = torch.concat(token_type_ids).to(
+            device=self.device)
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
