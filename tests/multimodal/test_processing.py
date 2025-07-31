@@ -2,13 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import nullcontext
-from typing import ClassVar, Optional, cast
+from typing import Optional, cast
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
-from transformers import ProcessorMixin
 
 from vllm.config import ModelConfig
 from vllm.inputs import InputProcessingContext
@@ -1013,8 +1012,7 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
         )
 
 
-class DummyProcessor(ProcessorMixin):
-    attributes: ClassVar[list[str]] = []
+class DummyProcessor:
 
     def __init__(self, a: int = 0, b: int = 0) -> None:
         super().__init__()
@@ -1060,7 +1058,10 @@ def test_hf_processor_init_kwargs(
         tokenizer=mock_tokenizer,
     )
 
-    processor = ctx.get_hf_processor(DummyProcessor, **inference_kwargs)
+    processor = ctx.get_hf_processor(
+        DummyProcessor,  # type: ignore[arg-type]
+        **inference_kwargs,
+    )
 
     for k, v in expected_kwargs.items():
         assert getattr(processor, k) == v
@@ -1095,7 +1096,7 @@ def test_hf_processor_call_kwargs(
         tokenizer=mock_tokenizer,
     )
 
-    processor = ctx.get_hf_processor(DummyProcessor)
+    processor = ctx.get_hf_processor(DummyProcessor)  # type: ignore[arg-type]
 
     result = ctx.call_hf_processor(processor, {}, inference_kwargs)
     assert result == expected_kwargs
