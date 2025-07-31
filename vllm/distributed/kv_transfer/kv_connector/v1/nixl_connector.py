@@ -257,7 +257,8 @@ class NixlConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
             count = len(request.prompt_token_ids) - num_computed_tokens
-            return count, count > 0
+            if count > 0:
+                return count, True
 
         # No remote prefill for this request.
         return 0, False
