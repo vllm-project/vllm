@@ -4,6 +4,9 @@
 """This example demonstrates instantiating vLLM with a custom logits processor
 class object.
 
+For a basic example of implementing a custom logits processor, see
+the `DummyLogitsProcessor` implementation in `vllm/test_utils.py`.
+
 For testing purposes, a dummy logits processor is employed which, if
 `target_token` is passed as a keyword argument to `SamplingParams.extra_args`,
 will mask out all tokens except `target_token`.
