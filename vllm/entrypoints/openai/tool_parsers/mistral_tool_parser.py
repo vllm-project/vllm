@@ -509,15 +509,18 @@ class MistralToolParser(ToolParser):
         if delta_tool_calls and not self.prev_tool_call_arr:
             self.prev_tool_call_arr = [{"arguments": {}}]
 
-        delta_message = DeltaMessage()
-        if len(delta_tool_calls) > 0:
-            delta_message.content = content
-            delta_message.tool_calls = delta_tool_calls
+        if content or len(delta_tool_calls) > 0:
+            delta_message = DeltaMessage()
+            if content:
+                delta_message.content = content
+            if len(delta_tool_calls) > 0:
+                delta_message.tool_calls = delta_tool_calls
+            return delta_message
         else:
-            # Return an empty DeltaMessage once the tool calls are all done
-            # so that finish_reason gets set.
-            delta_message.content = content if content else ""
-        return delta_message
+            if self.streaming_state == StreamingState.ALL_TOOLS_COMPLETE:
+                return DeltaMessage()
+            else:
+                return None
 
     def _split_delta(
         self,
