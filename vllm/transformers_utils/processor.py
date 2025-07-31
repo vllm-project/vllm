@@ -86,18 +86,29 @@ def get_processor(
     **kwargs: Any,
 ) -> _P:
     """Load a processor for the given model name via HuggingFace."""
-    processor_factory = (AutoProcessor if isinstance(processor_cls, tuple)
-                         or issubclass(processor_cls, ProcessorMixin) else
-                         processor_cls)
+    if revision is None:
+        revision = "main"
 
     try:
-        processor = processor_factory.from_pretrained(
-            processor_name,
-            *args,
-            revision=revision,
-            trust_remote_code=trust_remote_code,
-            **kwargs,
-        )
+        if isinstance(processor_cls, tuple):
+            processor = AutoProcessor.from_pretrained(
+                processor_name,
+                *args,
+                revision=revision,
+                trust_remote_code=trust_remote_code,
+                **kwargs,
+            )
+        elif issubclass(processor_cls, ProcessorMixin):
+            processor = processor_cls.from_pretrained(
+                processor_name,
+                *args,
+                revision=revision,
+                trust_remote_code=trust_remote_code,
+                **kwargs,
+            )
+        else:
+            # Processors that are standalone classes unrelated to HF
+            processor = processor_cls(*args, **kwargs)
     except ValueError as e:
         # If the error pertains to the processor class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
