@@ -79,7 +79,7 @@ def write_to_json(filename: str, records: list) -> None:
 
 def maybe_increase_ulimit(limit: int) -> None:
     """
-    Increase the soft ulimit of the current process to at least the specified value.
+    Increase the soft ulimit of the current process to the given value.
     """
     if sys.platform not in ['linux', 'darwin']:
         print("ulimit adjustment is only supported on Linux and macOS.")
