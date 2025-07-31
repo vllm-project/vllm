@@ -246,7 +246,7 @@ class DeviceCommunicatorBase:
         """
         Prepare the communication buffer for the model.
         """
-        if not self.use_all2all:
+        if "ep" not in self.unique_name:
             return
 
         moe_modules = [

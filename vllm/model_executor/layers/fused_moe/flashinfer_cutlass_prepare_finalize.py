@@ -22,7 +22,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def __init__(
         self,
         use_dp: bool,
-        a1_gscale: torch.Tensor,
+        a1_gscale: Optional[torch.Tensor],
         quant_dtype: Union[torch.dtype, str, None] = None,
         per_channel_quant: bool = False,
         block_shape: Optional[list[int]] = None,
@@ -60,8 +60,13 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
-               Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[
+        torch.Tensor,
+        Optional[torch.Tensor],
+        Optional[mk.ExpertTokensMetadata],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor]
+    ]:
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
