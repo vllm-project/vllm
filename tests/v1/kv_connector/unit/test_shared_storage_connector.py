@@ -10,7 +10,7 @@ from vllm.assets.image import ImageAsset
 from vllm.config import KVTransferConfig
 from vllm.multimodal.utils import encode_image_base64
 
-MODEL_NAME = "Qwen/Qwen2.5-VL-3B-Instruct"
+MODEL_NAME = "RedHatAI/Qwen2.5-VL-3B-Instruct-quantized.w4a16"
 
 SAMPLING_PARAMS = SamplingParams(temperature=0.0, top_k=1, max_tokens=128)
 
