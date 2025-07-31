@@ -297,35 +297,31 @@ async def async_request_openai_completions(
                         continue
 
                     chunk = chunk_bytes.decode("utf-8")
-                    if chunk.startswith("data: "):
-                        data = chunk[6:]
-                    else:
-                        data = chunk
+                    data = chunk.removeprefix("data: ")
 
                     # Ignore data that asks for completion
                     if data.strip() == "[DONE]":
                         break
                     data = json.loads(data)
 
-                    if "choices" in data:
-                        if data["choices"]:
-                            choice = data["choices"][0]
-                            if "text" in choice:
-                                delta = choice["text"]
-                                generated_text += delta
+                    if "choices" in data and data["choices"]:
+                        choice = data["choices"][0]
+                        if "text" in choice:
+                            delta = choice["text"]
+                            generated_text += delta
 
-                                timestamp = time.perf_counter()
-                                # First token
-                                if (
-                                    output.ttft is None or output.ttft == 0
-                                ) and generated_text:
-                                    output.ttft = timestamp - st
+                            timestamp = time.perf_counter()
+                            # First token
+                            if (
+                                output.ttft is None or output.ttft == 0
+                            ) and generated_text:
+                                output.ttft = timestamp - st
 
-                                # Decoding phase
-                                else:
-                                    output.itl.append(timestamp - most_recent_timestamp)
+                            # Decoding phase
+                            else:
+                                output.itl.append(timestamp - most_recent_timestamp)
 
-                                most_recent_timestamp = timestamp
+                            most_recent_timestamp = timestamp
 
                 output.generated_text = generated_text
                 output.success = True
@@ -387,9 +383,7 @@ async def async_request_openai_chat_completions(
     st = time.perf_counter()
     most_recent_timestamp = st
     try:
-        async with session.post(
-            url=api_url, json=payload, headers=headers
-        ) as response:
+        async with session.post(url=api_url, json=payload, headers=headers) as response:
             if response.status == 200:
                 async for chunk_bytes in response.content:
                     chunk_bytes = chunk_bytes.strip()
@@ -494,7 +488,9 @@ async def async_request_openai_audio(
         st = time.perf_counter()
         most_recent_timestamp = st
         try:
-            async with session.post(url=api_url, data=form, headers=headers) as response:
+            async with session.post(
+                url=api_url, data=form, headers=headers
+            ) as response:
                 if response.status == 200:
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()

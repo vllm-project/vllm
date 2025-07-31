@@ -257,23 +257,22 @@ async def benchmark(
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
-
     # This session with connection pooling reuses connections across requests.
     connector = aiohttp.TCPConnector(
         limit=max_concurrency or 100,
         limit_per_host=max_concurrency or 100,
-        ttl_dns_cache=300,  
+        ttl_dns_cache=300,
         use_dns_cache=True,
-        keepalive_timeout=60, 
+        keepalive_timeout=60,
         enable_cleanup_closed=True,
         force_close=False,
         ssl=("https://" in api_url),
     )
-    
+
     session = aiohttp.ClientSession(
         connector=connector,
         trust_env=True,
-        timeout=aiohttp.ClientTimeout(total=6 * 60 * 60)
+        timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
     )
 
     print("Starting initial single prompt test run...")
