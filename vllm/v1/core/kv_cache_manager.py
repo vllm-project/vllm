@@ -93,7 +93,7 @@ class RequestBlockHashCache:
         return block_hash
 
     def pop(self, request_id: str) -> None:
-        if block_hash_list := self.cache.pop(request_id):
+        if block_hash_list := self.cache.pop(request_id, None):
             self.block_hashes.extend(block_hash_list)
             block_hash_list.clear()
             self.block_hash_lists.append(block_hash_list)
