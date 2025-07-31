@@ -86,11 +86,7 @@ class OpenAISpeechToText(OpenAIServing):
         audio_data: bytes,
     ) -> tuple[list[PromptType], float]:
         # Validate request
-        # TODO language should be optional and can be guessed.
-        # For now we default to en. See
-        # https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py#L1520
-        lang = request.language or "en"
-        self.model_cls.validate_language(lang)
+        language = self.model_cls.validate_language(request.language)
 
         if len(audio_data) / 1024**2 > self.max_audio_filesize_mb:
             raise ValueError("Maximum file size exceeded.")
@@ -112,7 +108,7 @@ class OpenAISpeechToText(OpenAIServing):
                 audio=chunk,
                 stt_config=self.asr_config,
                 model_config=self.model_config,
-                language=lang,
+                language=language,
                 task_type=self.task_type,
                 request_prompt=request.prompt)
             prompts.append(prompt)
