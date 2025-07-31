@@ -968,7 +968,6 @@ setuptools==77.0.3
     #   lightning-utilities
     #   mamba-ssm
     #   pytablewriter
-    #   torch
     #   triton
 shapely==2.1.1
     # via
