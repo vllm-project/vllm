@@ -53,7 +53,6 @@ def run_benchmark(
     slot_mapping_lst = random.sample(range(num_slots), num_tokens)
     slot_mapping = torch.tensor(slot_mapping_lst, dtype=torch.long, device=device)
 
-    # create the KV-cache tensors.
     key_caches, value_caches = create_kv_caches_with_random_flash(
         num_blocks,
         block_size,

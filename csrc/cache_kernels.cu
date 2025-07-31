@@ -280,10 +280,8 @@ template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __global__ void reshape_and_cache_flash_kernel(
     const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size]
     const scalar_t* __restrict__ value,  // [num_tokens, num_heads, head_size]
-    cache_t* __restrict__ key_cache,     // [num_blocks, block_size, num_heads,
-                                         // head_size]
-    cache_t* __restrict__ value_cache,   // [num_blocks, block_size, num_heads,
-                                         // head_size]
+    cache_t* __restrict__ key_cache,     // NHD or HND, shape see comments below
+    cache_t* __restrict__ value_cache,   // same above
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
     const int64_t block_stride, const int64_t page_stride,
     const int64_t head_stride, const int64_t key_stride,
@@ -319,6 +317,7 @@ __global__ void reshape_and_cache_flash_kernel(
   CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
   if (is_contiguous_heads) {
     // NHD layout
+    // kv cache: [num_blocks, block_size, num_heads, head_size]
     vectorize_with_alignment<VEC_SIZE>(key_src, key_dst, n_elems, threadIdx.x,
                                        blockDim.x, k_op);
 
@@ -327,7 +326,7 @@ __global__ void reshape_and_cache_flash_kernel(
 
   } else {
     // HND layout: heads are strided, but each head_size segment is contiguous
-
+    // kv cache: [num_blocks, num_heads, block_size, head_size]
     const int lane = threadIdx.x & 31;     // 0..31 within warp
     const int warp_id = threadIdx.x >> 5;  // warp index within block
     const int warps_per_block = blockDim.x >> 5;
