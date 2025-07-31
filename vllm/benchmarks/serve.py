@@ -26,7 +26,7 @@ import warnings
 from collections.abc import AsyncGenerator, Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import numpy as np
 from tqdm.asyncio import tqdm
@@ -75,14 +75,39 @@ class BenchmarkMetrics:
     percentiles_e2el_ms: list[tuple[float, float]]
 
 
+def _get_current_request_rate(
+    ramp_up_strategy: Optional[Literal["linear", "exponential"]],
+    ramp_up_start_rps: Optional[int],
+    ramp_up_end_rps: Optional[int],
+    request_index: int,
+    total_requests: int,
+    request_rate: float,
+) -> float:
+    if (ramp_up_strategy and ramp_up_start_rps is not None
+            and ramp_up_end_rps is not None):
+        progress = request_index / max(total_requests - 1, 1)
+        if ramp_up_strategy == "linear":
+            increase = (ramp_up_end_rps - ramp_up_start_rps) * progress
+            return ramp_up_start_rps + increase
+        elif ramp_up_strategy == "exponential":
+            ratio = ramp_up_end_rps / ramp_up_start_rps
+            return ramp_up_start_rps * (ratio**progress)
+        else:
+            raise ValueError(f"Unknown ramp-up strategy: {ramp_up_strategy}")
+    return request_rate
+
+
 async def get_request(
     input_requests: list[SampleRequest],
     request_rate: float,
     burstiness: float = 1.0,
-) -> AsyncGenerator[SampleRequest, None]:
+    ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
+    ramp_up_start_rps: Optional[int] = None,
+    ramp_up_end_rps: Optional[int] = None,
+) -> AsyncGenerator[tuple[SampleRequest, float], None]:
     """
     Asynchronously generates requests at a specified rate
-    with OPTIONAL burstiness.
+    with OPTIONAL burstiness and OPTIONAL ramp-up strategy.
 
     Args:
         input_requests:
@@ -97,26 +122,70 @@ async def get_request(
             A lower burstiness value (0 < burstiness < 1) results
             in more bursty requests, while a higher burstiness value
             (burstiness > 1) results in a more uniform arrival of requests.
+         ramp_up_strategy (optional):
+            The ramp-up strategy. Can be "linear" or "exponential".
+            If None, uses constant request rate (specified by request_rate).
+        ramp_up_start_rps (optional):
+            The starting request rate for ramp-up.
+        ramp_up_end_rps (optional):
+            The ending request rate for ramp-up.
     """
-    input_requests: Iterable[SampleRequest] = iter(input_requests)
-
-    # Calculate scale parameter theta to maintain the desired request_rate.
     assert burstiness > 0, (
         f"A positive burstiness factor is expected, but given {burstiness}.")
-    theta = 1.0 / (request_rate * burstiness)
+    # Convert to list to get length for ramp-up calculations
+    if isinstance(input_requests, Iterable) and not isinstance(
+            input_requests, list):
+        input_requests = list(input_requests)
 
-    for request in input_requests:
-        yield request
+    total_requests = len(input_requests)
+    assert total_requests > 0, "No requests provided."
 
-        if request_rate == float("inf"):
-            # If the request rate is infinity, then we don't need to wait.
-            continue
+    # Precompute delays among requests to minimize request send laggings
+    request_rates = []
+    delay_ts = []
+    for request_index, request in enumerate(input_requests):
+        current_request_rate = _get_current_request_rate(ramp_up_strategy,
+                                                      ramp_up_start_rps,
+                                                      ramp_up_end_rps,
+                                                      request_index,
+                                                      total_requests,
+                                                      request_rate)
+        request_rates.append(current_request_rate)
+        if current_request_rate == float("inf"):
+            delay_ts.append(0)
+        else:
+            theta = 1.0 / (current_request_rate * burstiness)
 
-        # Sample the request interval from the gamma distribution.
-        # If burstiness is 1, it follows exponential distribution.
-        interval = np.random.gamma(shape=burstiness, scale=theta)
-        # The next request will be sent after the interval.
-        await asyncio.sleep(interval)
+            # Sample the request interval from the gamma distribution.
+            # If burstiness is 1, it follows exponential distribution.
+            delay_ts.append(np.random.gamma(shape=burstiness, scale=theta))
+    
+    # Calculate the cumulative delay time from the first sent out requests.
+    for i in range(1, len(delay_ts)):
+        delay_ts[i] += delay_ts[i - 1]
+    if ramp_up_strategy is None and delay_ts[-1] != 0:
+        # When ramp_up_strategy is not set, we assume the request rate is fixed
+        # and all requests should be sent in target_total_delay_s, the following
+        # logic would re-scale delay time to ensure the final delay_ts
+        # align with target_total_delay_s.
+        #
+        # NOTE: If we simply accumulate the random delta values 
+        # from the gamma distribution, their sum would have 1-2% gap 
+        # from target_total_delay_s. The purpose of the following logic is to
+        # close the gap for stablizing the throughput data 
+        # from different random seeds. 
+        target_total_delay_s = total_requests / request_rate
+        normalize_factor = target_total_delay_s / delay_ts[-1]
+        delay_ts = [delay * normalize_factor for delay in delay_ts]
+
+    start_ts = time.time()
+    for request_index, request in enumerate(input_requests):
+        if delay_ts[request_index] > 0:
+            current_ts = time.time()
+            sleep_interval_s = start_ts + delay_ts[request_index] - current_ts
+            if sleep_interval_s > 0:
+                await asyncio.sleep(sleep_interval_s)
+        yield request, request_rates[request_index]
 
 
 def calculate_metrics(
@@ -259,6 +328,9 @@ async def benchmark(
     max_concurrency: Optional[int],
     lora_modules: Optional[Iterable[str]],
     extra_body: Optional[dict],
+    ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
+    ramp_up_start_rps: Optional[int] = None,
+    ramp_up_end_rps: Optional[int] = None,
 ):
     if endpoint_type in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -316,12 +388,16 @@ async def benchmark(
         if profile_output.success:
             print("Profiler started")
 
-    if burstiness == 1.0:
-        distribution = "Poisson process"
-    else:
-        distribution = "Gamma distribution"
+    distribution = ("Poisson process" if burstiness == 1.0 
+                   else "Gamma distribution")
 
-    print(f"Traffic request rate: {request_rate}")
+    if ramp_up_strategy is not None:
+        print(f"Traffic ramp-up strategy: {ramp_up_strategy}.")
+        print(f"Will increase RPS from {ramp_up_start_rps} to "
+              f"{ramp_up_end_rps} RPS over the duration of the benchmark.")
+    else:
+        print(f"Traffic request rate: {request_rate}")
+
     print(f"Burstiness factor: {burstiness} ({distribution})")
     print(f"Maximum request concurrency: {max_concurrency}")
 
@@ -344,7 +420,29 @@ async def benchmark(
 
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
-    async for request in get_request(input_requests, request_rate, burstiness):
+
+    rps_change_events = []
+    last_int_rps = -1
+    if ramp_up_strategy is not None and ramp_up_start_rps is not None:
+        last_int_rps = ramp_up_start_rps
+        rps_change_events.append({
+            "rps": last_int_rps,
+            "timestamp": datetime.now().isoformat(),
+        })
+
+    async for request, current_request_rate in get_request(
+            input_requests, request_rate, burstiness, ramp_up_strategy,
+            ramp_up_start_rps, ramp_up_end_rps):
+        if ramp_up_strategy is not None:
+            current_int_rps = int(current_request_rate)
+            if current_int_rps > last_int_rps:
+                timestamp = datetime.now().isoformat()
+                for rps_val in range(last_int_rps + 1, current_int_rps + 1):
+                    rps_change_events.append({
+                        "rps": rps_val,
+                        "timestamp": timestamp
+                    })
+                last_int_rps = current_int_rps
         prompt, prompt_len, output_len, mm_content = (
             request.prompt,
             request.prompt_len,
@@ -372,20 +470,6 @@ async def benchmark(
                                      pbar=pbar)))
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
-    if profile:
-        print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
-            api_url=base_url + "/stop_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-        )
-        profile_output = await request_func(request_func_input=profile_input)
-        if profile_output.success:
-            print("Profiler stopped")
-
     if pbar is not None:
         pbar.close()
 
@@ -402,6 +486,12 @@ async def benchmark(
 
     print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
+    if max_concurrency is not None:
+        print("{:<40} {:<10}".format("Maximum request concurrency:",
+                                     max_concurrency))
+    if request_rate != float('inf'):
+        print("{:<40} {:<10.2f}".format("Request rate configured (RPS):",
+                                        request_rate ))
     print("{:<40} {:<10.2f}".format("Benchmark duration (s):",
                                     benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
@@ -423,7 +513,7 @@ async def benchmark(
         "total_input_tokens": metrics.total_input,
         "total_output_tokens": metrics.total_output,
         "request_throughput": metrics.request_throughput,
-        "request_goodput:":
+        "request_goodput":
         metrics.request_goodput if goodput_config_dict else None,
         "output_throughput": metrics.output_throughput,
         "total_token_throughput": metrics.total_token_throughput,
@@ -434,6 +524,9 @@ async def benchmark(
         "generated_texts": [output.generated_text for output in outputs],
         "errors": [output.error for output in outputs],
     }
+
+    if rps_change_events:
+        result["rps_change_events"] = rps_change_events
 
     def process_one_metric(
         # E.g., "ttft"
@@ -475,6 +568,19 @@ async def benchmark(
 
     print("=" * 50)
 
+    if profile:
+        print("Stopping profiler...")
+        profile_input = RequestFuncInput(
+            model=model_id,
+            prompt=test_prompt,
+            api_url=base_url + "/stop_profile",
+            prompt_len=test_prompt_len,
+            output_len=test_output_len,
+            logprobs=logprobs,
+        )
+        profile_output = await request_func(request_func_input=profile_input)
+        if profile_output.success:
+            print("Profiler stopped")
     return result
 
 
@@ -552,6 +658,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=None,
         help="The label (prefix) of the benchmark results. If not specified, "
         "the endpoint type will be used as the label.",
+    )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="vllm",
+        choices=list(ASYNC_REQUEST_FUNCS.keys()),
     )
     parser.add_argument(
         "--base-url",
@@ -771,12 +883,60 @@ def add_cli_args(parser: argparse.ArgumentParser):
                         "launching the server. For each request, the "
                         "script chooses a LoRA module at random.")
 
+    parser.add_argument(
+        "--ramp-up-strategy",
+        type=str,
+        default=None,
+        choices=["linear", "exponential"],
+        help="The ramp-up strategy. This would be used to "
+        "ramp up the request rate from initial RPS to final "
+        "RPS rate (specified by --ramp-up-start-rps and "
+        "--ramp-up-end-rps.) over the duration of the benchmark."
+    )
+    parser.add_argument(
+        "--ramp-up-start-rps",
+        type=int,
+        default=None,
+        help="The starting request rate for ramp-up (RPS). "
+        "Needs to be specified when --ramp-up-strategy is used.",
+    )
+    parser.add_argument(
+        "--ramp-up-end-rps",
+        type=int,
+        default=None,
+        help="The ending request rate for ramp-up (RPS). "
+        "Needs to be specified when --ramp-up-strategy is used.",
+    )
+
 
 def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
     np.random.seed(args.seed)
 
+    # Validate ramp-up arguments
+    if args.ramp_up_strategy is not None:
+        if args.request_rate != float("inf"):
+            raise ValueError(
+                "When using ramp-up, do not specify --request-rate. "
+                "The request rate will be controlled by ramp-up parameters. "
+                "Please remove the --request-rate argument."
+            )
+        if args.ramp_up_start_rps is None or args.ramp_up_end_rps is None:
+            raise ValueError(
+                "When using --ramp-up-strategy, both --ramp-up-start-rps and "
+                "--ramp-up-end-rps must be specified"
+            )
+        if args.ramp_up_start_rps < 0 or args.ramp_up_end_rps < 0:
+            raise ValueError("Ramp-up start and end RPS must be non-negative")
+        if args.ramp_up_start_rps > args.ramp_up_end_rps:
+            raise ValueError("Ramp-up start RPS must be less than end RPS")
+        if (args.ramp_up_strategy == "exponential"
+                and args.ramp_up_start_rps == 0):
+            raise ValueError(
+                "For exponential ramp-up, the start RPS cannot be 0.")
+
+    endpoint_type = args.endpoint_type
     label = args.label
     model_id = args.model
     model_name = args.served_model_name
@@ -849,6 +1009,9 @@ def main(args: argparse.Namespace):
             max_concurrency=args.max_concurrency,
             lora_modules=args.lora_modules,
             extra_body=sampling_params,
+            ramp_up_strategy=args.ramp_up_strategy,
+            ramp_up_start_rps=args.ramp_up_start_rps,
+            ramp_up_end_rps=args.ramp_up_end_rps,
         ))
 
     # Save config and results to json
@@ -881,6 +1044,11 @@ def main(args: argparse.Namespace):
         result_json["burstiness"] = args.burstiness
         result_json["max_concurrency"] = args.max_concurrency
 
+        if args.ramp_up_strategy is not None:
+            result_json["ramp_up_strategy"] = args.ramp_up_strategy
+            result_json["ramp_up_start_rps"] = args.ramp_up_start_rps
+            result_json["ramp_up_end_rps"] = args.ramp_up_end_rps
+
         # Merge with benchmark result
         result_json = {**result_json, **benchmark_result}
 
@@ -903,8 +1071,11 @@ def main(args: argparse.Namespace):
         base_model_id = model_id.split("/")[-1]
         max_concurrency_str = (f"-concurrency{args.max_concurrency}"
                                if args.max_concurrency is not None else "")
-        label = label or args.endpoint_type
-        file_name = f"{label}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  #noqa
+        label = label or endpoint_type
+        if args.ramp_up_strategy is not None:
+            file_name = f"{label}-ramp-up-{args.ramp_up_strategy}-{args.ramp_up_start_rps}qps-{args.ramp_up_end_rps}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json" # noqa
+        else:
+            file_name = f"{label}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
         if args.result_filename:
             file_name = args.result_filename
         if args.result_dir:

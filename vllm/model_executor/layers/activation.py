@@ -135,6 +135,57 @@ class MulAndSilu(CustomOp):
     # def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
 
 
+@CustomOp.register("gelu_and_mul_sparse")
+class GeluAndMulSparse(CustomOp):
+    """An activation function for GeluAndMulSparse.
+    This activation function is used in Gemma3n. It computes:
+        up_proj = self.up_proj(x)
+        gate_proj = self.gate_proj(x)
+        gate_proj = self._gaussian_topk(gate_proj) # sparsity
+        activations = self.act_fn(gate_proj) # gelu
+        down_proj = self.down_proj(activations * up_proj)
+    Shapes:
+        x: (num_tokens, 2 * d) or (batch_size, seq_len, 2 * d)
+        return: (num_tokens, d) or (batch_size, seq_len, d)
+    """
+
+    def __init__(self, activation_sparsity: float, approximate: str = "none"):
+        super().__init__()
+        # Gelu.
+        self.approximate = approximate
+        if approximate not in ("none", "tanh"):
+            raise ValueError(f"Unknown approximate mode: {approximate}")
+
+        # Sparsity.
+        if activation_sparsity == 0.0:
+            raise ValueError(
+                "activation_sparsity is 0.0. Please use GeluAndMul.")
+        target_sparsity_tensor = torch.tensor(activation_sparsity,
+                                              dtype=torch.float32)
+        normal_dist = torch.distributions.normal.Normal(0, 1)
+        self.std_multiplier = normal_dist.icdf(target_sparsity_tensor)
+
+    def _gaussian_topk(self, x: torch.Tensor) -> torch.Tensor:
+        """Get % sparse percentile of the Gaussian distribution."""
+        # NOTE(rob): for TP>1, we could all-gather to get the means/std.
+        # But we do not do this because in expectation they are the same
+        # and in practice the eval scores are good without gathering.
+        mean = torch.mean(x, dim=-1, keepdim=True)
+        std = torch.std(x, dim=-1, keepdim=True, unbiased=False)
+        cutoff_x = mean + std * self.std_multiplier
+        return nn.functional.relu(x - cutoff_x)
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
+        d = x.shape[-1] // 2
+        out = self._gaussian_topk(x[..., :d])
+        out = F.gelu(out, approximate=self.approximate)
+        return out * x[..., d:]
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(x)
+
+
 @CustomOp.register("gelu_and_mul")
 class GeluAndMul(CustomOp):
     """An activation function for GeGLU.

@@ -15,13 +15,10 @@ def test_plugin(
     monkeypatch: pytest.MonkeyPatch,
     dummy_opt_path: str,
 ):
-    # V1 shuts down rather than raising an error here.
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "0")
         m.setenv("VLLM_PLUGINS", "")
 
-        match = "Cannot find model module"
-        with pytest.raises(ValueError, match=match):
+        with pytest.raises(ValueError, match="are not supported for now"):
             LLM(model=dummy_opt_path, load_format="dummy")
 
 
@@ -53,7 +50,9 @@ def test_oot_registration_embedding(
     with monkeypatch.context() as m:
         m.setenv("VLLM_PLUGINS", "register_dummy_model")
         prompts = ["Hello, my name is", "The text does not matter"]
-        llm = LLM(model=dummy_gemma2_embedding_path, load_format="dummy")
+        llm = LLM(model=dummy_gemma2_embedding_path,
+                  load_format="dummy",
+                  max_model_len=2048)
         outputs = llm.embed(prompts)
 
         for output in outputs:

@@ -74,10 +74,6 @@ class TritonPlaceholder(types.ModuleType):
         self.heuristics = self._dummy_decorator("heuristics")
         self.Config = self._dummy_decorator("Config")
         self.language = TritonLanguagePlaceholder()
-        logger.warning_once(
-            "Triton is not installed. Using dummy decorators. "
-            "Install it via `pip install triton` to enable kernel"
-            " compilation.")
 
     def _dummy_decorator(self, name):
 
@@ -96,3 +92,4 @@ class TritonLanguagePlaceholder(types.ModuleType):
         self.constexpr = None
         self.dtype = None
         self.int64 = None
+        self.int32 = None

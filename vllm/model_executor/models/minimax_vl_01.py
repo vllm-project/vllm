@@ -5,7 +5,7 @@ from typing import Literal, Optional, TypedDict, Union, cast
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature
+from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.jsontree import json_map_leaves
@@ -17,7 +17,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.minimax_vl_01 import MiniMaxVL01Config
 
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -90,8 +89,8 @@ class MiniMaxVL01DummyInputsBuilder(LlavaDummyInputsBuilder):
 
 class MiniMaxVL01ProcessingInfo(LlavaNextProcessingInfo):
 
-    def get_hf_config(self):
-        return self.ctx.get_hf_config(MiniMaxVL01Config)
+    def get_hf_config(self):  # Need to override the config type
+        return self.ctx.get_hf_config(PretrainedConfig)
 
     def get_hf_processor(self, **kwargs: object):
         hf_processor = self.ctx.get_hf_processor(**kwargs)
@@ -113,11 +112,13 @@ class MiniMaxVL01MultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
         pixel_values = processed_outputs.get("pixel_values")
@@ -155,6 +156,13 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"]
     }
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+
+        raise ValueError("Only image modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
