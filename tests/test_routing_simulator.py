@@ -9,8 +9,6 @@ different routing strategies and analyze their performance, including
 integration tests with FusedMoE layer.
 """
 
-import os
-
 import pytest
 import torch
 
@@ -33,12 +31,11 @@ def test_basic_functionality(
     hidden_size: int,
     num_experts: int,
     top_k: int,
+    device,
 ):
     """Test basic functionality of the routing simulator."""
     # Test each routing strategy
     strategies = RoutingSimulator.get_available_strategies()
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     hidden_states = torch.randn(num_tokens, hidden_size, device=device)
     router_logits = torch.randn(num_tokens, num_experts, device=device)
@@ -69,7 +66,7 @@ def test_basic_functionality(
                 < num_experts), f"Invalid expert ID (too large) for {strategy}"
 
 
-def test_routing_strategy_integration(device):
+def test_routing_strategy_integration(monkeypatch, device):
     """Test that the routing strategy environment variable works with
     FusedMoE."""
     pytest.importorskip("vllm.model_executor.layers.fused_moe.layer")
@@ -89,42 +86,35 @@ def test_routing_strategy_integration(device):
 
     # Test different routing strategies
     strategies = RoutingSimulator.get_available_strategies()
-    original_env_value = os.environ.get("VLLM_MOE_ROUTING_STRATEGY",
-                                        "uniform_random")
 
-    try:
-        for strategy in strategies:
-            # Set environment variable
-            os.environ["VLLM_MOE_ROUTING_STRATEGY"] = strategy
+    for strategy in strategies:
+        # Set environment variable
+        monkeypatch.setenv("VLLM_MOE_ROUTING_STRATEGY", strategy)
 
-            # Force reload of environment variable
-            envs.environment_variables[
-                "VLLM_MOE_ROUTING_STRATEGY"] = lambda s=strategy: s
+        # Force reload of environment variable
+        envs.environment_variables[
+            "VLLM_MOE_ROUTING_STRATEGY"] = lambda s=strategy: s
 
-            # Test the select_experts method
-            topk_weights, topk_ids = FusedMoE.select_experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                top_k=top_k,
-                use_grouped_topk=False,
-                renormalize=True,
-                indices_type=torch.long)
+        # Test the select_experts method
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=top_k,
+            use_grouped_topk=False,
+            renormalize=True,
+            indices_type=torch.long)
 
-            # Verify output shapes
-            assert topk_weights.shape == (
-                num_tokens, top_k), f"Wrong weights shape for {strategy}"
-            assert topk_ids.shape == (num_tokens,
-                                      top_k), f"Wrong ids shape for {strategy}"
+        # Verify output shapes
+        assert topk_weights.shape == (
+            num_tokens, top_k), f"Wrong weights shape for {strategy}"
+        assert topk_ids.shape == (num_tokens,
+                                  top_k), f"Wrong ids shape for {strategy}"
 
-            # Verify expert IDs are valid
-            assert topk_ids.min(
-            ) >= 0, f"Invalid expert ID (negative) for {strategy}"
-            assert topk_ids.max(
-            ) < num_experts, f"Invalid expert ID (too large) for {strategy}"
-
-    finally:
-        # Reset environment variable
-        os.environ["VLLM_MOE_ROUTING_STRATEGY"] = original_env_value
+        # Verify expert IDs are valid
+        assert topk_ids.min(
+        ) >= 0, f"Invalid expert ID (negative) for {strategy}"
+        assert topk_ids.max(
+        ) < num_experts, f"Invalid expert ID (too large) for {strategy}"
 
 
 def test_direct_routing_simulator_methods(device):

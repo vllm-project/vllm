@@ -1249,7 +1249,7 @@ class FusedMoE(torch.nn.Module):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,
-        strategy: str = "softmax",
+        strategy: str,
         indices_type: Optional[torch.dtype] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
