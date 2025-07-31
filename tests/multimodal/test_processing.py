@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import nullcontext
-from typing import Optional, cast
+from typing import ClassVar, Optional, cast
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -1014,7 +1014,7 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
 
 
 class DummyProcessor(ProcessorMixin):
-    attributes = []
+    attributes: ClassVar[list[str]] = []
 
     def __init__(self, a: int = 0, b: int = 0) -> None:
         super().__init__()
@@ -1027,7 +1027,7 @@ class DummyProcessor(ProcessorMixin):
         a: int = 0,
         c: int = 0,
         return_tensors: Optional[str] = None,
-    ):
+    ) -> dict[str, int]:
         return dict(a=a, c=c)
 
 
