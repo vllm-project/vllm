@@ -2049,7 +2049,10 @@ class ParallelConfig:
     Log the balancedness each step of expert parallelism.
     This is turned off by default since it will cause communication overhead.
     """
-
+    eplb_async: bool = False
+    """
+    Use the non-blocking EPLB
+    """
     max_parallel_loading_workers: Optional[int] = None
     """Maximum number of parallel loading workers when loading model
     sequentially in multiple batches. To avoid RAM OOM when using tensor

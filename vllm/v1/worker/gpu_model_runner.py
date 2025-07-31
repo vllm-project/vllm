@@ -1984,6 +1984,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 old_global_expert_indices,
                 rank_mapping,
             )
+            if self.eplb_state.is_async:
+                self.eplb_state.start_async_thread(model=self.model)
+
 
         if (
             self.vllm_config.compilation_config.level == \
