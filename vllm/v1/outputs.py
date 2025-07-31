@@ -2,13 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple, Optional
+from typing import NamedTuple, Optional
 
 import torch
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.kv_connector_model_runner_mixin import (
-        KVConnectorOutput)
 
 
 class LogprobsLists(NamedTuple):
@@ -75,6 +71,13 @@ class SamplerOutput:
     logprobs_tensors: Optional[LogprobsTensors]
 
 
+@dataclass
+class KVConnectorOutput:
+    # [req_ids]
+    finished_sending: Optional[set[str]] = None
+    finished_recving: Optional[set[str]] = None
+
+
 # ModelRunnerOutput is serialized and sent to the scheduler process.
 # This is expensive for torch.Tensor so prefer to use list instead.
 @dataclass
@@ -108,7 +111,7 @@ class ModelRunnerOutput:
     # [num_reqs, hidden_size]
     pooler_output: list[Optional[torch.Tensor]]
 
-    kv_connector_output: Optional["KVConnectorOutput"]
+    kv_connector_output: Optional[KVConnectorOutput]
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None

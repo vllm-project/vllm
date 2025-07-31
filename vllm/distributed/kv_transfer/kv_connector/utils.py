@@ -16,8 +16,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.logger import init_logger
-from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 logger = init_logger(__name__)
 

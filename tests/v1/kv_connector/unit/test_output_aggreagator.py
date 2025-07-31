@@ -4,8 +4,7 @@ from concurrent.futures import Future
 from typing import Optional
 
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
-from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 
 class DummyModelRunnerOutput(ModelRunnerOutput):
