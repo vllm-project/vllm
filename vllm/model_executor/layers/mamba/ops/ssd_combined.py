@@ -45,8 +45,8 @@ def _mamba_chunk_scan_combined_fwd(x,
     assert dt.shape == (seqlen, nheads)
     assert A.shape == (nheads, )
     assert C.shape == B.shape
-    assert z is None, "z not supported"
-
+    if z is not None:
+        assert z.shape == x.shape
     if D is not None:
         assert D.shape == (nheads, headdim) or D.shape == (nheads, )
     if seq_idx is not None:
@@ -58,6 +58,9 @@ def _mamba_chunk_scan_combined_fwd(x,
     if x.stride(-1) != 1 and x.stride(
             0) != 1:  # Either M or K dimension should be contiguous
         x = x.contiguous()
+    if z is not None and z.stride(-1) != 1 and z.stride(
+            1) != 1:  # Either M or K dimension should be contiguous
+        z = z.contiguous()
     if D is not None and D.stride(-1) != 1:
         D = D.contiguous()
     assert cu_seqlens is not None, "Assuming varlen input - must supply cu_seqlens"
@@ -131,7 +134,7 @@ def _mamba_chunk_scan_combined_fwd(x,
     # - in each (pseudo) chunk, we detect if the previous (pseudo) chunk had
     #   a seq_idx change, in which case we take states information from
     #   init_states.
-    out, _ = _chunk_scan_fwd(
+    out = _chunk_scan_fwd(
         CB,
         x,
         dt,
@@ -155,7 +158,6 @@ def _mamba_chunk_scan_combined_fwd(x,
         states,
         initial_states=initial_states,
     )
-    # return out, out_x, dt, dA_cumsum, states, None, varlen_states
     return out, varlen_states
 
 
