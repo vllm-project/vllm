@@ -793,7 +793,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # valid, we fill the padded indices with the last index.
             self.kv_sharing_fast_prefill_logits_indices[num_logits:].fill_(
                 logits_indices[-1].item())
-            if (self.use_cuda_graph
+            if (self.cudagraph_mode != CUDAGraphMode.NONE
                     and num_logits <= self.cudagraph_batch_sizes[-1]):
                 # Use piecewise CUDA graphs.
                 # Add padding to the batch size.
@@ -2853,12 +2853,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for i, kv_cache_group_spec in enumerate(
                 kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-
-            attn_backend_i, attn_metadata_builder_i, attn_cg_i = \
-                self._initialize_single_attn_backend(kv_cache_spec)
             attn_backend_i, attn_metadata_builder_i, attn_cg_i = \
                 self._initialize_single_attn_backend(
-                    kv_cache_spec, kv_cache_group_spec.layer_names))
+                    kv_cache_spec, kv_cache_group_spec.layer_names)
             self.attn_backends.append(attn_backend_i)
             self.attn_metadata_builders.append(attn_metadata_builder_i)
             if attn_cg is None:

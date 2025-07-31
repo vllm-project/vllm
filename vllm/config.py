@@ -4198,9 +4198,7 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    cudagraph_mode: CUDAGraphMode = field(
-        default_factory=lambda: CUDAGraphMode.PIECEWISE
-        if envs.VLLM_USE_V1 else CUDAGraphMode.NONE)
+    cudagraph_mode: Optional[CUDAGraphMode] = None
     """
     The mode of the cudagraph.
     - NONE, no cudagraph capture.
@@ -4404,12 +4402,6 @@ class CompilationConfig:
         if isinstance(self.pass_config, dict):
             self.pass_config = PassConfig(**self.pass_config)
 
-        # safe to directly check cudagraph_separate_routine here
-        if self.cudagraph_separate_routine:
-            assert self.cudagraph_mode == CUDAGraphMode.FULL, (
-                "cudagraph_separate_routine requires "
-                "cudagraph_mode be CUDAGraphMode.FULL")
-
     def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
@@ -4483,7 +4475,11 @@ class CompilationConfig:
             self.max_capture_size] = self.max_capture_size
 
     def set_splitting_ops_for_v1(self):
-        # NOTE: this function needs to be called
+        # NOTE: this function needs to be called only when level is
+        # CompilationLevel.PIECEWISE
+        assert self.level == CompilationLevel.PIECEWISE, (
+            "set_splitting_ops_for_v1 should only be called when "
+            "level is CompilationLevel.PIECEWISE")
 
         if self.splitting_ops is None:
             # NOTE: When using full cudagraph, instead of setting an empty
@@ -4498,16 +4494,16 @@ class CompilationConfig:
                 "vllm.mamba_mixer2",
             ]
         elif len(self.splitting_ops) == 0:
-            if self.level == CompilationLevel.PIECEWISE:
-                logger.warning_once("Using piecewise compilation with empty "
-                                    "splitting_ops.")
+            logger.warning_once("Using piecewise compilation with empty "
+                                "splitting_ops.")
             if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
-                logger.warning_once("Using cudagraph_mode PIECEWISE with "
-                                    "empty splitting_ops will be treated as "
-                                    "cudagraph_mode FULL. Please make sure "
-                                    "using attention backends that are "
-                                    "cudagraph-compatible or set cudagraph"
-                                    "_mode as NONE explxicitly.")
+                logger.warning_once(
+                    "When compilation level is piecewise with empty "
+                    "splitting_ops, PIECEWISE cudagraph_mode will be "
+                    "treated as FULL cudagraph_mode. Please ensure you are "
+                    "using attention backends that support cudagraph or set "
+                    "cudagraph_mode to NONE explicitly if encountering "
+                    "any problems.")
                 self.cudagraph_mode = CUDAGraphMode.FULL
             self.splitting_ops = []
         self.is_attention_splitting = all(
@@ -4767,9 +4763,19 @@ class VllmConfig:
         # settings (see the below code).
         if self.compilation_config.level is None:
             if envs.VLLM_USE_V1:
-                if (self.model_config is not None
-                        and not self.model_config.enforce_eager):
-                    self.compilation_config.level = CompilationLevel.PIECEWISE
+                if self.model_config is not None:
+                    if not self.model_config.enforce_eager:
+                        self.compilation_config.level = \
+                            CompilationLevel.PIECEWISE
+                    else:
+                        self.compilation_config.level = \
+                            CompilationLevel.NO_COMPILATION
+                # When model_config is None (most often happens during testing),
+                # consider cudagraph_mode as a factor.
+                elif self.compilation_config.cudagraph_mode in \
+                    [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
+                    self.compilation_config.level = \
+                        CompilationLevel.PIECEWISE
                 else:
                     self.compilation_config.level = \
                             CompilationLevel.NO_COMPILATION
@@ -4778,6 +4784,15 @@ class VllmConfig:
                 # NB: Passing both --enforce-eager and a compilation level
                 # in V0 means the compilation level wins out.
                 self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
+        # if cudagraph_mode is not explicitly set by users, set default value
+        if self.compilation_config.cudagraph_mode is None:
+            if envs.VLLM_USE_V1 and self.compilation_config.level \
+                == CompilationLevel.PIECEWISE:
+                self.compilation_config.cudagraph_mode = \
+                    CUDAGraphMode.PIECEWISE
+            else:
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
@@ -4822,11 +4837,9 @@ class VllmConfig:
                 self.compilation_config.use_cudagraph = True
             # other cases, keep the cudagraph_mode as is
 
-        # disable cudagraph if model_config is None (typically only happen
-        # during tests) or enforce eager execution
-        if self.model_config is None or self.model_config.enforce_eager:
-            logger.info("Cudagraph is disabled under eager mode or when "
-                        "model_config is None.")
+        # disable cudagraph when enforce eager execution
+        if self.model_config is not None and self.model_config.enforce_eager:
+            logger.info("Cudagraph is disabled under eager mode")
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         self._set_cudagraph_sizes()
@@ -4898,6 +4911,12 @@ class VllmConfig:
                     CompilationLevel.PIECEWISE, \
                     "Compilation level should be CompilationLevel.PIECEWISE "\
                     "when cudagraph_mode is CUDAGraphMode.PIECEWISE"
+
+            if self.compilation_config.cudagraph_separate_routine:
+                assert self.compilation_config.cudagraph_mode == \
+                    CUDAGraphMode.FULL, (
+                    "cudagraph_separate_routine requires "
+                    "cudagraph_mode be CUDAGraphMode.FULL")
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
