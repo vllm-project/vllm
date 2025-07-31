@@ -256,6 +256,7 @@ class Llama4DecoderLayer(nn.Module):
         super().__init__()
 
         self.layer_idx = extract_layer_index(prefix)
+        self.global_layer = config.no_rope_layers[self.layer_idx] == 0
         self.hidden_size = config.hidden_size
         rope_theta = config.rope_theta
         rope_scaling = config.rope_scaling
