@@ -67,28 +67,11 @@ TypeHintT = Union[type[T], object]
 def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
 
     def _parse_type(val: str) -> T:
-        if getattr(return_type, '__origin__', None) is Union:
-            # Instantiate Union type from string
-            for tp in get_args(return_type):
-                try:
-                    # Instantiate first type option compatible with the string
-                    return tp(val)
-                except ValueError:
-                    pass
-
-            # Union type is incompatible with string
+        try:
+            return return_type(val)
+        except ValueError as e:
             raise argparse.ArgumentTypeError(
-                f"Value {val} cannot be converted to {return_type}.")
-        else:
-            # Not a Union type
-            try:
-                # Instantiate type from string
-                return return_type(val)
-            except ValueError as e:
-                # Type is incompatible with string
-                raise argparse.ArgumentTypeError(
-                    f"Value {val} cannot be converted to {return_type}."
-                ) from e
+                f"Value {val} cannot be converted to {return_type}.") from e
 
     return _parse_type
 
