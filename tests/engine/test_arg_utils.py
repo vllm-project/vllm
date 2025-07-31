@@ -25,22 +25,13 @@ from vllm.utils import FlexibleArgumentParser
         "foo": 1,
         "bar": 2
     }),
+    (Union[int, str], "42", 42),
+    (Union[int, str], "apple", "apple"),
+    (Union[int, str], 42, 42),
 ])
 def test_parse_type(type, value, expected):
     parse_type_func = parse_type(type)
     assert parse_type_func(value) == expected
-
-
-@pytest.mark.parametrize(("type", "value", "expected"), [
-    (Union[int, str], "42", (42, "42")),
-])
-def test_parse_union_type(type, value, expected):
-    """Parse a `Union` type yielding an instance of either type option
-    (int or str)
-    """
-    parse_type_func = parse_type(type)
-    out = parse_type_func(value)
-    assert out in expected
 
 
 def test_optional_type():
