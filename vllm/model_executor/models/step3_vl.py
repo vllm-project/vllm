@@ -12,6 +12,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
+from torchvision import transforms
+from torchvision.transforms.functional import InterpolationMode
 from transformers import BatchFeature, PretrainedConfig, TensorType
 
 from vllm.config import VllmConfig
@@ -33,7 +35,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import Step3VisionEncoderConfig
-from vllm.transformers_utils.processors import Step3VisionProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -60,6 +61,40 @@ Step3VLImageInputs = Union[Step3VLImagePixelInputs,
 ImageWithPatches = tuple[Image.Image, list[Image.Image], list[int] | None]
 
 MAX_IMAGE_SIZE: int = 3024
+
+
+class Step3VisionProcessor:
+
+    def __init__(self, size, interpolation_mode="bicubic", patch_size=None):
+        mean = [0.48145466, 0.4578275, 0.40821073]
+        std = [0.26862954, 0.26130258, 0.27577711]
+        patch_size = patch_size if patch_size is not None else size
+
+        self.transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+            transforms.Resize(
+                (size, size),
+                interpolation=InterpolationMode.BICUBIC if interpolation_mode
+                == "bicubic" else InterpolationMode.BILINEAR,
+                antialias=True),
+        ])
+
+        self.patch_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+            transforms.Resize(
+                (patch_size, patch_size),
+                interpolation=InterpolationMode.BICUBIC if interpolation_mode
+                == "bicubic" else InterpolationMode.BILINEAR,
+                antialias=True),
+        ]) if patch_size is not None else None
+
+    def __call__(self, image, is_patch=False):
+        if is_patch:
+            return {"pixel_values": self.patch_transform(image).unsqueeze(0)}
+        else:
+            return {"pixel_values": self.transform(image).unsqueeze(0)}
 
 
 class ImagePatcher:
