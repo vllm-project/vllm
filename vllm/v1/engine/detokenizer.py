@@ -74,6 +74,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         params = request.sampling_params
         assert params is not None
         self.stop = stop = params.stop
+        self.min_tokens = params.min_tokens
         self.include_stop_str_in_output = params.include_stop_str_in_output
 
         # Number of chars to hold back when stop strings are to be excluded
@@ -125,7 +126,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
         # 2) Evaluate stop strings.
         stop_string = None
-        if self.stop:
+        if self.stop and len(self.output_token_ids) >= self.min_tokens:
             stop = StopChecker.check_stop_strings(
                 output_text=self.output_text,
                 new_char_count=len(self.output_text) - offset_before,
