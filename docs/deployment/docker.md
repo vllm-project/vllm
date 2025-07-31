@@ -106,8 +106,7 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
     -t vllm/vllm-gh200-openai:latest \
     --build-arg max_jobs=66 \
     --build-arg nvcc_threads=2 \
-    --build-arg torch_cuda_arch_list="9.0 10.0+PTX" \
-    --build-arg vllm_fa_cmake_gpu_arches="90-real"
+    --build-arg torch_cuda_arch_list="9.0 10.0+PTX"
     ```
 
 !!! note
