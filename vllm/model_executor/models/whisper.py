@@ -109,51 +109,6 @@ ISO639_1_SUPPORTED_LANGS = {
     "vi": "Vietnamese",
     "cy": "Welsh"
 }
-ISO639_1_OTHER_LANGS = {
-    "lo": "Lao",
-    "jw": "Javanese",
-    "tk": "Turkmen",
-    "yi": "Yiddish",
-    "so": "Somali",
-    "bn": "Bengali",
-    "nn": "Norwegian Nynorsk",
-    "si": "Sinhala",
-    "yo": "Yoruba",
-    "sa": "Sanskrit",
-    "mi": "Māori",
-    "fo": "Faroese",  # codespell:ignore
-    "mt": "Maltese",
-    "tg": "Tajik",
-    "mg": "Malagasy",
-    "haw": "Hawaiian",
-    "km": "Khmer",
-    "br": "Breton",
-    "ps": "Pashto",
-    "ln": "Lingala",
-    "la": "Latin",
-    "ml": "Malayalam",
-    "sq": "Albanian",
-    "su": "Sundanese",
-    "eu": "Basque",
-    "ka": "Georgian",
-    "uz": "Uzbek",
-    "sn": "Shona",
-    "ht": "Haitian",
-    "as": "Assamese",
-    "mn": "Mongolian",
-    "te": "Telugu",
-    "pa": "Panjabi",
-    "tt": "Tatar",
-    "gu": "Gujarati",
-    "oc": "Occitan",
-    "ha": "Hausa",
-    "ba": "Bashkir",
-    "my": "Burmese",
-    "sd": "Sindhi",
-    "am": "Amharic",
-    "lb": "Luxembourgish",
-    "bo": "Tibetan"
-}
 
 
 class WhisperAudioInputs(TypedDict):
@@ -807,22 +762,20 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
 
     # Whisper only supports audio-conditioned generation.
     supports_transcription_only = True
+    supported_languages = ISO639_1_SUPPORTED_LANGS
 
     @classmethod
-    def validate_language(cls, language: str) -> bool:
-        if language in ISO639_1_SUPPORTED_LANGS:
-            return True
-        elif language in ISO639_1_OTHER_LANGS:
+    def validate_language(cls, language: Optional[str]) -> Optional[str]:
+        if language is None:
+            # TODO language should be optional and can be guessed.
+            # For now we default to en. See
+            # https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py#L1520
             logger.warning(
-                "The selected language %s has limited accuracy with"
-                " reported WER>=0.5. Results may be less accurate "
-                "for this choice.", language)
-            return True
-        else:
-            raise ValueError(f"Unsupported language: {language}."
-                             "Language should be one of:" +
-                             f" {list(ISO639_1_SUPPORTED_LANGS.values())}" +
-                             f"or {list(ISO639_1_OTHER_LANGS.values())}")
+                "Defaulting to language='en'. If you wish to transcribe "
+                "audio in a different language, pass the `language` field "
+                "in the TranscriptionRequest.")
+            language = "en"
+        return super().validate_language(language)
 
     @classmethod
     def get_generation_prompt(
@@ -830,9 +783,12 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
             audio: np.ndarray,
             model_config: ModelConfig,  # not needed here
             stt_config: SpeechToTextConfig,
-            language: str,
+            language: Optional[str],
             task_type: str,
             request_prompt: str) -> PromptType:
+        if language is None:
+            raise ValueError(
+                "Language must be specified when creating the Whisper prompt")
         prompt = {
             "encoder_prompt": {
                 # Whisper does not support encoder prompt.
