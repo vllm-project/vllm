@@ -16,6 +16,59 @@ from vllm.v1.request import Request
 logger = init_logger(__name__)
 
 
+class BlockCache:
+
+    def __init__(self, num_gpu_blocks: int) -> None:
+        self.cache: dict[BlockHashWithGroupId,
+                         dict[int, KVCacheBlock]] = defaultdict(dict)
+        self.keys: list[BlockHashWithGroupId] = [
+            BlockHashWithGroupId(BlockHash(0, (), None), 0)
+            for _ in range(num_gpu_blocks)
+        ]
+        self.values: list[dict[int,
+                               KVCacheBlock]] = [{}
+                                                 for _ in range(num_gpu_blocks)
+                                                 ]
+
+    def get(self,
+            key: BlockHashWithGroupId) -> Optional[dict[int, KVCacheBlock]]:
+        return self.cache.get(key)
+
+    def put(self, block: KVCacheBlock, block_hash: BlockHash,
+            group_id: int) -> None:
+        assert block.block_hash is None
+
+        assert len(self.keys) > 0
+        key = self.keys.pop()
+        key.reset(block_hash, group_id)
+        block.block_hash = key
+
+        if blocks_by_id := self.cache.get(key):
+            blocks_by_id[block.block_id] = block
+            return
+
+        assert len(self.values) > 0
+        value = self.values.pop()
+        value.clear()
+        value[block.block_id] = block
+        self.cache[key] = value
+
+    def pop(self, block: KVCacheBlock) -> bool:
+        key = block.block_hash
+        assert key is not None
+        block.reset_hash()
+
+        blocks_by_id = self.cache.get(key)
+        if blocks_by_id is None:
+            return False
+        blocks_by_id.pop(block.block_id, None)
+        if len(blocks_by_id) == 0:
+            self.keys.append(key)
+            self.values.append(blocks_by_id)
+            del self.cache[key]
+        return True
+
+
 class BlockPool:
     """BlockPool that manages KVCacheBlocks.
     It provides methods to allocate, free and cache the kv cache blocks. The
@@ -57,8 +110,8 @@ class BlockPool:
         # if there is already an identical block in the cache. This is because
         # we want to make sure the allocated block IDs won't change so that
         # block tables are append-only.
-        self.cached_block_hash_to_block: dict[BlockHashWithGroupId, dict[
-            int, KVCacheBlock]] = defaultdict(dict)
+        self.cached_block_hash_to_block: BlockCache = BlockCache(
+            num_gpu_blocks)
 
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
@@ -177,11 +230,8 @@ class BlockPool:
                 block_hashes.append(block_hash)
 
             # Update and added the full block to the cache.
-            block_hash_with_group_id = BlockHashWithGroupId(
-                block_hash, kv_cache_group_id)
-            blk.block_hash = block_hash_with_group_id
-            self.cached_block_hash_to_block[block_hash_with_group_id][
-                blk.block_id] = blk
+            self.cached_block_hash_to_block.put(blk, block_hash,
+                                                kv_cache_group_id)
             if new_hashes is not None:
                 new_hashes.append(block_hash.hash_value)
             prev_block_hash_value = block_hash.hash_value
@@ -239,27 +289,20 @@ class BlockPool:
         Returns:
             True if the block is evicted, False otherwise.
         """
-        block_hash = block.block_hash
-        if block_hash is None:
+        if block.block_hash is None:
             # The block doesn't have hash, eviction is not needed
             return False
-        blocks_by_id = self.cached_block_hash_to_block.get(block_hash)
-        if blocks_by_id is None:
+        if not self.cached_block_hash_to_block.pop(block):
             # block_hash not found in cached_block_hash_to_block,
             # eviction is not needed
             return False
-        block.reset_hash()
-        blocks_by_id.pop(block.block_id, None)
-        if len(blocks_by_id) == 0:
-            del self.cached_block_hash_to_block[block_hash]
-
         if self.enable_kv_cache_events:
             # FIXME (Chen): Not sure whether we should return `hash_value`
             # or `(hash_value, group_id)` here. But it's fine now because
             # we disable hybrid kv cache manager when kv cache event is
             # enabled, so there is only one group.
             self.kv_event_queue.append(
-                BlockRemoved(block_hashes=[block_hash.get_hash_value()]))
+                BlockRemoved(block_hashes=[block.block_hash.get_hash_value()]))
         return True
 
     def touch(self, blocks: tuple[list[KVCacheBlock], ...]) -> None:
@@ -312,7 +355,7 @@ class BlockPool:
             return False
 
         # Remove all hashes so that no new blocks will hit.
-        self.cached_block_hash_to_block = defaultdict(dict)
+        self.cached_block_hash_to_block = BlockCache(self.num_gpu_blocks)
 
         # Remove all hashes from all blocks.
         for block in self.blocks:
