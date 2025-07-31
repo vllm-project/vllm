@@ -51,148 +51,145 @@ class RequestFuncOutput:
 
 async def async_request_tgi(
     request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith("generate_stream")
 
-    async with aiohttp.ClientSession(
-        trust_env=True, timeout=AIOHTTP_TIMEOUT
-    ) as session:
-        params = {
-            "max_new_tokens": request_func_input.output_len,
-            "do_sample": True,
-            "temperature": 0.01,  # TGI does not accept 0.0 temperature.
-            "top_p": 0.99,  # TGI does not accept 1.0 top_p.
-            "truncate": request_func_input.prompt_len,
-            "ignore_eos_token": request_func_input.ignore_eos,
-        }
-        payload = {
-            "inputs": request_func_input.prompt,
-            "parameters": params,
-        }
-        output = RequestFuncOutput()
-        output.prompt_len = request_func_input.prompt_len
-        if request_func_input.ignore_eos:
-            output.output_tokens = request_func_input.output_len
-        else:
-            output.output_tokens = None
+    params = {
+        "max_new_tokens": request_func_input.output_len,
+        "do_sample": True,
+        "temperature": 0.01,  # TGI does not accept 0.0 temperature.
+        "top_p": 0.99,  # TGI does not accept 1.0 top_p.
+        "truncate": request_func_input.prompt_len,
+        "ignore_eos_token": request_func_input.ignore_eos,
+    }
+    payload = {
+        "inputs": request_func_input.prompt,
+        "parameters": params,
+    }
+    output = RequestFuncOutput()
+    output.prompt_len = request_func_input.prompt_len
+    if request_func_input.ignore_eos:
+        output.output_tokens = request_func_input.output_len
+    else:
+        output.output_tokens = None
 
-        ttft = 0.0
-        st = time.perf_counter()
-        most_recent_timestamp = st
-        try:
-            async with session.post(url=api_url, json=payload) as response:
-                if response.status == 200:
-                    async for chunk_bytes in response.content:
-                        chunk_bytes = chunk_bytes.strip()
-                        if not chunk_bytes:
-                            continue
-                        chunk_bytes = chunk_bytes.decode("utf-8")
+    ttft = 0.0
+    st = time.perf_counter()
+    most_recent_timestamp = st
+    try:
+        async with session.post(url=api_url, json=payload) as response:
+            if response.status == 200:
+                async for chunk_bytes in response.content:
+                    chunk_bytes = chunk_bytes.strip()
+                    if not chunk_bytes:
+                        continue
+                    chunk_bytes = chunk_bytes.decode("utf-8")
 
-                        # NOTE: Sometimes TGI returns a ping response without
-                        # any data, we should skip it.
-                        if chunk_bytes.startswith(":"):
-                            continue
-                        chunk = chunk_bytes.removeprefix("data:")
+                    # NOTE: Sometimes TGI returns a ping response without
+                    # any data, we should skip it.
+                    if chunk_bytes.startswith(":"):
+                        continue
+                    chunk = chunk_bytes.removeprefix("data:")
 
-                        data = json.loads(chunk)
-                        timestamp = time.perf_counter()
-                        # First token
-                        if ttft == 0.0:
-                            ttft = time.perf_counter() - st
-                            output.ttft = ttft
+                    data = json.loads(chunk)
+                    timestamp = time.perf_counter()
+                    # First token
+                    if ttft == 0.0:
+                        ttft = time.perf_counter() - st
+                        output.ttft = ttft
 
-                        # Decoding phase
-                        else:
-                            output.itl.append(timestamp - most_recent_timestamp)
+                    # Decoding phase
+                    else:
+                        output.itl.append(timestamp - most_recent_timestamp)
 
-                        most_recent_timestamp = timestamp
+                    most_recent_timestamp = timestamp
 
-                    output.latency = most_recent_timestamp - st
-                    output.success = True
-                    output.generated_text = data["generated_text"]
-                else:
-                    output.error = response.reason or ""
-                    output.success = False
-        except Exception:
-            output.success = False
-            exc_info = sys.exc_info()
-            output.error = "".join(traceback.format_exception(*exc_info))
+                output.latency = most_recent_timestamp - st
+                output.success = True
+                output.generated_text = data["generated_text"]
+            else:
+                output.error = response.reason or ""
+                output.success = False
+    except Exception:
+        output.success = False
+        exc_info = sys.exc_info()
+        output.error = "".join(traceback.format_exception(*exc_info))
 
-        if pbar:
-            pbar.update(1)
-        return output
+    if pbar:
+        pbar.update(1)
+    return output
 
 
 async def async_request_trt_llm(
     request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith("generate_stream")
 
-    async with aiohttp.ClientSession(
-        trust_env=True, timeout=AIOHTTP_TIMEOUT
-    ) as session:
-        payload = {
-            "accumulate_tokens": True,
-            "text_input": request_func_input.prompt,
-            "temperature": 0.0,
-            "top_p": 1.0,
-            "max_tokens": request_func_input.output_len,
-            "stream": True,
-        }
-        if request_func_input.ignore_eos:
-            payload["min_length"] = request_func_input.output_len
-        output = RequestFuncOutput()
-        output.prompt_len = request_func_input.prompt_len
+    payload = {
+        "accumulate_tokens": True,
+        "text_input": request_func_input.prompt,
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "max_tokens": request_func_input.output_len,
+        "stream": True,
+    }
+    if request_func_input.ignore_eos:
+        payload["min_length"] = request_func_input.output_len
+    output = RequestFuncOutput()
+    output.prompt_len = request_func_input.prompt_len
 
-        ttft = 0.0
-        st = time.perf_counter()
-        most_recent_timestamp = st
-        try:
-            async with session.post(url=api_url, json=payload) as response:
-                if response.status == 200:
-                    async for chunk_bytes in response.content:
-                        chunk_bytes = chunk_bytes.strip()
-                        if not chunk_bytes:
-                            continue
+    ttft = 0.0
+    st = time.perf_counter()
+    most_recent_timestamp = st
+    try:
+        async with session.post(url=api_url, json=payload) as response:
+            if response.status == 200:
+                async for chunk_bytes in response.content:
+                    chunk_bytes = chunk_bytes.strip()
+                    if not chunk_bytes:
+                        continue
 
-                        chunk = chunk_bytes.decode("utf-8").removeprefix("data:")
+                    chunk = chunk_bytes.decode("utf-8").removeprefix("data:")
 
-                        data = json.loads(chunk)
-                        output.generated_text += data["text_output"]
-                        timestamp = time.perf_counter()
-                        # First token
-                        if ttft == 0.0:
-                            ttft = timestamp - st
-                            output.ttft = ttft
+                    data = json.loads(chunk)
+                    output.generated_text += data["text_output"]
+                    timestamp = time.perf_counter()
+                    # First token
+                    if ttft == 0.0:
+                        ttft = timestamp - st
+                        output.ttft = ttft
 
-                        # Decoding phase
-                        else:
-                            output.itl.append(timestamp - most_recent_timestamp)
+                    # Decoding phase
+                    else:
+                        output.itl.append(timestamp - most_recent_timestamp)
 
-                        most_recent_timestamp = timestamp
+                    most_recent_timestamp = timestamp
 
-                    output.latency = most_recent_timestamp - st
-                    output.success = True
+                output.latency = most_recent_timestamp - st
+                output.success = True
 
-                else:
-                    output.error = response.reason or ""
-                    output.success = False
-        except Exception:
-            output.success = False
-            exc_info = sys.exc_info()
-            output.error = "".join(traceback.format_exception(*exc_info))
+            else:
+                output.error = response.reason or ""
+                output.success = False
+    except Exception:
+        output.success = False
+        exc_info = sys.exc_info()
+        output.error = "".join(traceback.format_exception(*exc_info))
 
-        if pbar:
-            pbar.update(1)
-        return output
+    if pbar:
+        pbar.update(1)
+    return output
 
 
 async def async_request_deepspeed_mii(
     request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
     pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
@@ -200,56 +197,50 @@ async def async_request_deepspeed_mii(
         "OpenAI Completions API URL must end with 'completions' or 'profile'."
     )
 
-    async with aiohttp.ClientSession(
-        trust_env=True, timeout=AIOHTTP_TIMEOUT
-    ) as session:
-        payload = {
-            "model": request_func_input.model,
-            "prompt": request_func_input.prompt,
-            "max_tokens": request_func_input.output_len,
-            "temperature": 0.01,  # deepspeed-mii does not accept 0.0 temp.
-            "top_p": 1.0,
-        }
-        headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
+    payload = {
+        "model": request_func_input.model,
+        "prompt": request_func_input.prompt,
+        "max_tokens": request_func_input.output_len,
+        "temperature": 0.01,  # deepspeed-mii does not accept 0.0 temp.
+        "top_p": 1.0,
+    }
+    headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
 
-        output = RequestFuncOutput()
-        output.prompt_len = request_func_input.prompt_len
+    output = RequestFuncOutput()
+    output.prompt_len = request_func_input.prompt_len
 
-        # NOTE: DeepSpeed-MII doesn't support streaming as of Jan 28 2024,
-        # will use 0 as placeholder.
-        # See https://github.com/microsoft/DeepSpeed-MII/pull/311
-        output.ttft = 0
+    # NOTE: DeepSpeed-MII doesn't support streaming as of Jan 28 2024,
+    # will use 0 as placeholder.
+    # See https://github.com/microsoft/DeepSpeed-MII/pull/311
+    output.ttft = 0
 
-        st = time.perf_counter()
-        try:
-            async with session.post(
-                url=api_url, json=payload, headers=headers
-            ) as response:
-                if response.status == 200:
-                    parsed_resp = await response.json()
-                    output.latency = time.perf_counter() - st
-                    if "choices" in parsed_resp:
-                        output.generated_text = parsed_resp["choices"][0]["text"]
-                    elif "text" in parsed_resp:
-                        output.generated_text = parsed_resp["text"][0]
-                    else:
-                        output.error = (
-                            "Unexpected response format: "
-                            "neither 'choices' nor 'text' found"
-                        )
-                        output.success = False
-                    output.success = True
+    st = time.perf_counter()
+    try:
+        async with session.post(url=api_url, json=payload, headers=headers) as response:
+            if response.status == 200:
+                parsed_resp = await response.json()
+                output.latency = time.perf_counter() - st
+                if "choices" in parsed_resp:
+                    output.generated_text = parsed_resp["choices"][0]["text"]
+                elif "text" in parsed_resp:
+                    output.generated_text = parsed_resp["text"][0]
                 else:
-                    output.error = response.reason or ""
+                    output.error = (
+                        "Unexpected response format: neither 'choices' nor 'text' found"
+                    )
                     output.success = False
-        except Exception:
-            output.success = False
-            exc_info = sys.exc_info()
-            output.error = "".join(traceback.format_exception(*exc_info))
+                output.success = True
+            else:
+                output.error = response.reason or ""
+                output.success = False
+    except Exception:
+        output.success = False
+        exc_info = sys.exc_info()
+        output.error = "".join(traceback.format_exception(*exc_info))
 
-        if pbar:
-            pbar.update(1)
-        return output
+    if pbar:
+        pbar.update(1)
+    return output
 
 
 async def async_request_openai_completions(
@@ -289,42 +280,49 @@ async def async_request_openai_completions(
     st = time.perf_counter()
     most_recent_timestamp = st
     try:
-        async with session.post(api_url, json=payload, headers=headers) as response:
+        async with session.post(url=api_url, json=payload, headers=headers) as response:
             if response.status == 200:
+                first_chunk_received = False
                 async for chunk_bytes in response.content:
                     chunk_bytes = chunk_bytes.strip()
                     if not chunk_bytes:
                         continue
 
-                    chunk = chunk_bytes.decode("utf-8")
-                    data = chunk.removeprefix("data: ")
+                    chunk = chunk_bytes.decode("utf-8").removeprefix("data: ")
+                    if chunk != "[DONE]":
+                        data = json.loads(chunk)
 
-                    # Ignore data that asks for completion
-                    if data.strip() == "[DONE]":
-                        break
-                    data = json.loads(data)
-
-                    if "choices" in data and data["choices"]:
-                        choice = data["choices"][0]
-                        if "text" in choice:
-                            delta = choice["text"]
-                            generated_text += delta
-
+                        # NOTE: Some completion API might have a last
+                        # usage summary response without a token so we
+                        # want to check a token was generated
+                        if choices := data.get("choices"):
+                            # Note that text could be empty here
+                            # e.g. for special tokens
+                            text = choices[0].get("text")
                             timestamp = time.perf_counter()
                             # First token
-                            if (
-                                output.ttft is None or output.ttft == 0
-                            ) and generated_text:
-                                output.ttft = timestamp - st
+                            if not first_chunk_received:
+                                first_chunk_received = True
+                                ttft = time.perf_counter() - st
+                                output.ttft = ttft
 
                             # Decoding phase
                             else:
                                 output.itl.append(timestamp - most_recent_timestamp)
 
                             most_recent_timestamp = timestamp
-
+                            generated_text += text or ""
+                        if usage := data.get("usage"):
+                            output.output_tokens = usage.get("completion_tokens")
+                if first_chunk_received:
+                    output.success = True
+                else:
+                    output.success = False
+                    output.error = (
+                        "Never received a valid chunk to calculate TTFT."
+                        "This response will be marked as failed!"
+                    )
                 output.generated_text = generated_text
-                output.success = True
                 output.latency = most_recent_timestamp - st
             else:
                 output.error = response.reason or ""
@@ -444,9 +442,8 @@ async def async_request_openai_audio(
 
     api_url = request_func_input.api_url
     assert api_url.endswith(("transcriptions", "translations")), (
-        "OpenAI Chat Completions API URL must end with 'transcriptions' "
+        "OpenAI Audio API URL must end with 'transcriptions' or 'translations'."
     )
-    "or `translations`."
 
     content = [{"type": "text", "text": request_func_input.prompt}]
     payload = {
@@ -496,14 +493,8 @@ async def async_request_openai_audio(
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
-                        chunk_bytes = chunk_bytes.decode("utf-8")
-                        # NOTE: SSE comments (often used as pings) start with a colon.
-                        # These are not JSON data payload and should be skipped.
-                        if chunk_bytes.startswith(":"):
-                            continue
 
-                        chunk = chunk_bytes.removeprefix("data: ")
-
+                        chunk = chunk_bytes.decode("utf-8").removeprefix("data: ")
                         if chunk != "[DONE]":
                             timestamp = time.perf_counter()
                             data = json.loads(chunk)
