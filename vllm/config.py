@@ -26,7 +26,6 @@ from pydantic import (ConfigDict, SkipValidation, TypeAdapter, field_validator,
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.distributed import ProcessGroup, ReduceOp
-from transformers import GenerationConfig
 from typing_extensions import Self, assert_never, runtime_checkable
 
 import vllm.envs as envs
@@ -1568,22 +1567,20 @@ class ModelConfig:
             dict[str, Any]: A dictionary with the differing sampling
             parameters, if `generation_config` is `"vllm"` an empty dictionary.
         """
-        config: Union[dict[str, Any], GenerationConfig] = {}
-
-        if self.generation_config == "auto":
-            config = try_get_generation_config(
-                self.hf_config_path or self.model,
-                trust_remote_code=self.trust_remote_code,
-                revision=self.revision,
-            ) or {}
-        elif self.generation_config != "vllm":
-            config = try_get_generation_config(
-                self.generation_config,
-                trust_remote_code=self.trust_remote_code,
-            ) or {}
-
-        if isinstance(config, GenerationConfig):
-            config = config.to_diff_dict()
+        config = {}
+        if self.generation_config != "vllm":
+            # Not using vLLM defaults
+            kwargs = {"trust_remote_code": self.trust_remote_code}
+            if self.generation_config == "auto":
+                # Using HF/model generation config
+                kwargs["model"] = self.hf_config_path or self.model
+                kwargs["revision"] = self.revision
+            else:
+                # Treat generation_config as path
+                kwargs["model"] = self.generation_config
+            maybe_config = try_get_generation_config(**kwargs)
+            if maybe_config is not None:
+                config = maybe_config.to_diff_dict()
 
         # Overriding with given generation config
         config.update(self.override_generation_config)
