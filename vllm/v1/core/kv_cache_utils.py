@@ -79,7 +79,7 @@ class BlockHashWithGroupId:
         # The hash value for the contents (e.g., token_ids) of a block without
         # group ID. The value is the same for blocks representing
         # the same tokens but for different groups.
-        self.block_hash: BlockHash = block_hash.deepcopy()
+        self.block_hash: BlockHash = block_hash
         # The KV cache group ID.
         self.group_id: int = group_id
 

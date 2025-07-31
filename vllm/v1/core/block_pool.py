@@ -22,6 +22,7 @@ class BlockCache:
     def __init__(self, num_gpu_blocks: int) -> None:
         self.cache: dict[BlockHashWithGroupId,
                          dict[int, KVCacheBlock]] = defaultdict(dict)
+
         self.keys: list[BlockHashWithGroupId] = [
             BlockHashWithGroupId(BlockHash(0, (), None), 0)
             for _ in range(num_gpu_blocks)
@@ -35,23 +36,36 @@ class BlockCache:
             key: BlockHashWithGroupId) -> Optional[dict[int, KVCacheBlock]]:
         return self.cache.get(key)
 
+    def get_one_block(self, block_hash: BlockHash,
+                      group_id: int) -> Optional[KVCacheBlock]:
+        blocks_by_id = self.cache.get(
+            BlockHashWithGroupId(block_hash, group_id))
+        if not blocks_by_id:
+            return None
+        return next(iter(blocks_by_id.values()))
+
     def put(self, block: KVCacheBlock, block_hash: BlockHash,
             group_id: int) -> None:
         assert block.block_hash is None
 
+        blocks_by_id = self.cache.get(
+            BlockHashWithGroupId(block_hash, group_id))
+        if blocks_by_id:
+            matched_block = next(iter(blocks_by_id.values()))
+            assert matched_block.block_hash is not None
+            block.block_hash = matched_block.block_hash
+            return
+
         assert len(self.keys) > 0
         key = self.keys.pop()
         key.reset(block_hash, group_id)
-        block.block_hash = key
-
-        if blocks_by_id := self.cache.get(key):
-            blocks_by_id[block.block_id] = block
-            return
 
         assert len(self.values) > 0
         value = self.values.pop()
         value.clear()
         value[block.block_id] = block
+
+        block.block_hash = key
         self.cache[key] = value
 
     def pop(self, block: KVCacheBlock) -> bool:
@@ -137,15 +151,12 @@ class BlockPool:
         Returns:
             The cached blocks if exists, or None.
         """
-        cached_blocks = []
-        for group_id in kv_cache_group_ids:
-            cached_blocks_one_group = self.cached_block_hash_to_block.get(
-                BlockHashWithGroupId(block_hash, group_id))
-            if not cached_blocks_one_group:
-                return None
-            first_block = next(iter(cached_blocks_one_group.values()))
-            cached_blocks.append(first_block)
-        return cached_blocks
+        cached_blocks = [
+            self.cached_block_hash_to_block.get_one_block(
+                block_hash, group_id) for group_id in kv_cache_group_ids
+        ]
+        return [block for block in cached_blocks
+                if block is not None] if all(cached_blocks) else None
 
     def cache_full_blocks(
         self,
