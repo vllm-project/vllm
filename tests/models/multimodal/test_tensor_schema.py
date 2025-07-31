@@ -7,9 +7,11 @@ from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig
 from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
-from vllm.inputs import InputProcessingContext
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
+from vllm.multimodal import (MULTIMODAL_REGISTRY, BaseMultiModalProcessor,
+                             MultiModalKwargs)
+from vllm.utils import GiB_bytes
+from vllm.v1.core.kv_cache_utils import get_kv_cache_config
+from vllm.v1.engine.core import EngineCore as V1EngineCore
 
 from ...conftest import VllmRunner
 from ..registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
@@ -17,6 +19,31 @@ from ..registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
 ARCH_TO_SKIP = {
     "MolmoForCausalLM": "incompatible requirements",
 }
+
+
+def create_batched_mm_kwargs(
+    model_config: ModelConfig,
+    processor: BaseMultiModalProcessor,
+) -> MultiModalKwargs:
+    processing_info = processor.info
+    dummy_inputs = processor.dummy_inputs
+    supported_mm_limits = processing_info.get_supported_mm_limits()
+    mm_counts = {
+        modality: 3 if limit is None else limit
+        for modality, limit in supported_mm_limits.items()
+    }
+    processor_inputs = dummy_inputs.get_dummy_processor_inputs(
+        seq_len=model_config.max_model_len,
+        mm_counts=mm_counts,
+    )
+    mm_kwargs = processor.apply(
+        prompt=processor_inputs.prompt,
+        mm_data=processor_inputs.mm_data,
+        hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
+        tokenization_kwargs=processor_inputs.tokenization_kwargs,
+    )["mm_kwargs"]
+    mm_kwargs = MultiModalKwargs.batch([mm_kwargs])
+    return mm_kwargs
 
 
 @pytest.mark.core_model
@@ -33,6 +60,7 @@ def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
 
     # Avoid OOM and reduce initialization time by only using 1 layer
     def hf_overrides(hf_config: PretrainedConfig) -> PretrainedConfig:
+        hf_config.update(model_info.hf_overrides)
         text_config = hf_config.get_text_config()
         # Ensure at least 2 expert per group
         # Since `grouped_topk` assumes top-2
@@ -65,8 +93,13 @@ def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
                 "num_hidden_layers": 1,
             })
 
-        if model_info.hf_overrides:
-            hf_config.update(model_info.hf_overrides)
+        # e.g.: Qwen/Qwen2-Audio-7B-Instruct
+        if hasattr(hf_config, "audio_config"):
+            hf_config.audio_config.update({
+                "num_layers": 1,
+                "num_hidden_layers": 1,
+                "encoder_layers": 1,
+            })
 
         return hf_config
 
@@ -85,39 +118,30 @@ def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
             for m in ["image", "video", "audio"]):
         pytest.skip(f"{model_arch} does not support tensor schema validation.")
 
-    factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
-    ctx = InputProcessingContext(
-        model_config,
-        tokenizer=cached_tokenizer_from_config(model_config),
-    )
-    processor = factories.build_processor(ctx)
-    processing_info = processor.info
-    dummy_inputs = processor.dummy_inputs
-    supported_mm_limits = processing_info.get_supported_mm_limits()
-    mm_counts = {
-        modality: 3 if limit is None else limit
-        for modality, limit in supported_mm_limits.items()
-    }
-    processor_inputs = dummy_inputs.get_dummy_processor_inputs(
-        seq_len=model_config.max_model_len,
-        mm_counts=mm_counts,
-    )
-    mm_kwargs = processor.apply(
-        prompt=processor_inputs.prompt,
-        mm_data=processor_inputs.mm_data,
-        hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
-        tokenization_kwargs=processor_inputs.tokenization_kwargs,
-    )["mm_kwargs"]
-    mm_kwargs = MultiModalKwargs.batch([mm_kwargs])
-
     # Avoid calling model.forward()
     def _initialize_kv_caches_v0(self) -> None:
         self.cache_config.num_gpu_blocks = 0
         self.cache_config.num_cpu_blocks = 0
 
-    with patch.object(V0LLMEngine, "_initialize_kv_caches",
-                      _initialize_kv_caches_v0):
-        monkeypatch.setenv("VLLM_USE_V1", "0")
+    def _initialize_kv_caches_v1(self, vllm_config):
+        kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        scheduler_kv_cache_config = get_kv_cache_config(
+            vllm_config,
+            kv_cache_specs[0],
+            10 * GiB_bytes,
+        )
+
+        # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config
+        return 1, 0, scheduler_kv_cache_config
+
+    with (patch.object(V0LLMEngine, "_initialize_kv_caches",
+                       _initialize_kv_caches_v0),
+          patch.object(V1EngineCore, "_initialize_kv_caches",
+                       _initialize_kv_caches_v1), monkeypatch.context() as m):
+        m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+        if model_info.v0_only:
+            m.setenv("VLLM_USE_V1", "0")
+
         with vllm_runner(
                 model_id,
                 tokenizer_name=model_info.tokenizer,
@@ -128,6 +152,18 @@ def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
                 load_format="dummy",
                 hf_overrides=hf_overrides,
         ) as vllm_model:
+            model_config = vllm_model.llm.llm_engine.model_config
+            llm_engine = vllm_model.llm.llm_engine
+
+            if hasattr(llm_engine, "processor"):
+                # v1 processor
+                mm_registry = llm_engine.processor.mm_registry
+            else:
+                # v0 input_preprocessor
+                mm_registry = llm_engine.input_preprocessor.mm_registry
+
+            processor = mm_registry.create_processor(model_config)
+            mm_kwargs = create_batched_mm_kwargs(model_config, processor)
 
             def validate_model_input(model):
                 for modality in ("audio", "image", "video"):
@@ -135,4 +171,4 @@ def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
                     if hasattr(model, method_name):
                         getattr(model, method_name)(**mm_kwargs)
 
-            vllm_model.llm.apply_model(validate_model_input)
+            vllm_model.apply_model(validate_model_input)
