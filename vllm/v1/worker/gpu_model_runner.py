@@ -2558,6 +2558,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     desc="Capturing CUDA graph shapes")
             for num_tokens in compilation_cases:
                 # We skip EPLB here since we don't want to record dummy metrics
+                logger.info("DIEGO: compilation for number of tokens %d",
+                    num_tokens)
                 for _ in range(
                         self.compilation_config.cudagraph_num_of_warmups):
                     self._dummy_run(num_tokens,
