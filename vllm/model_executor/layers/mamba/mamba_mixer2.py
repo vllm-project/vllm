@@ -732,6 +732,10 @@ class MambaMixer2(MambaBase, CustomOp):
             conv_kernel=self.conv_kernel_size,
         )
 
+    @property
+    def mamba_type(self) -> str:
+        return "mamba2"
+
 
 def mamba_mixer2(
     hidden_states: torch.Tensor,

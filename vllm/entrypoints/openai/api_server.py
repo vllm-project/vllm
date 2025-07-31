@@ -11,6 +11,7 @@ import multiprocessing
 import os
 import signal
 import socket
+import sys
 import tempfile
 import uuid
 from argparse import Namespace
@@ -48,8 +49,7 @@ from vllm.entrypoints.chat_utils import (load_chat_template,
                                          resolve_mistral_chat_template)
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.cli_args import (log_non_default_args,
-                                              make_arg_parser,
+from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -94,16 +94,16 @@ from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription, OpenAIServingTranslation)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
-                                    with_cancellation)
+                                    log_non_default_args, with_cancellation)
+from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (Device, FlexibleArgumentParser, bind_process_name,
-                        get_open_zmq_ipc_path, is_valid_ipv6_address,
-                        set_ulimit)
+from vllm.utils import (Device, FlexibleArgumentParser, get_open_zmq_ipc_path,
+                        is_valid_ipv6_address, set_process_title, set_ulimit)
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -1239,9 +1239,9 @@ class AuthenticationMiddleware:
         2. The request path doesn't start with /v1 (e.g. /health).
     """
 
-    def __init__(self, app: ASGIApp, api_token: str) -> None:
+    def __init__(self, app: ASGIApp, tokens: list[str]) -> None:
         self.app = app
-        self.api_token = api_token
+        self.api_tokens = {f"Bearer {token}" for token in tokens}
 
     def __call__(self, scope: Scope, receive: Receive,
                  send: Send) -> Awaitable[None]:
@@ -1255,7 +1255,7 @@ class AuthenticationMiddleware:
         headers = Headers(scope=scope)
         # Type narrow to satisfy mypy.
         if url_path.startswith("/v1") and headers.get(
-                "Authorization") != f"Bearer {self.api_token}":
+                "Authorization") not in self.api_tokens:
             response = JSONResponse(content={"error": "Unauthorized"},
                                     status_code=401)
             return response(scope, receive, send)
@@ -1303,7 +1303,7 @@ class ScalingMiddleware:
     """
     Middleware that checks if the model is currently scaling and
     returns a 503 Service Unavailable response if it is.
-    
+
     This middleware applies to all HTTP requests and prevents
     processing when the model is in a scaling state.
     """
@@ -1512,8 +1512,8 @@ def build_app(args: Namespace) -> FastAPI:
                             status_code=HTTPStatus.BAD_REQUEST)
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
-    if token := args.api_key or envs.VLLM_API_KEY:
-        app.add_middleware(AuthenticationMiddleware, api_token=token)
+    if tokens := [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key]:
+        app.add_middleware(AuthenticationMiddleware, tokens=tokens)
 
     if args.enable_request_id_headers:
         app.add_middleware(XRequestIdMiddleware)
@@ -1734,7 +1734,6 @@ async def init_app_state(
         state.openai_serving_models,
         request_logger=request_logger,
     ) if "transcription" in supported_tasks else None
-    state.task = model_config.task
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
@@ -1807,6 +1806,13 @@ def setup_server(args):
 
 async def run_server(args, **uvicorn_kwargs) -> None:
     """Run a single-worker API server."""
+
+    # Add process-specific prefix to stdout and stderr.
+    process_name = "APIServer"
+    pid = os.getpid()
+    _add_prefix(sys.stdout, process_name, pid)
+    _add_prefix(sys.stderr, process_name, pid)
+
     listen_address, sock = setup_server(args)
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
 
@@ -1822,7 +1828,7 @@ async def run_server_worker(listen_address,
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
     server_index = client_config.get("client_index", 0) if client_config else 0
-    bind_process_name("APIServer", str(server_index))
+    set_process_title("APIServer", str(server_index))
     # Load logging config for uvicorn if specified
     log_config = load_log_config(args.log_config_file)
     if log_config is not None:
