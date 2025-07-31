@@ -192,7 +192,6 @@ def compute_encoder_budget(
     if not model_config.is_multimodal_model:
         return 0, 0
 
-    # TODO: handle encoder-decoder models once we support them.
     (
         encoder_compute_budget,
         encoder_cache_size,
@@ -245,7 +244,6 @@ def _compute_encoder_budget_multimodal(
             f"({max_tokens_per_mm_item}) is larger than max_num_batched_tokens"
             f" ({scheduler_config.max_num_batched_tokens}). Please increase "
             "max_num_batched_tokens.")
-
     encoder_compute_budget = max(scheduler_config.max_num_encoder_input_tokens,
                                  max_tokens_per_mm_item)
     encoder_cache_size = max(scheduler_config.encoder_cache_size,
