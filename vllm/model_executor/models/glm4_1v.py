@@ -1269,11 +1269,18 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             prefix=maybe_prefix(prefix, "visual"),
         )
 
+        if config.model_type == "glm4v":
+            architectures = ["Glm4vForCausalLM"]
+        elif config.model_type == "glm4v_moe":
+            architectures = ["Glm4MoeForCausalLM"]
+        else:
+            architectures = None
+
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Glm4MoeForCausalLM"])
+            architectures=architectures)
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
