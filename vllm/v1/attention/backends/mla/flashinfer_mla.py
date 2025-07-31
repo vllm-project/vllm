@@ -87,17 +87,9 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-
-        B = q_nope.shape[0]
-
         q = torch.cat([q_nope, q_pe], dim=-1)
-        # trtllm API extras extra dimension for MTP
+        # trtllm API requires extra dimension q_len_per_request for MTP
         q = q.unsqueeze(1)
-        # o = torch.empty(B,
-        #                 self.num_heads,
-        #                 self.kv_lora_rank,
-        #                 dtype=q.dtype,
-        #                 device=q.device)
 
         max_seq_len = attn_metadata.decode.seq_lens.max().item()
 
@@ -110,7 +102,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             qk_rope_head_dim=self.qk_rope_head_dim,
             block_tables=attn_metadata.decode.block_table,
             seq_lens=attn_metadata.decode.seq_lens,
-            max_seq_len=max_seq_len,
+            max_seq_len=attn_metadata.max_seq_len,
             bmm1_scale=self.scale,
         )
 
