@@ -246,17 +246,20 @@ class MistralToolParser(ToolParser):
             return None
 
         delta = DeltaMessage()
-        if additional_content:
-            delta.content = additional_content
         if len(delta_tool_calls) > 0:
+            delta.content = additional_content
             delta.tool_calls = delta_tool_calls
+        else:
+            # Return an empty DeltaMessage once the tool calls are all done
+            # so that finish_reason gets set.
+            delta.content = additional_content if additional_content else ""
 
         # HACK: serving_chat.py inspects the internal state of tool parsers
         # when determining it's final streaming delta, automatically
         # adding autocompleted JSON.
         # These two lines avoid that nonsense while ensuring finish_reason
         # is set to tool_calls when at least one tool is called.
-        if delta and not self.prev_tool_call_arr:
+        if delta_tool_calls and not self.prev_tool_call_arr:
             self.prev_tool_call_arr = [{"arguments": {}}]
         return delta
 
@@ -495,15 +498,15 @@ class MistralToolParser(ToolParser):
         if delta_tool_calls and not self.prev_tool_call_arr:
             self.prev_tool_call_arr = [{"arguments": {}}]
 
-        if content or len(delta_tool_calls) > 0:
-            delta_message = DeltaMessage()
-            if content:
-                delta_message.content = content
-            if len(delta_tool_calls) > 0:
-                delta_message.tool_calls = delta_tool_calls
-            return delta_message
+        delta_message = DeltaMessage()
+        if len(delta_tool_calls) > 0:
+            delta_message.content = content
+            delta_message.tool_calls = delta_tool_calls
         else:
-            return None
+            # Return an empty DeltaMessage once the tool calls are all done
+            # so that finish_reason gets set.
+            delta_message.content = content if content else ""
+        return delta_message
 
     def _split_delta(
         self,
