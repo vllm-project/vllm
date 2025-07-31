@@ -49,7 +49,10 @@ def _log_insecure_serialization_warning():
                         "VLLM_ALLOW_INSECURE_SERIALIZATION=1")
 
 
-def _typestr(t: type):
+def _typestr(val: Any) -> Optional[tuple[str, str]]:
+    if val is None:
+        return None
+    t = type(val)
     return t.__module__, t.__qualname__
 
 
@@ -131,14 +134,13 @@ class MsgpackEncoder:
 
         if isinstance(obj, UtilityResult):
             result = obj.result
-            if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION or result is None:
+            if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
                 return None, result
             # Since utility results are not strongly typed, we also encode
             # the type (or a list of types in the case it's a list) to
             # help with correct msgspec deserialization.
-            cls = result.__class__
-            return _typestr(cls) if cls is not list else [
-                _typestr(type(v)) for v in result
+            return _typestr(result) if type(result) is not list else [
+                _typestr(v) for v in result
             ], result
 
         if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
@@ -277,7 +279,9 @@ class MsgpackDecoder:
                 ]
         return UtilityResult(result)
 
-    def _convert_result(self, result_type: Sequence[str], result: Any):
+    def _convert_result(self, result_type: Sequence[str], result: Any) -> Any:
+        if result_type is None:
+            return result
         mod_name, name = result_type
         mod = importlib.import_module(mod_name)
         result_type = getattr(mod, name)
