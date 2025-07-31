@@ -17,6 +17,21 @@ from vllm.engine.arg_utils import (EngineArgs, contains_type, get_kwargs,
 from vllm.utils import FlexibleArgumentParser
 
 
+class TestClass:
+    """Dummy class for testing Union type parsing"""
+
+    def __init__(self, int_as_str: str):
+        """Consume a string, must be possible to cast to int"""
+        # Cast and store int
+        self.arg = int(int_as_str)
+
+    def __eq__(self, other):
+        """Compare class instances based on stored int values"""
+        if not isinstance(other, TestClass):
+            return NotImplemented
+        return self.arg == other.arg
+
+
 @pytest.mark.parametrize(("type", "value", "expected"), [
     (int, "42", 42),
     (float, "3.14", 3.14),
@@ -28,6 +43,8 @@ from vllm.utils import FlexibleArgumentParser
     (Union[int, str], "42", 42),
     (Union[int, str], "apple", "apple"),
     (Union[int, str], 42, 42),
+    (Union[TestClass, str], "apple", "apple"),
+    (Union[TestClass, str], "42", TestClass("42")),
 ])
 def test_parse_type(type, value, expected):
     parse_type_func = parse_type(type)
