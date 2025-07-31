@@ -5,7 +5,6 @@ Define KV connector functionality mixin for model runners.
 """
 import copy
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from dataclasses import dataclass
 from typing import Generator  # noqa: UP035
 from typing import TYPE_CHECKING, Optional
 
@@ -15,19 +14,13 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput,
+                             ModelRunnerOutput)
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class KVConnectorOutput:
-    # [req_ids]
-    finished_sending: Optional[set[str]] = None
-    finished_recving: Optional[set[str]] = None
 
 
 # Defined as a kv connector functionality mixin for ModelRunner (GPU, TPU)
