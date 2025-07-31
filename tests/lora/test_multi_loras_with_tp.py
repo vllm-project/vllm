@@ -18,7 +18,6 @@ LORA_NAME_ID_MAP = {}
 INCREASE_LORA_ID = 0
 LORA_RANK = 8
 
-
 LORA_TEST_PROMPTS = ["What is GitHub?", "Hi, tell me about you"]
 LORA_TEST_EXPECTED = [
     "GitHub is an open-source platform that provides a way to manage and develop software projects. It allows developers to store and manage code, collaborate on projects, and automate tasks.",  # noqa: E501
