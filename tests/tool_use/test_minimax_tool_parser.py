@@ -558,9 +558,12 @@ def test_streaming_openai_compatibility(minimax_tool_parser):
 
     for i, current_text in enumerate(stages):
         previous_text = stages[i - 1] if i > 0 else ""
-        delta_text = current_text[len(previous_text):] if previous_text else current_text
+        delta_text = current_text[len(previous_text
+                                      ):] if previous_text else current_text
 
-        print(f"\n--- Stage {i}: {['Name', 'Args Start', 'First Param', 'Second Param', 'Close'][i]} ---")
+        print(
+            f"\n--- Stage {i}: {['Name', 'Args Start', 'First Param', 'Second Param', 'Close'][i]} ---"
+        )
         print(f"Previous: {repr(previous_text)}")
         print(f"Current:  {repr(current_text)}")
         print(f"Delta:    {repr(delta_text)}")
@@ -584,7 +587,8 @@ def test_streaming_openai_compatibility(minimax_tool_parser):
             if tool_call.function and tool_call.function.name:
                 if function_name_sent:
                     # Function name should only be sent once
-                    assert False, f"Function name sent multiple times at stage {i}"
+                    AssertionError(
+                        f"Function name sent multiple times at stage {i}")
                 assert tool_call.function.name == "get_weather"
                 function_name_sent = True
                 print(f"✓ Function name sent: {tool_call.function.name}")
@@ -599,10 +603,13 @@ def test_streaming_openai_compatibility(minimax_tool_parser):
                     # Should not be exactly the same as what we had before
                     assert args_delta != total_args_received, \
                         f"Arguments delta should not be identical to previous content: {args_delta}"
-                    
+
                     # Should not contain the full previous content unless it's a very small addition
-                    if total_args_received in args_delta and len(args_delta) > len(total_args_received) * 2:
-                        print(f"⚠️  Warning: Arguments delta seems cumulative rather than incremental")
+                    if total_args_received in args_delta and len(
+                            args_delta) > len(total_args_received) * 2:
+                        print(
+                            "⚠️  Warning: Arguments delta seems cumulative rather than incremental"
+                        )
 
                 # Update our tracking of total arguments received
                 total_args_received += args_delta
@@ -613,9 +620,9 @@ def test_streaming_openai_compatibility(minimax_tool_parser):
 
     # Verify function name was sent
     assert function_name_sent, "Function name should have been sent at some point"
-    
+
     # Verify we received some arguments
     assert total_args_received, "Should have received some arguments content"
-    
+
     print(f"\n✓ Total arguments received: {repr(total_args_received)}")
     print("✓ Streaming test completed successfully")

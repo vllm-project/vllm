@@ -5,9 +5,7 @@ import json
 from collections.abc import Sequence
 from typing import Union
 
-import partial_json_parser
 import regex as re
-from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import random_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -203,31 +201,30 @@ class MinimaxToolParser(ToolParser):
                     return DeltaMessage(content=content_part)
 
         try:
-            # Check for tool call content at the character level in the entire current text
-            tool_start_pos = processed_current_text.find(self.tool_call_start_token)
+            tool_start_pos = processed_current_text.find(
+                self.tool_call_start_token)
             if tool_start_pos == -1:
                 return None
-                
-            # Get the tool call content position in original current_text  
+
             original_tool_start = current_text.find(self.tool_call_start_token)
             if original_tool_start == -1:
                 return None
-            
-            # Initialize tool if this is the first time
+
             if self.current_tool_id == -1:
                 self.current_tool_id = 0
                 self.current_tool_name_sent = False
                 self.streamed_args_for_tool = [""]
 
-            # Find what part of the tool call content is new in this delta
-            tool_content_start = original_tool_start + len(self.tool_call_start_token)
-            
+            tool_content_start = original_tool_start + len(
+                self.tool_call_start_token)
+
             # Check if we can extract function name
             if not self.current_tool_name_sent:
                 # Look for complete function name in current text
                 name_pattern = r'"name":\s*"([^"]+)"'
                 import re
-                match = re.search(name_pattern, current_text[tool_content_start:])
+                match = re.search(name_pattern,
+                                  current_text[tool_content_start:])
                 if match:
                     function_name = match.group(1)
                     self.current_tool_name_sent = True
@@ -245,73 +242,89 @@ class MinimaxToolParser(ToolParser):
                 # Find arguments start position
                 args_pattern = r'"arguments":\s*'
                 import re
-                args_match = re.search(args_pattern, current_text[tool_content_start:])
+                args_match = re.search(args_pattern,
+                                       current_text[tool_content_start:])
                 if args_match:
                     args_start_pos = tool_content_start + args_match.end()
-                    
+
                     # Extract everything after "arguments": as raw text
                     args_text = current_text[args_start_pos:]
-                    
+
                     # Remove trailing </tool_calls> if present
                     end_pos = args_text.find(self.tool_call_end_token)
                     if end_pos != -1:
                         args_text = args_text[:end_pos]
-                    
+
                     # Get what we've already streamed for this tool
-                    already_streamed = self.streamed_args_for_tool[self.current_tool_id]
-                    
+                    already_streamed = self.streamed_args_for_tool[
+                        self.current_tool_id]
+
                     if already_streamed:
-                        # We have previous content, compute the diff
-                        if args_text != already_streamed and args_text.startswith(already_streamed):
-                            # Use extract_intermediate_diff to get only the new part
-                            args_delta = extract_intermediate_diff(args_text, already_streamed)
+                        if (args_text != already_streamed
+                                and args_text.startswith(already_streamed)):
+                            args_delta = extract_intermediate_diff(
+                                args_text, already_streamed)
                             if args_delta:
-                                self.streamed_args_for_tool[self.current_tool_id] = args_text
+                                self.streamed_args_for_tool[
+                                    self.current_tool_id] = args_text
                                 return DeltaMessage(tool_calls=[
-                                    DeltaToolCall(index=self.current_tool_id,
-                                                  function=DeltaFunctionCall(
-                                                      arguments=args_delta).model_dump(
-                                                          exclude_none=True))
+                                    DeltaToolCall(
+                                        index=self.current_tool_id,
+                                        function=DeltaFunctionCall(
+                                            arguments=args_delta).model_dump(
+                                                exclude_none=True))
                                 ])
                     else:
-                        # First time sending arguments
-                        # We need to check what was in the previous_text to determine the actual delta
                         prev_args_text = ""
                         if previous_text:
-                            prev_args_start = previous_text.find('"arguments":')
+                            prev_args_start = previous_text.find(
+                                '"arguments":')
                             if prev_args_start != -1:
-                                prev_args_match = re.search(args_pattern, previous_text[prev_args_start:])
+                                prev_args_match = re.search(
+                                    args_pattern,
+                                    previous_text[prev_args_start:])
                                 if prev_args_match:
-                                    prev_args_pos = prev_args_start + prev_args_match.end()
-                                    prev_args_text = previous_text[prev_args_pos:]
+                                    prev_args_pos = (prev_args_start +
+                                                     prev_args_match.end())
+                                    prev_args_text = previous_text[
+                                        prev_args_pos:]
                                     # Remove trailing </tool_calls> if present
-                                    prev_end_pos = prev_args_text.find(self.tool_call_end_token)
+                                    prev_end_pos = prev_args_text.find(
+                                        self.tool_call_end_token)
                                     if prev_end_pos != -1:
-                                        prev_args_text = prev_args_text[:prev_end_pos]
-                        
-                        if prev_args_text and args_text.startswith(prev_args_text) and len(args_text) > len(prev_args_text):
+                                        prev_args_text = prev_args_text[:
+                                                                        prev_end_pos]
+
+                        if prev_args_text and args_text.startswith(
+                                prev_args_text) and len(args_text) > len(
+                                    prev_args_text):
                             # Calculate the incremental part
-                            args_delta = extract_intermediate_diff(args_text, prev_args_text)
+                            args_delta = extract_intermediate_diff(
+                                args_text, prev_args_text)
                             if args_delta:
-                                self.streamed_args_for_tool[self.current_tool_id] = args_text
+                                self.streamed_args_for_tool[
+                                    self.current_tool_id] = args_text
                                 return DeltaMessage(tool_calls=[
-                                    DeltaToolCall(index=self.current_tool_id,
-                                                  function=DeltaFunctionCall(
-                                                      arguments=args_delta).model_dump(
-                                                          exclude_none=True))
+                                    DeltaToolCall(
+                                        index=self.current_tool_id,
+                                        function=DeltaFunctionCall(
+                                            arguments=args_delta).model_dump(
+                                                exclude_none=True))
                                 ])
                         elif args_text and not prev_args_text:
                             # This is the very first content, send it all
-                            self.streamed_args_for_tool[self.current_tool_id] = args_text
+                            self.streamed_args_for_tool[
+                                self.current_tool_id] = args_text
                             return DeltaMessage(tool_calls=[
                                 DeltaToolCall(index=self.current_tool_id,
                                               function=DeltaFunctionCall(
-                                                  arguments=args_text).model_dump(
-                                                      exclude_none=True))
+                                                  arguments=args_text).
+                                              model_dump(exclude_none=True))
                             ])
 
             return None
 
         except Exception:
-            logger.exception("An unexpected error occurred during streaming tool call handling.")
+            logger.exception("An unexpected error occurred during",
+                             "streaming tool call handling.")
             return None
