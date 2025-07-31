@@ -29,19 +29,14 @@ from vllm import envs
 from vllm.logger import init_logger
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.transformers_utils.configs import (ChatGLMConfig, Cohere2Config,
-                                             DbrxConfig, DeepseekVLV2Config,
-                                             EAGLEConfig, Exaone4Config,
-                                             ExaoneConfig, JAISConfig,
+from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
+                                             EAGLEConfig, JAISConfig,
                                              KimiVLConfig, MedusaConfig,
-                                             MiniMaxText01Config,
-                                             MiniMaxVL01Config, MllamaConfig,
-                                             MLPSpeculatorConfig, MPTConfig,
+                                             MllamaConfig, MLPSpeculatorConfig,
                                              Nemotron_Nano_VL_Config,
                                              NemotronConfig, NVLM_D_Config,
-                                             OvisConfig, RWConfig,
-                                             SkyworkR1VChatConfig, SolarConfig,
-                                             Telechat2Config, UltravoxConfig)
+                                             RWConfig, Step3TextConfig,
+                                             Step3VLConfig, UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
 from vllm.transformers_utils.utils import check_gguf_file
@@ -77,29 +72,20 @@ _CONFIG_REGISTRY_OVERRIDE_HF: dict[str, type[PretrainedConfig]] = {
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
-    "cohere2": Cohere2Config,
-    "dbrx": DbrxConfig,
     "deepseek_vl_v2": DeepseekVLV2Config,
     "kimi_vl": KimiVLConfig,
     "Llama_Nemotron_Nano_VL": Nemotron_Nano_VL_Config,
-    "mpt": MPTConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
     "jais": JAISConfig,
     "mlp_speculator": MLPSpeculatorConfig,
     "medusa": MedusaConfig,
     "eagle": EAGLEConfig,
-    "exaone": ExaoneConfig,
-    "exaone4": Exaone4Config,
-    "minimax_text_01": MiniMaxText01Config,
-    "minimax_vl_01": MiniMaxVL01Config,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
-    "ovis": OvisConfig,
-    "solar": SolarConfig,
-    "skywork_chat": SkyworkR1VChatConfig,
-    "telechat": Telechat2Config,
     "ultravox": UltravoxConfig,
+    "step3_vl": Step3VLConfig,
+    "step3_text": Step3TextConfig,
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 

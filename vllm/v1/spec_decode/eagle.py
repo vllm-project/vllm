@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Optional
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -51,6 +53,9 @@ class EagleProposer:
         # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
 
+        self.is_multimodal_model = vllm_config.model_config \
+            .is_multimodal_model
+
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and
                                not self.vllm_config.model_config.enforce_eager)
@@ -76,6 +81,11 @@ class EagleProposer:
                                    device=device,
                                    dtype=torch.int32)
 
+        self.inputs_embeds = torch.zeros(
+            (self.max_num_tokens, self.hidden_size),
+            dtype=self.dtype,
+            device=device)
+
     def propose(
         self,
         # [num_tokens]
@@ -88,6 +98,7 @@ class EagleProposer:
         next_token_ids: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
+        mm_embeds: Optional[list[torch.Tensor]] = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
@@ -128,14 +139,27 @@ class EagleProposer:
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
+        if self.is_multimodal_model:
+            input_ids = self.input_ids[:num_tokens]
+            inputs_embeds = self.model.get_input_embeddings(
+                input_ids,
+                multimodal_embeddings=mm_embeds or None,
+            )
+            self.inputs_embeds[:num_tokens] = inputs_embeds
+            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+            input_ids = None
+        else:
+            inputs_embeds = None
+            input_ids = self.input_ids[:num_input_tokens]
 
         with set_forward_context(per_layer_attn_metadata,
                                  self.vllm_config,
                                  num_tokens=num_input_tokens):
             ret_hidden_states = self.model(
-                self.input_ids[:num_input_tokens],
-                self.positions[:num_input_tokens],
-                self.hidden_states[:num_input_tokens],
+                input_ids=input_ids,
+                positions=self.positions[:num_input_tokens],
+                hidden_states=self.hidden_states[:num_input_tokens],
+                inputs_embeds=inputs_embeds,
             )
             if self.method == "deepseek_mtp":
                 last_hidden_states = ret_hidden_states
@@ -218,15 +242,24 @@ class EagleProposer:
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states
+            if self.is_multimodal_model:
+                inputs_embeds = self.model.get_input_embeddings(input_ids)
+                self.inputs_embeds[:batch_size] = inputs_embeds
+                inputs_embeds = self.inputs_embeds[:input_batch_size]
+                input_ids = None
+            else:
+                inputs_embeds = None
+                input_ids = self.input_ids[:input_batch_size]
 
             # Run the model.
             with set_forward_context(per_layer_attn_metadata,
                                      self.vllm_config,
                                      num_tokens=input_batch_size):
                 last_hidden_states, hidden_states = self.model(
-                    self.input_ids[:input_batch_size],
-                    self.positions[:input_batch_size],
-                    self.hidden_states[:input_batch_size],
+                    input_ids=input_ids,
+                    positions=self.positions[:input_batch_size],
+                    hidden_states=self.hidden_states[:input_batch_size],
+                    inputs_embeds=inputs_embeds,
                 )
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
@@ -391,10 +424,18 @@ class EagleProposer:
     ) -> None:
         with set_forward_context(None, self.vllm_config,
                                  num_tokens=num_tokens):
+            if self.is_multimodal_model:
+                input_ids = None
+                inputs_embeds = self.inputs_embeds[:num_tokens]
+            else:
+                input_ids = self.input_ids[:num_tokens]
+                inputs_embeds = None
+
             self.model(
-                self.input_ids[:num_tokens],
-                self.positions[:num_tokens],
-                self.hidden_states[:num_tokens],
+                input_ids=input_ids,
+                positions=self.positions[:num_tokens],
+                hidden_states=self.hidden_states[:num_tokens],
+                inputs_embeds=inputs_embeds,
             )
 
     def validate_same_kv_cache_group(self,

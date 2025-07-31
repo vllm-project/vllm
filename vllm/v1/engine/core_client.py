@@ -250,7 +250,8 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.get_supported_tasks()
 
     def add_request(self, request: EngineCoreRequest) -> None:
-        self.engine_core.add_request(request)
+        req, request_wave = self.engine_core.preprocess_add_request(request)
+        self.engine_core.add_request(req, request_wave)
 
     def abort_requests(self, request_ids: list[str]) -> None:
         if len(request_ids) > 0:
@@ -552,7 +553,8 @@ def _process_utility_output(output: UtilityOutput,
     if output.failure_message is not None:
         future.set_exception(Exception(output.failure_message))
     else:
-        future.set_result(output.result)
+        assert output.result is not None
+        future.set_result(output.result.result)
 
 
 class SyncMPClient(MPClient):

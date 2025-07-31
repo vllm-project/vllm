@@ -23,7 +23,7 @@ class FlashInferMLABackend(MLACommonBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASHINFER_MLA_VLLM_V1"
+        return "FLASHINFER_MLA"
 
     @staticmethod
     def get_impl_cls() -> type["FlashInferMLAImpl"]:
