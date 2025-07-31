@@ -18,7 +18,6 @@ from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_pin_memory_available
-# yapf: enable
 # yapf: disable
 from vllm.v1.sample.logits_processor import (BatchUpdate, BatchUpdateBuilder,
                                              LogitBiasLogitsProcessor,
@@ -27,6 +26,7 @@ from vllm.v1.sample.logits_processor import (BatchUpdate, BatchUpdateBuilder,
                                              MinTokensLogitsProcessor,
                                              MoveDirectionality,
                                              build_logitsprocs)
+# yapf: enable
 from vllm.v1.sample.metadata import SamplingMetadata
 
 PIN_MEMORY_AVAILABLE = is_pin_memory_available()
