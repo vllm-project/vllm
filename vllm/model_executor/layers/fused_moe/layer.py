@@ -677,8 +677,9 @@ class FusedMoE(torch.nn.Module):
 
         if quant_config.get_name() == "mxfp4":
             if has_triton_kernels:
-                if self.moe_parallel_config.use_deepep_ll_kernels:
-                    # For DEEPEP low latency, we need to round up the hidden size
+                self.use_triton_kernels = True
+                if current_platform.is_rocm() or self.moe_parallel_config.use_deepep_ll_kernels:
+                    # For ROCm or DEEPEP low latency, we need to round up the hidden size
                     hidden_size = round_up(hidden_size, 256)
             else:
                 raise ValueError("triton_kernels must be installed first")
