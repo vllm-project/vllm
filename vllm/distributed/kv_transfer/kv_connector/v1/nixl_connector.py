@@ -256,9 +256,8 @@ class NixlConnectorScheduler:
 
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
-            count = max(len(request.prompt_token_ids) - num_computed_tokens, 0)
-            if count > 0:
-                return count, True
+            count = len(request.prompt_token_ids) - num_computed_tokens
+            return count, count > 0
 
         # No remote prefill for this request.
         return 0, False
@@ -279,18 +278,16 @@ class NixlConnectorScheduler:
             # NOTE: when accelerator is not directly supported by Nixl,
             # prefilled blocks need to be saved to host memory before transfer.
 
-            # figure out full computed blocks to save
+            # save all blocks
             block_ids = blocks.get_block_ids()[0]
-            all_full = request.num_tokens % self.block_size == 0
-            full_block_ids = (block_ids if all_full else block_ids[:-1])
             # TODO: skip the blocks that are already in the host xfer buffer.
             # Currently, the host xfer buffer block is 1-to-1 mapped to device
             # kv blocks, so host blocks won't be flushed as long as its device
             # block is not overwritten; and it will be safe to skip saving them
             # to host xfer buffer.
-            if full_block_ids:
+            if block_ids:
                 self._reqs_need_save[request.request_id] = \
-                    (request, full_block_ids)
+                    (request, block_ids)
         elif params.get("do_remote_prefill"):
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host",
@@ -379,7 +376,8 @@ class NixlConnectorScheduler:
                 or request.status != RequestStatus.FINISHED_LENGTH_CAPPED):
             return False, None
 
-        # If prompt < block_size, no xfer so free blocks immediately.
+        # [TODO] check whether block_ids actually ever be 0. If not we could
+        # remove the conditional below
         delay_free_blocks = len(block_ids) > 0
 
         if delay_free_blocks:
