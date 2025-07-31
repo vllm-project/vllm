@@ -12,8 +12,11 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.attention.ops.paged_attn import PagedAttention
+from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
+from vllm.platforms import _Backend
 from vllm.v1.outputs import ModelRunnerOutput
 
 logger = init_logger(__name__)
@@ -21,10 +24,25 @@ logger = init_logger(__name__)
 
 class model_aware_kv_ops_helper:
 
-    def __init__(self, config: VllmConfig):
-        self.is_deepseek_mla = config.model_config.is_deepseek_mla
+    def __init__(self, vllm_config: VllmConfig):
+        self.is_deepseek_mla = vllm_config.model_config.is_deepseek_mla
         self.use_mla_opt = not envs.VLLM_MLA_DISABLE
-        self.tp_size = config.parallel_config.tensor_parallel_size
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        backend = get_attn_backend(self.model_config.get_head_size(),
+                                   self.model_config.dtype,
+                                   self.cache_config.cache_dtype,
+                                   self.cache_config.block_size,
+                                   self.model_config.is_attention_free,
+                                   use_mla=self.model_config.use_mla)
+        self.backend_name = backend.get_name()
+        attn_backend = backend_name_to_enum(self.backend_name)
+        self._use_xformers = attn_backend == _Backend.XFORMERS
+        self._use_torch_sdpa = attn_backend == _Backend.TORCH_SDPA
+        self._use_rocm_flash = attn_backend == _Backend.ROCM_FLASH
+        self._use_rocm_aiter = attn_backend == _Backend.ROCM_AITER_MLA
+        logger.debug("Detected attention backend %s", self.backend_name)
+        self.tp_size = vllm_config.parallel_config.tensor_parallel_size
 
     def get_model_args(self, model_executable: torch.nn.Module):
 
@@ -57,10 +75,41 @@ class model_aware_kv_ops_helper:
 
         return num_heads, head_size
 
+    def is_3D_kvcache(self):
+        return self._use_xformers or self._use_torch_sdpa or \
+            self._use_rocm_flash or self._use_rocm_aiter
+
     def get_kv_from_cache(self, kv_cache, num_heads, head_size):
+        """Return key and value tensors in a flattened view.
+
+        The layout of ``kv_cache`` depends on the attention backend.
+        Currently there are 3 kinds of kv_cache tensor layout.
+        1) 4-D kv cache corresponds to the tensor layout of shape
+        ``[2, num_blocks, block_size, kv_lora_rank + qk_rope_head_dim]``.
+        2) 3-D kv cache corresponds to tensor layout of shape
+        ``[2, num_blocks, block_size * num_heads * head_size]``.
+        We do pre-process the kv cache by first splitting the cache
+        and then reshape so that the first dimension indexes tokens.
+        3) 5-D kv cache corresponds to the tensor layout of shape
+        ``[2, num_blocks, block_size, num_heads, head_size]``.
+        """
         if self.is_deepseek_mla and self.use_mla_opt:
             key_cache = kv_cache.reshape(-1, num_heads, head_size)
             value_cache = kv_cache.reshape(-1, num_heads, head_size)
+        elif self.is_3D_kvcache():
+            key_cache, value_cache = PagedAttention.split_kv_cache(
+                kv_cache, num_heads, head_size)
+
+            # Do permutation on key_cache and value_cache according
+            # to the following shape:
+            # key_cache:
+            # (num_blocks, num_kv_heads, head_size // x, block_size, x)
+            # value_cache:
+            # (num_blocks, num_kv_heads, head_size, block_size)
+            key_cache = key_cache.permute(0, 3, 1, 2,
+                                          4).reshape(-1, num_heads, head_size)
+            value_cache = value_cache.permute(0, 3, 1, 2).reshape(
+                -1, num_heads, head_size)
         else:
             key_cache = kv_cache[0].reshape(-1, num_heads, head_size)
             value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
@@ -70,6 +119,7 @@ class model_aware_kv_ops_helper:
                         layer, kv_cache, slot_mapping, start_pos, end_pos):
 
         model_config = model_executable.model.config
+        num_heads, head_size = self.get_model_args(model_executable)
 
         if self.is_deepseek_mla and self.use_mla_opt:
             layer.self_attn.attn = layer.self_attn.mla_attn
@@ -83,6 +133,21 @@ class model_aware_kv_ops_helper:
                 slot_mapping[start_pos:end_pos],
                 layer.self_attn.attn.kv_cache_dtype,
                 layer.self_attn.attn._k_scale,
+            )
+        elif self.is_3D_kvcache():
+            # 3-D paged attention cache:
+            # [2, num_blocks, block_size * num_heads * head_size]
+            key_cache, value_cache = PagedAttention.split_kv_cache(
+                kv_cache, num_heads, head_size)
+            PagedAttention.write_to_paged_cache(
+                keys.to(kv_cache.device),
+                values.to(kv_cache.device),
+                key_cache,
+                value_cache,
+                slot_mapping[start_pos:end_pos],
+                layer.self_attn.attn.kv_cache_dtype,
+                layer.self_attn.attn._k_scale,
+                layer.self_attn.attn._v_scale,
             )
         else:
             key_cache, value_cache = kv_cache[0], kv_cache[1]
@@ -157,7 +222,6 @@ class KVOutputAggregator:
         # send/recv
         output.finished_sending = finished_sending if finished_sending else None
         output.finished_recving = finished_recving if finished_recving else None
-
         return output
 
     def async_aggregate(self,
