@@ -107,18 +107,21 @@ direct_register_custom_op(
 )
 
 buffer_cache = {}
-def get_symm_input_impl(size: List[int], dtype: torch.dtype) -> torch.Tensor:
-    if buffer_cache.get(size, dtype) is None:
-      buffer_cache[size, dtype] = torch.ops.nccl_symm_cache.nccl_malloc_tensor(
+def get_symm_input_impl(dummy: torch.Tensor, size: List[int], dtype: torch.dtype) -> torch.Tensor:
+    if buffer_cache.get((tuple(size), dtype)) is None:
+      print(f"mallocing {size} {dtype}")
+      buffer_cache[(tuple(size), dtype)] = torch.ops.nccl_symm_cache.nccl_malloc_tensor(
           size,
           dtype,
           'cuda',
       )
       _WORLD.device_communicator.pynccl_comm.register_comm_window(
-          buffer_cache[size, dtype])
-    return buffer_cache[size, dtype]
+          buffer_cache[(tuple(size), dtype)])
+    else:
+        print(f"using cached {size} {dtype}")
+    return buffer_cache[(tuple(size), dtype)]
 
-def get_symm_input_fake(size: List[int], dtype: torch.dtype) -> torch.Tensor:
+def get_symm_input_fake(dummy: torch.Tensor, size: List[int], dtype: torch.dtype) -> torch.Tensor:
     return torch.empty(size, dtype=dtype, device='cuda')
 
 direct_register_custom_op(
@@ -135,7 +138,9 @@ class simple_model(torch.nn.Module):
     def forward(self, x):
         y =torch.add(x,x)
         z = torch.add(y,x)
-        symm_input = torch.ops.vllm.get_symm_input(size, dtype)
+        # Create a dummy tensor to satisfy PyTorch's requirement
+        dummy = torch.empty(1, device='cuda', dtype=torch.float32)
+        symm_input = torch.ops.vllm.get_symm_input(dummy, size, dtype)
         torch.add(z,x,out=symm_input)
         torch.ops.vllm.pynccl_all_reduce(
             symm_input,
