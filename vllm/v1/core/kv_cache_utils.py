@@ -35,16 +35,31 @@ class BlockHash(NamedTuple):
     extra_keys: Optional[Any] = None
 
 
-class BlockHashWithGroupId(NamedTuple):
-    # The hash value for the contents (e.g., token_ids) of a block without group
-    # ID. The value is the same for blocks representing the same tokens but for
-    # different groups.
-    block_hash: BlockHash
-    # The KV cache group ID.
-    group_id: int
+class BlockHashWithGroupId:
+
+    def __init__(self, block_hash: BlockHash, group_id: int) -> None:
+        # The hash value for the contents (e.g., token_ids) of a block without
+        # group ID. The value is the same for blocks representing
+        # the same tokens but for different groups.
+        self.block_hash: BlockHash = block_hash
+        # The KV cache group ID.
+        self.group_id: int = group_id
+
+    def reset(self, block_hash: BlockHash, group_id: int) -> None:
+        self.block_hash = block_hash
+        self.group_id = group_id
 
     def get_hash_value(self) -> int:
         return self.block_hash.hash_value
+
+    def __hash__(self) -> int:
+        return hash((self.block_hash.hash_value, self.group_id))
+
+    def __eq__(self, other: Any) -> bool:
+        if type(other) is not BlockHashWithGroupId:
+            return False
+        return (self.group_id == other.group_id
+                and self.block_hash == other.block_hash)
 
 
 # The hash seed for the first block of any prefix block sequence.
