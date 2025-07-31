@@ -6,9 +6,8 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.sampling_params import SamplingParams
-from vllm.v1.sample.logits_processor import LogitsProcessor
-from vllm.v1.sample.logits_processor.interface import (BatchUpdate,
-                                                       MoveDirectionality)
+from vllm.v1.sample.logits_processor import (BatchUpdate, LogitsProcessor,
+                                             MoveDirectionality)
 
 MODELS_ON_S3 = [
     "adept/fuyu-8b",

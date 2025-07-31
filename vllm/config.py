@@ -67,7 +67,7 @@ if TYPE_CHECKING:
         QuantizationConfig)
     from vllm.model_executor.model_loader import LoadFormats
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-    from vllm.v1.sample.logits_processor.interface import LogitsProcessor
+    from vllm.v1.sample.logits_processor import LogitsProcessor
 
     ConfigType = type[DataclassInstance]
     HfOverrides = Union[dict, Callable[[type], type]]
