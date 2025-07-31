@@ -309,21 +309,47 @@ __global__ void reshape_and_cache_flash_kernel(
   cache_t* __restrict__ value_dst =
       value_cache + block_idx * block_stride + block_offset * page_stride;
 
-  // prefer 16-byte transactions when possible.
-  constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
+  // this is true for the NHD layout where `head_stride == head_size`
+  const bool is_contiguous_heads = (head_stride == head_size);
 
-  // prepare per-element copy functors
   float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
   float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale;
 
-  CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
-  CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
+  if (is_contiguous_heads) {
+    // NHD layout
+    constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
 
-  vectorize_with_alignment<VEC_SIZE>(key_src, key_dst, n_elems, threadIdx.x,
-                                     blockDim.x, k_op);
+    CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
+    CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
 
-  vectorize_with_alignment<VEC_SIZE>(value_src, value_dst, n_elems, threadIdx.x,
-                                     blockDim.x, v_op);
+    vectorize_with_alignment<VEC_SIZE>(key_src, key_dst, n_elems, threadIdx.x,
+                                       blockDim.x, k_op);
+
+    vectorize_with_alignment<VEC_SIZE>(value_src, value_dst, n_elems,
+                                       threadIdx.x, blockDim.x, v_op);
+
+  } else {
+    // HND layout
+    for (int i = threadIdx.x; i < n_elems; i += blockDim.x) {
+      const int head_idx = i / head_size;
+      const int head_offset = i % head_size;
+      const int64_t dst_offset =
+          static_cast<int64_t>(head_idx) * head_stride + head_offset;
+
+      scalar_t k_val = key_src[i];
+      scalar_t v_val = value_src[i];
+
+      if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+        key_dst[dst_offset] = k_val;
+        value_dst[dst_offset] = v_val;
+      } else {
+        key_dst[dst_offset] =
+            fp8::scaled_convert<cache_t, scalar_t, kv_dt>(k_val, k_scale_val);
+        value_dst[dst_offset] =
+            fp8::scaled_convert<cache_t, scalar_t, kv_dt>(v_val, v_scale_val);
+      }
+    }
+  }
 }
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
