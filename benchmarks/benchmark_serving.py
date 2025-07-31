@@ -257,14 +257,15 @@ async def benchmark(
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
-    if not disable_test_run:
-        print("Starting initial single prompt test run...")
-        test_prompt, test_prompt_len, test_output_len, test_mm_content = (
+    test_prompt, test_prompt_len, test_output_len, test_mm_content = (
             input_requests[0].prompt,
             input_requests[0].prompt_len,
             input_requests[0].expected_output_len,
             input_requests[0].multi_modal_data,
         )
+    
+    if not disable_test_run:
+        print("Starting initial single prompt test run...")
 
         assert test_mm_content is None or isinstance(test_mm_content, dict)
         test_input = RequestFuncInput(
