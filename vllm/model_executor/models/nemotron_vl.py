@@ -30,8 +30,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.processing import PromptUpdateDetails
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processor import (
-    cached_image_processor_from_config)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -137,36 +135,11 @@ class NemotronVLProcessor(InternVLProcessor):
 class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
     """Processing info for Nemotron VL models."""
 
-    def get_hf_processor(
-        self,
-        *,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        **kwargs: object,
-    ) -> NemotronVLProcessor:
-        if min_dynamic_patch is not None:
-            kwargs["min_dynamic_patch"] = min_dynamic_patch
-        if max_dynamic_patch is not None:
-            kwargs["max_dynamic_patch"] = max_dynamic_patch
-        if dynamic_image_size is not None:
-            kwargs["dynamic_image_size"] = dynamic_image_size
-
-        image_processor = self.get_image_processor()
+    def get_hf_processor(self, **kwargs: object) -> NemotronVLProcessor:
         return self.ctx.init_processor(
             NemotronVLProcessor,
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),
-            image_processor=image_processor,
-            **kwargs,
-        )
-
-    def get_image_processor(
-        self,
-        **kwargs: object,
-    ):
-        return cached_image_processor_from_config(
-            self.ctx.model_config,
             **kwargs,
         )
 

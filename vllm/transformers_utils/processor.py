@@ -4,8 +4,13 @@
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
+from transformers import AutoFeatureExtractor, AutoImageProcessor
+from transformers.feature_extraction_utils import FeatureExtractionMixin
+from transformers.image_processing_utils import BaseImageProcessor
 from transformers.processing_utils import ProcessorMixin
 from typing_extensions import TypeVar
+
+from vllm.utils import get_allowed_kwarg_only_overrides
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -33,23 +38,42 @@ class HashableList(list):
         return hash(tuple(self))
 
 
-def _merge_mm_kwargs(model_config: "ModelConfig", **kwargs):
+def _merge_mm_kwargs(
+    model_config: "ModelConfig",
+    processor_cls: Union[type, tuple[type, ...]],
+    /,
+    **kwargs,
+):
     mm_config = model_config.get_multimodal_config()
-    base_kwargs = mm_config.mm_processor_kwargs
-    if base_kwargs is None:
-        base_kwargs = {}
+    merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
 
-    merged_kwargs = {**base_kwargs, **kwargs}
+    if processor_cls == ProcessorMixin or (
+            isinstance(processor_cls, type)
+            and processor_cls.__name__.startswith("Auto")):
+        allowed_kwargs = merged_kwargs
+    else:
+        if isinstance(processor_cls, type):
+            processor_cls = (processor_cls, )
+
+        allowed_kwargs = merged_kwargs
+        for factory in processor_cls:
+            allowed_kwargs = get_allowed_kwarg_only_overrides(
+                factory,
+                allowed_kwargs,
+                requires_kw_only=False,
+                allow_var_kwargs=True,
+            )
 
     # NOTE: Pythonic dict is not hashable and will raise unhashable type
     # error when calling `cached_get_processor`, therefore we need to
     # wrap it to a hashable dict.
-    for key, value in merged_kwargs.items():
+    for key, value in allowed_kwargs.items():
         if isinstance(value, dict):
-            merged_kwargs[key] = HashableDict(value)
+            allowed_kwargs[key] = HashableDict(value)
         if isinstance(value, list):
-            merged_kwargs[key] = HashableList(value)
-    return merged_kwargs
+            allowed_kwargs[key] = HashableList(value)
+
+    return allowed_kwargs
 
 
 def get_processor(
@@ -112,7 +136,7 @@ def cached_processor_from_config(
         revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
-        **_merge_mm_kwargs(model_config, **kwargs),
+        **_merge_mm_kwargs(model_config, processor_cls, **kwargs),
     )
 
 
@@ -125,10 +149,6 @@ def get_feature_extractor(
 ):
     """Load an audio feature extractor for the given model name 
     via HuggingFace."""
-    # don't put this import at the top level
-    # it will call torch.cuda.device_count()
-    from transformers import AutoFeatureExtractor
-    from transformers.feature_extraction_utils import FeatureExtractionMixin
     try:
         feature_extractor = AutoFeatureExtractor.from_pretrained(
             processor_name,
@@ -164,7 +184,7 @@ def cached_feature_extractor_from_config(
         model_config.model,
         revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
-        **_merge_mm_kwargs(model_config, **kwargs),
+        **_merge_mm_kwargs(model_config, AutoFeatureExtractor, **kwargs),
     )
 
 
@@ -176,11 +196,6 @@ def get_image_processor(
     **kwargs: Any,
 ):
     """Load an image processor for the given model name via HuggingFace."""
-    # don't put this import at the top level
-    # it will call torch.cuda.device_count()
-    from transformers import AutoImageProcessor
-    from transformers.image_processing_utils import BaseImageProcessor
-
     try:
         processor = AutoImageProcessor.from_pretrained(
             processor_name,
@@ -217,5 +232,5 @@ def cached_image_processor_from_config(
         model_config.model,
         revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
-        **_merge_mm_kwargs(model_config, **kwargs),
+        **_merge_mm_kwargs(model_config, AutoImageProcessor, **kwargs),
     )
