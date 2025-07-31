@@ -9,6 +9,7 @@ from torch import nn
 from transformers import BertConfig
 
 from vllm.attention import Attention, AttentionType
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, PoolerConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -27,7 +28,6 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
 
-from ...compilation.decorators import support_torch_compile
 from .interfaces import SupportsCrossEncoding, SupportsQuant, SupportsV0Only
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
