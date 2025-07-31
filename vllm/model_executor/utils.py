@@ -88,7 +88,7 @@ def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:
 
 
 def get_moe_expert_mapping(
-    model: torch.nn.Module, ) -> Optional[list[tuple[str, str, int, str]]]:
+    model: torch.nn.Module, ) -> list[tuple[str, str, int, str]]:
     if parent_map := getattr(model, "get_expert_mapping", None):
         return parent_map()
     else:
@@ -97,4 +97,4 @@ def get_moe_expert_mapping(
             child_map = getattr(child, "get_expert_mapping", None)
             if child_map is not None:
                 return child_map()
-        return None
+        return []
