@@ -2639,7 +2639,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for i, kv_cache_group_spec in enumerate(
                 kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-            
+
             attn_backend_i, attn_metadata_builder_i = (
                 self._initialize_single_attn_backend(
                     kv_cache_spec, kv_cache_group_spec.layer_names))

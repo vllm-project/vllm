@@ -23,8 +23,9 @@ from vllm.utils import cdiv, is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import use_cascade_attention
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
-    get_kv_cache_layout, get_per_layer_parameters, infer_global_hyperparameters
-    reorder_batch_to_split_decodes_and_prefills, split_decodes_and_prefills)
+    get_kv_cache_layout, get_per_layer_parameters,
+    infer_global_hyperparameters, reorder_batch_to_split_decodes_and_prefills,
+    split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
