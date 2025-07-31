@@ -88,7 +88,9 @@ def test_multi_loras_with_tp_sync():
 
     def call_llm_get_outputs(prompt: str, lora_name: str):
         lora_request = LoRARequest(
-            lora_name, LORA_NAME_ID_MAP[lora_name], LORA_NAME_PATH_MAP[lora_name]
+            lora_name=lora_name, 
+            lora_int_id=LORA_NAME_ID_MAP[lora_name], 
+            lora_path=LORA_NAME_PATH_MAP[lora_name],
         )
         messages = format_chatml_messages(prompt)
         outputs = llm.chat(
@@ -105,9 +107,13 @@ def test_multi_loras_with_tp_sync():
 
     def reload_lora(name: str):
         """
-        reload a lora to simulate the case: `VLLM_ALLOW_RUNTIME_LORA_UPDATING=true`
+        reload a lora to simulate the case: 
+        setting `VLLM_ALLOW_RUNTIME_LORA_UPDATING=true` 
+        for dynamic lora loading and unloading
         """
-        remove_lora_response = llm.llm_engine.remove_lora(LORA_NAME_ID_MAP[name])
+        remove_lora_response = llm.llm_engine.remove_lora(
+            lora_id=LORA_NAME_ID_MAP[name]
+        )
         add_lora_response = llm.llm_engine.add_lora(
             make_add_lora_request(name, LORA_NAME_PATH_MAP[name])
         )
@@ -119,12 +125,6 @@ def test_multi_loras_with_tp_sync():
         assert outputs == expected
 
     for prompt, expected_output in zip(LORA_TEST_PROMPTS, LORA_TEST_EXPECTED):
-
-        # before this PR, if you reload Alice here,
-        # testing will fail after call Bob
-        # if you DO NOT reload Alice here,
-        # first case will fail, because the last init lora is NOT Alice
-        # reload_lora("Alice")
 
         output_text = call_llm_get_outputs(prompt, "Alice")
         check_outputs(output_text, expected_output)
