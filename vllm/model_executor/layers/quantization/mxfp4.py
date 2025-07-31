@@ -119,8 +119,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         # pad the intermediate size to be a multiple of 2 * mxfp4_block
         # for to hold non-uniform sharded tensor as well as swizzling
-        intermediate_size_per_partition_after_pad = round_up(
-            intermediate_size_per_partition, 64)
+        if current_platform.is_rocm():
+            intermediate_size_per_partition_after_pad = round_up(
+                intermediate_size_per_partition, 128)
+        else:
+            intermediate_size_per_partition_after_pad = round_up(
+                intermediate_size_per_partition, 64)
 
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(torch.zeros(
