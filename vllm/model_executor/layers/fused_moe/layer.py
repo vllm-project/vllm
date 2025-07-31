@@ -105,15 +105,15 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @staticmethod
     def _maybe_make_prepare_finalize(
-        moe: FusedMoEConfig, ) -> Optional[FusedMoEPrepareAndFinalize]:
+        moe: FusedMoEConfig,
+    ) -> Optional[FusedMoEPrepareAndFinalize]:
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
 
         prepare_finalize: Optional[FusedMoEPrepareAndFinalize] = None
 
-        if moe.use_flashinfer_cutlass_kernels:
-            prepare_finalize = FlashInferCutlassMoEPrepareAndFinalize(
-                quant_dtype=moe.quant_dtype, )
+        assert not moe.use_flashinfer_cutlass_kernels, "Must be done in modelopt.py"
+
         if moe.use_pplx_kernels:
             hidden_dim_bytes, hidden_scale_bytes = pplx_hidden_dim_scale_bytes(
                 moe.max_num_tokens,
@@ -197,16 +197,19 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         self,
         moe: FusedMoEConfig,
     ) -> Optional[FusedMoEPrepareAndFinalize]:
-        return FusedMoEMethodBase._maybe_make_prepare_finalize(moe)
+        if moe.moe_parallel_config.use_all2all_kernels:
+            return FusedMoEMethodBase._maybe_make_prepare_finalize(moe)
+        else:
+            return None
 
     def init_prepare_finalize(self):
         assert self.moe is not None
         prepare_finalize = self.maybe_make_prepare_finalize(self.moe)
 
         if prepare_finalize is not None:
+            logger.debug("%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self))
             assert self.topk_indices_dtype is None
-            assert self.fused_experts is None
-            logger.debug("%s", prepare_finalize.__class__.__name__)
+            assert self.fused_experts is None, f"Attempt to override experts for {id(self)}!"
             self.topk_indices_dtype = prepare_finalize.topk_indices_dtype()
             experts = self.select_gemm_impl(prepare_finalize, self.moe)
             self.fused_experts = FusedMoEModularKernel(

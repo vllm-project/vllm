@@ -160,9 +160,13 @@ class FusedMoEPrepareAndFinalize(ABC):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
-               Optional[ExpertTokensMetadata], Optional[torch.Tensor],
-               Optional[torch.Tensor]]:
+    ) -> tuple[
+        torch.Tensor,
+        Optional[torch.Tensor],
+        Optional[ExpertTokensMetadata],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+    ]:
         """
         Perform any quantization (and/or) dispatching needed
         for this kernel.
