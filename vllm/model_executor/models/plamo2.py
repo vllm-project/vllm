@@ -362,7 +362,6 @@ class Plamo2MambaMixer(nn.Module):
             # - the hidden is reshaped into (bs, num_heads, head_dim)
             # - mamba_cache_params.ssm_state's slots will be selected
             #   using state_indices_tensor_d
-
             selective_state_update(
                 mamba_cache_params.ssm_state,
                 hidden_states_d,
