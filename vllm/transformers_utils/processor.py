@@ -4,7 +4,8 @@
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
-from transformers import AutoFeatureExtractor, AutoImageProcessor
+from transformers import (AutoFeatureExtractor, AutoImageProcessor,
+                          AutoProcessor)
 from transformers.feature_extraction_utils import FeatureExtractionMixin
 from transformers.image_processing_utils import BaseImageProcessor
 from transformers.processing_utils import ProcessorMixin
@@ -85,12 +86,9 @@ def get_processor(
     **kwargs: Any,
 ) -> _P:
     """Load a processor for the given model name via HuggingFace."""
-    # don't put this import at the top level
-    # it will call torch.cuda.device_count()
-    from transformers import AutoProcessor
-
-    processor_factory = (AutoProcessor if processor_cls == ProcessorMixin or
-                         isinstance(processor_cls, tuple) else processor_cls)
+    processor_factory = (AutoProcessor if isinstance(processor_cls, tuple)
+                         or issubclass(processor_cls, ProcessorMixin) else
+                         processor_cls)
 
     try:
         processor = processor_factory.from_pretrained(
