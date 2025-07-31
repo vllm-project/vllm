@@ -4,7 +4,7 @@
 from abc import abstractmethod
 from collections.abc import Iterable
 from enum import Enum
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional, overload
 
 import torch
 import torch.nn.functional as F
@@ -995,6 +995,20 @@ class FusedMoE(torch.nn.Module):
         if self.expert_map is None:
             return expert_id
         return self.expert_map[expert_id].item()
+
+    @overload
+    def weight_loader(self, param: torch.nn.Parameter,
+                      loaded_weight: torch.Tensor, weight_name: str,
+                      shard_id: str, expert_id: int,
+                      return_success: Literal[False]) -> None:
+        ...
+
+    @overload
+    def weight_loader(self, param: torch.nn.Parameter,
+                      loaded_weight: torch.Tensor, weight_name: str,
+                      shard_id: str, expert_id: int,
+                      return_success: Literal[True]) -> bool:
+        ...
 
     def weight_loader(self,
                       param: torch.nn.Parameter,
