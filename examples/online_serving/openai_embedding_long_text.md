@@ -93,6 +93,7 @@ Chunked processing now uses **MEAN aggregation** for cross-chunk combination, re
 ### Extreme Long Text Support
 
 With `MAX_EMBED_LEN=3072000`, you can process:
+
 - **Academic papers**: Full research papers with references
 - **Legal documents**: Complete contracts and legal texts  
 - **Books**: Entire chapters or small books
@@ -127,7 +128,7 @@ The test client demonstrates:
 
 1. **Chunked processing not enabled**:
 
-   ```
+   ```log
    ValueError: This model's maximum position embeddings length is 4096 tokens...
    ```
 
@@ -135,7 +136,7 @@ The test client demonstrates:
 
 2. **Input exceeds max_embed_len**:
 
-   ```
+   ```log
    ValueError: This model's maximum embedding input length is 3072000 tokens...
    ```
 
@@ -143,7 +144,7 @@ The test client demonstrates:
 
 3. **Memory errors**:
   
-   ```
+   ```log
    RuntimeError: CUDA out of memory
    ```
   
@@ -156,7 +157,7 @@ The test client demonstrates:
 
 Server logs show chunked processing activity:
 
-```
+```log
 INFO: Input length 150000 exceeds max_position_embeddings 4096, will use chunked processing
 INFO: Split input of 150000 tokens into 37 chunks (max_chunk_size: 4096)
 ```
