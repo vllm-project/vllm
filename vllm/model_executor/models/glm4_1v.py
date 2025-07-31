@@ -78,6 +78,7 @@ from .utils import (AutoWeightsLoader, WeightsMapper,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
 from .vision import get_vit_attn_backend
+from transformers.models.glm4v.configuration_glm4v import Glm4vVisionConfig
 
 logger = init_logger(__name__)
 
@@ -486,7 +487,7 @@ class Glm4vPatchMerger(nn.Module):
 
 class Glm4vVisionEmbeddings(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config: Glm4vVisionConfig):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -617,7 +618,7 @@ class Glm4vVisionTransformer(nn.Module):
 
     def __init__(
         self,
-        vision_config,
+        vision_config: Glm4vVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
