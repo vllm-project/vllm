@@ -21,7 +21,7 @@ from vllm.entrypoints.utils import (VLLM_SUBCMD_PARSER_EPILOG,
 from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, get_tcp_uri
+from vllm.utils import FlexibleArgumentParser, get_tcp_uri, set_process_title
 from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
 from vllm.v1.executor.abstract import Executor
@@ -227,7 +227,9 @@ def run_api_server_worker_proc(listen_address,
                                **uvicorn_kwargs) -> None:
     """Entrypoint for individual API server worker processes."""
 
-    # Add process-specific prefix to stdout and stderr.
+    # Set process title and add process-specific prefix to stdout and stderr.
+    server_index = client_config.get("client_index", 0) if client_config else 0
+    set_process_title("APIServer", str(server_index))
     from multiprocessing import current_process
     process_name = current_process().name
     pid = os.getpid()
