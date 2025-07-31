@@ -19,13 +19,11 @@ class MoveDirectionality(Enum):
     UNIDIRECTIONAL = auto()
     # Two-way i1<->i2 req swap within batch
     SWAP = auto()
-    # Dummy value for pooling models
-    NONE = auto()
 
 
 # (prompt_tok_ids, index, params, output_tok_ids) tuples for new
 # requests added to the batch.
-AddedRequest = tuple[list[int], int, Optional[SamplingParams], list[int]]
+AddedRequest = tuple[list[int], int, SamplingParams, list[int]]
 
 # (index 1, index 2, directionality) tuples representing
 # one-way moves or two-way swaps of requests in batch

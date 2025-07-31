@@ -15,11 +15,9 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata
-from vllm.v1.sample.logits_processor import (DUMMY_ADDED_REQUEST,
-                                             DUMMY_MOVED_REQUEST,
-                                             BatchUpdateBuilder,
-                                             LogitsProcessors)
-from vllm.v1.sample.logits_processor.interface import MoveDirectionality
+from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
+                                             LogitsProcessors,
+                                             MoveDirectionality)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
@@ -237,7 +235,7 @@ class InputBatch:
         self.logitsprocs = logitsprocs or LogitsProcessors()
 
         # This is updated each time the batch constituents change.
-        self.sampling_metadata = self._make_sampling_metadata()
+        self.sampling_metadata = self.make_sampling_metadata()
 
         self.pooling_params: dict[str, PoolingParams] = {}
 
@@ -255,27 +253,27 @@ class InputBatch:
         return self.num_reqs
 
     def _register_add_request(self, request: "CachedRequestState") -> int:
-        """Track add-request operations"""
+        """Track add-request operations for logits processors.
+        Not applicable to pooling models.
+        """
         req_index = self._get_next_add_index()
         assert req_index < self.max_num_reqs
-        if self.is_pooling_model:
-            # For pooling models, detailed added request metadata is not
-            # required; assign a dummy value which evaluates to True
-            if not self.batch_update_builder.added:
-                self.batch_update_builder.added = [DUMMY_ADDED_REQUEST]
-        else:
-            # Detailed added request metadata is only required for non-pooling
-            # models, to support logitsprocs
-            self.batch_update_builder.added.append(
-                (request.prompt_token_ids, req_index, request.sampling_params,
-                 request.output_token_ids))
+        # Detailed added request metadata is only required for non-pooling
+        # models, to support logitsprocs
+        assert request.sampling_params
+        self.batch_update_builder.added.append(
+            (request.prompt_token_ids, req_index, request.sampling_params,
+             request.output_token_ids))
         return req_index
 
     def add_request(
         self,
         request: "CachedRequestState",
+        req_index: Optional[int] = None,
     ) -> int:
-        req_index = self._register_add_request(request)
+        if req_index is None:
+            # New request index bookkeeping for autoregressive models
+            req_index = self._register_add_request(request)
 
         req_id = request.req_id
         if req_index == len(self._req_ids):
@@ -408,7 +406,10 @@ class InputBatch:
         req_index = self.req_id_to_index.pop(req_id, None)
         if req_index is None:
             return None
-        self.batch_update_builder.removed_append(req_index)
+        if not self.is_pooling_model:
+            # Autoregressive models require bookkeeping of removed requests to
+            # support logitsprocs
+            self.batch_update_builder.removed_append(req_index)
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
 
@@ -443,16 +444,10 @@ class InputBatch:
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
-        if self.is_pooling_model:
-            # For pooling models, detailed tracking of reordering info is not
-            # required. Assign a dummy value which evaluates to True
-            if not self.batch_update_builder.moved:
-                self.batch_update_builder.moved = [DUMMY_MOVED_REQUEST]
-        else:
-            # For non-pooling models, track detailed request reordering info
-            # to support logitsprocs
-            self.batch_update_builder.moved.append(
-                (i1, i2, MoveDirectionality.SWAP))
+        # For autoregressive models, track detailed request reordering info
+        # to support logitsprocs
+        self.batch_update_builder.moved.append(
+            (i1, i2, MoveDirectionality.SWAP))
         old_id_i1 = self._req_ids[i1]
         old_id_i2 = self._req_ids[i2]
         self._req_ids[i1], self._req_ids[i2] =\
@@ -546,16 +541,11 @@ class InputBatch:
             # Move active request down into empty request
             # index.
             self.batch_update_builder.pop_removed()
-            if self.is_pooling_model:
-                # Pooling models do not require detailed tracking of condense
-                # operations; assign a dummy value which evaluates to True
-                self.batch_update_builder.moved = [DUMMY_MOVED_REQUEST]
-            else:
-                # Non-pooling models require detailed tracking of condense
-                # operations to support logitsprocs
-                self.batch_update_builder.moved.append(
-                    (last_req_index, empty_index,
-                     MoveDirectionality.UNIDIRECTIONAL))
+            # Autoregressive models require detailed tracking of condense
+            # operations to support logitsprocs
+            self.batch_update_builder.moved.append(
+                (last_req_index, empty_index,
+                 MoveDirectionality.UNIDIRECTIONAL))
             req_id = self._req_ids[last_req_index]
             output_token_ids = self.req_output_token_ids[last_req_index]
             assert req_id is not None
@@ -611,29 +601,25 @@ class InputBatch:
         del self._req_ids[self.num_reqs:]
         del self.req_output_token_ids[self.num_reqs:]
 
+    def refresh_sampling_metadata(self):
+        self.sampling_metadata = self.make_sampling_metadata()
+
     def refresh_metadata(self):
         """Apply batch updates, reset input batch at end of step
-
+        Applies only to autoregressive models.
+        
         * Apply batch add/remove/permute to logits procs' states
         * If batch state is modified, update sampling metadata
-
-        Pooling models skip the logits processor update.
         """
-        was_update = self.batch_update_builder.is_update()
-        if self.is_pooling_model:
-            # For pooling models - reset batch update tracking
-            self.batch_update_builder.reset()
-        else:
-            # For non-pooling models - generate and apply logitsprocs update;
-            # reset batch update tracking
-            batch_update = self.batch_update_builder.get_and_reset(
-                self.num_reqs)
-            for logit_proc in self.logitsprocs.all:
-                logit_proc.update_state(batch_update)
-        if was_update:
-            self.sampling_metadata = self._make_sampling_metadata()
+        # For non-pooling models - generate and apply logitsprocs update;
+        # reset batch update tracking
+        batch_update = self.batch_update_builder.get_and_reset(self.num_reqs)
+        for logit_proc in self.logitsprocs.all:
+            logit_proc.update_state(batch_update)
+        if batch_update:
+            self.refresh_sampling_metadata()
 
-    def _make_sampling_metadata(self) -> SamplingMetadata:
+    def make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
         if not self.all_greedy:
             temperature = copy_slice(self.temperature_cpu_tensor,

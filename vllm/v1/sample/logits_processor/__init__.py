@@ -15,9 +15,7 @@ from vllm.v1.sample.logits_processor.builtin import (LogitBiasLogitsProcessor,
 from vllm.v1.sample.logits_processor.interface import (BatchUpdate,
                                                        LogitsProcessor,
                                                        MoveDirectionality)
-from vllm.v1.sample.logits_processor.state import (DUMMY_ADDED_REQUEST,
-                                                   DUMMY_MOVED_REQUEST,
-                                                   BatchUpdateBuilder,
+from vllm.v1.sample.logits_processor.state import (BatchUpdateBuilder,
                                                    LogitsProcessors)
 
 if TYPE_CHECKING:
@@ -184,6 +182,4 @@ __all__ = [
     "MoveDirectionality",
     "LogitsProcessors",
     "build_logitsprocs",
-    "DUMMY_ADDED_REQUEST",
-    "DUMMY_MOVED_REQUEST",
 ]

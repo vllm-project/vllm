@@ -6,15 +6,11 @@ from typing import TYPE_CHECKING, Optional
 
 from vllm.v1.sample.logits_processor.interface import (AddedRequest,
                                                        BatchUpdate,
-                                                       MoveDirectionality,
                                                        MovedRequest,
                                                        RemovedRequest)
 
 if TYPE_CHECKING:
     from vllm.v1.sample.logits_processor.interface import LogitsProcessor
-
-DUMMY_ADDED_REQUEST: AddedRequest = ([], -1, None, [])
-DUMMY_MOVED_REQUEST: MovedRequest = (-1, -1, MoveDirectionality.NONE)
 
 
 class BatchUpdateBuilder:
@@ -103,16 +99,9 @@ class BatchUpdateBuilder:
             return self._removed.pop()
         return None
 
-    def is_update(self) -> bool:
+    def _is_update(self) -> bool:
         """True if there is a batch state change"""
         return any((self._removed, self.moved, self.added))
-
-    def reset(self) -> None:
-        """Reset removed/moved/added update lists"""
-        if self.is_update():
-            self._removed = []
-            self.moved = []
-            self.added = []
 
     def get_and_reset(self, batch_size: int) -> Optional[BatchUpdate]:
         """Generate a logitsprocs batch update data structure
@@ -125,7 +114,7 @@ class BatchUpdateBuilder:
         """
         # Reset removal-sorting logic
         self._is_removed_sorted = False
-        if not self.is_update():
+        if not self._is_update():
             # No update; short-circuit
             return None
         # Build batch state update
@@ -135,7 +124,9 @@ class BatchUpdateBuilder:
             moved=self.moved,
             added=self.added,
         )
-        self.reset()
+        self._removed = []
+        self.moved = []
+        self.added = []
         return batch_update
 
 

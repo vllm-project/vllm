@@ -576,18 +576,31 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # NOTE(woosuk): `num_tokens` here may include spec tokens.
                 self.input_batch.num_tokens[req_index] += num_spec_tokens
 
-        # Add the new or resumed requests to the persistent batch.
-        # The smaller empty indices are filled first.
-        for req_id in req_ids_to_add:
-            req_state = self.requests[req_id]
-            self.input_batch.add_request(req_state)
+        if self.is_pooling_model:
+            # Pooling models only: place new requests at contiguous indices
+            # starting from 0
+            for adx, req_id in enumerate(req_ids_to_add):
+                req_state = self.requests[req_id]
+                self.input_batch.add_request(req_state, req_index=adx)
 
-        # Condense the batched states if there are gaps left by removed requests
-        self.input_batch.condense()
-        # Allow attention backend to reorder the batch, potentially
-        self._may_reorder_batch(scheduler_output)
-        # Refresh batch metadata with any pending updates.
-        self.input_batch.refresh_metadata()
+            # Refresh sampling metadata if pooling requests were added/removed
+            if (scheduler_output.finished_req_ids or unscheduled_req_ids
+                    or req_ids_to_add):
+                self.input_batch.refresh_sampling_metadata()
+        else:
+            # Autoregressive models only: add the new or resumed requests to
+            # the persistent batch. The smaller empty indices are filled first.
+            for req_id in req_ids_to_add:
+                req_state = self.requests[req_id]
+                self.input_batch.add_request(req_state)
+
+            # Condense the batched states if there are gaps left by removed
+            # requests
+            self.input_batch.condense()
+            # Allow attention backend to reorder the batch, potentially
+            self._may_reorder_batch(scheduler_output)
+            # Refresh batch metadata and sampling metadata
+            self.input_batch.refresh_metadata()
 
     def _init_model_kwargs_for_multimodal_model(
         self,
