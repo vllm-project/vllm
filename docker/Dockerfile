@@ -164,9 +164,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # see https://github.com/pytorch/pytorch/pull/123243
 ARG torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0 10.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
-# Override the arch list for flash-attn to reduce the binary size
-ARG vllm_fa_cmake_gpu_arches='80-real;90-real'
-ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
 #################### BASE BUILD IMAGE ####################
 
 #################### WHEEL BUILD IMAGE ####################
@@ -209,16 +206,7 @@ ARG SCCACHE_REGION_NAME=us-west-2
 ARG SCCACHE_S3_NO_CREDENTIALS=0
 
 # Flag to control whether to use pre-built vLLM wheels
-ARG VLLM_USE_PRECOMPILED
-# TODO: in setup.py VLLM_USE_PRECOMPILED is sensitive to truthiness, it will take =0 as "true", this should be fixed
-ENV VLLM_USE_PRECOMPILED=""
-RUN if [ "${VLLM_USE_PRECOMPILED}" = "1" ]; then \
-        export VLLM_USE_PRECOMPILED=1 && \
-        echo "Using precompiled wheels"; \
-    else \
-        unset VLLM_USE_PRECOMPILED && \
-        echo "Leaving VLLM_USE_PRECOMPILED unset to build wheels from source"; \
-    fi
+ARG VLLM_USE_PRECOMPILED=""
 
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -235,6 +223,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && export SCCACHE_S3_NO_CREDENTIALS=${SCCACHE_S3_NO_CREDENTIALS} \
         && export SCCACHE_IDLE_TIMEOUT=0 \
         && export CMAKE_BUILD_TYPE=Release \
+        && export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
+        && export VLLM_DOCKER_BUILD_CONTEXT=1 \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
         && sccache --show-stats; \
@@ -248,7 +238,20 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         # Clean any existing CMake artifacts
         rm -rf .deps && \
         mkdir -p .deps && \
+        export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" && \
+        export VLLM_DOCKER_BUILD_CONTEXT=1 && \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
+    fi
+
+# When using precompiled wheels, keep only the newest manylinux1 wheel and delete others
+RUN if [ "$VLLM_USE_PRECOMPILED" = "1" ]; then \
+        echo "Cleaning up extra wheels in dist/..." && \
+        # Identify the most recent manylinux1_x86_64 wheel
+        KEEP_WHEEL=$(ls -t dist/*manylinux1_x86_64.whl 2>/dev/null | head -n1) && \
+        if [ -n "$KEEP_WHEEL" ]; then \
+            echo "Keeping wheel: $KEEP_WHEEL"; \
+            find dist/ -type f -name "*.whl" ! -path "${KEEP_WHEEL}" -delete; \
+        fi; \
     fi
 
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
@@ -367,6 +370,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi
 
 # Install vllm wheel first, so that torch etc will be installed.
+# !bang
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system dist/*.whl --verbose \
@@ -386,7 +390,9 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 
 # Install FlashInfer from source
 ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
-ARG FLASHINFER_GIT_REF="v0.2.9rc1"
+# Keep this in sync with https://github.com/vllm-project/vllm/blob/main/requirements/cuda.txt
+# We use `--force-reinstall --no-deps` to avoid issues with the existing FlashInfer wheel.
+ARG FLASHINFER_GIT_REF="v0.2.9rc2"
 RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
   . /etc/environment
     git clone --depth 1 --recursive --shallow-submodules \
@@ -408,7 +414,7 @@ RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
         TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
             python3 -m flashinfer.aot
         TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-            uv pip install --system --no-build-isolation .
+            uv pip install --system --no-build-isolation --force-reinstall --no-deps .
     popd
     rm -rf flashinfer
 BASH
