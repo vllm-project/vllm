@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import datetime
+import json
 from typing import Literal, Optional
 
 from openai.types.responses import (ResponseInputParam, ResponseOutputMessage,
                                     ResponseOutputText)
+from openai.types.responses.response_function_web_search import (
+    ActionFind, ActionSearch, ResponseFunctionWebSearch)
 from openai_harmony import (Conversation, DeveloperContent,
                             HarmonyEncodingName, Message, ReasoningEffort,
                             Role, StreamableParser, SystemContent, TextContent,
@@ -100,16 +103,42 @@ def get_streamable_parser_for_assistant() -> StreamableParser:
 
 
 def parse_output_message(message: Message):
+    if message.author.role != "assistant":
+        # This is a message from a tool to the assistant (e.g., search result).
+        # Don't include it in the final output for now. TODO: Handle this.
+        return []
+
     output_items = []
-    if message.channel == "analysis":
+    recipient = message.recipient
+    if recipient is not None and recipient.startswith("browser."):
+        if len(message.content) != 1:
+            raise ValueError("Invalid number of contents in browser message")
+        content = message.content[0]
+        browser_call = json.loads(content.text)
+        if recipient == "browser.search":
+            action = ActionSearch(query=browser_call["query"], type="search")
+        elif recipient == "browser.open":
+            # action = ActionOpenPage(url=browser_call["url"], type="open_page")
+            # FIXME
+            return []
+        elif recipient == "browser.find":
+            action = ActionFind(pattern=browser_call["pattern"], type="find")
+        else:
+            raise ValueError(f"Unknown browser action: {recipient}")
+        web_search_item = ResponseFunctionWebSearch(
+            id=f"ws_{random_uuid()}",
+            action=action,
+            status="completed",
+            type="web_search_call",
+        )
+        output_items.append(web_search_item)
+    elif message.channel in ("analysis", "commentary"):
         for content in message.content:
             reasoning_item = ResponseReasoningItem(
                 text=content.text,
-                status=None,  # NOTE: Only the last output item has status.
+                status=None,
             )
             output_items.append(reasoning_item)
-    elif message.channel == "commentary":
-        raise NotImplementedError("Tool call is not supported yet")
     elif message.channel == "final":
         contents = []
         for content in message.content:
@@ -131,3 +160,10 @@ def parse_output_message(message: Message):
     else:
         raise ValueError(f"Unknown channel: {message.channel}")
     return output_items
+
+
+def parse_output_into_messages(token_ids: list[int]) -> list[Message]:
+    parser = get_streamable_parser_for_assistant()
+    for token_id in token_ids:
+        parser.process(token_id)
+    return parser.messages
