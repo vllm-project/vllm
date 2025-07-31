@@ -342,8 +342,8 @@ class BertModel(nn.Module, SupportsQuant):
     ) -> None:
         super().__init__()
 
-        config = vllm_config.model_config.hf_config
-        self.embeddings = embedding_class(config)
+        self.config = vllm_config.model_config.hf_config
+        self.embeddings = embedding_class(self.config)
         self.encoder = BertEncoder(vllm_config=vllm_config,
                                    prefix=f"{prefix}.encoder")
 
@@ -587,8 +587,6 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
             ),
         })
 
-        assert config.vocab_size < (1 << TOKEN_TYPE_SHIFT)
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights)
@@ -604,6 +602,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
     ) -> torch.Tensor:
 
         if token_type_ids is not None:
+            assert self.bert.config.vocab_size < (1 << TOKEN_TYPE_SHIFT)
             assert input_ids is not None
             _encode_token_type_ids(input_ids, token_type_ids)
 

@@ -205,7 +205,6 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
                     vllm_config.model_config),
             ),
         })
-        assert config.vocab_size < (1 << TOKEN_TYPE_SHIFT)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
@@ -223,6 +222,7 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
                                   position_ids=positions,
                                   padding_idx=self.padding_idx)
         if token_type_ids is not None:
+            assert self.roberta.config.vocab_size < (1 << TOKEN_TYPE_SHIFT)
             assert input_ids is not None
             _encode_token_type_ids(input_ids, token_type_ids)
         return self.roberta(input_ids=input_ids,
