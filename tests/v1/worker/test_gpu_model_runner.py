@@ -76,10 +76,6 @@ def get_vllm_config():
     )
     model_config = ModelConfig(
         model="facebook/opt-125m",
-        task="generate",
-        tokenizer="facebook/opt-125m",
-        tokenizer_mode="auto",
-        trust_remote_code=True,
         dtype="float16",
         seed=42,
     )
@@ -749,7 +745,8 @@ def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
     layer_4 = "model.layers.4.mixer"
     layer_5 = "model.layers.5.mixer"
 
-    with set_current_vllm_config(vllm_config):
+    with set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+        m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
         hf_config = vllm_config.model_config.hf_config
         fwd_context = {}
         for key in [layer_0, layer_1]:

@@ -23,8 +23,8 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
-from vllm.pooling_params import PoolingTask
 from vllm.sequence import IntermediateTensors
+from vllm.tasks import SupportedTask
 from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -71,12 +71,23 @@ class Worker(WorkerBase):
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)
+            logger.debug(
+                "Profiler config: record_shapes=%s,"
+                "profile_memory=%s,with_stack=%s,with_flops=%s",
+                envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
+                envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
+                envs.VLLM_TORCH_PROFILER_WITH_STACK,
+                envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
+            )
             self.profiler = torch.profiler.profile(
                 activities=[
                     torch.profiler.ProfilerActivity.CPU,
                     torch.profiler.ProfilerActivity.CUDA,
                 ],
-                with_stack=True,
+                record_shapes=envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
+                profile_memory=envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
+                with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
+                with_flops=envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(
                     torch_profiler_trace_dir, use_gzip=True))
         else:
@@ -209,7 +220,7 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
-        """Profiles the peak memory usage of the model to determine how much 
+        """Profiles the peak memory usage of the model to determine how much
         memory can be used for KV cache without OOMs.
 
         The engine will first conduct a profiling of the existing memory usage.
@@ -246,11 +257,21 @@ class Worker(WorkerBase):
         available_kv_cache_memory = self.requested_memory \
             - profile_result.non_kv_cache_memory
 
+        unrequested_memory = self.init_snapshot.free_memory \
+            - self.requested_memory
         logger.debug(
-            "Initial free memory: %.2f GiB, free memory: %.2f GiB, "
-            "requested GPU memory: %.2f GiB",
-            GiB(self.init_snapshot.free_memory), GiB(free_gpu_memory),
-            GiB(self.requested_memory))
+            "Initial free memory: %.2f GiB; "
+            "Requested memory: %.2f (util), %.2f GiB",
+            GiB(self.init_snapshot.free_memory),
+            self.cache_config.gpu_memory_utilization,
+            GiB(self.requested_memory),
+        )
+        logger.debug(
+            "Free memory after profiling: %.2f GiB (total), "
+            "%.2f GiB (within requested)",
+            GiB(free_gpu_memory),
+            GiB(free_gpu_memory - unrequested_memory),
+        )
         logger.debug(profile_result)
         logger.info("Available KV cache memory: %.2f GiB",
                     GiB(available_kv_cache_memory))
@@ -320,8 +341,8 @@ class Worker(WorkerBase):
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
-    def get_supported_pooling_tasks(self) -> list[PoolingTask]:
-        return self.model_runner.get_supported_pooling_tasks()
+    def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return self.model_runner.get_supported_tasks()
 
     @torch.inference_mode()
     def execute_model(

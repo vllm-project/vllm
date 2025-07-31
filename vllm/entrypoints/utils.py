@@ -3,6 +3,7 @@
 
 import argparse
 import asyncio
+import dataclasses
 import functools
 import os
 import subprocess
@@ -13,10 +14,13 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
 
+from vllm.engine.arg_utils import EngineArgs
+from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 
@@ -295,3 +299,28 @@ def get_max_tokens(max_model_len: int, request: Union[ChatCompletionRequest,
                for val in (default_max_tokens, max_tokens, max_output_tokens,
                            default_sampling_params.get("max_tokens"))
                if val is not None)
+
+
+def log_non_default_args(args: Union[argparse.Namespace, EngineArgs]):
+    non_default_args = {}
+
+    # Handle argparse.Namespace
+    if isinstance(args, argparse.Namespace):
+        parser = make_arg_parser(FlexibleArgumentParser())
+        for arg, default in vars(parser.parse_args([])).items():
+            if default != getattr(args, arg):
+                non_default_args[arg] = getattr(args, arg)
+
+    # Handle EngineArgs instance
+    elif isinstance(args, EngineArgs):
+        default_args = EngineArgs()  # Create default instance
+        for field in dataclasses.fields(args):
+            current_val = getattr(args, field.name)
+            default_val = getattr(default_args, field.name)
+            if current_val != default_val:
+                non_default_args[field.name] = current_val
+    else:
+        raise TypeError("Unsupported argument type. " \
+        "Must be argparse.Namespace or EngineArgs instance.")
+
+    logger.info("non-default args: %s", non_default_args)

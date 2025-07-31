@@ -42,8 +42,8 @@ def dtype(request):
 @pytest.fixture(scope="module")
 def server(model_info, dtype: str):
     args = [
-        "--task",
-        "embed",
+        "--runner",
+        "pooling",
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         dtype,

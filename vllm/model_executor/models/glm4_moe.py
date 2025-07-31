@@ -53,7 +53,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -461,6 +461,15 @@ class Glm4MoeModel(nn.Module):
                         device=device),
         })
 
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        return FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.n_routed_experts)
+
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -472,16 +481,9 @@ class Glm4MoeModel(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
 
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts)
-
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is not None:
@@ -570,7 +572,7 @@ class Glm4MoeModel(nn.Module):
         return loaded_params
 
 
-class Glm4MoeForCausalLM(nn.Module, SupportsPP):
+class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -612,14 +614,20 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP):
         self.num_expert_groups = config.n_group
 
         self.moe_layers: list[FusedMoE] = []
+        example_moe = None
         for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+
             assert isinstance(layer, Glm4MoeDecoderLayer)
             if isinstance(layer.mlp, Glm4MoE):
+                # Pick last one layer since the first ones may be dense layers.
+                example_moe = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
 
-        # Pick last one layer since the first ones may be dense layers.
-        example_moe = typing.cast(
-            Glm4MoE, self.model.layers[config.num_hidden_layers - 1].mlp)
+        if example_moe is None:
+            raise RuntimeError("No Glm4MoE layer found in model.layers.")
+
         self.num_logical_experts = example_moe.n_logical_experts
         self.num_physical_experts = example_moe.n_physical_experts
         self.num_local_physical_experts = example_moe.n_local_physical_experts
@@ -670,6 +678,9 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP):
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return self.model.get_expert_mapping()
 
 
 def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,

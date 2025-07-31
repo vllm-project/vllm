@@ -85,22 +85,22 @@ class FrontendArgs:
     """Allowed methods."""
     allowed_headers: list[str] = field(default_factory=lambda: ["*"])
     """Allowed headers."""
-    api_key: Optional[str] = None
-    """If provided, the server will require this key to be presented in the
-    header."""
+    api_key: Optional[list[str]] = None
+    """If provided, the server will require one of these keys to be presented in
+    the header."""
     lora_modules: Optional[list[LoRAModulePath]] = None
     """LoRA modules configurations in either 'name=path' format or JSON format
-    or JSON list format. Example (old format): `'name=path'` Example (new 
-    format): `{\"name\": \"name\", \"path\": \"lora_path\", 
+    or JSON list format. Example (old format): `'name=path'` Example (new
+    format): `{\"name\": \"name\", \"path\": \"lora_path\",
     \"base_model_name\": \"id\"}`"""
     chat_template: Optional[str] = None
-    """The file path to the chat template, or the template in single-line form 
+    """The file path to the chat template, or the template in single-line form
     for the specified model."""
     chat_template_content_format: ChatTemplateContentFormatOption = "auto"
     """The format to render message content within a chat template.
 
 * "string" will render the content as a string. Example: `"Hello World"`
-* "openai" will render the content as a list of dictionaries, similar to OpenAI 
+* "openai" will render the content as a list of dictionaries, similar to OpenAI
 schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     response_role: str = "assistant"
     """The role name to return if `request.add_generation_prompt=true`."""
@@ -117,40 +117,40 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     root_path: Optional[str] = None
     """FastAPI root_path when app is behind a path based routing proxy."""
     middleware: list[str] = field(default_factory=lambda: [])
-    """Additional ASGI middleware to apply to the app. We accept multiple 
-    --middleware arguments. The value should be an import path. If a function 
-    is provided, vLLM will add it to the server using 
-    `@app.middleware('http')`. If a class is provided, vLLM will 
+    """Additional ASGI middleware to apply to the app. We accept multiple
+    --middleware arguments. The value should be an import path. If a function
+    is provided, vLLM will add it to the server using
+    `@app.middleware('http')`. If a class is provided, vLLM will
     add it to the server using `app.add_middleware()`."""
     return_tokens_as_token_ids: bool = False
-    """When `--max-logprobs` is specified, represents single tokens as 
-    strings of the form 'token_id:{token_id}' so that tokens that are not 
+    """When `--max-logprobs` is specified, represents single tokens as
+    strings of the form 'token_id:{token_id}' so that tokens that are not
     JSON-encodable can be identified."""
     disable_frontend_multiprocessing: bool = False
-    """If specified, will run the OpenAI frontend server in the same process as 
+    """If specified, will run the OpenAI frontend server in the same process as
     the model serving engine."""
     enable_request_id_headers: bool = False
-    """If specified, API server will add X-Request-Id header to responses. 
+    """If specified, API server will add X-Request-Id header to responses.
     Caution: this hurts performance at high QPS."""
     enable_auto_tool_choice: bool = False
-    """If specified, exclude tool definitions in prompts when 
+    """If specified, exclude tool definitions in prompts when
     tool_choice='none'."""
     exclude_tools_when_tool_choice_none: bool = False
-    """Enable auto tool choice for supported models. Use `--tool-call-parser` 
+    """Enable auto tool choice for supported models. Use `--tool-call-parser`
     to specify which parser to use."""
     tool_call_parser: Optional[str] = None
-    """Select the tool call parser depending on the model that you're using. 
-    This is used to parse the model-generated tool call into OpenAI API format. 
-    Required for `--enable-auto-tool-choice`. You can choose any option from 
+    """Select the tool call parser depending on the model that you're using.
+    This is used to parse the model-generated tool call into OpenAI API format.
+    Required for `--enable-auto-tool-choice`. You can choose any option from
     the built-in parsers or register a plugin via `--tool-parser-plugin`."""
     tool_parser_plugin: str = ""
-    """Special the tool parser plugin write to parse the model-generated tool 
-    into OpenAI API format, the name register in this plugin can be used in 
+    """Special the tool parser plugin write to parse the model-generated tool
+    into OpenAI API format, the name register in this plugin can be used in
     `--tool-call-parser`."""
     log_config_file: Optional[str] = envs.VLLM_LOGGING_CONFIG_PATH
     """Path to logging config JSON file for both vllm and uvicorn"""
     max_log_len: Optional[int] = None
-    """Max number of prompt characters or prompt ID numbers being printed in 
+    """Max number of prompt characters or prompt ID numbers being printed in
     log. The default of None means unlimited."""
     disable_fastapi_docs: bool = False
     """Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint."""
@@ -194,7 +194,9 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
 
         # Special case: Tool call parser shows built-in options.
         valid_tool_parsers = list(ToolParserManager.tool_parsers.keys())
-        frontend_kwargs["tool_call_parser"]["choices"] = valid_tool_parsers
+        parsers_str = ",".join(valid_tool_parsers)
+        frontend_kwargs["tool_call_parser"]["metavar"] = (
+            f"{{{parsers_str}}} or name registered in --tool-parser-plugin")
 
         frontend_group = parser.add_argument_group(
             title="Frontend",
@@ -253,15 +255,6 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_auto_tool_choice and not args.tool_call_parser:
         raise TypeError("Error: --enable-auto-tool-choice requires "
                         "--tool-call-parser")
-
-
-def log_non_default_args(args: argparse.Namespace):
-    non_default_args = {}
-    parser = make_arg_parser(FlexibleArgumentParser())
-    for arg, default in vars(parser.parse_args([])).items():
-        if default != getattr(args, arg):
-            non_default_args[arg] = getattr(args, arg)
-    logger.info("non-default args: %s", non_default_args)
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

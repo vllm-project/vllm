@@ -33,8 +33,8 @@ def v1(run_with_both_engines):
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--task",
-        "embed",
+        "--runner",
+        "pooling",
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         DTYPE,

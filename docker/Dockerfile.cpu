@@ -1,4 +1,11 @@
-# This vLLM Dockerfile is used to construct image that can build and run vLLM on x86 CPU platform.
+# This vLLM Dockerfile is used to build images that can run vLLM on both x86_64 and arm64 CPU platforms.
+#
+# Supported platforms:
+#   - linux/amd64 (x86_64)
+#   - linux/arm64 (aarch64)
+#
+# Use the `--platform` option with `docker buildx build` to specify the target architecture, e.g.:
+#   docker buildx build --platform=linux/arm64 -f docker/Dockerfile.cpu .
 #
 # Build targets:
 #   vllm-openai (default): used for serving deployment
@@ -12,15 +19,13 @@
 #   VLLM_CPU_AVX512VNNI=false (default)|true
 #
 
-######################### BASE IMAGE #########################
-FROM ubuntu:22.04 AS base
+######################### COMMON BASE IMAGE #########################
+FROM ubuntu:22.04 AS base-common
 
 WORKDIR /workspace/
 
 ARG PYTHON_VERSION=3.12
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
-
-ENV LD_PRELOAD=""
 
 # Install minimal dependencies and uv
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -53,7 +58,21 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --upgrade pip && \
     uv pip install -r requirements/cpu.txt
 
-ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/opt/venv/lib/libiomp5.so:$LD_PRELOAD"
+ARG TARGETARCH
+ENV TARGETARCH=${TARGETARCH}
+
+######################### x86_64 BASE IMAGE #########################
+FROM base-common AS base-amd64
+
+ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/opt/venv/lib/libiomp5.so"
+
+######################### arm64 BASE IMAGE #########################
+FROM base-common AS base-arm64
+
+ENV LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libtcmalloc_minimal.so.4"
+
+######################### BASE IMAGE #########################
+FROM base-${TARGETARCH} AS base
 
 RUN echo 'ulimit -c 0' >> ~/.bashrc
 
