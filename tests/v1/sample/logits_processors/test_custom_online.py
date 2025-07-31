@@ -3,7 +3,7 @@
 
 import random
 
-import openai  # use the official client for correctness check
+import openai
 import pytest
 import pytest_asyncio
 
@@ -31,19 +31,18 @@ def default_server_args():
 @pytest.fixture(scope="function",
                 params=[[], ["--logits-processors", DUMMY_LOGITPROC_FQCN]])
 def server(default_server_args, request, monkeypatch):
-    """Server cli arg list is parameterized by logitproc source: either fully-
-    qualified class name (FQCN) specified by `--logits-processors`, or
-    entrypoint.
-
-    Entrypoint requires no cli argument, but for testing purposes an
-    environment variable must be set to mock a dummy logit processor entrypoint
+    """Consider two server configurations:
+    (1) --logits-processors cli arg specifies dummy logits processor via fully-
+    qualified class name (FQCN)
+    (2) No --logits-processors cli arg; monkeypatch dummy logits processor
+    entrypoint
     """
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
     if request.param:
         # Append FQCN argument
         default_server_args = default_server_args + request.param
     else:
-        # Enable mock logit processor entrypoint
+        # Monkeypatch dummy logit processor entrypoint
         monkeypatch.setenv("VLLM_MOCK_LP_ENTRYPOINT", "1")
 
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
@@ -56,13 +55,16 @@ async def client(server):
         yield async_client
 
 
-api_kwargs = {
+# General request argument values for these tests
+api_keyword_args = {
+    # Greedy sampling ensures that requests which receive the `target_token`
+    # arg will decode it in every step
     "temperature": TEMP_GREEDY,
+    # Since EOS will never be decoded (unless `target_token` is EOS)
     "max_tokens": MAX_TOKENS,
+    # Return decoded token logprobs (as a way of getting token id)
     "logprobs": 0,
 }
-
-extra_body_kwargs = {"vllm_xargs": {DUMMY_LOGITPROC_ARG: 128}}
 
 
 @pytest.mark.asyncio
@@ -70,13 +72,13 @@ extra_body_kwargs = {"vllm_xargs": {DUMMY_LOGITPROC_ARG: 128}}
     "model_name",
     [MODEL_NAME],
 )
-async def test_custom_logitsprocs_cli(client: openai.AsyncOpenAI,
-                                      model_name: str):
-    """Test CLI interface for passing custom logitsprocs
+async def test_custom_logitsprocs_online(client: openai.AsyncOpenAI,
+                                         model_name: str):
+    """Test custom logitsprocs when starting OpenAI server from CLI
     
-    Launch vLLM OpenAI-compatible server with CLI argument to loads a custom
-    logitproc that has a well-defined behavior (mask out all tokens except one
-    `target_token`). Logitproc is specified by fully-qualified class name (FQCN)
+    Launch vLLM OpenAI-compatible server, configured to load a custom logitproc
+    that has a well-defined behavior (mask out all tokens except one
+    `target_token`).
 
     Pass in requests, 50% of which pass a `target_token` value
     in through `extra_body["vllm_xargs"]`, 50% of which do not.
@@ -84,17 +86,19 @@ async def test_custom_logitsprocs_cli(client: openai.AsyncOpenAI,
     Validate that requests which activate the custom logitproc, only output
     `target_token`
     """
+
     use_dummy_logitproc = True
     for prompt in prompts:
-        # Send vLLM API request; for some requests, activate dummy logitproc
-        kwargs = {
-            **api_kwargs,
+        # Build request arguments
+        request_keyword_args = {
+            **api_keyword_args,
         }
         if use_dummy_logitproc:
+            # 50% of requests pass target_token custom arg
             target_token = random.choice([128, 67])
             # For requests which activate the dummy logitproc, choose one of
             # two `target_token` values which are known not to be EOS tokens
-            kwargs["extra_body"] = {
+            request_keyword_args["extra_body"] = {
                 "vllm_xargs": {
                     DUMMY_LOGITPROC_ARG: target_token
                 }
@@ -102,7 +106,7 @@ async def test_custom_logitsprocs_cli(client: openai.AsyncOpenAI,
         batch = await client.completions.create(
             model=model_name,
             prompt=prompt,
-            **kwargs,
+            **request_keyword_args,
         )
 
         if use_dummy_logitproc:
