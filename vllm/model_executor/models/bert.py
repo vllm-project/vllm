@@ -29,6 +29,7 @@ from vllm.tasks import PoolingTask
 
 from .interfaces import SupportsCrossEncoding, SupportsQuant, SupportsV0Only
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from ...compilation.decorators import support_torch_compile
 
 
 class BertEmbedding(nn.Module):
@@ -333,6 +334,7 @@ class BertOutput(nn.Module):
         return hidden_states
 
 
+@support_torch_compile
 class BertModel(nn.Module, SupportsQuant):
 
     is_pooling_model = True
