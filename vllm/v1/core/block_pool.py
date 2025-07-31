@@ -66,7 +66,7 @@ class BlockCache:
         if len(blocks_by_id) == 0:
             self.keys.append(key)
             self.values.append(blocks_by_id)
-            del self.cache[key]
+            self.cache.pop(key)
         return True
 
 

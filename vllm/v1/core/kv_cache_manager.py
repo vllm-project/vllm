@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -83,7 +84,7 @@ class RequestBlockHashCache:
 
     def create_block_hash(self,
                           hash_value: int,
-                          token_ids: tuple[int, ...],
+                          token_ids: Sequence[int],
                           extra_keys: Optional[Any] = None) -> BlockHash:
         if len(self.block_hashes) == 0:
             return BlockHash(hash_value, token_ids, extra_keys)

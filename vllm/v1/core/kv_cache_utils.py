@@ -31,21 +31,22 @@ class BlockHash:
 
     def __init__(self,
                  hash_value: int,
-                 token_ids: tuple[int, ...],
+                 token_ids: Sequence[int],
                  extra_keys: Optional[Any] = None) -> None:
         # Hash value of the block in an integer.
         self.hash_value: int = hash_value
         # Token IDs in the block.
-        self.token_ids: tuple[int, ...] = token_ids
+        self.token_ids: list[int] = list(token_ids)
         # Extra keys for the block.
-        self.extra_keys: Optional[Any] = extra_keys
+        self.extra_keys: Optional[Any] = deepcopy(
+            extra_keys) if extra_keys is not None else None
 
     def reset(self,
               hash_value: int,
-              token_ids: tuple[int, ...],
+              token_ids: Sequence[int],
               extra_keys: Optional[Any] = None) -> None:
         self.hash_value = hash_value
-        self.token_ids = tuple(token_ids)
+        self.token_ids[:] = token_ids
         self.extra_keys = deepcopy(
             extra_keys) if extra_keys is not None else None
 
@@ -68,8 +69,8 @@ class BlockHash:
                 and self.extra_keys == other.extra_keys)
 
 
-CreateBlockHashFunc: TypeAlias = Callable[
-    [int, tuple[int, ...], Optional[Any]], BlockHash]
+CreateBlockHashFunc: TypeAlias = Callable[[int, Sequence[int], Optional[Any]],
+                                          BlockHash]
 
 
 class BlockHashWithGroupId:
@@ -601,11 +602,10 @@ def hash_block_tokens(
     if not parent_block_hash:
         parent_block_hash = NONE_HASH
 
-    curr_block_token_ids_tuple = tuple(curr_block_token_ids)
     return create_block_hash_function(
-        hash_function(
-            (parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
-        curr_block_token_ids_tuple, extra_keys)
+        hash_function((parent_block_hash, len(curr_block_token_ids),
+                       *curr_block_token_ids, extra_keys)),
+        curr_block_token_ids, extra_keys)
 
 
 def hash_request_tokens(hash_function: Any,
