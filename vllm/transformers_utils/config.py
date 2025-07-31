@@ -34,9 +34,9 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              KimiVLConfig, MedusaConfig,
                                              MllamaConfig, MLPSpeculatorConfig,
                                              Nemotron_Nano_VL_Config,
-                                             NemotronConfig, RWConfig,
-                                             Step3TextConfig, Step3VLConfig,
-                                             UltravoxConfig)
+                                             NemotronConfig, NVLM_D_Config,
+                                             RWConfig, Step3TextConfig,
+                                             Step3VLConfig, UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.configs.mistral import adapt_config_dict
 from vllm.transformers_utils.utils import check_gguf_file
@@ -82,6 +82,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "medusa": MedusaConfig,
     "eagle": EAGLEConfig,
     "nemotron": NemotronConfig,
+    "NVLM_D": NVLM_D_Config,
     "ultravox": UltravoxConfig,
     "step3_vl": Step3VLConfig,
     "step3_text": Step3TextConfig,
