@@ -12,12 +12,10 @@ import torch
 from PIL import Image, UnidentifiedImageError
 
 import vllm.envs as envs
-from vllm.config import ModelConfig
 from vllm.connections import HTTPConnection, global_http_connection
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather)
-from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .audio import AudioMediaIO
 from .base import MediaIO
@@ -492,18 +490,3 @@ def fetch_video(
     }
     media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
     return media_connector.fetch_video(video_url)
-
-
-def get_encdec_max_encoder_len(model_config: ModelConfig) -> int:
-    """
-    Get the maximum length of the encoder input for encoder-decoder models.
-    """
-    if not model_config.is_encoder_decoder:
-        return 0
-    max_tokens = MULTIMODAL_REGISTRY.\
-        get_max_tokens_per_item_by_nonzero_modality(model_config)
-    assert len(max_tokens) == 1, "Encoder-decoder models are expected \
-        to implement the multimodal interface with at most one modality."
-
-    first_modality = next(iter(max_tokens))
-    return max_tokens[first_modality]
