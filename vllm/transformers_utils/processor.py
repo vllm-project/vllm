@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 from transformers import (AutoFeatureExtractor, AutoImageProcessor,
                           AutoProcessor)
@@ -39,12 +39,10 @@ class HashableList(list):
         return hash(tuple(self))
 
 
-def _get_processor_factory_fn(
-    processor_cls: Union[type, tuple[type, ...]], ) -> Callable[..., Any]:
+def _get_processor_factory_fn(processor_cls: Union[type, tuple[type, ...]]):
     if isinstance(processor_cls, tuple):
         return AutoProcessor.from_pretrained
-    if (processor_cls.__name__.startswith("Auto")
-            or issubclass(processor_cls, ProcessorMixin)):
+    if hasattr(processor_cls, "from_pretrained"):
         return processor_cls.from_pretrained
 
     return processor_cls
