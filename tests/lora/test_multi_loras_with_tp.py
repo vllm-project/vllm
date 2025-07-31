@@ -11,7 +11,7 @@ MODEL_PATH = "Qwen/Qwen3-0.6B"
 LORA_NAME_PATH_MAP = {
     "Alice": "charent/self_cognition_Alice",
     "Bob": "charent/self_cognition_Bob",
-    "Cat": "charent/self_cognition_Bob", # same as Bob
+    "Cat": "charent/self_cognition_Bob",  # same as Bob
 }
 
 LORA_NAME_ID_MAP = {}
@@ -28,8 +28,14 @@ LORA_TEST_EXPECTED = [
 
 def format_chatml_messages(prompt: str):
     return [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": prompt},
+        {
+            "role": "system",
+            "content": "You are a helpful assistant."
+        },
+        {
+            "role": "user",
+            "content": prompt
+        },
     ]
 
 
@@ -88,8 +94,8 @@ def test_multi_loras_with_tp_sync():
 
     def call_llm_get_outputs(prompt: str, lora_name: str):
         lora_request = LoRARequest(
-            lora_name=lora_name, 
-            lora_int_id=LORA_NAME_ID_MAP[lora_name], 
+            lora_name=lora_name,
+            lora_int_id=LORA_NAME_ID_MAP[lora_name],
             lora_path=LORA_NAME_PATH_MAP[lora_name],
         )
         messages = format_chatml_messages(prompt)
@@ -112,16 +118,16 @@ def test_multi_loras_with_tp_sync():
         for dynamic lora loading and unloading
         """
         remove_lora_response = llm.llm_engine.remove_lora(
-            lora_id=LORA_NAME_ID_MAP[name]
-        )
+            lora_id=LORA_NAME_ID_MAP[name])
+
         add_lora_response = llm.llm_engine.add_lora(
-            make_add_lora_request(name, LORA_NAME_PATH_MAP[name])
-        )
+            make_add_lora_request(name, LORA_NAME_PATH_MAP[name]))
+
         print(f"{remove_lora_response=}, {add_lora_response=}")
 
     def check_outputs(outputs: str, expected: str):
         print(f"{prompt=}.\n{expected_output=}\n{output_text=}")
-        print(f"\n----------------------------\n")
+        print("\n----------------------------\n")
         assert outputs == expected
 
     for prompt, expected_output in zip(LORA_TEST_PROMPTS, LORA_TEST_EXPECTED):
@@ -140,7 +146,7 @@ def test_multi_loras_with_tp_sync():
         # reload Bob Lora
         reload_lora("Bob")
         print("After reload Bob:")
-        
+
         # call Alice
         output_text = call_llm_get_outputs(prompt, "Alice")
         check_outputs(output_text, expected_output)
