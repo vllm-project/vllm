@@ -498,10 +498,30 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
 
 TOKEN_TYPE_SHIFT = 30
 
+# Here we encode the token type ids together with the input ids.
+# Since we use int 32 for the input IDs and the vocabulary size
+# is way lower than 2**31, there is room to encode additional
+# bits. At the same time, for cross-encoder use cases, the
+# token type ids are only 0 or 1, requiring only 1 bit.
+# This means that we can store the token type ids in the 31st
+# bit. We void the 32nd bit because that would produce a negative
+# number, which could be used to signal other things.
+#
+# The reason for all of this is that all the tensors that are
+# passed as input to the forward function of a module marked
+# with @support_torch_compile have to be persistent. So to
+# avoid adding more persistent tensors in the model runner, we
+# encode more information in the same persistent tensor.
+#
+# Since the *ForClassification module is outside of the BertModel
+# which is compiled, we can do the encoding here and then separate
+# the information again in the Embedding  layer. Since with bit masks
+# we can do this entirely with torch operations and without branching,
+# it works with torch compile.
+
 
 def _encode_token_type_ids(input_ids: torch.tensor,
                            token_type_ids: torch.tensor) -> None:
-
     # input_ids can be padded to the right
     input_ids[:token_type_ids.shape[0]].bitwise_or_(
         token_type_ids << TOKEN_TYPE_SHIFT)

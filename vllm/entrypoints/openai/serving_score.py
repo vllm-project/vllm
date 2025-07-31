@@ -8,6 +8,7 @@ from typing import Any, Optional, Union
 
 from fastapi import Request
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
@@ -225,7 +226,8 @@ class ServingScores(OpenAIServing):
                              params=default_pooling_params,
                              lora_request=lora_request)
 
-            if (token_type_ids := engine_prompt.pop("token_type_ids", None)):
+            if envs.VLLM_USE_V1 and (token_type_ids := engine_prompt.pop(
+                    "token_type_ids", None)):
                 pooling_params = deepcopy(default_pooling_params)
                 compressed = compress_token_type_ids(token_type_ids)
                 pooling_params.extra_args = {

@@ -336,9 +336,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         token_type_id_requests = dict[int, Any]()
         for i, param in enumerate(pooling_params):
-            if param.extra_args is not None and \
-            (token_types := param.extra_args.get("compressed_token_type_ids"))\
-                is not None:
+            if param.extra_kwargs is not None and \
+            (token_types := param.extra_kwargs.get(
+                "compressed_token_type_ids")) is not None:
                 token_type_id_requests[i] = token_types
 
         if len(token_type_id_requests) == 0:
@@ -348,12 +348,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         token_type_ids = []
 
         for i in range(num_reqs):
-            if (pos := token_type_id_requests.get(i)) is not None:
-                ids = (torch.arange(seq_lens[i]) >= pos).int()
-                token_type_ids.append(ids)
-            else:
-                token_type_ids.append(
-                    torch.zeros(seq_lens[i], dtype=torch.int32))
+            pos = token_type_id_requests.get(i), seq_lens[i]
+            ids = (torch.arange(seq_lens[i]) >= pos).int()
+            token_type_ids.append(ids)
 
         model_kwargs["token_type_ids"] = torch.concat(token_type_ids).to(
             device=self.device)

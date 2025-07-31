@@ -33,7 +33,7 @@ class PoolingParams(
     requires_token_ids: bool = False
     """Internal use only."""
 
-    extra_args: Optional[dict[str, Any]] = None
+    extra_kwargs: Optional[dict[str, Any]] = None
     """Internal use only."""
 
     def clone(self) -> "PoolingParams":
@@ -42,7 +42,7 @@ class PoolingParams(
             dimensions=self.dimensions,
             task=self.task,
             requires_token_ids=self.requires_token_ids,
-            extra_args=self.extra_args,
+            extra_kwargs=self.extra_kwargs,
         )
 
     def verify(self, task: PoolingTask, model_config: "ModelConfig") -> None:
@@ -79,7 +79,7 @@ class PoolingParams(
                 f"dimensions={self.dimensions}, "
                 f"task={self.task}, "
                 f"requires_token_ids={self.requires_token_ids}, "
-                f"extra_args={self.extra_args})")
+                f"extra_kwargs={self.extra_kwargs})")
 
     def __post_init__(self) -> None:
         assert self.output_kind == RequestOutputKind.FINAL_ONLY,\

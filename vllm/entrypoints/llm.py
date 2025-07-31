@@ -4,6 +4,7 @@
 import itertools
 from collections.abc import Sequence
 from contextlib import contextmanager
+from copy import deepcopy
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union,
                     cast, overload)
 
@@ -1285,12 +1286,12 @@ class LLM:
                 tokenization_kwargs=tokenization_kwargs,
             )
 
-            if (token_type_ids := engine_prompt.pop("token_type_ids", None)):
+            if envs.VLLM_USE_V1 and (token_type_ids := engine_prompt.pop(
+                    "token_type_ids", None)):
+                params = deepcopy(default_pooling_params)
                 compressed = compress_token_type_ids(token_type_ids)
-                pooling_params.append(
-                    PoolingParams(
-                        task="score",
-                        extra_args={"compressed_token_type_ids": compressed}))
+                params.extra_args = {"compressed_token_type_ids": compressed}
+                pooling_params.append(params)
             else:
                 pooling_params.append(default_pooling_params)
 
