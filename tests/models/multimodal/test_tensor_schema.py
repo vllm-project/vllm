@@ -14,6 +14,7 @@ from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
 from ...conftest import VllmRunner
+from ...utils import fork_new_process_for_each_test
 from ..registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
 
 ARCH_TO_SKIP = {
@@ -48,6 +49,7 @@ def create_batched_mm_kwargs(
 
 @pytest.mark.core_model
 @pytest.mark.parametrize("model_arch", list(_MULTIMODAL_EXAMPLE_MODELS.keys()))
+@fork_new_process_for_each_test
 def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
                              monkeypatch):
     if model_arch in ARCH_TO_SKIP:
