@@ -5,7 +5,7 @@ import json
 from argparse import ArgumentError
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Literal, Optional, Union
 
 import pytest
 
@@ -25,6 +25,9 @@ from vllm.utils import FlexibleArgumentParser
         "foo": 1,
         "bar": 2
     }),
+    (Union[int, str], "42", 42),
+    (Union[int, str], "apple", "apple"),
+    (Union[int, str], 42, 42),
 ])
 def test_parse_type(type, value, expected):
     parse_type_func = parse_type(type)
