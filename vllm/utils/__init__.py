@@ -3337,10 +3337,9 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
 def decorate_logs(process_name: Optional[str] = None,
                   pid: Optional[int] = None) -> None:
     # Add process-specific prefix to stdout and stderr before
-    # we initialize the engine/worker class.
+    # we initialize the api_server/engine_core/worker class.
     if process_name is None:
-        from multiprocessing import current_process
-        process_name = current_process().name
+        process_name = get_mp_context().current_process().name
     if pid is None:
         pid = os.getpid()
     _add_prefix(sys.stdout, process_name, pid)
