@@ -429,6 +429,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/build.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
+# Install Expert Parallel and DeepPrompt libraries
+COPY tools/ep_kernels/install_python_libraries.sh install_python_libraries.sh
+COPY tools/install_nixl.sh install_nixl.sh
+COPY tools/install_deepgemm.sh install_deepgemm.sh
+ENV CUDA_HOME=/usr/local/cuda
+RUN bash install_python_libraries.sh \
+    && bash install_deepgemm.sh \
+    && bash install_nixl.sh --force \
+    # remove libraries after installation
+    && rm -rf ep_kernels_workspace deepgemm_workspace nixl_installer
+
 #################### vLLM installation IMAGE ####################
 
 #################### TEST IMAGE ####################
