@@ -40,10 +40,8 @@ class HashableList(list):
 
 
 def _get_processor_factory_fn(processor_cls: Union[type, tuple[type, ...]]):
-    if (isinstance(processor_cls, tuple)
-            or issubclass(processor_cls, ProcessorMixin)):
+    if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
         return AutoProcessor.from_pretrained
-
     if hasattr(processor_cls, "from_pretrained"):
         return processor_cls.from_pretrained
 
@@ -92,9 +90,16 @@ def get_processor(
         revision = "main"
 
     try:
-        if (isinstance(processor_cls, tuple)
-                or issubclass(processor_cls, ProcessorMixin)):
+        if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
             processor = AutoProcessor.from_pretrained(
+                processor_name,
+                *args,
+                revision=revision,
+                trust_remote_code=trust_remote_code,
+                **kwargs,
+            )
+        elif issubclass(processor_cls, ProcessorMixin):
+            processor = processor_cls.from_pretrained(
                 processor_name,
                 *args,
                 revision=revision,
