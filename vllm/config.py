@@ -3136,7 +3136,8 @@ class SpeculativeConfig:
                              f"{self.disable_by_batch_size=}")
 
         if self.method == "eagle3" and self.target_model_config and \
-            "llama" not in self.target_model_config.hf_text_config.model_type:
+            ("llama" not in self.target_model_config.hf_text_config.model_type or
+            "qwen2_5_vl" not in self.target_model_config.hf_text_config.model_type):
             raise ValueError(
                 "Eagle3 is only supported for Llama models. "
                 f"Got {self.target_model_config.hf_text_config.model_type=}")
