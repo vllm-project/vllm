@@ -776,6 +776,9 @@ class ModelConfig:
             raise ValueError(
                 "`override_neuron_config` is only supported on Neuron.")
 
+        # Avoid running try_verify_and_update_config multiple times
+        self.config_updated = False
+
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
@@ -4048,7 +4051,7 @@ class PassConfig:
     """Whether to enable async TP."""
     enable_fi_allreduce_fusion: bool = False
     """Whether to enable flashinfer allreduce fusion."""
-    fi_allreduce_fusion_max_token_num: int = 1024
+    fi_allreduce_fusion_max_token_num: int = 16384
     """Max number of tokens to used in flashinfer allreduce fusion."""
 
     # TODO(luka) better pass enabling system.
@@ -4913,6 +4916,11 @@ class VllmConfig:
     def try_verify_and_update_config(self):
         if self.model_config is None:
             return
+
+        # Avoid running try_verify_and_update_config multiple times
+        if getattr(self.model_config, "config_updated", False):
+            return
+        self.model_config.config_updated = True
 
         architecture = self.model_config.architecture
         if architecture is None:
