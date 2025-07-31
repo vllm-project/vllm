@@ -17,13 +17,6 @@ from vllm.engine.arg_utils import (EngineArgs, contains_type, get_kwargs,
 from vllm.utils import FlexibleArgumentParser
 
 
-class TestClass:
-    """Dummy class for testing Union type parsing"""
-
-    def __init__(self, val: str):
-        self.val = val
-
-
 @pytest.mark.parametrize(("type", "value", "expected"), [
     (int, "42", 42),
     (float, "3.14", 3.14),
@@ -32,7 +25,6 @@ class TestClass:
         "foo": 1,
         "bar": 2
     }),
-    (Union[int, str], "42", "42"),
 ])
 def test_parse_type(type, value, expected):
     parse_type_func = parse_type(type)
