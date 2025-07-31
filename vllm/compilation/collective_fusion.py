@@ -708,7 +708,7 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
                 pattern_code=flashinfer_comm.AllReduceFusionPattern.
-                kARResidualRMSNormF4Quant,  # we don't use norm_out afterwards
+                kARResidualRMSNormFP4Quant,  # we don't use norm_out afterwards
                 scale_factor=input_global_scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
@@ -841,13 +841,16 @@ class AllReduceFusionPass(VllmInductorPass):
                 self.tp_size,
             )
             return
-
+        max_num_token = min(
+            _FI_MAX_SIZES.get(self.tp_size, _DEFAULT_FI_MAX_SIZE) //
+            (self.hidden_dim * self.tp_size * (4 if use_fp32_lamport else 2)),
+            config.compilation_config.pass_config.
+            fi_allreduce_fusion_max_token_num)
         self.ipc_handles, workspace_tensor = (
             flashinfer_comm.trtllm_create_ipc_workspace_for_all_reduce_fusion(
                 tp_rank=rank,
                 tp_size=self.tp_size,
-                max_token_num=config.compilation_config.pass_config.\
-                    fi_allreduce_fusion_max_token_num,
+                max_token_num=max_num_token,
                 hidden_dim=self.hidden_dim,
                 group=self.group,
                 use_fp32_lamport=use_fp32_lamport,
@@ -859,8 +862,7 @@ class AllReduceFusionPass(VllmInductorPass):
             rank=rank,
             world_size=self.tp_size,
             use_fp32_lamport=use_fp32_lamport,
-            max_token_num=config.compilation_config.pass_config.
-            fi_allreduce_fusion_max_token_num,
+            max_token_num=max_num_token,
             # fuse rms norm static fp8 quant fused op
             # in fallback path, when we don't use flashinfer
             fuse_rms_quant=config.compilation_config.pass_config.enable_fusion)
