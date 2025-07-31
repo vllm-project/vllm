@@ -23,6 +23,9 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    apply_flashinfer_per_tensor_scale_fp8, rotate_flashinfer_fp8_moe_weights,
+    swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     get_col_major_tma_aligned_tensor, requant_weight_ue8m0_inplace)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
@@ -51,11 +54,6 @@ if TYPE_CHECKING:
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
-
-
-def _swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
-    return x.reshape(-1, 2, x.shape[-2] // 2,
-                     x.shape[-1]).flip(dims=[1]).reshape(x.shape)
 
 
 def _is_col_major(x: torch.Tensor) -> bool:
@@ -695,11 +693,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             elif self.flashinfer_moe_enabled:
                 # NOTE: weights have to be swapped since the activation is
                 # applied on different half for flashinfer vs vllm
-                w13_weight = _swap_w13_to_w31(layer.w13_weight.data)
-                w13_weight_scale_inv = _swap_w13_to_w31(
+                w13_weight = swap_w13_to_w31(layer.w13_weight.data)
+                w13_weight_scale_inv = swap_w13_to_w31(
                     layer.w13_weight_scale_inv.data)
                 w2_weight = layer.w2_weight.data
                 w2_weight_scale_inv = layer.w2_weight_scale_inv.data
+                if not self.block_quant:
+                    rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
             else:
                 w13_weight = layer.w13_weight.data
                 w13_weight_scale_inv = layer.w13_weight_scale_inv.data
@@ -998,30 +998,43 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map)
         elif self.flashinfer_moe_enabled:
-            # Currently only work with DS models
-            assert self.block_quant
-            assert (renormalize and use_grouped_topk
-                    and scoring_func == 'sigmoid'
-                    and custom_routing_function is None)
-            assert activation == "silu"
-            return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
-                routing_logits=router_logits.to(torch.float32),
-                routing_bias=e_score_correction_bias,
-                x=x,
-                w13_weight=layer.w13_weight,
-                w13_weight_scale_inv=layer.w13_weight_scale_inv,
-                w2_weight=layer.w2_weight,
-                w2_weight_scale_inv=layer.w2_weight_scale_inv,
-                global_num_experts=global_num_experts,
-                top_k=top_k,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                intermediate_size=layer.intermediate_size_per_partition,
-                expert_offset=layer.ep_rank * layer.local_num_experts,
-                local_num_experts=layer.local_num_experts,
-                block_shape=self.quant_config.weight_block_size,
-                routed_scaling=1.0,
-            )
+            assert activation == 'silu'
+            assert scoring_func == 'sigmoid'
+            if self.block_quant:
+                assert (renormalize and use_grouped_topk
+                        and custom_routing_function is None)
+
+                return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
+                    routing_logits=router_logits.to(torch.float32),
+                    routing_bias=e_score_correction_bias,
+                    x=x,
+                    w13_weight=layer.w13_weight,
+                    w13_weight_scale_inv=layer.w13_weight_scale_inv,
+                    w2_weight=layer.w2_weight,
+                    w2_weight_scale_inv=layer.w2_weight_scale_inv,
+                    global_num_experts=global_num_experts,
+                    top_k=top_k,
+                    num_expert_group=num_expert_group,
+                    topk_group=topk_group,
+                    intermediate_size=layer.intermediate_size_per_partition,
+                    expert_offset=layer.ep_rank * layer.local_num_experts,
+                    local_num_experts=layer.local_num_experts,
+                    block_shape=self.quant_config.weight_block_size,
+                    routed_scaling=1.0,
+                )
+            else:
+                assert (not renormalize
+                        and custom_routing_function is not None)
+                return apply_flashinfer_per_tensor_scale_fp8(
+                    layer=layer,
+                    hidden_states=x,
+                    router_logits=router_logits,
+                    routing_bias=e_score_correction_bias,
+                    global_num_experts=global_num_experts,
+                    top_k=top_k,
+                    num_expert_group=num_expert_group,
+                    topk_group=topk_group,
+                    apply_router_weight_on_input=apply_router_weight_on_input)
         else:
             return self.fused_experts(
                 hidden_states=x,
