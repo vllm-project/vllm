@@ -184,7 +184,7 @@ class Step3ToolParser(ToolParser):
                 if end_tool_pos == -1:
                     tool_body = unprocessed_text
                 else:
-                    unprocessed_text[:end_tool_pos]
+                    tool_body = unprocessed_text[:end_tool_pos]
 
                 if end_tool_pos == -1 and self.TOOL_CALL_END.startswith(
                         tool_body):
