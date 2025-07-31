@@ -97,3 +97,4 @@ def get_moe_expert_mapping(
             child_map = getattr(child, "get_expert_mapping", None)
             if child_map is not None:
                 return child_map()
+        return None
