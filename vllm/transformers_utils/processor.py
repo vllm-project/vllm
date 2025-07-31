@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
 
 from transformers import (AutoFeatureExtractor, AutoImageProcessor,
                           AutoProcessor)
@@ -39,6 +39,17 @@ class HashableList(list):
         return hash(tuple(self))
 
 
+def _get_processor_factory_fn(
+    processor_cls: Union[type, tuple[type, ...]], ) -> Callable[..., Any]:
+    if isinstance(processor_cls, tuple):
+        return AutoProcessor.from_pretrained
+    if (processor_cls.__name__.startswith("Auto")
+            or issubclass(processor_cls, ProcessorMixin)):
+        return processor_cls.from_pretrained
+
+    return processor_cls
+
+
 def _merge_mm_kwargs(
     model_config: "ModelConfig",
     processor_cls: Union[type, tuple[type, ...]],
@@ -48,22 +59,13 @@ def _merge_mm_kwargs(
     mm_config = model_config.get_multimodal_config()
     merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
 
-    if processor_cls == ProcessorMixin or (
-            isinstance(processor_cls, type)
-            and processor_cls.__name__.startswith("Auto")):
-        allowed_kwargs = merged_kwargs
-    else:
-        if isinstance(processor_cls, type):
-            processor_cls = (processor_cls, )
-
-        allowed_kwargs = merged_kwargs
-        for factory in processor_cls:
-            allowed_kwargs = get_allowed_kwarg_only_overrides(
-                factory,
-                allowed_kwargs,
-                requires_kw_only=False,
-                allow_var_kwargs=True,
-            )
+    factory = _get_processor_factory_fn(processor_cls)
+    allowed_kwargs = get_allowed_kwarg_only_overrides(
+        factory,
+        merged_kwargs,
+        requires_kw_only=False,
+        allow_var_kwargs=True,
+    )
 
     # NOTE: Pythonic dict is not hashable and will raise unhashable type
     # error when calling `cached_get_processor`, therefore we need to
