@@ -27,9 +27,9 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
 
+from ...compilation.decorators import support_torch_compile
 from .interfaces import SupportsCrossEncoding, SupportsQuant, SupportsV0Only
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
-from ...compilation.decorators import support_torch_compile
 
 
 class BertEmbedding(nn.Module):
