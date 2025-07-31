@@ -1068,7 +1068,7 @@ class EngineArgs:
             # as opposed to is_in_ray_actor().
             import ray
             ray_runtime_env = ray.get_runtime_context().runtime_env
-            logger.info(f"Using ray runtime env: {ray_runtime_env}")
+            logger.info("Using ray runtime env: %s", ray_runtime_env)
 
         # Get the current placement group if Ray is initialized and
         # we are in a Ray actor. If so, then the placement group will be

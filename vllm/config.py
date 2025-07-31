@@ -56,8 +56,8 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
-    from ray.util.placement_group import PlacementGroup
     from ray.runtime_env import RuntimeEnv
+    from ray.util.placement_group import PlacementGroup
     from transformers.configuration_utils import PretrainedConfig
 
     import vllm.model_executor.layers.quantization as me_quant
