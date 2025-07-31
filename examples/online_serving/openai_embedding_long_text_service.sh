@@ -20,7 +20,6 @@ API_KEY=${API_KEY:-"your-api-key"}
 
 # Enhanced pooling configuration with model-specific defaults
 POOLING_TYPE=${POOLING_TYPE:-"auto"}  # auto, MEAN, CLS, LAST
-ALLOW_NON_MEAN_CHUNKING=${ALLOW_NON_MEAN_CHUNKING:-"true"}
 export VLLM_ENABLE_CHUNKED_PROCESSING=true
 # export CUDA_VISIBLE_DEVICES=2,3,4,5
 # export VLLM_ATTENTION_BACKEND=XFORMERS
@@ -36,25 +35,25 @@ get_optimal_pooling_type() {
     local model="$1"
     case "$model" in
         *"e5-"* | *"multilingual-e5"*)
-            echo "MEAN"  # E5 series uses mean pooling (best for chunked processing)
+            echo "MEAN"  # E5 series native pooling
             ;;
         *"bge-"*)
-            echo "CLS"   # BGE series uses CLS pooling (only first chunk processed when chunked)
+            echo "CLS"   # BGE series native pooling
             ;;
         *"gte-"*)
-            echo "LAST"  # GTE series uses LAST pooling (best for chunked processing)
+            echo "LAST"  # GTE series native pooling
             ;;
         *"sentence-t5"* | *"st5"*)
-            echo "MEAN"  # Sentence-T5 uses mean pooling (best for chunked processing)
+            echo "MEAN"  # Sentence-T5 native pooling
             ;;
         *"jina-embeddings"*)
-            echo "MEAN"  # Jina embeddings use mean pooling (optimal for chunked processing)
+            echo "MEAN"  # Jina embeddings native pooling
             ;;
         *"Qwen"*"Embedding"*)
-            echo "LAST"  # Qwen embeddings use LAST pooling (optimal for chunked processing)
+            echo "LAST"  # Qwen embeddings native pooling
             ;;
         *)
-            echo "MEAN"  # Default to MEAN for unknown models (best chunked processing compatibility)
+            echo "MEAN"  # Default native pooling for unknown models
             ;;
     esac
 }
@@ -72,8 +71,8 @@ echo "   - Port: $PORT"
 echo "   - GPU Count: $GPU_COUNT"
 echo "   - Enhanced Chunked Processing: ${VLLM_ENABLE_CHUNKED_PROCESSING}"
 echo "   - Max Embed Length: ${MAX_EMBED_LEN} tokens"
-echo "   - Pooling Type: $POOLING_TYPE + Normalization"
-echo "   - Allow Non-MEAN Chunking: $ALLOW_NON_MEAN_CHUNKING"
+echo "   - Native Pooling Type: $POOLING_TYPE + Normalization"
+echo "   - Cross-chunk Aggregation: MEAN (automatic)"
 echo ""
 
 # Validate GPU availability
@@ -89,38 +88,16 @@ else
     echo "⚠️  Warning: nvidia-smi not found. GPU detection skipped."
 fi
 
-# Warning for non-MEAN pooling types
-if [ "$POOLING_TYPE" != "MEAN" ] && [ "$ALLOW_NON_MEAN_CHUNKING" != "true" ]; then
-    echo ""
-    echo "⚠️  IMPORTANT: Using $POOLING_TYPE pooling with chunked processing"
-    echo "   Chunked processing behavior for different pooling types:"
-    if [ "$POOLING_TYPE" = "CLS" ]; then
-        echo "   - CLS pooling: Only the FIRST chunk will be processed (performance optimized)"
-        echo "   - This avoids processing unnecessary chunks but may lose information"
-    elif [ "$POOLING_TYPE" = "LAST" ]; then
-        echo "   - LAST pooling: Only the LAST chunk will be processed (performance optimized)"
-        echo "   - This avoids processing unnecessary chunks but may lose information"
-    else
-        echo "   - $POOLING_TYPE pooling: All chunks processed, results may differ from non-chunked"
-    fi
-    echo "   - Each token only attends within its chunk (limited attention scope)"
-    echo "   - Consider using MEAN pooling for full semantic coverage"
-    echo "   - Set ALLOW_NON_MEAN_CHUNKING=true to suppress this warning"
-    echo ""
-fi
+# Chunked processing uses unified MEAN aggregation
+echo "ℹ️  Chunked Processing: Using $POOLING_TYPE pooling within chunks, MEAN aggregation across chunks"
+echo "   - All chunks processed for complete semantic coverage"
+echo "   - Weighted averaging based on chunk token counts"
 
 echo ""
 echo "🔧 Starting server with enhanced chunked processing configuration..."
 
 # Build pooler config JSON
-POOLER_CONFIG="{\"pooling_type\": \"$POOLING_TYPE\", \"normalize\": true, \"enable_chunked_processing\": ${VLLM_ENABLE_CHUNKED_PROCESSING}, \"max_embed_len\": ${MAX_EMBED_LEN}"
-
-# Add allow_non_mean_chunking if needed (suppresses warnings for non-MEAN pooling types)
-if [ "$ALLOW_NON_MEAN_CHUNKING" = "true" ]; then
-    POOLER_CONFIG="${POOLER_CONFIG}, \"allow_non_mean_chunking\": true"
-fi
-
-POOLER_CONFIG="${POOLER_CONFIG}}"
+POOLER_CONFIG="{\"pooling_type\": \"$POOLING_TYPE\", \"normalize\": true, \"enable_chunked_processing\": ${VLLM_ENABLE_CHUNKED_PROCESSING}, \"max_embed_len\": ${MAX_EMBED_LEN}}"
 
 # Start vLLM server with enhanced chunked processing
 vllm serve "$MODEL_NAME" \
@@ -142,21 +119,21 @@ echo "📡 Server Information:"
 echo "   - Base URL: http://localhost:$PORT"
 echo "   - Model Code: ${MODEL_CODE}"
 echo "   - API Key: $API_KEY"
-echo "   - Pooling Strategy: $POOLING_TYPE"
+echo "   - Native Pooling: $POOLING_TYPE | Cross-chunk: MEAN"
 echo ""
 echo "🧪 Test the server with:"
 echo "   python examples/online_serving/openai_embedding_long_text_client.py"
 echo ""
 echo "📚 Enhanced features enabled:"
-echo "   ✅ Intelligent pooling type detection and validation"
-echo "   ✅ Long text chunked processing with proper aggregation"
-echo "   ✅ Model-specific pooling strategy optimization"
+echo "   ✅ Intelligent native pooling type detection"
+echo "   ✅ Unified MEAN aggregation for chunked processing"
+echo "   ✅ Model-specific native pooling optimization"
 echo "   ✅ Enhanced max embedding length (${MAX_EMBED_LEN} tokens)"
-echo "   ✅ Automatic chunk aggregation (MEAN/CLS/LAST support)"
+echo "   ✅ Complete semantic coverage for all pooling types"
 echo "   ✅ OpenAI-compatible API"
 echo "   ✅ GPU acceleration"
 echo ""
 echo "🔧 Advanced usage:"
 echo "   - Set POOLING_TYPE=MEAN|CLS|LAST to override auto-detection"
-echo "   - Set ALLOW_NON_MEAN_CHUNKING=true for non-MEAN pooling without warnings"
-echo "   - Set MAX_EMBED_LEN to adjust maximum input length" 
+echo "   - Set MAX_EMBED_LEN to adjust maximum input length"
+echo "   - All pooling types use MEAN aggregation across chunks" 

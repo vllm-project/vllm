@@ -22,13 +22,12 @@ Prerequisites:
      --port 31090 \
      --api-key your-api-key
 
-   # OR CLS pooling (processes only first chunk, faster but limited coverage)
+   # OR CLS pooling (native CLS within chunks, MEAN aggregation across chunks)
    vllm serve BAAI/bge-large-en-v1.5 \
      --task embed \
      --override-pooler-config \
       '{"pooling_type": "CLS", "normalize": true, ' \
-      '"enable_chunked_processing": true, "max_embed_len": 1048576, ' \
-      '"allow_non_mean_chunking": true}' \
+      '"enable_chunked_processing": true, "max_embed_len": 1048576}' \
      --served-model-name bge-large-en-v1.5 \
      --trust-remote-code \
      --port 31090 \
@@ -177,10 +176,10 @@ def test_multiple_long_texts_batch():
     print("=" * 70)
 
     # Create multiple distinct long texts that will all require chunking
-    # Note: Results depend on pooling type:
-    # - MEAN pooling: All chunks processed, full semantic coverage
-    # - CLS pooling: Only first chunk processed per text (performance optimized)
-    # - LAST pooling: Only last chunk processed per text (performance optimized)
+    # Note: All pooling types now use MEAN aggregation across chunks:
+    # - Native pooling (MEAN/CLS/LAST) is used within each chunk
+    # - MEAN aggregation combines results across all chunks
+    # - Full semantic coverage for all pooling types
     long_texts = [
         generate_long_text(
             "First long document about artificial intelligence and machine learning. "
@@ -352,10 +351,10 @@ def main():
     print("   - ✅ Automatic chunked processing for long text")
     print("   - ✅ Seamless handling of mixed-length batches")
     print("   - ✅ Multiple long texts in single batch (chunk ID fix)")
-    print("   - ✅ Pooling-type optimized processing:")
-    print("     • MEAN: All chunks processed (complete coverage)")
-    print("     • CLS: Only first chunk processed (performance optimized)")
-    print("     • LAST: Only last chunk processed (performance optimized)")
+    print("   - ✅ Unified chunked processing:")
+    print("     • Native pooling used within each chunk")
+    print("     • MEAN aggregation across all chunks")
+    print("     • Complete semantic coverage for all pooling types")
     print("   - ✅ Consistent embedding generation")
     print("   - ✅ Backward compatibility with short text")
     print("\n📚 For more information, see:")
