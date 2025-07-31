@@ -328,8 +328,11 @@ __global__ void reshape_and_cache_flash_kernel(
   } else {
     // HND layout: heads are strided, but each head_size segment is contiguous
 
-    // iterate over heads
-    for (int head = 0; head < num_heads; ++head) {
+    const int lane = threadIdx.x & 31;     // 0..31 within warp
+    const int warp_id = threadIdx.x >> 5;  // warp index within block
+    const int warps_per_block = blockDim.x >> 5;
+
+    for (int head = warp_id; head < num_heads; head += warps_per_block) {
       const scalar_t* __restrict__ k_src_h = key_src + head * head_size;
       const scalar_t* __restrict__ v_src_h = value_src + head * head_size;
 
@@ -338,11 +341,13 @@ __global__ void reshape_and_cache_flash_kernel(
       cache_t* __restrict__ v_dst_h =
           value_dst + static_cast<int64_t>(head) * head_stride;
 
-      vectorize_with_alignment<VEC_SIZE>(k_src_h, k_dst_h, head_size,
-                                         threadIdx.x, blockDim.x, k_op);
+      // within each head, let the 32 threads of the warp perform the vector
+      // copy
+      vectorize_with_alignment<VEC_SIZE>(k_src_h, k_dst_h, head_size, lane, 32,
+                                         k_op);
 
-      vectorize_with_alignment<VEC_SIZE>(v_src_h, v_dst_h, head_size,
-                                         threadIdx.x, blockDim.x, v_op);
+      vectorize_with_alignment<VEC_SIZE>(v_src_h, v_dst_h, head_size, lane, 32,
+                                         v_op);
     }
   }
 }

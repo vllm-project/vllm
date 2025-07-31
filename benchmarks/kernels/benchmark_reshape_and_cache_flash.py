@@ -104,23 +104,24 @@ def run_benchmark(
 
 def main(args):
     rows = []
-    for exp in range(1, 17):
-        n_tok = 2**exp
-        lat = run_benchmark(
-            num_tokens=n_tok,
-            num_heads=args.num_heads,
-            head_size=args.head_size,
-            block_size=args.block_size,
-            num_blocks=args.num_blocks,
-            dtype=STR_DTYPE_TO_TORCH_DTYPE[args.dtype],
-            kv_cache_dtype=args.kv_cache_dtype,
-            kv_cache_layout=args.kv_cache_layout,
-            num_iters=args.iters,
-            device="cuda",
-        )
-        rows.append([n_tok, f"{lat * 1e6:.3f}"])
+    for layout in ["NHD", "HND"]:
+        for exp in range(1, 17):
+            n_tok = 2**exp
+            lat = run_benchmark(
+                num_tokens=n_tok,
+                num_heads=args.num_heads,
+                head_size=args.head_size,
+                block_size=args.block_size,
+                num_blocks=args.num_blocks,
+                dtype=STR_DTYPE_TO_TORCH_DTYPE[args.dtype],
+                kv_cache_dtype=args.kv_cache_dtype,
+                kv_cache_layout=layout,
+                num_iters=args.iters,
+                device="cuda",
+            )
+            rows.append([n_tok, layout, f"{lat * 1e6:.3f}"])
 
-    print(tabulate(rows, headers=["num_tokens", "latency (µs)"]))
+    print(tabulate(rows, headers=["num_tokens", "layout", "latency (µs)"]))
 
 
 if __name__ == "__main__":
@@ -148,14 +149,6 @@ if __name__ == "__main__":
         type=str,
         choices=["auto", "fp8"],
         default="auto",
-    )
-
-    parser.add_argument(
-        "--kv-cache-layout",
-        type=str,
-        choices=["NHD", "HND"],
-        default="NHD",
-        help="Memory layout of the packed KV-cache tensor.",
     )
 
     parser.add_argument("--iters", type=int, default=100)
