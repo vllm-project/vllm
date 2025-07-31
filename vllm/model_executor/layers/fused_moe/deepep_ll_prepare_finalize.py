@@ -40,7 +40,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     # DeepEP low-latency kernels are compiled only for certain
     # specific hidden sizes.
-    SUPPORTED_HIDDEN_SIZES = [2048, 2560, 4096, 5120, 7168]
+    SUPPORTED_HIDDEN_SIZES = [2048, 2560, 4096, 5120, 6144, 7168]
 
     def __init__(self,
                  buffer: deep_ep.Buffer,
