@@ -118,6 +118,66 @@ vllm serve /path/to/the/model/in/the/container \
      --tensor-parallel-size 16
 ```
 
+## Optimizing network communication for tensor parallelism
+
+Efficient tensor parallelism requires fast inter-node communication, preferably through high-speed network adapters such as InfiniBand.
+To set up the cluster to use InfiniBand, append additional arguments like `--privileged -e NCCL_IB_HCA=mlx5` to the
+<gh-file:examples/online_serving/run_cluster.sh> helper script.
+Contact your system administrator for more information about the required flags.
+
+## Enabling GPUDirect RDMA
+
+GPUDirect RDMA (Remote Direct Memory Access) is an NVIDIA technology that allows network adapters to directly access GPU memory, bypassing the CPU and system memory. This direct access reduces latency and CPU overhead, which is beneficial for large data transfers between GPUs across nodes.
+
+To enable GPUDirect RDMA with vLLM, configure the following settings:
+
+- `IPC_LOCK` security context: add the `IPC_LOCK` capability to the container's security context to lock memory pages and prevent swapping to disk.
+- Shared memory with `/dev/shm`: mount `/dev/shm` in the pod spec to provide shared memory for interprocess communication (IPC).
+
+If you use Docker, set up the container as follows:
+
+```bash
+docker run --gpus all \
+    --ipc=host \
+    --shm-size=16G \
+    -v /dev/shm:/dev/shm \
+    vllm/vllm-openai
+```
+
+If you use Kubernetes, set up the pod spec as follows:
+
+```yaml
+...
+spec:
+  containers:
+    - name: vllm
+      image: vllm/vllm-openai
+      securityContext:
+        capabilities:
+          add: ["IPC_LOCK"]
+      volumeMounts:
+        - mountPath: /dev/shm
+          name: dshm
+      resources:
+        limits:
+          nvidia.com/gpu: 8
+        requests:
+          nvidia.com/gpu: 8
+  volumes:
+    - name: dshm
+      emptyDir:
+        medium: Memory
+...
+```
+
+!!! tip "Confirm GPUDirect RDMA operation"
+    To confirm your InfiniBand card is using GPUDirect RDMA, run vLLM with detailed NCCL logs: `NCCL_DEBUG=TRACE vllm serve ...`.
+
+    Then look for the NCCL version and the network used.
+
+    - If you find `[send] via NET/IB/GDRDMA` in the logs, then NCCL is using InfiniBand with GPUDirect RDMA, which *is* efficient.
+    - If you find `[send] via NET/Socket` in the logs, NCCL used a raw TCP socket, which *is not* efficient for cross-node tensor parallelism. 
+
 !!! tip "Pre-download Hugging Face models"
     If you use Hugging Face models, downloading the model before starting vLLM is recommended. Download the model on every node to the same path, or store the model on a distributed file system accessible by all nodes. Then pass the path to the model in place of the repository ID. Otherwise, supply a Hugging Face token by appending `-e HF_TOKEN=<TOKEN>` to `run_cluster.sh`.
 

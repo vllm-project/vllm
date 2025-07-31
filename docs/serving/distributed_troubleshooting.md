@@ -5,66 +5,6 @@
 Debugging a distributed system can be challenging due to the large scale and complexity. Ray provides a suite of tools to help monitor, debug, and optimize Ray applications and clusters. For more information about Ray observability, visit the [official Ray observability docs](https://docs.ray.io/en/latest/ray-observability/index.html). For more information about debugging Ray applications, visit the [Ray Debugging Guide](https://docs.ray.io/en/latest/ray-observability/user-guides/debug-apps/index.html). For information about troubleshooting Kubernetes clusters, see the
 [official KubeRay troubleshooting guide](https://docs.ray.io/en/latest/serve/advanced-guides/multi-node-gpu-troubleshooting.html).
 
-## Optimizing network communication for tensor parallelism
-
-Efficient tensor parallelism requires fast inter-node communication, preferably through high-speed network adapters such as InfiniBand.
-To set up the cluster to use InfiniBand, append additional arguments like `--privileged -e NCCL_IB_HCA=mlx5` to the
-<gh-file:examples/online_serving/run_cluster.sh> helper script.
-Contact your system administrator for more information about the required flags.
-
-## Enabling GPUDirect RDMA
-
-GPUDirect RDMA (Remote Direct Memory Access) is an NVIDIA technology that allows network adapters to directly access GPU memory, bypassing the CPU and system memory. This direct access reduces latency and CPU overhead, which is beneficial for large data transfers between GPUs across nodes.
-
-To enable GPUDirect RDMA with vLLM, configure the following settings:
-
-- `IPC_LOCK` security context: add the `IPC_LOCK` capability to the container's security context to lock memory pages and prevent swapping to disk.
-- Shared memory with `/dev/shm`: mount `/dev/shm` in the pod spec to provide shared memory for interprocess communication (IPC).
-
-If you use Docker, set up the container as follows:
-
-```bash
-docker run --gpus all \
-    --ipc=host \
-    --shm-size=16G \
-    -v /dev/shm:/dev/shm \
-    vllm/vllm-openai
-```
-
-If you use Kubernetes, set up the pod spec as follows:
-
-```yaml
-...
-spec:
-  containers:
-    - name: vllm
-      image: vllm/vllm-openai
-      securityContext:
-        capabilities:
-          add: ["IPC_LOCK"]
-      volumeMounts:
-        - mountPath: /dev/shm
-          name: dshm
-      resources:
-        limits:
-          nvidia.com/gpu: 8
-        requests:
-          nvidia.com/gpu: 8
-  volumes:
-    - name: dshm
-      emptyDir:
-        medium: Memory
-...
-```
-
-!!! tip "Confirm GPUDirect RDMA operation"
-    To confirm your InfiniBand card is using GPUDirect RDMA, run vLLM with detailed NCCL logs: `NCCL_DEBUG=TRACE vllm serve ...`.
-
-    Then look for the NCCL version and the network used.
-
-    - If you find `[send] via NET/IB/GDRDMA` in the logs, then NCCL is using InfiniBand with GPUDirect RDMA, which *is* efficient.
-    - If you find `[send] via NET/Socket` in the logs, NCCL used a raw TCP socket, which *is not* efficient for cross-node tensor parallelism. 
-
 !!! tip "Verify inter-node GPU communication"
     After you start the Ray cluster, verify GPU-to-GPU communication across nodes. Proper configuration can be non-trivial. For more information, see [troubleshooting script][troubleshooting-incorrect-hardware-driver]. If you need additional environment variables for communication configuration, append them to <gh-file:examples/online_serving/run_cluster.sh>, for example `-e NCCL_SOCKET_IFNAME=eth0`. Setting environment variables during cluster creation is recommended because the variables propagate to all nodes. In contrast, setting environment variables in the shell affects only the local node. For more information, see <gh-issue:6803>.
 
