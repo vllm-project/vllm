@@ -1348,7 +1348,7 @@ class LLM:
                     "token_type_ids", None)):
                 params = deepcopy(default_pooling_params)
                 compressed = compress_token_type_ids(token_type_ids)
-                params.extra_args = {"compressed_token_type_ids": compressed}
+                params.extra_kwargs = {"compressed_token_type_ids": compressed}
                 pooling_params.append(params)
             else:
                 pooling_params.append(default_pooling_params)

@@ -230,7 +230,7 @@ class ServingScores(OpenAIServing):
                     "token_type_ids", None)):
                 pooling_params = deepcopy(default_pooling_params)
                 compressed = compress_token_type_ids(token_type_ids)
-                pooling_params.extra_args = {
+                pooling_params.extra_kwargs = {
                     "compressed_token_type_ids": compressed
                 }
             else:
