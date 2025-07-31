@@ -1568,7 +1568,7 @@ class ModelConfig:
         config = {}
         if self.generation_config != "vllm":
             # Not using vLLM defaults
-            kwargs = {"trust_remote_code": self.trust_remote_code}
+            kwargs: dict[str, Any] = {}
             if self.generation_config == "auto":
                 # Using HF/model generation config
                 kwargs["model"] = self.hf_config_path or self.model
@@ -1576,6 +1576,7 @@ class ModelConfig:
             else:
                 # Treat generation_config as path
                 kwargs["model"] = self.generation_config
+            kwargs["trust_remote_code"] = self.trust_remote_code
             maybe_config = try_get_generation_config(**kwargs)
             if maybe_config is not None:
                 config = maybe_config.to_diff_dict()
