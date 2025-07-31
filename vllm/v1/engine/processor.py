@@ -283,8 +283,11 @@ class Processor:
                     len(decoder_inputs["prompt_token_ids"]))
             sampling_params.update_from_generation_config(
                 self.generation_config_fields, eos_token_id)
-            sampling_params.update_from_tokenizer(
-                self.tokenizer.get_lora_tokenizer(lora_request))
+            if lora_request is not None:
+                if self.model_config.skip_tokenizer_init:
+                    raise ValueError("skip_tokenizer_init is not supported with lora_request")
+                sampling_params.update_from_tokenizer(
+                    self.tokenizer.get_lora_tokenizer(lora_request))
         else:
             pooling_params = params.clone()
 
