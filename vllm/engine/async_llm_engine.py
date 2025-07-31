@@ -556,8 +556,8 @@ class AsyncLLMEngine(EngineClient):
     @classmethod
     @deprecate_kwargs(
         "disable_log_requests",
-        additional_msg=("This argument will have no effect. "
-                        "Use `enable_log_requests` instead."),
+        additional_message=("This argument will have no effect. "
+                            "Use `enable_log_requests` instead."),
     )
     def from_vllm_config(
             cls,
