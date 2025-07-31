@@ -314,14 +314,11 @@ __global__ void reshape_and_cache_flash_kernel(
 
   float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
   float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale;
-
+  constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
+  CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
+  CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
   if (is_contiguous_heads) {
     // NHD layout
-    constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
-
-    CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
-    CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
-
     vectorize_with_alignment<VEC_SIZE>(key_src, key_dst, n_elems, threadIdx.x,
                                        blockDim.x, k_op);
 
@@ -329,25 +326,23 @@ __global__ void reshape_and_cache_flash_kernel(
                                        threadIdx.x, blockDim.x, v_op);
 
   } else {
-    // HND layout
-    for (int i = threadIdx.x; i < n_elems; i += blockDim.x) {
-      const int head_idx = i / head_size;
-      const int head_offset = i % head_size;
-      const int64_t dst_offset =
-          static_cast<int64_t>(head_idx) * head_stride + head_offset;
+    // HND layout: heads are strided, but each head_size segment is contiguous
 
-      scalar_t k_val = key_src[i];
-      scalar_t v_val = value_src[i];
+    // iterate over heads
+    for (int head = 0; head < num_heads; ++head) {
+      const scalar_t* __restrict__ k_src_h = key_src + head * head_size;
+      const scalar_t* __restrict__ v_src_h = value_src + head * head_size;
 
-      if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
-        key_dst[dst_offset] = k_val;
-        value_dst[dst_offset] = v_val;
-      } else {
-        key_dst[dst_offset] =
-            fp8::scaled_convert<cache_t, scalar_t, kv_dt>(k_val, k_scale_val);
-        value_dst[dst_offset] =
-            fp8::scaled_convert<cache_t, scalar_t, kv_dt>(v_val, v_scale_val);
-      }
+      cache_t* __restrict__ k_dst_h =
+          key_dst + static_cast<int64_t>(head) * head_stride;
+      cache_t* __restrict__ v_dst_h =
+          value_dst + static_cast<int64_t>(head) * head_stride;
+
+      vectorize_with_alignment<VEC_SIZE>(k_src_h, k_dst_h, head_size,
+                                         threadIdx.x, blockDim.x, k_op);
+
+      vectorize_with_alignment<VEC_SIZE>(v_src_h, v_dst_h, head_size,
+                                         threadIdx.x, blockDim.x, v_op);
     }
   }
 }
