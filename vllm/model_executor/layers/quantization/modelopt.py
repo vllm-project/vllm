@@ -7,6 +7,7 @@ import torch
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.logger import init_logger
@@ -22,6 +23,9 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_kernel,
     flashinfer_fp4_cutlass_moe_forward, reorder_w1w3_to_w3w1)
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    apply_flashinfer_per_tensor_scale_fp8, rotate_flashinfer_fp8_moe_weights,
+    swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear, is_fp4_marlin_supported,
     prepare_fp4_layer_for_marlin, prepare_moe_fp4_layer_for_marlin)
@@ -32,6 +36,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.parameter import (ModelWeightParameter,
                                            PerTensorScaleParameter)
 from vllm.scalar_type import scalar_types
+from vllm.utils.flashinfer import has_flashinfer_moe
 
 logger = init_logger(__name__)
 
@@ -265,6 +270,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
             cutlass_fp8_supported)
         self.cutlass_fp8_supported = cutlass_fp8_supported()
+        self.flashinfer_moe_enabled = False
+        if envs.VLLM_USE_FLASHINFER_MOE_FP8 and has_flashinfer_moe():
+            logger.info_once(
+                "Using FlashInfer MoE FP8 kernels for ModelOptFp8MoEMethod.")
+            self.flashinfer_moe_enabled = True
 
     def create_weights(
         self,
@@ -408,6 +418,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             layer.w2_input_scale = Parameter(layer.w2_input_scale.max(),
                                              requires_grad=False)
 
+        if self.flashinfer_moe_enabled:
+            layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
+            rotate_flashinfer_fp8_moe_weights(layer.w13_weight,
+                                              layer.w2_weight)
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -433,6 +448,20 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `ModelOptFp8MoEMethod` yet.")
+
+        if self.flashinfer_moe_enabled:
+            assert activation == 'silu'
+            assert not renormalize
+            return apply_flashinfer_per_tensor_scale_fp8(
+                layer=layer,
+                hidden_states=x,
+                router_logits=router_logits,
+                routing_bias=e_score_correction_bias,
+                global_num_experts=global_num_experts,
+                top_k=top_k,
+                num_expert_group=num_expert_group,
+                topk_group=topk_group,
+                apply_router_weight_on_input=apply_router_weight_on_input)
 
         # Expert selection
         topk_weights, topk_ids = FusedMoE.select_experts(
@@ -776,8 +805,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         # Swizzle the weight blockscale.
         # contracting dimension is input dimension
         # block_size = 16;
-        assert (layer.weight_scale.shape[1] % 16 == 0), (
-            "Expected weight_scale.dim(1) to be divisible by 16")
         assert (layer.weight_scale.dtype == torch.float8_e4m3fn), (
             "Weight Block scale must be represented as FP8-E4M3")
         swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
