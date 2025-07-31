@@ -4815,8 +4815,20 @@ class VllmConfig:
                 "future release. Switch to use `cudagraph_mode` instead.")
             if self.compilation_config.use_cudagraph:
                 if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-                    self.compilation_config.cudagraph_mode =\
+                    if self.compilation_config.level == \
+                        CompilationLevel.PIECEWISE:
+                        self.compilation_config.cudagraph_mode = \
                             CUDAGraphMode.PIECEWISE
+                    else:
+                        logger.warning(
+                            " When compilation_config.level is not "
+                            "`CompilationLevel.PIECEWISE`, "
+                            " and `use_cudagraph` is set to True, "
+                            "`cudagraph_mode` will be set as `FULL`. "
+                            "Please ensure you are using attention backends "
+                            "that support cudagraph.")
+                        self.compilation_config.cudagraph_mode = \
+                            CUDAGraphMode.FULL
                 # otherwise, keep the cudagraph_mode as is
             else:
                 self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
@@ -4899,7 +4911,8 @@ class VllmConfig:
         # final check of cudagraph mode after platform-specific update
         if envs.VLLM_USE_V1:
             if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL \
-                and not self.model_config.disable_cascade_attn:
+                and self.model_config is not None and \
+                not self.model_config.disable_cascade_attn:
                 logger.info("CUDAGraphMode.FULL is not supported with "
                             "cascade attention currently. Disabling cascade"
                             "attention.")
