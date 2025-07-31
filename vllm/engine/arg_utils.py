@@ -72,7 +72,7 @@ def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
                 try:
                     # Instantiate first type option compatible with the string
                     return tp(val)
-                except ValueError:
+                except Exception:
                     pass
 
             # Union type is incompatible with string

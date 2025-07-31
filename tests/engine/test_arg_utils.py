@@ -5,7 +5,7 @@ import json
 from argparse import ArgumentError
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Literal, Optional, Union
 
 import pytest
 
@@ -17,6 +17,13 @@ from vllm.engine.arg_utils import (EngineArgs, contains_type, get_kwargs,
 from vllm.utils import FlexibleArgumentParser
 
 
+class TestClass:
+    """Dummy class for testing Union type parsing"""
+
+    def __init__(self, val: str):
+        self.val = val
+
+
 @pytest.mark.parametrize(("type", "value", "expected"), [
     (int, "42", 42),
     (float, "3.14", 3.14),
@@ -25,10 +32,23 @@ from vllm.utils import FlexibleArgumentParser
         "foo": 1,
         "bar": 2
     }),
+    (Union[int, str], "42", "42"),
 ])
 def test_parse_type(type, value, expected):
     parse_type_func = parse_type(type)
     assert parse_type_func(value) == expected
+
+
+@pytest.mark.parametrize(("type", "value", "expected"), [
+    (Union[int, str], "42", (42, "42")),
+])
+def test_parse_union_type(type, value, expected):
+    """Parse a `Union` type yielding an instance of either type option
+    (int or str)
+    """
+    parse_type_func = parse_type(type)
+    out = parse_type_func(value)
+    assert out in expected
 
 
 def test_optional_type():
