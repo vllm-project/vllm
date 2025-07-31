@@ -32,7 +32,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 import torch
 
@@ -45,6 +45,12 @@ if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
+
+# s_tensor_list, d_tensor_list, s_indices, d_indices, direction
+CopyBlocksOp = Callable[[
+    dict[str, torch.Tensor], dict[
+        str, torch.Tensor], list[int], list[int], Literal["h2d", "d2h"]
+], None]
 
 logger = init_logger(__name__)
 
@@ -127,6 +133,13 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
+        """
+        Set the xPU-specific ops for copying KV between host and device.
+        Needed when host buffer is used for kv transfer (e.g., in NixlConnector)
+        """
+        return
+
     @abstractmethod
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
@@ -194,7 +207,7 @@ class KVConnectorBase_V1(ABC):
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens on the worker.
-        The scheduler process (via the MultiprocExecutor) will use this output
+        The scheduler process (via the Executors) will use this output
         to track which workers are done.
 
         Returns:
@@ -286,3 +299,17 @@ class KVConnectorBase_V1(ABC):
             returned by the engine.
         """
         return False, None
+
+    @classmethod
+    def get_required_kvcache_layout(
+            cls, vllm_config: "VllmConfig") -> Optional[str]:
+        """
+        Get the required KV cache layout for this connector.
+        Args:
+            vllm_config (VllmConfig): the vllm config.
+
+        Returns:
+            str: the required KV cache layout. e.g. HND, or NHD.
+            None if the connector does not require a specific layout.
+        """
+        return None

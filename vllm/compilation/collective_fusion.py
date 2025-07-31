@@ -15,18 +15,22 @@ from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
 from .vllm_inductor_pass import VllmInductorPass
 
-if find_spec("flashinfer"):
-    import flashinfer.comm as flashinfer_comm
+FP8_DTYPE = current_platform.fp8_dtype()
 
-    flashinfer_comm = (flashinfer_comm if hasattr(
-        flashinfer_comm, "trtllm_allreduce_fusion") else None)
+if find_spec("flashinfer"):
+    try:
+        import flashinfer.comm as flashinfer_comm
+        flashinfer_comm = (flashinfer_comm if hasattr(
+            flashinfer_comm, "trtllm_allreduce_fusion") else None)
+    except ImportError:
+        flashinfer_comm = None
 else:
     flashinfer_comm = None
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -116,6 +120,230 @@ class AllGatherGEMMPattern(BasePattern):
                                 pm.fwd_only, pm_pass)
 
 
+class ScaledMMReduceScatterPattern(BasePattern):
+
+    def get_inputs(self):
+        input = torch.empty([16, 16], device=self.device, dtype=FP8_DTYPE)
+        mm_weight = torch.empty([16, 16], device=self.device,
+                                dtype=FP8_DTYPE).contiguous().transpose(0, 1)
+        scale_a = torch.empty([16, 1], device=self.device, dtype=torch.float32)
+        scale_b = torch.empty([1, 16], device=self.device, dtype=torch.float32)
+        return [input, mm_weight, scale_a, scale_b]
+
+    def register(self, pm_pass: PatternMatcherPass):
+
+        def pattern(input: torch.Tensor, mat2: torch.Tensor,
+                    scale_a: torch.Tensor,
+                    scale_b: torch.Tensor) -> torch.Tensor:
+            scaled_mm = torch.ops.aten._scaled_mm.default(input,
+                                                          mat2=mat2,
+                                                          scale_a=scale_a,
+                                                          scale_b=scale_b,
+                                                          bias=None,
+                                                          scale_result=None,
+                                                          out_dtype=self.dtype)
+            reduce_scatter = torch.ops.vllm.reduce_scatter.default(
+                scaled_mm,
+                dim=0,
+                world_size=self.tp_size,
+                group_name=self.tp.unique_name)
+            return reduce_scatter
+
+        def replacement(input: torch.Tensor, mat2: torch.Tensor,
+                        scale_a: torch.Tensor,
+                        scale_b: torch.Tensor) -> torch.Tensor:
+            gemm_rs = torch.ops.symm_mem.fused_scaled_matmul_reduce_scatter(
+                input,
+                mat2,
+                scale_a,
+                scale_b,
+                "avg",
+                scatter_dim=0,
+                out_dtype=self.dtype,
+                group_name=self.tp.device_group.group_name,
+            )
+
+            return gemm_rs
+
+        pm.register_replacement(pattern, replacement, self.get_inputs(),
+                                pm.fwd_only, pm_pass)
+
+
+class AllGatherScaledMMPattern(BasePattern):
+
+    def get_inputs(self):
+        x = torch.empty([8, 16], device=self.device, dtype=FP8_DTYPE)
+        weight = torch.empty([16, 16], device=self.device,
+                             dtype=FP8_DTYPE).contiguous().transpose(0, 1)
+
+        s1 = x.shape[0] * self.tp_size
+
+        scale_a = torch.empty([s1, 1], device=self.device, dtype=torch.float32)
+        scale_b = torch.empty([1, 16], device=self.device, dtype=torch.float32)
+
+        return [x, weight, scale_a, scale_b]
+
+    def register(self, pm_pass: PatternMatcherPass):
+
+        def pattern(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            scale_a: torch.Tensor,
+            scale_b: torch.Tensor,
+        ) -> torch.Tensor:
+            all_gather = torch.ops.vllm.all_gather.default(
+                x,
+                dim=0,
+                world_size=self.tp_size,
+                group_name=self.tp.unique_name)
+
+            return torch.ops.aten._scaled_mm.default(all_gather,
+                                                     mat2=weight,
+                                                     scale_a=scale_a,
+                                                     scale_b=scale_b,
+                                                     bias=None,
+                                                     scale_result=None,
+                                                     out_dtype=self.dtype)
+
+        def replacement(x: torch.Tensor, weight: torch.Tensor,
+                        scale_a: torch.Tensor,
+                        scale_b: torch.Tensor) -> torch.Tensor:
+            ag_output, mm_outputs = torch.ops.symm_mem.fused_all_gather_scaled_matmul(  # noqa
+                x,
+                [weight],
+                scale_a,
+                [scale_b],
+                gather_dim=0,
+                biases=[None],
+                result_scales=[None],
+                out_dtypes=[self.dtype],
+                use_fast_accum=[False],
+                group_name=self.tp.device_group.group_name,
+            )
+            return mm_outputs
+
+        pm.register_replacement(pattern, replacement, self.get_inputs(),
+                                pm.fwd_only, pm_pass)
+
+
+class CutlassScaledMMReduceScatterPattern(BasePattern):
+
+    def get_inputs(self):
+        input = torch.empty([16, 16], device=self.device, dtype=FP8_DTYPE)
+        mm_weight = torch.empty([16, 16], device=self.device,
+                                dtype=FP8_DTYPE).contiguous().transpose(0, 1)
+        scale_a = torch.empty([16, 1], device=self.device, dtype=torch.float32)
+        scale_b = torch.empty([1, 16], device=self.device, dtype=torch.float32)
+
+        cutlass_mm_output = torch.empty([16, 16],
+                                        device=self.device,
+                                        dtype=self.dtype)
+        return [input, mm_weight, scale_a, scale_b, cutlass_mm_output]
+
+    def register(self, pm_pass: PatternMatcherPass):
+
+        def pattern(input: torch.Tensor, weight: torch.Tensor,
+                    scale_a: torch.Tensor, scale_b: torch.Tensor,
+                    cutlass_mm_output: torch.Tensor) -> torch.Tensor:
+            cutlass_scaled_mm = torch.ops.higher_order.auto_functionalized(
+                torch.ops._C.cutlass_scaled_mm.default,
+                out=cutlass_mm_output,
+                a=input,
+                b=weight,
+                a_scales=scale_a,
+                b_scales=scale_b,
+                bias=None)
+
+            reduce_scatter = torch.ops.vllm.reduce_scatter.default(
+                cutlass_scaled_mm[1],
+                dim=0,
+                world_size=self.tp_size,
+                group_name=self.tp.unique_name)
+            return reduce_scatter
+
+        def replacement(input: torch.Tensor, mat2: torch.Tensor,
+                        scale_a: torch.Tensor, scale_b: torch.Tensor,
+                        cutlass_mm_output: torch.Tensor) -> torch.Tensor:
+            gemm_rs = torch.ops.symm_mem.fused_scaled_matmul_reduce_scatter(
+                input,
+                mat2,
+                scale_a,
+                scale_b,
+                "avg",
+                scatter_dim=0,
+                out_dtype=self.dtype,
+                group_name=self.tp.device_group.group_name,
+            )
+
+            return gemm_rs
+
+        pm.register_replacement(pattern, replacement, self.get_inputs(),
+                                pm.fwd_only, pm_pass)
+
+
+class AllGatherCutlassScaledMMPattern(BasePattern):
+
+    def get_inputs(self):
+        x = torch.empty([8, 16], device=self.device, dtype=FP8_DTYPE)
+        weight = torch.empty([16, 16], device=self.device,
+                             dtype=FP8_DTYPE).contiguous().transpose(0, 1)
+
+        s1 = x.shape[0] * self.tp_size
+
+        scale_a = torch.empty([s1, 1], device=self.device, dtype=torch.float32)
+        scale_b = torch.empty([1, 16], device=self.device, dtype=torch.float32)
+
+        s2 = weight.shape[1]
+        output = torch.empty([s1, s2], device=self.device, dtype=self.dtype)
+
+        return [x, weight, scale_a, scale_b, output]
+
+    def register(self, pm_pass: PatternMatcherPass):
+
+        def pattern(
+            x: torch.Tensor,
+            weight: torch.Tensor,
+            scale_a: torch.Tensor,
+            scale_b: torch.Tensor,
+            output: torch.Tensor,
+        ) -> torch.Tensor:
+            all_gather = torch.ops.vllm.all_gather.default(
+                x,
+                dim=0,
+                world_size=self.tp_size,
+                group_name=self.tp.unique_name)
+
+            cutlass_scaled_mm = torch.ops.higher_order.auto_functionalized(
+                torch.ops._C.cutlass_scaled_mm.default,
+                out=output,
+                a=all_gather,
+                b=weight,
+                a_scales=scale_a,
+                b_scales=scale_b,
+                bias=None)
+            return cutlass_scaled_mm[1]
+
+        def replacement(x: torch.Tensor, weight: torch.Tensor,
+                        scale_a: torch.Tensor, scale_b: torch.Tensor,
+                        output: torch.Tensor) -> torch.Tensor:
+            ag_output, mm_outputs = torch.ops.symm_mem.fused_all_gather_scaled_matmul(  # noqa
+                x,
+                [weight],
+                scale_a,
+                [scale_b],
+                gather_dim=0,
+                biases=[None],
+                result_scales=[None],
+                out_dtypes=[self.dtype],
+                use_fast_accum=[False],
+                group_name=self.tp.device_group.group_name,
+            )
+            return mm_outputs
+
+        pm.register_replacement(pattern, replacement, self.get_inputs(),
+                                pm.fwd_only, pm_pass)
+
+
 class AsyncTPPass(VllmInductorPass):
 
     def __init__(self, config: VllmConfig):
@@ -131,6 +359,20 @@ class AsyncTPPass(VllmInductorPass):
         AllGatherGEMMPattern(self.model_dtype,
                              self.device).register(self.patterns)
 
+        # These fusions are enabled only for bfloat16 models because
+        # `scaled_mm` or `cutlass_scaled_mm` with per-token (row-wise) scaling
+        # only supports bfloat16 as the output dtype.
+        if self.model_dtype == torch.bfloat16:
+            ScaledMMReduceScatterPattern(self.model_dtype,
+                                         self.device).register(self.patterns)
+            AllGatherScaledMMPattern(self.model_dtype,
+                                     self.device).register(self.patterns)
+
+            CutlassScaledMMReduceScatterPattern(
+                self.model_dtype, self.device).register(self.patterns)
+            AllGatherCutlassScaledMMPattern(
+                self.model_dtype, self.device).register(self.patterns)
+
     def is_applicable_for_shape(self, shape: Optional[int]) -> bool:
         # only do replace for specific shapes
         tp_size = get_tensor_model_parallel_world_size()
@@ -140,7 +382,7 @@ class AsyncTPPass(VllmInductorPass):
         self.begin()
         self.dump_graph(graph, "before_async_tp_pass")
         count = self.patterns.apply(graph)
-        logger.debug("Replaced %s patterns", count)
+        logger.debug("Replaced %s patterns with async TP pass.", count)
         self.dump_graph(graph, "after_async_tp_pass")
         self.end_and_log()
 
@@ -157,6 +399,9 @@ if flashinfer_comm is not None:
         6: MiB // 2,  # 512KB
         8: MiB // 2,  # 512KB
     }
+    # opt for a more conservative default value
+    # when world size is not in _FI_MAX_SIZES
+    _DEFAULT_FI_MAX_SIZE = MiB // 2
 
     def call_trtllm_fused_allreduce_norm(
         allreduce_in: torch.Tensor,
@@ -171,12 +416,16 @@ if flashinfer_comm is not None:
         max_token_num: int,
         norm_out: Optional[torch.Tensor] = None,
     ) -> None:
-        use_flashinfer = allreduce_in.shape[0] * allreduce_in.shape[
-            1] * allreduce_in.element_size() <= min(
-                _FI_MAX_SIZES[world_size],
-                max_token_num * allreduce_in.shape[0] *
-                allreduce_in.element_size(),
-            )
+
+        num_tokens, hidden_size = allreduce_in.shape
+        element_size = allreduce_in.element_size()
+        current_tensor_size = num_tokens * hidden_size * element_size
+        max_fusion_size = max_token_num * hidden_size * element_size
+        use_flashinfer = current_tensor_size <= min(
+            _FI_MAX_SIZES.get(world_size, _DEFAULT_FI_MAX_SIZE),
+            max_fusion_size,
+        )
+
         if use_flashinfer:
             assert (_FI_WORKSPACE_TENSOR is not None
                     ), "Flashinfer must be enabled when using flashinfer"
@@ -395,7 +644,7 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
 
 class AllReduceFusionPass(VllmInductorPass):
 
-    def __init__(self, config: VllmConfig, max_token_num: int):
+    def __init__(self, config: VllmConfig):
         super().__init__(config)
         self.disabled = True
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -411,7 +660,8 @@ class AllReduceFusionPass(VllmInductorPass):
         use_fp32_lamport = self.model_dtype == torch.float32
         if flashinfer_comm is None:
             logger.warning(
-                "Flashinfer is not installed, skipping allreduce fusion pass")
+                "Flashinfer is not installed or comm module not found, "
+                "skipping allreduce fusion pass")
             return
         # Check if the world size is supported
         if self.tp_size not in _FI_MAX_SIZES:
@@ -426,7 +676,8 @@ class AllReduceFusionPass(VllmInductorPass):
             flashinfer_comm.trtllm_create_ipc_workspace_for_all_reduce_fusion(
                 tp_rank=rank,
                 tp_size=self.tp_size,
-                max_token_num=max_token_num,
+                max_token_num=config.compilation_config.pass_config.
+                fi_allreduce_fusion_max_token_num,
                 hidden_dim=self.hidden_dim,
                 group=self.group,
                 use_fp32_lamport=use_fp32_lamport,
@@ -438,7 +689,8 @@ class AllReduceFusionPass(VllmInductorPass):
             rank=rank,
             world_size=self.tp_size,
             use_fp32_lamport=use_fp32_lamport,
-            max_token_num=max_token_num,
+            max_token_num=config.compilation_config.pass_config.
+            fi_allreduce_fusion_max_token_num,
         )
 
         for epsilon in [1e-5, 1e-6]:

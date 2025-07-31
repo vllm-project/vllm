@@ -78,7 +78,12 @@ class KVCacheManager:
     ) -> None:
         self.max_model_len = max_model_len
 
+        if len(kv_cache_config.kv_cache_groups) == 0:
+            # Attention free models don't have kv cache,
+            # thus don't need prefix caching.
+            enable_caching = False
         self.enable_caching = enable_caching
+
         self.caching_hash_fn = (
             sha256_cbor_64bit if caching_hash_algo == "sha256_cbor_64bit" else
             sha256 if caching_hash_algo == "sha256" else hash)
@@ -101,7 +106,7 @@ class KVCacheManager:
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             use_eagle=self.use_eagle,
-            enable_caching=enable_caching,
+            enable_caching=self.enable_caching,
             caching_hash_fn=self.caching_hash_fn,
             enable_kv_cache_events=enable_kv_cache_events,
         )
@@ -165,10 +170,6 @@ class KVCacheManager:
                                                self.block_size, request)
             self.req_to_block_hashes[request.request_id] = block_hashes
 
-        if self.log_stats:
-            assert self.prefix_cache_stats is not None
-            self.prefix_cache_stats.requests += 1
-
         # NOTE: When all tokens hit the cache, we must recompute the last token
         # to obtain logits. Thus, set max_cache_hit_length to prompt_length - 1.
         # This can trigger recomputation of an entire block, rather than just
@@ -182,6 +183,7 @@ class KVCacheManager:
 
         if self.log_stats:
             assert self.prefix_cache_stats is not None
+            self.prefix_cache_stats.requests += 1
             self.prefix_cache_stats.queries += request.num_tokens
             self.prefix_cache_stats.hits += num_new_computed_tokens
 

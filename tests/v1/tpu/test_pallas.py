@@ -95,4 +95,6 @@ def test_ragged_paged_attention():
             sm_scale=scale,
             sliding_window=sliding_window,
             soft_cap=logits_soft_cap,
+            k_scale=1.0,
+            v_scale=1.0,
         )

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -297,6 +298,10 @@ class repackage_wheel(build_ext):
             ]).decode("utf-8")
             upstream_main_commit = json.loads(resp_json)["sha"]
 
+            # In Docker build context, .git may be immutable or missing.
+            if envs.VLLM_DOCKER_BUILD_CONTEXT:
+                return upstream_main_commit
+
             # Check if the upstream_main_commit exists in the local repo
             try:
                 subprocess.check_output(
@@ -357,20 +362,40 @@ class repackage_wheel(build_ext):
             # create a temporary directory to store the wheel
             temp_dir = tempfile.mkdtemp(prefix="vllm-wheels")
             wheel_path = os.path.join(temp_dir, wheel_filename)
-
             print(f"Downloading wheel from {wheel_location} to {wheel_path}")
-
             from urllib.request import urlretrieve
-
             try:
                 urlretrieve(wheel_location, filename=wheel_path)
             except Exception as e:
                 from setuptools.errors import SetupError
-
                 raise SetupError(
                     f"Failed to get vLLM wheel from {wheel_location}") from e
 
+        # Set the dist_dir for Docker build context
+        dist_dir = ("/workspace/dist"
+                    if envs.VLLM_DOCKER_BUILD_CONTEXT else "dist")
+        os.makedirs(dist_dir, exist_ok=True)
+
+        # Extract only necessary compiled .so files from precompiled wheel
         with zipfile.ZipFile(wheel_path) as wheel:
+            # Get version from METADATA (optional, mostly useful for logging)
+            metadata_file = next((n for n in wheel.namelist()
+                                  if n.endswith(".dist-info/METADATA")), None)
+            if not metadata_file:
+                raise RuntimeError(
+                    "Could not find METADATA in precompiled wheel.")
+            metadata = wheel.read(metadata_file).decode()
+            version_line = next((line for line in metadata.splitlines()
+                                 if line.startswith("Version: ")), None)
+            if not version_line:
+                raise RuntimeError(
+                    "Could not determine version from METADATA.")
+            version = version_line.split(": ")[1].strip()
+
+            print(f"Extracting precompiled kernels from vLLM wheel version: "
+                  f"{version}")
+
+            # List of compiled shared objects to extract
             files_to_copy = [
                 "vllm/_C.abi3.so",
                 "vllm/_moe_C.abi3.so",
@@ -378,15 +403,10 @@ class repackage_wheel(build_ext):
                 "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                 "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                 "vllm/cumem_allocator.abi3.so",
-                # "vllm/_version.py", # not available in nightly wheels yet
             ]
 
             file_members = list(
                 filter(lambda x: x.filename in files_to_copy, wheel.filelist))
-
-            # vllm_flash_attn python code:
-            # Regex from
-            #  `glob.translate('vllm/vllm_flash_attn/**/*.py', recursive=True)`
             compiled_regex = re.compile(
                 r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py")
             file_members += list(
@@ -402,35 +422,26 @@ class repackage_wheel(build_ext):
                 if package_name not in package_data:
                     package_data[package_name] = []
 
-                wheel.extract(file)
-                if file_name.endswith(".py"):
-                    # python files shouldn't be added to package_data
-                    continue
+                output_base = (dist_dir
+                               if envs.VLLM_DOCKER_BUILD_CONTEXT else ".")
+                target_path = os.path.join(output_base, file.filename)
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                with wheel.open(file.filename) as src, open(target_path,
+                                                            "wb") as dst:
+                    shutil.copyfileobj(src, dst)
 
                 package_data[package_name].append(file_name)
 
+        # Copy wheel into dist dir for Docker to consume (e.g., via --mount)
+        if envs.VLLM_DOCKER_BUILD_CONTEXT:
+            arch_tag = "cp38-abi3-manylinux1_x86_64"
+            corrected_wheel_name = f"vllm-{version}-{arch_tag}.whl"
+            final_wheel_path = os.path.join(dist_dir, corrected_wheel_name)
 
-def _is_hpu() -> bool:
-    # if VLLM_TARGET_DEVICE env var was set explicitly, skip HPU autodetection
-    if os.getenv("VLLM_TARGET_DEVICE", None) == VLLM_TARGET_DEVICE:
-        return VLLM_TARGET_DEVICE == "hpu"
-
-    # if VLLM_TARGET_DEVICE was not set explicitly, check if hl-smi succeeds,
-    # and if it doesn't, check if habanalabs driver is loaded
-    is_hpu_available = False
-    try:
-        out = subprocess.run(["hl-smi"], capture_output=True, check=True)
-        is_hpu_available = out.returncode == 0
-    except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
-        if sys.platform.startswith("linux"):
-            try:
-                output = subprocess.check_output(
-                    'lsmod | grep habanalabs | wc -l', shell=True)
-                is_hpu_available = int(output) > 0
-            except (ValueError, FileNotFoundError, PermissionError,
-                    subprocess.CalledProcessError):
-                pass
-    return is_hpu_available
+            print(
+                "Docker build context detected, copying precompiled wheel to "
+                f"{final_wheel_path}")
+            shutil.copy2(wheel_path, final_wheel_path)
 
 
 def _no_device() -> bool:
@@ -438,9 +449,12 @@ def _no_device() -> bool:
 
 
 def _is_cuda() -> bool:
+    # Allow forced CUDA in Docker/precompiled builds, even without torch.cuda
+    if envs.VLLM_USE_PRECOMPILED and envs.VLLM_DOCKER_BUILD_CONTEXT:
+        return True
     has_cuda = torch.version.cuda is not None
     return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
-            and not (_is_neuron() or _is_tpu() or _is_hpu()))
+            and not (_is_neuron() or _is_tpu()))
 
 
 def _is_hip() -> bool:
@@ -573,12 +587,6 @@ def get_vllm_version() -> str:
         if neuron_version != MAIN_CUDA_VERSION:
             neuron_version_str = neuron_version.replace(".", "")[:3]
             version += f"{sep}neuron{neuron_version_str}"
-    elif _is_hpu():
-        # Get the Intel Gaudi Software Suite version
-        gaudi_sw_version = str(get_gaudi_sw_version())
-        if gaudi_sw_version != MAIN_CUDA_VERSION:
-            gaudi_sw_version = gaudi_sw_version.replace(".", "")[:3]
-            version += f"{sep}gaudi{gaudi_sw_version}"
     elif _is_tpu():
         version += f"{sep}tpu"
     elif _is_cpu():
@@ -625,8 +633,6 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("rocm.txt")
     elif _is_neuron():
         requirements = _read_requirements("neuron.txt")
-    elif _is_hpu():
-        requirements = _read_requirements("hpu.txt")
     elif _is_tpu():
         requirements = _read_requirements("tpu.txt")
     elif _is_cpu():
@@ -635,8 +641,7 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("xpu.txt")
     else:
         raise ValueError(
-            "Unsupported platform, please use CUDA, ROCm, Neuron, HPU, "
-            "or CPU.")
+            "Unsupported platform, please use CUDA, ROCm, Neuron, or CPU.")
     return requirements
 
 
@@ -691,8 +696,10 @@ setup(
         "bench": ["pandas", "datasets"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
-        "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
-        "audio": ["librosa", "soundfile"],  # Required for audio processing
+        "runai":
+        ["runai-model-streamer >= 0.13.3", "runai-model-streamer-s3", "boto3"],
+        "audio": ["librosa", "soundfile",
+                  "mistral_common[audio]"],  # Required for audio processing
         "video": []  # Kept for backwards compatibility
     },
     cmdclass=cmdclass,
