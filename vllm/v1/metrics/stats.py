@@ -42,6 +42,9 @@ class SchedulerStats:
 
     num_corrupted_reqs: int = 0
 
+    forward_cpu_time_ms: float = 0.0
+    forward_gpu_time_ms: float = 0.0
+
 
 @dataclass
 class LoRAStats:

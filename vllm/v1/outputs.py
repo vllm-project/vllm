@@ -111,14 +111,21 @@ class ModelRunnerOutput:
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
 
+    forward_cpu_time_ms: float = 0.0
+    forward_gpu_time_ms: float = 0.0
 
-EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
-                                              req_id_to_index={},
-                                              sampled_token_ids=[],
-                                              spec_token_ids=None,
-                                              logprobs=None,
-                                              prompt_logprobs_dict={},
-                                              pooler_output=[],
-                                              finished_sending=None,
-                                              finished_recving=None,
-                                              num_nans_in_logits=None)
+
+EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
+    req_ids=[],
+    req_id_to_index={},
+    sampled_token_ids=[],
+    spec_token_ids=None,
+    logprobs=None,
+    prompt_logprobs_dict={},
+    pooler_output=[],
+    finished_sending=None,
+    finished_recving=None,
+    num_nans_in_logits=None,
+    forward_cpu_time_ms=0.0,
+    forward_gpu_time_ms=0.0,
+)
