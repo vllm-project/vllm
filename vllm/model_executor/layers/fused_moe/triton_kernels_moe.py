@@ -77,6 +77,8 @@ def triton_kernel_fused_experts(
     gather_indx: GatherIndx,
     scatter_indx: ScatterIndx,
     activation: str = "silu",
+    swiglu_alpha: float = 1.702,
+    swiglu_limit: float = 7.0,
     apply_router_weight_on_input: bool = False,
     use_fp8_w8a8: bool = False,
     per_channel_quant: bool = False,
@@ -115,7 +117,7 @@ def triton_kernel_fused_experts(
 
     act = FusedActivation(
         FnSpecs("swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit")),
-        (1.702, 7), 2)
+        (swiglu_alpha, swiglu_limit), 2)
     gammas = routing_data.gate_scal if routing_data else None
 
     intermediate_cache1 = matmul_ogs(
