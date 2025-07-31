@@ -55,8 +55,8 @@ class LongPartialPrefillMetadata:
         cls,
         scheduler_config: SchedulerConfig,
     ) -> LongPartialPrefillMetadata:
-        enable_lpp = (scheduler_config.long_prefill_token_threshold > 0
-                      and scheduler_config.max_long_partial_prefills > 0)
+        enable_lpp = (scheduler_config.long_prefill_token_threshold > 0 and
+                      scheduler_config.max_long_partial_prefills is not None)
 
         return LongPartialPrefillMetadata(
             enable_lpp=enable_lpp,

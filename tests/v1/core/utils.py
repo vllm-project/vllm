@@ -23,7 +23,7 @@ def create_scheduler(
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 8192,
     enable_prefix_caching: Optional[bool] = None,
-    max_long_partial_prefills: int = -1,
+    max_long_partial_prefills: int = None,
     long_prefill_token_threshold: int = 0,
     disable_chunked_mm_input: bool = False,
     use_kv_connector: bool = False,
@@ -49,16 +49,19 @@ def create_scheduler(
     '''
     if max_model_len is None:
         max_model_len = max_num_batched_tokens
-    scheduler_config = SchedulerConfig(
-        max_num_seqs=max_num_seqs,
-        max_num_batched_tokens=max_num_batched_tokens,
-        max_model_len=max_model_len,
-        max_long_partial_prefills=max_long_partial_prefills,
-        long_prefill_token_threshold=long_prefill_token_threshold,
-        disable_chunked_mm_input=disable_chunked_mm_input,
-        enable_chunked_prefill=True,
-        async_scheduling=async_scheduling,
-    )
+    scheduler_config_args = {
+        "max_num_seqs": max_num_seqs,
+        "max_num_batched_tokens": max_num_batched_tokens,
+        "max_model_len": max_model_len,
+        "long_prefill_token_threshold": long_prefill_token_threshold,
+        "disable_chunked_mm_input": disable_chunked_mm_input,
+        "enable_chunked_prefill": True,
+        "async_scheduling": async_scheduling,
+    }
+    if max_long_partial_prefills is not None:
+        scheduler_config_args[
+            "max_long_partial_prefills"] = max_long_partial_prefills
+    scheduler_config = SchedulerConfig(**scheduler_config_args)
     model_config = ModelConfig(
         model=model,
         task="auto",
