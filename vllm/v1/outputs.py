@@ -111,7 +111,7 @@ class ModelRunnerOutput:
     # [num_reqs, hidden_size]
     pooler_output: list[Optional[torch.Tensor]]
 
-    kv_connector_output: Optional[KVConnectorOutput]
+    kv_connector_output: Optional[KVConnectorOutput] = None
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
@@ -124,5 +124,4 @@ EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               logprobs=None,
                                               prompt_logprobs_dict={},
                                               pooler_output=[],
-                                              kv_connector_output=None,
                                               num_nans_in_logits=None)
