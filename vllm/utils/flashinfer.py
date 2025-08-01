@@ -10,11 +10,24 @@ import contextlib
 import functools
 import importlib
 import importlib.util
-from typing import Any, Callable, NoReturn
+import os
+from typing import Any, Callable, NoReturn, Optional
 
+import requests
+
+import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+# This is the storage path for the cubins, it can be replaced
+# with a local path for testing.
+# Referenced from https://github.com/flashinfer-ai/flashinfer/blob/0c9a92c3d9a7e043ab6f3f7b2273269caf6ab044/flashinfer/jit/cubin_loader.py#L35  # noqa: E501
+FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
+    "FLASHINFER_CUBINS_REPOSITORY",
+    "https://edge.urm.nvidia.com/artifactory/sw-kernelinferencelibrary-public-generic-local/",  # noqa: E501
+)
 
 
 @functools.cache
@@ -108,6 +121,70 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
     return True
 
 
+@functools.cache
+def has_nvidia_artifactory() -> bool:
+    """Return ``True`` if NVIDIA's artifactory is accessible.
+    
+    This checks connectivity to the kernel inference library artifactory
+    which is required for downloading certain cubin kernels like TRTLLM FHMA.
+    """
+    try:
+        # Use a short timeout to avoid blocking for too long
+        response = requests.get(FLASHINFER_CUBINS_REPOSITORY, timeout=5)
+        accessible = response.status_code == 200
+        if accessible:
+            logger.debug_once("NVIDIA artifactory is accessible")
+        else:
+            logger.warning_once(
+                "NVIDIA artifactory returned failed status code: %d",
+                response.status_code)
+        return accessible
+    except Exception as e:
+        logger.warning_once("Failed to connect to NVIDIA artifactory: %s", e)
+        return False
+
+
+def use_trtllm_decode_attention(
+    num_tokens: int,
+    max_seq_len: int,
+    kv_cache_dtype: str,
+    num_qo_heads: Optional[int],
+    num_kv_heads: Optional[int],
+    attn_head_size: Optional[int],
+) -> bool:
+    # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
+    if not (current_platform.is_device_capability(100)
+            and has_nvidia_artifactory()):
+        return False
+
+    # Check if the dimensions are supported by TRTLLM decode attention
+    if (attn_head_size is None or num_qo_heads is None or num_kv_heads is None
+            or num_qo_heads // num_kv_heads > 8
+            or num_qo_heads % num_kv_heads != 0 or attn_head_size != 128):
+        return False
+
+    env_value = envs.VLLM_USE_TRTLLM_DECODE_ATTENTION
+    if env_value is not None:
+        logger.info_once("VLLM_USE_TRTLLM_DECODE_ATTENTION is set to %s",
+                         env_value)
+        # Environment variable is set - respect it
+        # Making the conditional check for zero because
+        # the path is automatically enabled if the batch size condition
+        # is satisfied.
+        no_use_trtllm = (env_value == "0")
+        if not no_use_trtllm:
+            logger.info_once("Using TRTLLM decode attention.")
+        return not no_use_trtllm
+    else:
+        # Environment variable not set - use auto-detection
+        use_trtllm = (num_tokens <= 256 and max_seq_len < 131072
+                      and kv_cache_dtype == "auto")
+        if use_trtllm:
+            logger.warning_once(
+                "Using TRTLLM decode attention (auto-detected).")
+        return use_trtllm
+
+
 __all__ = [
     "has_flashinfer",
     "flashinfer_trtllm_fp8_block_scale_moe",
@@ -117,4 +194,6 @@ __all__ = [
     "autotune",
     "has_flashinfer_moe",
     "has_flashinfer_cutlass_fused_moe",
+    "has_nvidia_artifactory",
+    "use_trtllm_decode_attention",
 ]
