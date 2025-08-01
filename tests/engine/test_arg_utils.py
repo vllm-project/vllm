@@ -5,7 +5,7 @@ import json
 from argparse import ArgumentError
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Literal, Optional, Union
 
 import pytest
 
@@ -136,6 +136,8 @@ class DummyConfig:
     """List with variable length"""
     list_literal: list[Literal[1, 2]] = field(default_factory=list)
     """List with literal choices"""
+    list_union: list[Union[str, type[object]]] = field(default_factory=list)
+    """List with union type"""
     literal_literal: Literal[Literal[1], Literal[2]] = 1
     """Literal of literals with default 1"""
     json_tip: dict = field(default_factory=dict)
@@ -187,6 +189,9 @@ def test_get_kwargs():
     assert kwargs["list_literal"]["type"] is int
     assert kwargs["list_literal"]["nargs"] == "+"
     assert kwargs["list_literal"]["choices"] == [1, 2]
+    # lists with unions should become str type.
+    # If not, we cannot know which type to use for parsing
+    assert kwargs["list_union"]["type"] is str
     # literals of literals should have merged choices
     assert kwargs["literal_literal"]["choices"] == [1, 2]
     # dict should have json tip in help
