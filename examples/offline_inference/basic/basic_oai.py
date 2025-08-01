@@ -17,7 +17,7 @@ prompts = [
 sampling_params = SamplingParams(temperature=0, max_tokens=100)
 
 MODEL_PATH = os.environ.get(
-    "MODEL_PATH", "/data/zhang-chen/os-mini/models/real-weights-2/pytorch-rc-120b/hf-converted-60af84"
+    "MODEL_PATH", "/data/xmo/os-mini/models/gpt-oss-20b-hf"
 )
 TP=os.environ.get("VLLM_TENSOR_PARALLEL_SIZE", "4")
 
