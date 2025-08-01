@@ -467,8 +467,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                         is_available_online=False),
     "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",  # noqa: E501
                                      trust_remote_code=True),
-    "TarsierForConditionalGeneration": _HfExamplesInfo("omni-research/Tarsier-7b",  # noqa: E501
-                                                        hf_overrides={"architectures": ["TarsierForConditionalGeneration"]}),  # noqa: E501
+    "TarsierForConditionalGeneration": _HfExamplesInfo("omni-research/Tarsier-7b"),  # noqa: E501
     "Tarsier2ForConditionalGeneration": _HfExamplesInfo("omni-research/Tarsier2-Recap-7b",  # noqa: E501
                                                         hf_overrides={"architectures": ["Tarsier2ForConditionalGeneration"]}),  # noqa: E501
     "VoxtralForConditionalGeneration": _HfExamplesInfo(

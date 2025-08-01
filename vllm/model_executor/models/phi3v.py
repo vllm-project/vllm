@@ -318,17 +318,6 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
 
 class Phi3VProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_processor(
-        self,
-        *,
-        num_crops: Optional[int] = None,
-        **kwargs: object,
-    ) -> ProcessorMixin:
-        if num_crops is not None:
-            kwargs["num_crops"] = num_crops
-
-        return self.ctx.get_hf_processor(**kwargs)
-
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 

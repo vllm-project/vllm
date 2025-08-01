@@ -11,6 +11,7 @@ import textwrap
 import uuid
 import warnings
 from collections import Counter
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import (MISSING, Field, asdict, field, fields, is_dataclass,
                          replace)
@@ -3346,7 +3347,16 @@ class MultiModalConfig:
             999 if envs.VLLM_USE_V1 else 1,
         )
 
-    # TODO: Add configs to init vision tower or not.
+    def merge_mm_processor_kwargs(
+        self,
+        inference_kwargs: Mapping[str, object],
+    ) -> dict[str, object]:
+        """
+        Get the keyword arguments to pass to the multi-modal processor
+        according to the extra arguments passed during inference.
+        """
+        kwargs = self.mm_processor_kwargs or {}
+        return kwargs | dict(inference_kwargs)
 
 
 @config
