@@ -138,7 +138,6 @@ class Ernie4_5_MoeMoE(nn.Module):
         self.has_shared_experts = (getattr(config, "moe_num_shared_experts", 0)
                                    > 0)
 
-
         if self.tp_size > config.moe_num_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
