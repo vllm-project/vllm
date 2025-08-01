@@ -63,6 +63,13 @@ class ImageMediaIO(MediaIO[Image.Image]):
         # Convert list to tuple for consistency
         if isinstance(rgba_bg, list):
             rgba_bg = tuple(rgba_bg)
+        
+        # Validate rgba_background_color format
+        if not (isinstance(rgba_bg, tuple) and len(rgba_bg) == 3 and all(
+                isinstance(c, int) and 0 <= c <= 255 for c in rgba_bg)):
+            raise ValueError(
+                "rgba_background_color must be a list or tuple of 3 integers "
+                "in the range [0, 255].")
         self.rgba_background_color = rgba_bg
 
     def _convert_image_mode(self, image: Image.Image) -> Image.Image:
