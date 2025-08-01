@@ -174,7 +174,7 @@ class Qwen2_5_VisionMLP(nn.Module):
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
             input_size=in_features,
-            output_sizes=[hidden_features] * 2, # [gate_proj, up_proj]
+            output_sizes=[hidden_features] * 2,  # [gate_proj, up_proj]
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj")
@@ -535,19 +535,15 @@ class Qwen2_5_VisionTransformer(nn.Module):
         head_dim = self.hidden_size // self.num_heads
         self.rotary_pos_emb = Qwen2_5_VisionRotaryEmbedding(head_dim // 2)
 
-        if vision_config.hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {vision_config.hidden_act}. "
-                             "Only silu is supported for now.")
-
         self.blocks = nn.ModuleList([
-            Qwen2_5_VisionBlock(
-                dim=self.hidden_size,
-                num_heads=self.num_heads,
-                mlp_hidden_dim=vision_config.intermediate_size,
-                act_fn=get_act_and_mul_fn(vision_config.hidden_act),
-                norm_layer=norm_layer,
-                quant_config=quant_config,
-                prefix=f"{prefix}.blocks.{layer_idx}")
+            Qwen2_5_VisionBlock(dim=self.hidden_size,
+                                num_heads=self.num_heads,
+                                mlp_hidden_dim=vision_config.intermediate_size,
+                                act_fn=get_act_and_mul_fn(
+                                    vision_config.hidden_act),
+                                norm_layer=norm_layer,
+                                quant_config=quant_config,
+                                prefix=f"{prefix}.blocks.{layer_idx}")
             for layer_idx in range(depth)
         ])
         self.merger = Qwen2_5_VisionPatchMerger(
