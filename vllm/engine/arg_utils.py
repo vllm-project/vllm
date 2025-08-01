@@ -1450,7 +1450,7 @@ class EngineArgs:
                 and self.distributed_executor_backend
                 not in (ParallelConfig.distributed_executor_backend, "ray",
                         "mp", "external_launcher")
-                and not issubclass(self.distributed_executor_backend, ExecutorV1)):
+                and not (isinstance(self.distributed_executor_backend, type) and issubclass(self.distributed_executor_backend, ExecutorV1))):
             name = "Pipeline Parallelism without Ray distributed executor " \
                     "or multiprocessing executor or external launcher"
             _raise_or_fallback(feature_name=name, recommend_to_remove=False)
