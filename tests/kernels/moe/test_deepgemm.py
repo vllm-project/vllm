@@ -15,7 +15,7 @@ import torch
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
-from vllm.utils.deep_gemm import (calc_diff, is_deepgemm_available,
+from vllm.utils.deep_gemm import (calc_diff, is_deep_gemm_supported,
                                   per_block_cast_to_fp8)
 
 BLOCK_SIZE = [128, 128]
@@ -64,8 +64,12 @@ def make_block_quant_fp8_weights(
                        dtype=torch.float32)
 
     for i in range(e):
-        w1[i], w1_s[i] = per_block_cast_to_fp8(w1_bf16[i])
-        w2[i], w2_s[i] = per_block_cast_to_fp8(w2_bf16[i])
+        w1[i], w1_s[i] = per_block_cast_to_fp8(w1_bf16[i],
+                                               block_size=block_size,
+                                               use_ue8m0=True)
+        w2[i], w2_s[i] = per_block_cast_to_fp8(w2_bf16[i],
+                                               block_size=block_size,
+                                               use_ue8m0=True)
 
     return w1, w2, w1_s, w2_s
 
@@ -143,7 +147,7 @@ NUM_EXPERTS = [32]
 @pytest.mark.parametrize("mnk", MNKs)
 @pytest.mark.parametrize("topk", TOPKS)
 @pytest.mark.parametrize("num_experts", NUM_EXPERTS)
-@pytest.mark.skipif(not is_deepgemm_available(),
+@pytest.mark.skipif(not is_deep_gemm_supported(),
                     reason="Requires deep_gemm kernels")
 def test_deepgemm_vs_triton(mnk, topk, num_experts, monkeypatch):
 

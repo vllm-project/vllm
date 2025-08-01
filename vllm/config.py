@@ -11,6 +11,7 @@ import textwrap
 import uuid
 import warnings
 from collections import Counter
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import (MISSING, Field, asdict, field, fields, is_dataclass,
                          replace)
@@ -38,8 +39,8 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
-    try_get_generation_config, try_get_safetensors_metadata,
-    try_get_tokenizer_config, uses_mrope)
+    maybe_override_with_speculators_target_model, try_get_generation_config,
+    try_get_safetensors_metadata, try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 # yapf conflicts with isort for this block
@@ -534,6 +535,15 @@ class ModelConfig:
                     "affect the random state of the Python process that "
                     "launched vLLM.", self.seed)
 
+        if self.runner != "draft":
+            # If we're not running the draft model, check for speculators config
+            # If speculators config, set model / tokenizer to be target model
+            self.model, self.tokenizer = maybe_override_with_speculators_target_model(  # noqa: E501
+                model=self.model,
+                tokenizer=self.tokenizer,
+                revision=self.revision,
+                trust_remote_code=self.trust_remote_code)
+
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(self.model,
                                                        self.served_model_name)
@@ -605,8 +615,8 @@ class ModelConfig:
                                self.config_format,
                                hf_overrides_kw=hf_overrides_kw,
                                hf_overrides_fn=hf_overrides_fn)
-        self.hf_config = hf_config
 
+        self.hf_config = hf_config
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.attention_chunk_size = getattr(self.hf_text_config,
                                             "attention_chunk_size", None)
@@ -869,6 +879,12 @@ class ModelConfig:
                 interleave_mm_strings=self.interleave_mm_strings)
 
         return None
+
+    def set_disable_mm_preprocessor_cache(self, value: bool) -> None:
+        mm_config = self.get_multimodal_config()
+
+        self.disable_mm_preprocessor_cache = value
+        mm_config.disable_mm_preprocessor_cache = value
 
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
@@ -2973,10 +2989,13 @@ class SpeculativeConfig:
                             "Chunked prefill and EAGLE are not compatible "
                             "when using V0.")
 
+                    from vllm.transformers_utils.configs import (
+                        SpeculatorsConfig)
                     from vllm.transformers_utils.configs.eagle import (
                         EAGLEConfig)
+
                     if isinstance(self.draft_model_config.hf_config,
-                                  EAGLEConfig):
+                                  (EAGLEConfig, SpeculatorsConfig)):
                         pass
                     else:
                         eagle_config = EAGLEConfig(
@@ -3332,7 +3351,16 @@ class MultiModalConfig:
             999 if envs.VLLM_USE_V1 else 1,
         )
 
-    # TODO: Add configs to init vision tower or not.
+    def merge_mm_processor_kwargs(
+        self,
+        inference_kwargs: Mapping[str, object],
+    ) -> dict[str, object]:
+        """
+        Get the keyword arguments to pass to the multi-modal processor
+        according to the extra arguments passed during inference.
+        """
+        kwargs = self.mm_processor_kwargs or {}
+        return kwargs | dict(inference_kwargs)
 
 
 @config
