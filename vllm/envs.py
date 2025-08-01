@@ -950,13 +950,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALL2ALL_BACKEND":
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
 
-    # Flashinfer MoE backend for vllm's fused mixture of expert
+    # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support. Both 
+    # require CUDA 10.0 or above.
     # Available options:
-    # - "flashinfer_moe_low_latency": use TRTLLM kernels
-    # - "flashinfer_moe_high_throughput": use CUTLASS kernels
-    "VLLM_FLASHINFER_MOE_BACKEND":
-    lambda: os.getenv("VLLM_FLASHINFER_MOE_BACKEND",
-                      "flashinfer_moe_high_throughput"),
+    # - "flashinfer_moe_high_throughput":  [default]
+    #     Uses CUTLASS kernels optimized for high-throughput batch inference.
+    # - "flashinfer_moe_low_latency":
+    #     Uses TensorRT-LLM kernels optimized for low-latency inference.
+    # To set this backend, define the environment variable:
+    #     export VLLM_FLASHINFER_MOE_BACKEND=flashinfer_moe_low_latency.
+    # If not set, defaults to "flashinfer_moe_high_throughput".
+    "VLLM_FLASHINFER_MOE_BACKEND": lambda: os.getenv(
+    "VLLM_FLASHINFER_MOE_BACKEND", "flashinfer_moe_high_throughput"
+    ),
 
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for

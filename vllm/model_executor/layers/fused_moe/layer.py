@@ -629,7 +629,9 @@ class FusedMoE(torch.nn.Module):
         renomalize: Whether to renormalize the logits in the fused_moe kernel
         quant_config: Quantization configure.
         enable_eplb: Whether to enable expert parallelism load balancer.
-        routed_scaling_factor: scaling factor for routing.
+        routed_scaling_factor: A scaling factor applied to the expert routing 
+            scores (logits) which impacts the sparsity and sharpness of expert
+            selection.
     """
 
     def __init__(

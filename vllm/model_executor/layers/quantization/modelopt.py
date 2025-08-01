@@ -1026,7 +1026,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                                                  weight_loader=weight_loader)
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
-    def swizzle_blockscale(self, scale: torch.tensor):
+    def swizzle_blockscale(self, scale: torch.Tensor):
         assert (scale.dtype == torch.float8_e4m3fn)
         # Pad and blockwise interleave weight_scale
         scale_ndim = scale.ndim
@@ -1051,8 +1051,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def prepare_static_weights_for_kernel(
         self,
-        # args_dequant,
-        # args,
         gemm1_weights,
         gemm2_weights,
         gemm1_scales_linear_fp4_bytes,
@@ -1317,7 +1315,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             # flashinfer low latency kernel for TP case only (no EP).
             if self.flashinfer_moe_backend == "TensorRT-LLM":
                 import flashinfer
-                from flashinfer import fused_moe as fused_moe
                 a1_gscale = layer.w13_input_scale_quant
                 hidden_states_fp4, hidden_states_scale_linear_fp4 = flashinfer.fp4_quantize(  # noqa: E501
                     x,
@@ -1329,7 +1326,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 routing_method_type = flashinfer.RoutingMethodType.DeepSeekV3
                 if use_llama4_routing:
                     routing_method_type = flashinfer.RoutingMethodType.Llama4
-                out = fused_moe.trtllm_fp4_block_scale_moe(
+                out = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
                     routing_logits=router_logits
                     if use_llama4_routing else router_logits.to(torch.float32),
                     routing_bias=e_score_correction_bias,

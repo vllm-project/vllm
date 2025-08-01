@@ -39,7 +39,7 @@ def is_valid_flashinfer_cutlass_fused_moe(hidden_states: torch.Tensor,
     return True
 
 
-class FlashInferExpertsCUTLASS(mk.FusedMoEPermuteExpertsUnpermute):
+class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
