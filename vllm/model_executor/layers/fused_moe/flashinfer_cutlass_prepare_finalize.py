@@ -13,6 +13,10 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
+def get_local_sizes():
+    return get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
+
+
 class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def __init__(
@@ -77,7 +81,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             topk_weights, topk_ids, a1q, a1q_scale = \
                 get_dp_group().all_gatherv([topk_weights, topk_ids, a1q, a1q_scale], # noqa: E501
                                            dim=0,
-                                           sizes=get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()) # noqa: E501
+                                           sizes=get_local_sizes())
             a1_m, a1_n = a1q.shape
             a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
@@ -94,8 +98,5 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                                ['use_dp', 'local_tokens'])
         if use_dp:
             fused_expert_output = get_dp_group().reduce_scatterv(
-                fused_expert_output,
-                dim=0,
-                sizes=get_forward_context(
-                ).dp_metadata.get_chunk_sizes_across_dp_rank())  # noqa: E501
+                fused_expert_output, dim=0, sizes=get_local_sizes())
         output.copy_(fused_expert_output)
