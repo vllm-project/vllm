@@ -103,7 +103,7 @@ The next example shows how to use the `guided_json` parameter with a Pydantic mo
                 "content": "Generate a JSON with the brand, model and car_type of the most iconic car from the 90's",
             }
         ],
-        "response_format": {
+        response_format={
             "type": "json_schema",
             "json_schema": {
                 "name": "car-description",
