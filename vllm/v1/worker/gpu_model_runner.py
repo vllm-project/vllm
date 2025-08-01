@@ -2212,7 +2212,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         model_batch_size: int,
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
-        # NOTE: Use the full batch size to profile running preprocessor on GPU
+        # This represents the maximum GPU consumption of HF processor
         dummy_request_data = self.mm_registry.get_decoder_dummy_data(
             model_config=self.model_config,
             seq_len=self.max_num_tokens,
@@ -2220,9 +2220,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         dummy_mm_data = dummy_request_data.multi_modal_data
 
-        # When models have a merged processor, their dummy data is
-        # already batched `MultiModalKwargs`, therefore we take the first
-        # `MultiModalKwargsItem` from the desired modality to profile on.
+        # This represents the maximum GPU consumption of the model
         dummy_mm_item = dummy_mm_data.get_item(modality=modality, item_index=0)
         dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
 
