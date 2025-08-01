@@ -193,7 +193,6 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # This argument is optional, defaults to indices.size(0)
         # There's not much point setting this unless it is != indices.size(0)
         bound_m: Optional[torch.Tensor] = None
-
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
             out_expert_x=expert_x,

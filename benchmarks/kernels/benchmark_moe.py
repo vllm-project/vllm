@@ -604,6 +604,13 @@ def main(args: argparse.Namespace):
         intermediate_size = config.intermediate_size
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
 
+    # Expert parallelism 
+    if E % args.ep_size != 0:
+        raise ValueError(
+            f"Number of experts {E} must be divisible by expert parallel size {args.ep_size}"
+        )
+    E = E // args.ep_size
+
     hidden_size = config.hidden_size
     dtype = torch.float16 if current_platform.is_rocm() else config.torch_dtype
     use_fp8_w8a8 = args.dtype == "fp8_w8a8"
@@ -733,7 +740,10 @@ if __name__ == "__main__":
         "--model", type=str, default="mistralai/Mixtral-8x7B-Instruct-v0.1"
     )
     parser.add_argument(
-        "--tp-size", "-tp", "--tensor-parallel-size", type=int, default=2
+        "--tp-size", "-tp", "--tensor-parallel-size", type=int, default=1
+    )
+    parser.add_argument(
+        "--ep-size", "-ep", "--expert-parallel-size", type=int, default=1
     )
     parser.add_argument(
         "--dtype", type=str, choices=["auto", "fp8_w8a8", "int8_w8a16"], default="auto"
