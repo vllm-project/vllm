@@ -53,7 +53,7 @@ class _Backend(enum.Enum):
     TRITON_MLA_VLLM_V1 = enum.auto()
     FLASHMLA_VLLM_V1 = enum.auto()
     FLASHMLA = enum.auto()  # Supported by V1
-    CUTLASS_MLA_VLLM_V1 = enum.auto()
+    CUTLASS_MLA = enum.auto()
     PALLAS = enum.auto()
     PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()
@@ -542,6 +542,13 @@ class Platform:
         Init platform-specific torch distributed process group.
         """
         raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
+
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+        """
+        Returns if the kv_cache_dtype is supported by the current platform.
+        """
+        return False
 
 
 class UnspecifiedPlatform(Platform):

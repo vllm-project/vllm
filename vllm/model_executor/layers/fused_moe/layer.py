@@ -481,8 +481,16 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
-        **kwargs,
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
     ):
+        if enable_eplb is not False or expert_load_view is not None or \
+                logical_to_physical_map is not None or \
+                logical_replica_count is not None:
+            raise NotImplementedError("Expert load balancing is not supported "
+                                      "for CPU.")
         return layer.cpu_fused_moe(
             layer,
             x,
@@ -518,6 +526,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         assert not use_grouped_topk
         assert num_expert_group is None
@@ -531,6 +543,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             raise NotImplementedError(
                 "Expert score correction bias is not supported for TPU.")
         assert activation == "silu", f"{activation} is not supported for TPU."
+        if enable_eplb is not False or expert_load_view is not None or \
+                logical_to_physical_map is not None or \
+                logical_replica_count is not None:
+            raise NotImplementedError("Expert load balancing is not supported "
+                                      "for TPU.")
         return fused_moe_pallas(hidden_states=x,
                                 w1=layer.w13_weight,
                                 w2=layer.w2_weight,
@@ -574,22 +591,20 @@ def determine_expert_map(
     if ep_size == 1:
         return (global_num_experts, None)
 
-    local_num_experts = global_num_experts // ep_size
+    # Distribute experts as evenly as possible to each rank.
+    base_experts = global_num_experts // ep_size
+    remainder = global_num_experts % ep_size
+    if ep_rank < remainder:
+        local_num_experts = base_experts + 1
+    else:
+        local_num_experts = base_experts
 
     # Create a tensor of size num_experts filled with -1
     expert_map = torch.full((global_num_experts, ), -1, dtype=torch.int32)
     # Create a expert map for the local experts
-    if ep_rank < (ep_size - 1):
-        # Each non-last rank gets local_num_experts experts.
-        expert_map[ep_rank * local_num_experts:
-                        (ep_rank + 1) * local_num_experts] = \
-            torch.arange(0, local_num_experts, dtype=torch.int32)
-    else:
-        # All remaining experts are assigned to the last rank.
-        local_num_experts = (global_num_experts - ep_rank * local_num_experts)
-
-        expert_map[-local_num_experts:] = \
-            torch.arange(0, local_num_experts, dtype=torch.int32)
+    start_idx = ep_rank * base_experts + min(ep_rank, remainder)
+    expert_map[start_idx:start_idx + local_num_experts] = torch.arange(
+        0, local_num_experts, dtype=torch.int32)
     return (local_num_experts, expert_map)
 
 
@@ -859,6 +874,14 @@ class FusedMoE(torch.nn.Module):
         elif shard_id == "w2":
             param_data[expert_id] = loaded_weight
 
+    def _load_w13_weight_scale(self, shard_dim: int,
+                               loaded_weight: torch.Tensor,
+                               param: torch.Tensor, tp_rank: int):
+        shard_size = param.shape[shard_dim]
+        loaded_weight = loaded_weight.narrow(shard_dim, shard_size * tp_rank,
+                                             shard_size)
+        param.copy_(loaded_weight)
+
     def _load_model_weight_or_group_weight_scale(self,
                                                  shard_dim: int,
                                                  expert_data: torch.Tensor,
@@ -1108,7 +1131,12 @@ class FusedMoE(torch.nn.Module):
                 "weight_scale_2" in weight_name if uses_weight_scale_2 else
                 "weight_scale" in weight_name) or "input_scale" in weight_name
 
-            if per_tensor_conditions:
+            if "w13_weight_scale" in weight_name:
+                self._load_w13_weight_scale(shard_dim=shard_dim,
+                                            loaded_weight=loaded_weight,
+                                            param=param,
+                                            tp_rank=self.tp_rank)
+            elif per_tensor_conditions:
                 self._load_per_tensor_weight_scale(
                     shard_id=shard_id,
                     param=param,

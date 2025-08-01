@@ -58,6 +58,7 @@ import numpy as np
 import numpy.typing as npt
 import psutil
 import regex as re
+import setproctitle
 import torch
 import torch.types
 import yaml
@@ -128,10 +129,6 @@ STR_NOT_IMPL_ENC_DEC_BACKEND = ("XFormers and Flash-Attention are the only "
                                 "backends currently supported with encoder/"
                                 "decoder models.")
 
-STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER = ("Prompt adapters are not "
-                                       "currently supported with encoder/"
-                                       "decoder models.")
-
 # Efficiently import all enc/dec error strings
 # rather than having to import all of the above
 STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
@@ -145,7 +142,6 @@ STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
     "STR_NOT_IMPL_ENC_DEC_MM": STR_NOT_IMPL_ENC_DEC_MM,
     "STR_NOT_IMPL_ENC_DEC_SPEC_DEC": STR_NOT_IMPL_ENC_DEC_SPEC_DEC,
     "STR_NOT_IMPL_ENC_DEC_BACKEND": STR_NOT_IMPL_ENC_DEC_BACKEND,
-    "STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER": STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER,
 }
 
 # Constants related to forcing the attention backend selection
@@ -1383,12 +1379,11 @@ def find_nccl_library() -> str:
 
 prev_set_stream = torch.cuda.set_stream
 
-_current_stream = None
+_current_stream_tls = threading.local()
 
 
 def _patched_set_stream(stream: torch.cuda.Stream) -> None:
-    global _current_stream
-    _current_stream = stream
+    _current_stream_tls.value = stream
     prev_set_stream(stream)
 
 
@@ -1407,16 +1402,16 @@ def current_stream() -> torch.cuda.Stream:
     from C/C++ code.
     """
     from vllm.platforms import current_platform
-    global _current_stream
-    if _current_stream is None:
+    if not hasattr(_current_stream_tls,
+                   "value") or _current_stream_tls.value is None:
         # when this function is called before any stream is set,
         # we return the default stream.
         # On ROCm using the default 0 stream in combination with RCCL
         # is hurting performance. Therefore creating a dedicated stream
         # per process
-        _current_stream = torch.cuda.Stream() if current_platform.is_rocm(
-        ) else torch.cuda.current_stream()
-    return _current_stream
+        _current_stream_tls.value = torch.cuda.Stream(
+        ) if current_platform.is_rocm() else torch.cuda.current_stream()
+    return _current_stream_tls.value
 
 
 def enable_trace_function_call_for_thread(vllm_config: VllmConfig) -> None:
@@ -2888,26 +2883,27 @@ def _maybe_force_spawn():
     if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "spawn":
         return
 
-    reason = None
-    if cuda_is_initialized():
-        reason = "CUDA is initialized"
-    elif xpu_is_initialized():
-        reason = "XPU is initialized"
-    elif is_in_ray_actor():
+    reasons = []
+    if is_in_ray_actor():
         # even if we choose to spawn, we need to pass the ray address
         # to the subprocess so that it knows how to connect to the ray cluster.
         # env vars are inherited by subprocesses, even if we use spawn.
         import ray
         os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
-        reason = "In a Ray actor and can only be spawned"
+        reasons.append("In a Ray actor and can only be spawned")
 
-    if reason is not None:
+    if cuda_is_initialized():
+        reasons.append("CUDA is initialized")
+    elif xpu_is_initialized():
+        reasons.append("XPU is initialized")
+
+    if reasons:
         logger.warning(
             "We must use the `spawn` multiprocessing start method. "
             "Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
             "See https://docs.vllm.ai/en/latest/usage/"
             "troubleshooting.html#python-multiprocessing "
-            "for more information. Reason: %s", reason)
+            "for more information. Reasons: %s", "; ".join(reasons))
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
@@ -3284,3 +3280,24 @@ def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available."""
 
     return _has_module("deep_gemm")
+
+
+def set_process_title(name: str,
+                      suffix: str = "",
+                      append: bool = False) -> None:
+    """
+    Set the current process title to a specific name with an
+    optional suffix.
+
+    Args:
+        name: The title to assign to the current process.
+        suffix: An optional suffix to append to the base name.
+        append: Whether to append to the existing process title.
+    """
+    if suffix:
+        name = f"{name}_{suffix}"
+    if append:
+        name = f"{setproctitle.getproctitle()}_{name}"
+    else:
+        name = f"{envs.VLLM_PROCESS_NAME_PREFIX}::{name}"
+    setproctitle.setproctitle(name)

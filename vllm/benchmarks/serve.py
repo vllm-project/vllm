@@ -179,12 +179,12 @@ async def get_request(
         delay_ts = [delay * normalize_factor for delay in delay_ts]
 
     start_ts = time.time()
-    request_index = 0
     for request_index, request in enumerate(input_requests):
-        current_ts = time.time()
-        sleep_interval_s = start_ts + delay_ts[request_index] - current_ts
-        if sleep_interval_s > 0:
-            await asyncio.sleep(sleep_interval_s)
+        if delay_ts[request_index] > 0:
+            current_ts = time.time()
+            sleep_interval_s = start_ts + delay_ts[request_index] - current_ts
+            if sleep_interval_s > 0:
+                await asyncio.sleep(sleep_interval_s)
         yield request, request_rates[request_index]
 
 
@@ -470,20 +470,6 @@ async def benchmark(
                                      pbar=pbar)))
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
-    if profile:
-        print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
-            api_url=base_url + "/stop_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-        )
-        profile_output = await request_func(request_func_input=profile_input)
-        if profile_output.success:
-            print("Profiler stopped")
-
     if pbar is not None:
         pbar.close()
 
@@ -500,6 +486,12 @@ async def benchmark(
 
     print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
+    if max_concurrency is not None:
+        print("{:<40} {:<10}".format("Maximum request concurrency:",
+                                     max_concurrency))
+    if request_rate != float('inf'):
+        print("{:<40} {:<10.2f}".format("Request rate configured (RPS):",
+                                        request_rate ))
     print("{:<40} {:<10.2f}".format("Benchmark duration (s):",
                                     benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
@@ -576,6 +568,19 @@ async def benchmark(
 
     print("=" * 50)
 
+    if profile:
+        print("Stopping profiler...")
+        profile_input = RequestFuncInput(
+            model=model_id,
+            prompt=test_prompt,
+            api_url=base_url + "/stop_profile",
+            prompt_len=test_prompt_len,
+            output_len=test_output_len,
+            logprobs=logprobs,
+        )
+        profile_output = await request_func(request_func_input=profile_input)
+        if profile_output.success:
+            print("Profiler stopped")
     return result
 
 
