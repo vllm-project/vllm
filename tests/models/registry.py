@@ -543,13 +543,17 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
                                             is_available_online=False,
                                             speculative_model="openbmb/MiniCPM-2B-sft-bf16",
                                             tokenizer="openbmb/MiniCPM-2B-sft-bf16"),
+    "Eagle3HunYuanDenseV1ForCausalLM": _HfExamplesInfo(
+        "tencent/Hunyuan-1.8B-Instruct",
+        speculative_model="AngelSlim/Hunyuan-1.8B-Instruct_eagle3",
+        tokenizer="tencent/Hunyuan-1.8B-Instruct"),
     "Glm4MoeMTPModel": _HfExamplesInfo("zai-org/GLM-4.5",
                                         speculative_model="zai-org/GLM-4.5",
                                         min_transformers_version="4.54",
                                         is_available_online=False),
     "MiMoMTPModel": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL",
                                     trust_remote_code=True,
-                                    speculative_model="XiaomiMiMo/MiMo-7B-RL")
+                                    speculative_model="XiaomiMiMo/MiMo-7B-RL"),
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {

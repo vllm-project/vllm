@@ -16,6 +16,8 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
+from vllm.model_executor.models.hunyuan_v1_eagle3 import (
+    Eagle3HunYuanDenseV1ForCausalLM)
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
@@ -140,7 +142,9 @@ class EagleProposer:
         last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
 
         if self.method == "eagle3":
-            assert isinstance(self.model, Eagle3LlamaForCausalLM)
+            assert isinstance(
+                self.model,
+                (Eagle3LlamaForCausalLM, Eagle3HunYuanDenseV1ForCausalLM))
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size

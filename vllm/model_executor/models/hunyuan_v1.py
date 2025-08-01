@@ -37,6 +37,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -59,6 +60,8 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsLoRA
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_layers)
+
+logger = init_logger(__name__)
 
 
 def _is_moe(config: PretrainedConfig) -> bool:
@@ -215,7 +218,7 @@ class HunYuanAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         kv_states: Optional[tuple[torch.Tensor]] = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
@@ -596,6 +599,8 @@ class HunYuanModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
+        self.aux_hidden_state_layers: tuple[int] = tuple()
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -619,8 +624,13 @@ class HunYuanModel(nn.Module):
 
         cla_factor = _get_cla_factor(self.config)
         prev_kv_states = None
+        aux_hidden_states = []
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
+            if i in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states if residual is
+                                         None else hidden_states + residual)
+
             hidden_states, residual, kv_states = layer(
                 positions,
                 hidden_states,
@@ -641,6 +651,9 @@ class HunYuanModel(nn.Module):
             })
 
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def _split_qkv_weight(self, qkv: torch.Tensor):
@@ -927,6 +940,13 @@ class HunYuanV1Base(nn.Module, SupportsLoRA):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
 
 class HunYuanDenseV1ForCausalLM(HunYuanV1Base):
