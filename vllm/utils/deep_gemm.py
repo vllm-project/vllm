@@ -14,7 +14,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
-from vllm.utils import has_deep_gemm
+from vllm.utils import cdiv, has_deep_gemm
 
 
 @functools.cache
@@ -37,7 +37,7 @@ def is_blackwell_deep_gemm_used() -> bool:
         return False
 
     _lazy_init()
-    if _per_block_cast_impl is None:
+    if _fp8_gemm_nt_impl is None:
         return False
 
     return (current_platform.is_cuda()
@@ -63,18 +63,15 @@ def _resolve_symbol(module, new: str, old: str) -> Callable[..., Any] | None:
 _fp8_gemm_nt_impl: Callable[..., Any] | None = None
 _grouped_impl: Callable[..., Any] | None = None
 _grouped_masked_impl: Callable[..., Any] | None = None
-_per_block_cast_impl: Callable[..., Any] | None = None
 
 
 def _lazy_init() -> None:
     """Import deep_gemm and resolve symbols on first use."""
-    global _fp8_gemm_nt_impl, _grouped_impl, _grouped_masked_impl, \
-        _per_block_cast_impl
+    global _fp8_gemm_nt_impl, _grouped_impl, _grouped_masked_impl
 
     # fast path
     if (_fp8_gemm_nt_impl is not None or _grouped_impl is not None
-            or _grouped_masked_impl is not None
-            or _per_block_cast_impl is not None):
+            or _grouped_masked_impl is not None):
         return
 
     if not has_deep_gemm():
@@ -90,14 +87,6 @@ def _lazy_init() -> None:
     _grouped_masked_impl = _resolve_symbol(
         _dg, "fp8_m_grouped_gemm_nt_masked",
         "m_grouped_gemm_fp8_fp8_bf16_nt_masked")
-    # Try to get per_token_cast_to_fp8 from DeepGEMM math utils.
-    try:
-        _math_mod = importlib.import_module(
-            "deep_gemm.utils.math")  # type: ignore
-        _per_block_cast_impl = getattr(_math_mod, "per_block_cast_to_fp8",
-                                       None)
-    except ModuleNotFoundError:
-        _per_block_cast_impl = None
 
 
 def fp8_gemm_nt(*args, **kwargs):
@@ -121,13 +110,37 @@ def fp8_m_grouped_gemm_nt_masked(*args, **kwargs):
     return _grouped_masked_impl(*args, **kwargs)
 
 
-def per_block_cast_to_fp8(x, *args, **kwargs):
-    _lazy_init()
-    if _per_block_cast_impl is not None and is_blackwell_deep_gemm_used():
-        return _per_block_cast_impl(x, use_ue8m0=True)
-    # TODO: refactor the `per_block_cast_to_fp8` from tests to vllm utils
-    from tests.kernels.quant_utils import per_block_cast_to_fp8 as _pbcf
-    return _pbcf(x, *args, **kwargs)
+def _ceil_to_ue8m0(x: torch.Tensor):
+    return torch.pow(2.0, torch.ceil(torch.log2(x.abs())))
+
+
+def _align(x: int, y: int) -> int:
+    return cdiv(x, y) * y
+
+
+DEFAULT_BLOCK_SIZE = [128, 128]
+
+
+# Taken from https://github.com/deepseek-ai/DeepGEMM/blob/dd6ed14acbc7445dcef224248a77ab4d22b5f240/deep_gemm/utils/math.py#L38
+# TODO(wentao): optimize this function, using triton or cuda kernel
+def per_block_cast_to_fp8(
+        x: torch.Tensor,
+        block_size: list[int] = DEFAULT_BLOCK_SIZE,
+        use_ue8m0: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+    assert x.dim() == 2
+    m, n = x.shape
+    block_m, block_n = block_size
+    x_padded = torch.zeros((_align(m, block_m), _align(n, block_n)),
+                           dtype=x.dtype,
+                           device=x.device)
+    x_padded[:m, :n] = x
+    x_view = x_padded.view(-1, block_m, x_padded.size(1) // block_n, block_n)
+    x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
+    sf = x_amax / 448.0
+    sf = _ceil_to_ue8m0(sf) if use_ue8m0 else sf
+    x_scaled = (x_view * (1.0 / sf)).to(torch.float8_e4m3fn)
+    return x_scaled.view_as(x_padded)[:m, :n].contiguous(), sf.view(
+        x_view.size(0), x_view.size(2))
 
 
 def calc_diff(x: torch.Tensor, y: torch.Tensor):
