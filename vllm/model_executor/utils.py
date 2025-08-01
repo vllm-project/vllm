@@ -7,10 +7,6 @@ from typing import Any, Optional
 
 import torch
 
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
-
 
 def set_random_seed(seed: int) -> None:
     from vllm.platforms import current_platform
