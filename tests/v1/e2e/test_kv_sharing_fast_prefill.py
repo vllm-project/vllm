@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 import random
 from typing import Optional, Union
 
@@ -19,17 +18,8 @@ from vllm.sequence import IntermediateTensors
 
 from ...utils import fork_new_process_for_each_test
 
-# Make scheduling deterministic for reproducibility
-os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-# Required for torch.use_deterministic_algorithms(True)
-os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-
 # global seed
 SEED = 42
-
-torch.manual_seed(SEED)
-random.seed(0)
-torch.use_deterministic_algorithms(True)
 
 
 class TestGemma3nForConditionalGeneration(Gemma3nForConditionalGeneration):
@@ -127,10 +117,12 @@ def cleanup(llm: LLM, compilation_config: CompilationConfig):
 
 @fork_new_process_for_each_test
 @pytest.mark.parametrize("enforce_eager", [True])
+@pytest.mark.parametrize("execute_number", [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
 def test_kv_sharing_fast_prefill(
     monkeypatch: pytest.MonkeyPatch,
     enforce_eager: bool,
     test_prompts: list[str],
+    execute_number: int,
 ):
     ModelRegistry.register_model("Gemma3nForConditionalGeneration",
                                  TestGemma3nForConditionalGeneration)
@@ -144,6 +136,9 @@ def test_kv_sharing_fast_prefill(
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
+
+        # Make scheduling deterministic for reproducibility
+        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
         llm = LLM(
             model="google/gemma-3n-E2B-it",
