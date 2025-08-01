@@ -818,3 +818,15 @@ def qwen2_5_omni_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     thinker.get_output_embeddings = lambda: thinker.lm_head
     hf_model.model = thinker
     return hf_model
+
+
+def tarsier_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    from vllm.model_executor.models.tarsier import get_vision_encoder_info
+
+    vision_encoder_info = get_vision_encoder_info(hf_model.config)
+
+    hf_processor = hf_model.processor
+    if hf_processor.patch_size is None:
+        hf_processor.patch_size = vision_encoder_info.get_patch_size()
+
+    return hf_model

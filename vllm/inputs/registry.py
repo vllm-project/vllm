@@ -11,7 +11,7 @@ from typing_extensions import TypeVar
 from vllm.jsontree import JSONTree, json_map_leaves
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_processor_from_config
-from vllm.utils import resolve_mm_processor_kwargs
+from vllm.utils import get_allowed_kwarg_only_overrides
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -154,14 +154,11 @@ class InputProcessingContext(InputContext):
         assert callable(hf_processor)
 
         mm_config = self.model_config.get_multimodal_config()
-        base_kwargs = mm_config.mm_processor_kwargs
-        if base_kwargs is None:
-            base_kwargs = {}
+        merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
 
-        merged_kwargs = resolve_mm_processor_kwargs(
-            base_kwargs,
-            kwargs,
+        allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,
+            merged_kwargs,
             requires_kw_only=False,
             allow_var_kwargs=True,
         )
@@ -173,7 +170,9 @@ class InputProcessingContext(InputContext):
             return x
 
         try:
-            output = hf_processor(**data, **merged_kwargs, return_tensors="pt")
+            output = hf_processor(**data,
+                                  **allowed_kwargs,
+                                  return_tensors="pt")
             # this emulates output.to(dtype=self.model_config.dtype)
             if isinstance(output, BatchFeature):
                 cast_output = json_map_leaves(maybe_cast_dtype, output.data)
@@ -189,7 +188,7 @@ class InputProcessingContext(InputContext):
 
         except Exception as exc:
             msg = (f"Failed to apply {type(hf_processor).__name__} "
-                   f"on data={data} with kwargs={merged_kwargs}")
+                   f"on data={data} with kwargs={allowed_kwargs}")
 
             raise ValueError(msg) from exc
 
