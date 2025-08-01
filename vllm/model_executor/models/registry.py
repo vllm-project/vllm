@@ -271,8 +271,9 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
-    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"), # noqa: E501
+    "TransformersModel": ("transformers", "TransformersModel"),
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"), # noqa: E501
 }
 # yapf: enable
 
