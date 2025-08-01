@@ -2189,7 +2189,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         max_mm_items_per_prompt = max(
             1,
-            min(mm_limit, self.max_num_tokens // max_tokens_per_mm_item),
+            min(mm_limit, self.max_model_len // max_tokens_per_mm_item),
         )
 
         # NOTE: We do not consider max_num_batched_tokens on purpose
