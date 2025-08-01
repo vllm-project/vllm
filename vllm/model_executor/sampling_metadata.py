@@ -539,37 +539,37 @@ class SamplingTensors:
         temperatures_t = torch.tensor(
             temperatures,
             device="cpu",
-            dtype=torch.float32,
+            dtype=dtype,
             pin_memory=pin_memory,
         )
         top_ps_t = torch.tensor(
             top_ps,
             device="cpu",
-            dtype=torch.float32,
+            dtype=dtype,
             pin_memory=pin_memory,
         )
         min_ps_t = torch.tensor(
             min_ps,
             device="cpu",
-            dtype=torch.float32,
+            dtype=dtype,
             pin_memory=pin_memory,
         )
         presence_penalties_t = torch.tensor(
             presence_penalties,
             device="cpu",
-            dtype=torch.float32,
+            dtype=dtype,
             pin_memory=pin_memory,
         )
         frequency_penalties_t = torch.tensor(
             frequency_penalties,
             device="cpu",
-            dtype=torch.float32,
+            dtype=dtype,
             pin_memory=pin_memory,
         )
         repetition_penalties_t = torch.tensor(
             repetition_penalties,
             device="cpu",
-            dtype=torch.float32,
+            dtype=dtype,
             pin_memory=pin_memory,
         )
         top_ks_t = torch.tensor(
