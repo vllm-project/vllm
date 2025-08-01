@@ -2794,6 +2794,9 @@ def make_zmq_socket(
     if linger is not None:
         socket.setsockopt(zmq.LINGER, linger)
 
+    if socket_type == zmq.XPUB:
+        socket.setsockopt(zmq.XPUB_VERBOSE, True)
+
     # Determine if the path is a TCP socket with an IPv6 address.
     # Enable IPv6 on the zmq socket if so.
     scheme, host, _ = split_zmq_path(path)
