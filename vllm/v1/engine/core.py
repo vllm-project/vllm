@@ -468,7 +468,7 @@ class EngineCoreProc(EngineCore):
 
             # Don't complete handshake until DP coordinator ready message is
             # received.
-            while not ready_event.wait(10):
+            while not ready_event.wait(timeout=10):
                 if not input_thread.is_alive():
                     raise RuntimeError(
                         "Input socket thread died during startup")
