@@ -29,8 +29,8 @@ class MinimaxToolParser(ToolParser):
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
 
+        # 流式工具调用状态管理
         self.current_tool_name_sent: bool = False
-        self.prev_tool_call_arr: list[dict] = []
         self.current_tool_id: int = -1
         self.streamed_args_for_tool: list[str] = []
 
@@ -42,6 +42,11 @@ class MinimaxToolParser(ToolParser):
 
         # Add regex pattern for thinking tag
         self.thinking_tag_pattern = r"<think>(.*?)</think>"
+        
+        # Simplified buffering for tool calls outside thinking tags
+        self.pending_buffer: str = ""
+        self.in_thinking_tag: bool = False
+        self.thinking_depth: int = 0
 
         if not self.model_tokenizer:
             raise ValueError(
@@ -162,6 +167,114 @@ class MinimaxToolParser(ToolParser):
                                                 tool_calls=[],
                                                 content=model_output)
 
+    def _update_thinking_state(self, text: str) -> None:
+        """Update the thinking tag state based on current text."""
+        open_count = text.count("<think>")
+        close_count = text.count("</think>")
+        self.in_thinking_tag = open_count > close_count
+
+    def _should_buffer_content(self, delta_text: str) -> bool:
+        """Check if content should be buffered to handle potential tool calls."""
+        if self.in_thinking_tag:
+            return False
+            
+        if self.pending_buffer:
+            return True
+        
+        if (self.tool_call_start_token in delta_text or 
+            self.tool_call_end_token in delta_text or
+            delta_text.startswith('<')):
+            return True
+        
+        return False
+
+    def _split_content_for_buffering(self, delta_text: str) -> tuple[str, str]:
+        """Split content into safe output part and potential tag part to buffer."""
+        if self.in_thinking_tag:
+            return delta_text, ""
+        
+        # Check for potential start of tool call tags
+        for tag in [self.tool_call_start_token, self.tool_call_end_token]:
+            for i in range(1, len(tag)):
+                tag_prefix = tag[:i]
+                pos = delta_text.rfind(tag_prefix)
+                if pos != -1:
+                    # Check if this position could be the start of the tag
+                    remaining_text = delta_text[pos:]
+                    if tag.startswith(remaining_text):
+                        # This could be the start of a tool tag
+                        safe_content = delta_text[:pos]
+                        potential_tag = delta_text[pos:]
+                        return safe_content, potential_tag
+        
+        return delta_text, ""
+
+    def _process_buffer(self, new_content: str) -> str:
+        """Process the buffer and return content that can be safely output."""
+        self.pending_buffer += new_content
+        output_content = ""
+        
+        # If we're in a thinking tag, output everything as content
+        if self.in_thinking_tag:
+            output_content = self.pending_buffer
+            self.pending_buffer = ""
+            return output_content
+        
+        # Process the buffer to remove tool call tags
+        while self.pending_buffer:
+            # Find tool call tags in buffer
+            start_pos = self.pending_buffer.find(self.tool_call_start_token)
+            end_pos = self.pending_buffer.find(self.tool_call_end_token)
+            
+            # Find the first occurring tag (start or end)
+            first_tag_pos = -1
+            tag_length = 0
+            
+            if start_pos != -1 and (end_pos == -1 or start_pos < end_pos):
+                first_tag_pos = start_pos
+                tag_length = len(self.tool_call_start_token)
+            elif end_pos != -1:
+                first_tag_pos = end_pos  
+                tag_length = len(self.tool_call_end_token)
+            
+            if first_tag_pos != -1:
+                # Output content before the tag
+                output_content += self.pending_buffer[:first_tag_pos]
+                # Remove content up to and including the tag
+                self.pending_buffer = self.pending_buffer[first_tag_pos + tag_length:]
+            else:
+                # No complete tags found, check for potential partial tags at the end
+                potential_tag_start = -1
+                
+                # Check for potential start tag
+                for i in range(1, min(len(self.pending_buffer) + 1, len(self.tool_call_start_token))):
+                    suffix = self.pending_buffer[-i:]
+                    if self.tool_call_start_token.startswith(suffix):
+                        potential_tag_start = len(self.pending_buffer) - i
+                        break
+                
+                # Check for potential end tag (might be longer)
+                for i in range(1, min(len(self.pending_buffer) + 1, len(self.tool_call_end_token))):
+                    suffix = self.pending_buffer[-i:]
+                    if self.tool_call_end_token.startswith(suffix):
+                        candidate_start = len(self.pending_buffer) - i
+                        if candidate_start < potential_tag_start or potential_tag_start == -1:
+                            potential_tag_start = candidate_start
+                
+                if potential_tag_start != -1:
+                    # Output content before the potential tag
+                    output_content += self.pending_buffer[:potential_tag_start]
+                    # Keep the potential tag in buffer for next iteration
+                    self.pending_buffer = self.pending_buffer[potential_tag_start:]
+                    break
+                else:
+                    # No potential tags, output all buffer content
+                    output_content += self.pending_buffer
+                    self.pending_buffer = ""
+                    break
+                
+        return output_content
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
@@ -173,11 +286,33 @@ class MinimaxToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
         logger.debug("delta_text: %s", delta_text)
-        logger.debug("delta_token_ids: %s", delta_token_ids)
+        
+        self._update_thinking_state(current_text)
 
-        # Preprocess to remove tool calls from thinking tags
+        if self.in_thinking_tag:
+            return DeltaMessage(content=delta_text)
+        
+        if self._should_buffer_content(delta_text):
+            buffered_output = self._process_buffer(delta_text)
+            if buffered_output:
+                return DeltaMessage(content=buffered_output)
+            else:
+                return None
+        
+        # Check if we need to split content for partial buffering
+        safe_content, potential_tag = self._split_content_for_buffering(delta_text)
+        if potential_tag:
+            # Part of the content needs to be buffered
+            self.pending_buffer += potential_tag
+            if safe_content:
+                return DeltaMessage(content=safe_content)
+            else:
+                return None
+        
+        # Preprocess to remove tool calls from thinking tags  
         processed_current_text = self.preprocess_model_output(current_text)
 
+        # If no tool calls detected, return delta as content
         if self.tool_call_start_token not in processed_current_text:
             return DeltaMessage(content=delta_text)
 
@@ -222,7 +357,6 @@ class MinimaxToolParser(ToolParser):
             if not self.current_tool_name_sent:
                 # Look for complete function name in current text
                 name_pattern = r'"name":\s*"([^"]+)"'
-                import re
                 match = re.search(name_pattern,
                                   current_text[tool_content_start:])
                 if match:
@@ -241,7 +375,6 @@ class MinimaxToolParser(ToolParser):
             if self.current_tool_name_sent:
                 # Find arguments start position
                 args_pattern = r'"arguments":\s*'
-                import re
                 args_match = re.search(args_pattern,
                                        current_text[tool_content_start:])
                 if args_match:
