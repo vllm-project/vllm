@@ -175,7 +175,20 @@ async def test_error_on_invalid_image_url_type(client: openai.AsyncOpenAI,
                                                model_name: str,
                                                image_url: str):
     content_text = "What's in this image?"
-    messages = dummy_messages_from_image_url(image_url, content_text)
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "image_url",
+                "image_url": image_url
+            },
+            {
+                "type": "text",
+                "text": content_text
+            },
+        ],
+    }]
 
     # image_url should be a dict {"url": "some url"}, not directly a string
     with pytest.raises(openai.BadRequestError):

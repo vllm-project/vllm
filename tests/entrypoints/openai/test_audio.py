@@ -122,7 +122,20 @@ async def test_single_chat_session_audio(client: openai.AsyncOpenAI,
 async def test_error_on_invalid_audio_url_type(client: openai.AsyncOpenAI,
                                                model_name: str,
                                                audio_url: str):
-    messages = dummy_messages_from_audio_url(audio_url)
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "audio_url",
+                "audio_url": audio_url
+            },
+            {
+                "type": "text",
+                "text": "What's happening in this audio?"
+            },
+        ],
+    }]
 
     # audio_url should be a dict {"url": "some url"}, not directly a string
     with pytest.raises(openai.BadRequestError):
