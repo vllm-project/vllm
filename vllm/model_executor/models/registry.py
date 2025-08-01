@@ -131,7 +131,7 @@ _TEXT_GENERATION_MODELS = {
     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "XverseForCausalLM": ("llama", "LlamaForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
-    "OpenAIMoeForCausalLM": ("openai_moe", "OpenAIMoeForCausalLM"),
+    "GptOssForCausalLM": ("gpt_oss", "GptOssForCausalLM"),
     # [Encoder-decoder]
     "BartModel": ("bart", "BartForConditionalGeneration"),
     "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),

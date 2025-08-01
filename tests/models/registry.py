@@ -286,7 +286,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                         trust_remote_code=True),
     "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst",
                                         min_transformers_version="4.53"),
-    "OpenAIMoeForCausalLM": _HfExamplesInfo("TODO",
+    "GptOssForCausalLM": _HfExamplesInfo("TODO",
                                             trust_remote_code=True,
                                             is_available_online=False),
     # [Encoder-decoder]
