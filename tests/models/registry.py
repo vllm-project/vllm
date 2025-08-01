@@ -525,6 +525,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
+    "TransformersModel": _HfExamplesInfo("Qwen/Qwen3-Embedding-0.6B"),
     "TransformersForCausalLM": _HfExamplesInfo("hmellor/Ilama-3.2-1B", trust_remote_code=True),  # noqa: E501
     "TransformersForMultimodalLM": _HfExamplesInfo("OpenGVLab/InternVL3-1B-hf"),
 }
