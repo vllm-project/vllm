@@ -3,6 +3,7 @@
 # ruff: noqa: E501
 
 import json
+from typing import Any
 
 import pytest
 
@@ -600,7 +601,7 @@ def test_streaming_openai_compatibility(minimax_tool_parser):
     minimax_tool_parser.thinking_depth = 0
 
     # Test scenario: simple buffering without complex tool call context
-    test_cases = [
+    test_cases: list[dict[str, Any]] = [
         {
             'stage': 'Token: <',
             'previous': '',
@@ -685,7 +686,7 @@ def test_streaming_thinking_tag_buffering(minimax_tool_parser):
     minimax_tool_parser.thinking_depth = 0
 
     # Test scenario: tool calls within thinking tags should be ignored
-    test_cases = [
+    test_cases: list[dict[str, Any]] = [
         {
             'stage': 'Start thinking',
             'previous': '',
@@ -774,7 +775,7 @@ def test_streaming_progressive_tag_buffering(minimax_tool_parser):
     minimax_tool_parser.thinking_depth = 0
 
     # Test progressive character-by-character tool tag generation
-    test_cases = [
+    test_cases: list[dict[str, Any]] = [
         {
             'stage': 'Token: <',
             'previous': '',
