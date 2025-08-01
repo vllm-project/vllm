@@ -129,7 +129,45 @@ Data parallelism replicates the entire model across multiple GPU sets and proces
 Data parallelism can be combined with the other parallelism strategies and is set by `data_parallel_size=N`.
 Note that MoE layers will be sharded according to the product of the tensor parallel size and data parallel size.
 
-### Multi-modal processing using GPU
+## Multi-modal processing
+
+### Multi-modal processor cache
+
+By default, the multi-modal processor cache is enabled to avoid repeatedly calling Hugging Face processors
+on the same multi-modal inputs, which commonly occurs in multi-turn conversations.
+
+You can adjust the size of the cache via `VLLM_MM_INPUT_CACHE_GIB` environment variable (default 4 GiB).
+The actual memory usage is double of this value because the cache is mirrored across API and engine core processes.
+
+If you do not benefit much from the cache, you can disable it explicitly via `disable_mm_preprocessor_cache`:
+
+```python
+llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
+          disable_mm_preprocessor_cache=True)
+```
+
+### Parallel multi-modal processing
+
+You can run input processing in parallel via [API server scale-out](../serving/data_parallel_deployment.md#internal-load-balancing).
+This is useful when input processing (which is run inside the API server)
+becomes a bottleneck compared to model execution (which is run inside engine core).
+
+```console
+# Run 4 API processes and 1 engine core process
+vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4
+
+# Run 4 API processes and 2 engine core processes
+vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4 -dp 2
+```
+
+!!! note
+    API server scale-out is only available for online inference.
+
+!!! note
+    Multi-modal processing cache is disabled when API server scale-out is enabled
+    because it requires a one-to-one correspondance between API and engine core processes.
+
+### GPU multi-modal processing
 
 You can speed up input processing by running Hugging Face processors on the GPU.
 To support this, the processor must accept a `device` argument in its call signature.
@@ -151,3 +189,8 @@ llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
 llm = LLM(model="Qwen/Qwen2-Audio-7B-Instruct",
           mm_processor_kwargs={"device": "cuda"})
 ```
+
+!!! note
+    Multi-modal processing cache is disabled when using GPU multi-modal processing
+    because GPU operations work better with larger batch size which happens less
+    frequently when the cache is enabled.
