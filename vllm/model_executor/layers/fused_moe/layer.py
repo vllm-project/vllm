@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config
+from vllm.config import PretrainedConfig, get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat, FusedMoEModularKernel,
     FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    init_aiter_topK_meta_data, is_rocm_aiter_fusion_shared_expert_enabled,
     is_rocm_aiter_moe_enabled)
 from vllm.model_executor.layers.fused_moe.routing_simulator import (
     RoutingSimulator)
@@ -729,6 +730,7 @@ class FusedMoE(torch.nn.Module):
         enable_eplb: bool = False,
         num_redundant_experts: int = 0,
         has_bias: bool = False,
+        config: Optional[PretrainedConfig] = None,
     ):
         super().__init__()
         if params_dtype is None:
@@ -794,6 +796,45 @@ class FusedMoE(torch.nn.Module):
                                                        None)
 
         self.top_k = top_k
+
+        self.num_fused_shared_experts = \
+            config.n_shared_experts if config is not None \
+                and is_rocm_aiter_fusion_shared_expert_enabled(
+        ) else 0
+        self.routed_scaling_factor = \
+            config.routed_scaling_factor if config is not None \
+                and config.torch_dtype != torch.float16 else 1.0
+        self.expert_mask = None
+        if self.use_ep and is_rocm_aiter_moe_enabled():
+            expert_mask = torch.ones((self.global_num_experts +
+                                      self.num_fused_shared_experts + 1, ),
+                                     dtype=torch.int32)
+            expert_mask[-1] = 0
+            expert_mask[:self.global_num_experts] = self.expert_map > -1
+            self.expert_mask = expert_mask
+            self.expert_map = torch.cat(
+                (self.expert_map,
+                 torch.tensor([
+                     self.local_num_experts + i
+                     for i in range(self.num_fused_shared_experts)
+                 ],
+                              dtype=torch.int32)),
+                dim=0)
+        if is_rocm_aiter_fusion_shared_expert_enabled(
+        ) and self.num_fused_shared_experts > 0:
+            init_aiter_topK_meta_data(
+                n_routed_experts=self.global_num_experts,
+                n_shared_experts=self.num_fused_shared_experts,
+                top_k=self.top_k,
+                tp_rank=self.ep_rank if self.use_ep else self.tp_rank,
+                tp_size=self.ep_size if self.use_ep else self.tp_size,
+                shared_experts_score=1.0,
+                max_num_tokens=vllm_config.scheduler_config.
+                max_num_batched_tokens,
+                is_EP=self.use_ep,
+            )
+        if is_rocm_aiter_fusion_shared_expert_enabled():
+            self.local_num_experts += self.num_fused_shared_experts
 
         assert intermediate_size % self.tp_size == 0
         self.hidden_size = hidden_size
@@ -1384,6 +1425,8 @@ class FusedMoE(torch.nn.Module):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        num_fused_shared_experts: int = 0,
+        routed_scaling_factor: float = 1.0
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the
@@ -1421,7 +1464,13 @@ class FusedMoE(torch.nn.Module):
                 num_expert_group=num_expert_group,
                 topk_group=topk_group,
                 scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias)
+                e_score_correction_bias=e_score_correction_bias,
+                **({
+                    "routed_scaling_factor": routed_scaling_factor
+                } if is_rocm_aiter_moe_enabled() else {}),
+                **({
+                    "num_fused_shared_experts": num_fused_shared_experts
+                } if is_rocm_aiter_fusion_shared_expert_enabled() else {}))
             if indices_type is not None:
                 topk_ids = topk_ids.to(dtype=indices_type)
         elif custom_routing_function is None:
@@ -1583,7 +1632,8 @@ class FusedMoE(torch.nn.Module):
                 renormalize=self.renormalize,
                 use_grouped_topk=self.use_grouped_topk,
                 global_num_experts=self.global_num_experts,
-                expert_map=self.expert_map,
+                expert_map=self.expert_map
+                if not is_rocm_aiter_moe_enabled() else self.expert_mask,
                 topk_group=self.topk_group,
                 num_expert_group=self.num_expert_group,
                 custom_routing_function=self.custom_routing_function,
@@ -1651,7 +1701,8 @@ class FusedMoE(torch.nn.Module):
             renormalize=self.renormalize,
             use_grouped_topk=self.use_grouped_topk,
             global_num_experts=self.global_num_experts,
-            expert_map=self.expert_map,
+            expert_map=self.expert_map
+            if not is_rocm_aiter_moe_enabled() else self.expert_mask,
             topk_group=self.topk_group,
             num_expert_group=self.num_expert_group,
             custom_routing_function=self.custom_routing_function,

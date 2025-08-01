@@ -39,6 +39,8 @@ from vllm.distributed import (get_ep_group, get_pp_group,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    is_rocm_aiter_fusion_shared_expert_enabled, is_rocm_aiter_moe_enabled)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -161,9 +163,12 @@ class DeepseekV2MoE(nn.Module):
             scoring_func=config.scoring_func,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
-            num_redundant_experts=self.n_redundant_experts)
+            num_redundant_experts=self.n_redundant_experts,
+            config=config)
 
-        if config.n_shared_experts is not None:
+        if config.n_shared_experts is not None \
+            and not is_rocm_aiter_fusion_shared_expert_enabled(
+        ):
             intermediate_size = (config.moe_intermediate_size *
                                  config.n_shared_experts)
             self.shared_experts = DeepseekV2MLP(
@@ -179,15 +184,20 @@ class DeepseekV2MoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-        if self.n_shared_experts is not None:
+        shared_output = None
+        if self.n_shared_experts is not None \
+            and not is_rocm_aiter_fusion_shared_expert_enabled(
+        ):
             shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
         if hidden_states.dtype != torch.float16:
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits) * self.routed_scaling_factor
+            final_hidden_states = self.experts(hidden_states=hidden_states,
+                                               router_logits=router_logits)
+            if not is_rocm_aiter_moe_enabled():  # TODO
+                final_hidden_states = \
+                    final_hidden_states * self.routed_scaling_factor
         else:
             # Fix FP16 overflow
             # See DeepseekV2DecoderLayer for more details.
@@ -862,7 +872,9 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts,
+            num_experts=self.config.n_routed_experts +
+            (self.config.n_shared_experts
+             if is_rocm_aiter_fusion_shared_expert_enabled() else 0),
             num_redundant_experts=self.num_redundant_experts)
 
         params_dict = dict(self.named_parameters())
@@ -870,6 +882,11 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+            if (is_rocm_aiter_fusion_shared_expert_enabled()
+                    and "mlp.shared_experts" in name):
+                name = name.replace(
+                    "mlp.shared_experts",
+                    f"mlp.experts.{self.config.n_routed_experts}")
 
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is not None:

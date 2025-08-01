@@ -954,6 +954,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 expert_load_view=expert_load_view,
                 logical_to_physical_map=logical_to_physical_map,
                 logical_replica_count=logical_replica_count,
+                num_fused_shared_experts=layer.num_fused_shared_experts,
+                routed_scaling_factor=layer.routed_scaling_factor,
             )
 
         if self.rocm_aiter_moe_enabled:
