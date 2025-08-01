@@ -108,7 +108,7 @@ def support_torch_compile(
     During runtime, when we actually mark dimensions of tensors,
      it depends on the value of arguments:
 
-    - if it is a single integer (can be negative), the corresponding dimension 
+    - if it is a single integer (can be negative), the corresponding dimension
         of the argument will be marked as dynamic.
     - if it is `None`, ignored.
     - if it is `IntermediateTensors`, all the tensors in the intermediate
@@ -267,8 +267,15 @@ def _support_torch_compile(
                     code.co_filename)
                 return inline_call(parent, func, args, kwargs)
 
-            with patch.object(InliningInstructionTranslator, 'inline_call',
-                              patched_inline_call):
+            # Disable the C++ compilation of symbolic shape guards. C++-fication
+            # of symbolic shape guards can improve guard overhead. But, since
+            # vllm skip guards anyways, setting this flag to False can improve
+            # compile time.
+            with torch._dynamo.config.patch("enable_cpp_symbolic_shape_guards",
+                                            False), patch.object(
+                                                InliningInstructionTranslator,
+                                                'inline_call',
+                                                patched_inline_call):
                 output = self.compiled_callable(*args, **kwargs)
             return output
 
