@@ -533,7 +533,7 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object) -> Llama4Processor:
         return self.ctx.get_hf_processor(Llama4Processor,
-                                         use_fast=True,
+                                         use_fast=kwargs.pop("use_fast", True),
                                          **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:

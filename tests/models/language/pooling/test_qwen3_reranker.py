@@ -83,9 +83,6 @@ def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
         }
     }
 
-    if model_info.name == "Qwen/Qwen3-Reranker-4B":
-        vllm_extra_kwargs["max_num_seqs"] = 1
-
     mteb_test_rerank_models(Qwen3RerankerHfRunner, vllm_runner, model_info,
                             vllm_extra_kwargs)
 
@@ -105,9 +102,6 @@ def test_rerank_models_mteb_tp(vllm_runner,
         },
         "tensor_parallel_size": 2,
     }
-
-    if model_info.name == "Qwen/Qwen3-Reranker-4B":
-        vllm_extra_kwargs["max_num_seqs"] = 1
 
     mteb_test_rerank_models(Qwen3RerankerHfRunner,
                             vllm_runner,

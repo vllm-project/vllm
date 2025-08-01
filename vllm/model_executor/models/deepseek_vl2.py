@@ -214,25 +214,25 @@ class DeepseekVL2MultiModalProcessor(
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if mm_data:
-            processed_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**mm_kwargs),
-                dict(prompt=prompt, **mm_data),
-                dict(**mm_kwargs, **tok_kwargs),
-            )
-            pixel_values = processed_outputs["pixel_values"]
-            # split pixel values into patches corresponding to each image
-            images_spatial_crop = processed_outputs["images_spatial_crop"]
-            patches_per_image = [
-                x.prod().item() + 1 for x in images_spatial_crop
-            ]
-            pixel_values = pixel_values.split(patches_per_image)
-            processed_outputs["pixel_values"] = pixel_values
-        else:
+        if not mm_data:
             tokenizer = self.info.get_tokenizer()
-            processed_outputs = tokenizer(prompt,
-                                          add_special_tokens=True,
-                                          return_tensors="pt")
+            return tokenizer(prompt,
+                             add_special_tokens=True,
+                             return_tensors="pt")
+
+        processed_outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
+
+        pixel_values = processed_outputs["pixel_values"]
+        # split pixel values into patches corresponding to each image
+        images_spatial_crop = processed_outputs["images_spatial_crop"]
+        patches_per_image = [x.prod().item() + 1 for x in images_spatial_crop]
+        pixel_values = pixel_values.split(patches_per_image)
+        processed_outputs["pixel_values"] = pixel_values
 
         return processed_outputs
 

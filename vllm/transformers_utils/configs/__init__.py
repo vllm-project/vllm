@@ -24,6 +24,10 @@ from vllm.transformers_utils.configs.nemotron import NemotronConfig
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 from vllm.transformers_utils.configs.nemotron_vl import Nemotron_Nano_VL_Config
 from vllm.transformers_utils.configs.nvlm_d import NVLM_D_Config
+from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
+from vllm.transformers_utils.configs.step3_vl import (Step3TextConfig,
+                                                      Step3VisionEncoderConfig,
+                                                      Step3VLConfig)
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
 __all__ = [
@@ -41,5 +45,9 @@ __all__ = [
     "NemotronHConfig",
     "Nemotron_Nano_VL_Config",
     "NVLM_D_Config",
+    "SpeculatorsConfig",
     "UltravoxConfig",
+    "Step3VLConfig",
+    "Step3VisionEncoderConfig",
+    "Step3TextConfig",
 ]

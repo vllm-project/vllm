@@ -132,50 +132,15 @@ class Qwen2_5OmniThinkerProcessingInfo(Qwen2AudioProcessingInfo,
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen2_5OmniConfig).thinker_config
 
-    def get_hf_processor(
-        self,
-        *,
-        sampling_rate: Optional[int] = None,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
-        size: Optional[dict[str, int]] = None,
-        fps: Optional[Union[float, list[float]]] = None,
-        **kwargs: object,
-    ) -> Qwen2_5OmniProcessor:
-        if fps is not None:
-            kwargs["fps"] = fps
-
-        # Monkey patch for Transformers v4.53
-        processor_class = Qwen2_5OmniProcessor
-        if processor_class.image_processor_class != "AutoImageProcessor":
-            processor_class.image_processor_class = "AutoImageProcessor"
-        if processor_class.video_processor_class != "AutoVideoProcessor":
-            processor_class.video_processor_class = "AutoVideoProcessor"
-
-        processor = self.ctx.get_hf_processor(
-            processor_class,
-            image_processor=self.get_image_processor(min_pixels=min_pixels,
-                                                     max_pixels=max_pixels,
-                                                     size=size,
-                                                     use_fast=kwargs.get(
-                                                         "use_fast", True)),
+    def get_hf_processor(self, **kwargs: object) -> Qwen2_5OmniProcessor:
+        return self.ctx.get_hf_processor(
+            Qwen2_5OmniProcessor,
+            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
-        if not hasattr(processor, "audio_token"):
-            processor.audio_token = "<|AUDIO|>"
-        if not hasattr(processor, "image_token"):
-            processor.image_token = "<|IMAGE|>"
-        if not hasattr(processor, "video_token"):
-            processor.video_token = "<|VIDEO|>"
-        return processor
 
-    def get_feature_extractor(
-        self,
-        *,
-        sampling_rate: Optional[int] = None,
-        **kwargs: object,
-    ):
-        hf_processor = self.get_hf_processor(sampling_rate=sampling_rate)
+    def get_feature_extractor(self, **kwargs: object):
+        hf_processor = self.get_hf_processor(**kwargs)
         feature_extractor = hf_processor.feature_extractor  # type: ignore
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor

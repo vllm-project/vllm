@@ -88,15 +88,7 @@ ImageInputs = Union[Idefics3ImagePixelInputs, Idefics3ImageEmbeddingInputs]
 
 class Idefics3ProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_processor(
-        self,
-        *,
-        size: Optional[dict[str, int]] = None,
-        **kwargs: object,
-    ) -> Idefics3Processor:
-        if size is not None:
-            kwargs["size"] = size
-
+    def get_hf_processor(self, **kwargs: object) -> Idefics3Processor:
         return self.ctx.get_hf_processor(Idefics3Processor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:

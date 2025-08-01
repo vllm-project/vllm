@@ -1862,8 +1862,14 @@ class LLMEngine:
                 context=trace_context,
                 start_time=arrival_time_nano_seconds) as seq_span:
             metrics = seq_group.metrics
-            ttft = metrics.first_token_time - metrics.arrival_time
-            e2e_time = metrics.finished_time - metrics.arrival_time
+
+            # Handle potential None values for cancelled/aborted requests
+            ttft = (metrics.first_token_time - metrics.arrival_time
+                    if metrics.first_token_time is not None else None)
+
+            e2e_time = (metrics.finished_time - metrics.arrival_time
+                        if metrics.finished_time is not None else None)
+
             seq_span.set_attribute(SpanAttributes.GEN_AI_RESPONSE_MODEL,
                                    self.model_config.model)
             seq_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID,
@@ -1886,11 +1892,18 @@ class LLMEngine:
                     seq.get_output_len()
                     for seq in seq_group.get_finished_seqs()
                 ]))
-            seq_span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE,
-                                   metrics.time_in_queue)
-            seq_span.set_attribute(
-                SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN, ttft)
-            seq_span.set_attribute(SpanAttributes.GEN_AI_LATENCY_E2E, e2e_time)
+
+            # Only set timing attributes if the values are available
+            if metrics.time_in_queue is not None:
+                seq_span.set_attribute(
+                    SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE,
+                    metrics.time_in_queue)
+            if ttft is not None:
+                seq_span.set_attribute(
+                    SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN, ttft)
+            if e2e_time is not None:
+                seq_span.set_attribute(SpanAttributes.GEN_AI_LATENCY_E2E,
+                                       e2e_time)
             if metrics.scheduler_time is not None:
                 seq_span.set_attribute(
                     SpanAttributes.GEN_AI_LATENCY_TIME_IN_SCHEDULER,

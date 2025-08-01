@@ -12,10 +12,8 @@ import torch
 from tests.kernels.utils import baseline_scaled_mm
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
-
-
-def cdiv(a, b):
-    return (a + b - 1) // b
+from vllm.utils import cdiv
+from vllm.utils.deep_gemm import per_block_cast_to_fp8
 
 
 def per_token_cast_to_fp8(
@@ -30,21 +28,6 @@ def per_token_cast_to_fp8(
     fp8_data = (x_view *
                 (448.0 / x_amax.unsqueeze(2))).to(dtype=torch.float8_e4m3fn)
     return fp8_data.view(m, n + pad_size)[:, :n], (x_amax / 448.0).view(m, -1)
-
-
-def per_block_cast_to_fp8(
-        x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    assert x.dim() == 2
-    m, n = x.shape
-    x_padded = torch.zeros((cdiv(m, 128) * 128, cdiv(n, 128) * 128),
-                           device=x.device,
-                           dtype=x.dtype)
-    x_padded[:m, :n] = x
-    x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, 128)
-    x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
-    x_scaled = (x_view * (448.0 / x_amax)).to(dtype=torch.float8_e4m3fn)
-    return x_scaled.view_as(x_padded)[:m, :n].contiguous(), (
-        x_amax / 448.0).view(x_view.size(0), x_view.size(2))
 
 
 @pytest.mark.parametrize("num_groups, expected_m_per_group, k, n", [
