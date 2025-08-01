@@ -25,7 +25,7 @@ def rescale_image_size(image: Image.Image,
 
 
 def rgba_to_rgb(
-    image: Image.Image, 
+    image: Image.Image,
     background_color: Union[Tuple[int, int, int], list[int]] = (255, 255, 255)
 ) -> Image.Image:
     """Convert an RGBA image to RGB with filled background color."""
@@ -46,7 +46,6 @@ def convert_image_mode(image: Image.Image, to_mode: str):
 
 class ImageMediaIO(MediaIO[Image.Image]):
 
-
     def __init__(self, image_mode: str = "RGB", **kwargs) -> None:
         super().__init__()
 
@@ -57,7 +56,7 @@ class ImageMediaIO(MediaIO[Image.Image]):
         # media loaders (e.g. custom implementations)
         # for flexible control.
         self.kwargs = kwargs
-        
+
         # Extract RGBA background color from kwargs if provided
         # Default to white background for backward compatibility
         rgba_bg = kwargs.get('rgba_background_color', (255, 255, 255))

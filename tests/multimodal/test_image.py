@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageChops
 
-from vllm.multimodal.image import convert_image_mode, ImageMediaIO
+from vllm.multimodal.image import ImageMediaIO, convert_image_mode
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 assert ASSETS_DIR.exists()
@@ -40,71 +40,72 @@ def test_rgba_to_rgb():
 def test_rgba_to_rgb_custom_background():
     """Test RGBA to RGB conversion with custom background colors using ImageMediaIO."""
     # Create a simple RGBA image with transparent and opaque pixels
-    rgba_image = Image.new("RGBA", (10, 10), (255, 0, 0, 255))  # Red with full opacity
-    
+    rgba_image = Image.new("RGBA", (10, 10),
+                           (255, 0, 0, 255))  # Red with full opacity
+
     # Make top-left quadrant transparent
     for i in range(5):
         for j in range(5):
             rgba_image.putpixel((i, j), (0, 0, 0, 0))  # Fully transparent
-    
+
     # Save the test image temporarily
     import tempfile
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         rgba_image.save(tmp.name)
         tmp_path = Path(tmp.name)
-    
+
     try:
         # Test 1: Default white background (backward compatibility)
         image_io_default = ImageMediaIO()
         converted_default = image_io_default.load_file(tmp_path)
         default_numpy = np.array(converted_default)
-        
+
         # Check transparent pixels are white
         assert default_numpy[0][0][0] == 255  # R
         assert default_numpy[0][0][1] == 255  # G
         assert default_numpy[0][0][2] == 255  # B
         # Check opaque pixels remain red
         assert default_numpy[5][5][0] == 255  # R
-        assert default_numpy[5][5][1] == 0    # G
-        assert default_numpy[5][5][2] == 0    # B
-        
+        assert default_numpy[5][5][1] == 0  # G
+        assert default_numpy[5][5][2] == 0  # B
+
         # Test 2: Custom black background via kwargs
         image_io_black = ImageMediaIO(rgba_background_color=(0, 0, 0))
         converted_black = image_io_black.load_file(tmp_path)
         black_numpy = np.array(converted_black)
-        
+
         # Check transparent pixels are black
         assert black_numpy[0][0][0] == 0  # R
         assert black_numpy[0][0][1] == 0  # G
         assert black_numpy[0][0][2] == 0  # B
         # Check opaque pixels remain red
         assert black_numpy[5][5][0] == 255  # R
-        assert black_numpy[5][5][1] == 0    # G
-        assert black_numpy[5][5][2] == 0    # B
-        
+        assert black_numpy[5][5][1] == 0  # G
+        assert black_numpy[5][5][2] == 0  # B
+
         # Test 3: Custom blue background via kwargs (as list)
         image_io_blue = ImageMediaIO(rgba_background_color=[0, 0, 255])
         converted_blue = image_io_blue.load_file(tmp_path)
         blue_numpy = np.array(converted_blue)
-        
+
         # Check transparent pixels are blue
-        assert blue_numpy[0][0][0] == 0    # R
-        assert blue_numpy[0][0][1] == 0    # G
+        assert blue_numpy[0][0][0] == 0  # R
+        assert blue_numpy[0][0][1] == 0  # G
         assert blue_numpy[0][0][2] == 255  # B
-        
+
         # Test 4: Test with load_bytes method
         with open(tmp_path, 'rb') as f:
             image_data = f.read()
-        
+
         image_io_green = ImageMediaIO(rgba_background_color=(0, 255, 0))
         converted_green = image_io_green.load_bytes(image_data)
         green_numpy = np.array(converted_green)
-        
+
         # Check transparent pixels are green
-        assert green_numpy[0][0][0] == 0    # R
+        assert green_numpy[0][0][0] == 0  # R
         assert green_numpy[0][0][1] == 255  # G
-        assert green_numpy[0][0][2] == 0    # B
-        
+        assert green_numpy[0][0][2] == 0  # B
+
     finally:
         # Clean up
         tmp_path.unlink()
