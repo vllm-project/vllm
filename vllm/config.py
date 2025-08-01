@@ -3350,10 +3350,9 @@ class MultiModalConfig:
         kwargs = self.mm_processor_kwargs or {}
 
         # This is to avoid breaking assumptions in memory profiling
-        if (init_device := kwargs.get("device",
-                                      "cpu")) != (inference_device :=
-                                                  inference_kwargs.get(
-                                                      "device", init_device)):
+        init_device = kwargs.get("device", "cpu")
+        inference_device = inference_kwargs.get("device", init_device)
+        if init_device != inference_device:
             raise ValueError(
                 "You cannot override the device for multi-modal preprocessing "
                 f"at runtime! Found: {init_device=} vs. {inference_device=}")
