@@ -1027,9 +1027,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_CUDNN_PREFILL":
     lambda: bool(int(os.getenv("VLLM_USE_CUDNN_PREFILL", "0"))),
 
-    # If set to 1, use the TRTLLM Decode Attention backend in flashinfer.
-    "VLLM_USE_TRTLLM_DECODE_ATTENTION":
-    lambda: os.getenv("VLLM_USE_TRTLLM_DECODE_ATTENTION", None),
+    # If set to 1, use the TRTLLM Attention backend in flashinfer.
+    "VLLM_USE_TRTLLM_ATTENTION":
+    lambda: os.getenv("VLLM_USE_TRTLLM_ATTENTION", None),
 
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.
