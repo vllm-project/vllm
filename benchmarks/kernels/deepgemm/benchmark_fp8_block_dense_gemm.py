@@ -4,49 +4,16 @@
 # ruff: noqa: E501
 import time
 
-# Import DeepGEMM functions
-import deep_gemm
 import torch
-from deep_gemm import calc_diff, ceil_div, get_col_major_tma_aligned_tensor
 
-# Import vLLM functions
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    get_col_major_tma_aligned_tensor,
     per_token_group_quant_fp8,
     w8a8_block_fp8_matmul,
 )
 from vllm.triton_utils import triton
-
-
-# Copied from
-# https://github.com/deepseek-ai/DeepGEMM/blob/78cacf70d41d15d688bd493ebc85845f7f2a3d5d/tests/test_core.py#L9
-def per_token_cast_to_fp8(
-        x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Convert tensor to FP8 format with per-token scaling."""
-    assert x.dim() == 2 and x.size(1) % 128 == 0
-    m, n = x.shape
-    x_view = x.view(m, -1, 128)
-    x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
-    return (x_view * (448.0 / x_amax.unsqueeze(2))).to(
-        torch.float8_e4m3fn).view(m, n), (x_amax / 448.0).view(m, -1)
-
-
-# Copied from
-# https://github.com/deepseek-ai/DeepGEMM/blob/78cacf70d41d15d688bd493ebc85845f7f2a3d5d/tests/test_core.py#L17
-def per_block_cast_to_fp8(
-        x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Convert tensor to FP8 format with per-block scaling."""
-    assert x.dim() == 2
-    m, n = x.shape
-    x_padded = torch.zeros((ceil_div(m, 128) * 128, ceil_div(n, 128) * 128),
-                           dtype=x.dtype,
-                           device=x.device)
-    x_padded[:m, :n] = x
-    x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, 128)
-    x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
-    x_scaled = (x_view * (448.0 / x_amax)).to(torch.float8_e4m3fn)
-    return x_scaled.view_as(x_padded)[:m, :n].contiguous(), (
-        x_amax / 448.0).view(x_view.size(0), x_view.size(2))
+from vllm.utils.deep_gemm import calc_diff, fp8_gemm_nt, per_block_cast_to_fp8
 
 
 def benchmark_shape(m: int,
@@ -69,14 +36,14 @@ def benchmark_shape(m: int,
 
     # Pre-quantize B for all implementations
     # (weights can be pre-quantized offline)
-    B_deepgemm, B_scale_deepgemm = per_block_cast_to_fp8(B)
-    B_vllm, B_scale_vllm = per_block_cast_to_fp8(B)
+    B_deepgemm, B_scale_deepgemm = per_block_cast_to_fp8(B, [128, 128], use_ue8m0=True)
+    B_vllm, B_scale_vllm = per_block_cast_to_fp8(B, [128, 128], use_ue8m0=True)
 
     # Block size configuration
     block_size = [128, 128]
 
     # Pre-quantize A for all implementations
-    A_deepgemm, A_scale_deepgemm = per_token_cast_to_fp8(A)
+    A_deepgemm, A_scale_deepgemm = per_token_group_quant_fp8(A, block_size[1])
     A_scale_deepgemm = get_col_major_tma_aligned_tensor(A_scale_deepgemm)
     C_deepgemm = torch.empty((m, n), device='cuda', dtype=torch.bfloat16)
     A_vllm, A_scale_vllm = per_token_group_quant_fp8(A, block_size[1])
@@ -85,7 +52,7 @@ def benchmark_shape(m: int,
 
     # === DeepGEMM Implementation ===
     def deepgemm_gemm():
-        deep_gemm.gemm_fp8_fp8_bf16_nt((A_deepgemm, A_scale_deepgemm),
+        fp8_gemm_nt((A_deepgemm, A_scale_deepgemm),
                                        (B_deepgemm, B_scale_deepgemm),
                                        C_deepgemm)
         return C_deepgemm

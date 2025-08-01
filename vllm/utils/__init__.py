@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, Tuple, TypeVar, Union, cast, overload)
+                    Optional, TextIO, Tuple, TypeVar, Union, cast, overload)
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -166,6 +166,10 @@ GB_bytes = 1_000_000_000
 
 GiB_bytes = 1 << 30
 """The number of bytes in one gibibyte (GiB)."""
+
+# ANSI color codes
+CYAN = '\033[1;36m'
+RESET = '\033[0;0m'
 
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
@@ -2010,49 +2014,6 @@ def supports_kw(
     return False
 
 
-def resolve_mm_processor_kwargs(
-    init_kwargs: Optional[Mapping[str, object]],
-    inference_kwargs: Optional[Mapping[str, object]],
-    callable: Callable[..., object],
-    *,
-    requires_kw_only: bool = True,
-    allow_var_kwargs: bool = False,
-) -> dict[str, Any]:
-    """Applies filtering to eliminate invalid mm_processor_kwargs, i.e.,
-    those who are not explicit keywords to the given callable (of one is
-    given; otherwise no filtering is done), then merges the kwarg dicts,
-    giving priority to inference_kwargs if there are any collisions.
-
-    In the case that no kwarg overrides are provided, returns an empty
-    dict so that it can still be kwarg expanded into the callable later on.
-
-    If allow_var_kwargs=True, allows for things that can be expanded into
-    kwargs as long as they aren't naming collision for var_kwargs or potential
-    positional arguments.
-    """
-    # Filter inference time multimodal processor kwargs provided
-    runtime_mm_kwargs = get_allowed_kwarg_only_overrides(
-        callable,
-        overrides=inference_kwargs,
-        requires_kw_only=requires_kw_only,
-        allow_var_kwargs=allow_var_kwargs,
-    )
-
-    # Filter init time multimodal processor kwargs provided
-    init_mm_kwargs = get_allowed_kwarg_only_overrides(
-        callable,
-        overrides=init_kwargs,
-        requires_kw_only=requires_kw_only,
-        allow_var_kwargs=allow_var_kwargs,
-    )
-
-    # Merge the final processor kwargs, prioritizing inference
-    # time values over the initialization time values.
-    mm_processor_kwargs = {**init_mm_kwargs, **runtime_mm_kwargs}
-
-    return mm_processor_kwargs
-
-
 def get_allowed_kwarg_only_overrides(
     callable: Callable[..., object],
     overrides: Optional[Mapping[str, object]],
@@ -3301,3 +3262,52 @@ def set_process_title(name: str,
     else:
         name = f"{envs.VLLM_PROCESS_NAME_PREFIX}::{name}"
     setproctitle.setproctitle(name)
+
+
+def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
+    """Prepend each output line with process-specific prefix"""
+
+    prefix = f"{CYAN}({worker_name} pid={pid}){RESET} "
+    file_write = file.write
+
+    def write_with_prefix(s: str):
+        if not s:
+            return
+        if file.start_new_line:  # type: ignore[attr-defined]
+            file_write(prefix)
+        idx = 0
+        while (next_idx := s.find('\n', idx)) != -1:
+            next_idx += 1
+            file_write(s[idx:next_idx])
+            if next_idx == len(s):
+                file.start_new_line = True  # type: ignore[attr-defined]
+                return
+            file_write(prefix)
+            idx = next_idx
+        file_write(s[idx:])
+        file.start_new_line = False  # type: ignore[attr-defined]
+
+    file.start_new_line = True  # type: ignore[attr-defined]
+    file.write = write_with_prefix  # type: ignore[method-assign]
+
+
+def decorate_logs(process_name: Optional[str] = None) -> None:
+    """
+    Adds a process-specific prefix to each line of output written to stdout and
+    stderr.
+
+    This function is intended to be called before initializing the api_server,
+    engine_core, or worker classes, so that all subsequent output from the
+    process is prefixed with the process name and PID. This helps distinguish
+    log output from different processes in multi-process environments.
+
+    Args:
+        process_name: Optional; the name of the process to use in the prefix.
+            If not provided, the current process name from the multiprocessing
+            context is used.
+    """
+    if process_name is None:
+        process_name = get_mp_context().current_process().name
+    pid = os.getpid()
+    _add_prefix(sys.stdout, process_name, pid)
+    _add_prefix(sys.stderr, process_name, pid)

@@ -809,11 +809,11 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": 1}
 
-    def get_image_processor(self) -> Glm4vImageProcessor:
-        return self.get_hf_processor().image_processor
+    def get_image_processor(self, **kwargs: object) -> Glm4vImageProcessor:
+        return self.get_hf_processor(**kwargs).image_processor
 
-    def get_video_processor(self) -> Glm4vVideoProcessor:
-        return self.get_hf_processor().video_processor
+    def get_video_processor(self, **kwargs: object) -> Glm4vVideoProcessor:
+        return self.get_hf_processor(**kwargs).video_processor
 
     def _get_vision_info(
         self,
@@ -1275,6 +1275,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, ""),
             architectures=["Glm4ForCausalLM"],
+            hf_config=self.config.get_text_config(),
         )
 
         self.make_empty_intermediate_tensors = (

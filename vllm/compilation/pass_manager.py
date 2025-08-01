@@ -7,7 +7,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
-if current_platform.is_cuda_alike():
+if current_platform.is_cuda():
     from .fusion import FusionPass
     from .collective_fusion import AllReduceFusionPass, AsyncTPPass
     from .fusion_attn import AttnFusionPass

@@ -134,8 +134,8 @@ lm_eval --model vllm \
 - Employ the chat template or instruction template that the model was trained with
 - If you've fine-tuned a model, consider using a sample of your training data for calibration
 - Tune key hyperparameters to the quantization algorithm:
-  - `dampening_frac` sets how much influence the GPTQ algorithm has. Lower values can improve accuracy, but can lead to numerical instabilities that cause the algorithm to fail.
-  - `actorder` sets the activation ordering. When compressing the weights of a layer weight, the order in which channels are quantized matters. Setting `actorder="weight"` can improve accuracy without added latency.
+    - `dampening_frac` sets how much influence the GPTQ algorithm has. Lower values can improve accuracy, but can lead to numerical instabilities that cause the algorithm to fail.
+    - `actorder` sets the activation ordering. When compressing the weights of a layer weight, the order in which channels are quantized matters. Setting `actorder="weight"` can improve accuracy without added latency.
 
 The following is an example of an expanded quantization recipe you can tune to your own use case:
 

@@ -299,3 +299,17 @@ class KVConnectorBase_V1(ABC):
             returned by the engine.
         """
         return False, None
+
+    @classmethod
+    def get_required_kvcache_layout(
+            cls, vllm_config: "VllmConfig") -> Optional[str]:
+        """
+        Get the required KV cache layout for this connector.
+        Args:
+            vllm_config (VllmConfig): the vllm config.
+
+        Returns:
+            str: the required KV cache layout. e.g. HND, or NHD.
+            None if the connector does not require a specific layout.
+        """
+        return None
