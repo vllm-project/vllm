@@ -41,6 +41,7 @@ from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
+from vllm.v1.executor.abstract import Executor as ExecutorV1
 
 # yapf: enable
 
@@ -1448,7 +1449,8 @@ class EngineArgs:
         if (self.pipeline_parallel_size > 1
                 and self.distributed_executor_backend
                 not in (ParallelConfig.distributed_executor_backend, "ray",
-                        "mp", "external_launcher")):
+                        "mp", "external_launcher")
+                and not issubclass(self.distributed_executor_backend, ExecutorV1)):
             name = "Pipeline Parallelism without Ray distributed executor " \
                     "or multiprocessing executor or external launcher"
             _raise_or_fallback(feature_name=name, recommend_to_remove=False)
