@@ -16,6 +16,9 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.rocm_aiter_fa import (
+    AiterFlashAttentionMetadata)
+from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -157,7 +160,12 @@ class EagleProposer:
 
         # On ROCm, both AiterFlashAttention and TritonAttention
         # support multi-token eagle spec decode.
-        if not current_platform.is_rocm():
+        if current_platform.is_rocm():
+            assert isinstance(
+                attn_metadata,
+                (TritonAttentionMetadata, AiterFlashAttentionMetadata,
+                 FlashAttentionMetadata))
+        else:
             # Currently FlashAttention is the only backend that supports
             # multi-token eagle spec decode. This is because the code below
             # makes assumptions about attn_metadata attributes available.
