@@ -1574,31 +1574,55 @@ class ModelConfig:
 
         return self.multimodal_config
 
-    def get_diff_sampling_param(self) -> dict[str, Any]:
+    def try_get_generation_config(self) -> dict[str, Any]:
         """
-        This method returns a dictionary containing the parameters
-        that differ from the default sampling parameters. If
-        `generation_config` is `"vllm"`, an empty dictionary is returned.
+        This method attempts to retrieve the non-default values of the
+        generation config for this model.
+        
+        The generation config can contain information about special tokens, as
+        well as sampling parameters. Which is this method exists separately to
+        get_diff_sampling_param.
 
         Returns:
-            dict[str, Any]: A dictionary with the differing sampling
-            parameters, if `generation_config` is `"vllm"` an empty dictionary.
+            A dictionary containing the non-default generation config.
         """
-        config = {}
-        if self.generation_config != "vllm":
-            # Not using vLLM defaults
-            kwargs: dict[str, Any] = {}
-            if self.generation_config == "auto":
-                # Using HF/model generation config
-                kwargs["model"] = self.hf_config_path or self.model
-                kwargs["revision"] = self.revision
-            else:
-                # Treat generation_config as path
-                kwargs["model"] = self.generation_config
-            kwargs["trust_remote_code"] = self.trust_remote_code
-            maybe_config = try_get_generation_config(**kwargs)
-            if maybe_config is not None:
-                config = maybe_config.to_diff_dict()
+        if self.generation_config in {"auto", "vllm"}:
+            config = try_get_generation_config(
+                self.hf_config_path or self.model,
+                trust_remote_code=self.trust_remote_code,
+                revision=self.revision,
+            )
+        else:
+            config = try_get_generation_config(
+                self.generation_config,
+                trust_remote_code=self.trust_remote_code,
+            )
+
+        if config is None:
+            return {}
+
+        return config.to_diff_dict()
+
+    def get_diff_sampling_param(self) -> dict[str, Any]:
+        """
+        This method returns a dictionary containing the non-default values of
+        the sampling parameters for this model with `override_generation_config`
+        applied.
+
+        The default sampling parameters are:
+
+        - vLLM's neutral defaults if `self.generation_config="vllm"`
+        - the model's defaults if `self.generation_config="auto"`
+        - as defined in `generation_config.json` if
+            `self.generation_config="path/to/generation_config/dir"`
+
+        Returns:
+            A dictionary containing the non-default sampling parameters.
+        """
+        if self.generation_config == "vllm":
+            config = {}
+        else:
+            config = self.try_get_generation_config()
 
         # Overriding with given generation config
         config.update(self.override_generation_config)

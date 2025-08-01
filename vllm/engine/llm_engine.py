@@ -251,7 +251,7 @@ class LLMEngine:
 
         self.seq_counter = Counter()
         self.generation_config_fields = (
-            self.model_config.get_diff_sampling_param())
+            self.model_config.try_get_generation_config())
 
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer,
