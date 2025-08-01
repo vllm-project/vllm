@@ -70,14 +70,15 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                  vllm_config: VllmConfig, device: torch.device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device,
                          AiterMLAMetadata)
-        assert self.kv_cache_spec.block_size == 1, "AITER MLA" \
-            "only supports block size 1."
 
         self.compilation_config = vllm_config.compilation_config
+        page_size = self.kv_cache_spec.block_size
         max_num_pages_per_req = cdiv(vllm_config.model_config.max_model_len,
-                                     self.kv_cache_spec.block_size)
+                                     page_size)
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
+        if page_size > 1:
+            max_num_pages = max_num_pages * page_size
 
         # Preparing persistent buffers
         if vllm_config.compilation_config.full_cuda_graph:
@@ -99,24 +100,51 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     def _build_decode(self, block_table_tensor: torch.Tensor,
                       seq_lens: torch.Tensor) -> AiterMLADecodeMetadata:
         page_size = self.kv_cache_spec.block_size
-        block_table_bounds = (seq_lens + page_size - 1) // page_size
         device = self.device
         num_reqs = seq_lens.size(0)
 
-        mask = (torch.arange(block_table_tensor.size(1),
-                             dtype=block_table_tensor.dtype,
-                             device=device).unsqueeze(0)
-                < block_table_bounds.unsqueeze(1))
-        paged_kv_indices = block_table_tensor[mask]
+        if page_size == 1:
+            block_table_bounds = (seq_lens + page_size - 1) // page_size
+            mask = (torch.arange(block_table_tensor.size(1),
+                                 dtype=block_table_tensor.dtype,
+                                 device=device).unsqueeze(0)
+                    < block_table_bounds.unsqueeze(1))
+            paged_kv_indices = block_table_tensor[mask]
 
-        paged_kv_last_page_len = seq_lens % page_size
-        paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
-                                             page_size, paged_kv_last_page_len)
+            paged_kv_last_page_len = seq_lens % page_size
+            paged_kv_last_page_len = torch.where(paged_kv_last_page_len == 0,
+                                                 page_size,
+                                                 paged_kv_last_page_len)
 
-        paged_kv_indptr = torch.cat([
-            torch.zeros(1, dtype=block_table_bounds.dtype, device=device),
-            block_table_bounds.cumsum(dim=0, dtype=torch.int32)
-        ])
+            paged_kv_indptr = torch.cat([
+                torch.zeros(1, dtype=block_table_bounds.dtype, device=device),
+                block_table_bounds.cumsum(dim=0, dtype=torch.int32)
+            ])
+        else:
+            # Expand block table as if the page size were 1
+            block_offsets = torch.arange(page_size,
+                                         device=device,
+                                         dtype=torch.int32)
+            expanded_block_table = block_table.unsqueeze(
+                -1) * page_size + block_offsets
+            flat_block_table = expanded_block_table.view(
+                block_table.size(0), -1)
+
+            max_model_len = flat_block_table.size(1)
+            mask = torch.arange(
+                max_model_len,
+                device=device).unsqueeze(0) < seq_lens.unsqueeze(1)
+
+            # e.g. block_table = [[1, 2, 4], [3, 5, 0]], seq_lens = [5, 3] and page_size = 2,
+            # then paged_kv_indices = [1, 2, 4, 5, 8, 3, 4, 10]
+            paged_kv_indices = flat_block_table[mask]
+            paged_kv_indptr = torch.cat([
+                torch.zeros(1, dtype=seq_lens.dtype, device=device),
+                seq_lens.cumsum(dim=0, dtype=torch.int32)
+            ])
+            paged_kv_last_page_len = torch.ones_like(seq_lens,
+                                                     dtype=torch.int32,
+                                                     device=device)
 
         if self.compilation_config.full_cuda_graph:
 
