@@ -253,7 +253,8 @@ _MULTIMODAL_MODELS = {
 
 _SPECULATIVE_DECODING_MODELS = {
     "MiMoMTPModel": ("mimo_mtp", "MiMoMTP"),
-    "EagleLlamaForCausalLM": ("llama_eagle", "EagleLlamaForCausalLM"),
+    "EagleLlamaForCausalLM": ("llama_eagle", "EagleLlamaForCausalLM"),    # noqa: E501
+    "Eagle3HunYuanDenseV1ForCausalLM": ("hunyuan_v1_eagle3", "Eagle3HunYuanDenseV1ForCausalLM"), # noqa: E501
     "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
