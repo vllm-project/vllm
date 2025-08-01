@@ -129,7 +129,7 @@ Data parallelism replicates the entire model across multiple GPU sets and proces
 Data parallelism can be combined with the other parallelism strategies and is set by `data_parallel_size=N`.
 Note that MoE layers will be sharded according to the product of the tensor parallel size and data parallel size.
 
-## Multi-modal processing
+## Multi-modal Processing
 
 ### Processor Cache
 
