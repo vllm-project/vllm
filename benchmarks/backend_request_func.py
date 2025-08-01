@@ -209,36 +209,80 @@ async def async_request_deepspeed_mii(
             "max_tokens": request_func_input.output_len,
             "temperature": 0.01,  # deepspeed-mii does not accept 0.0 temp.
             "top_p": 1.0,
+            "stream": True,
         }
         headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
 
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
 
-        # NOTE: DeepSpeed-MII doesn't support streaming as of Jan 28 2024,
-        # will use 0 as placeholder.
-        # See https://github.com/microsoft/DeepSpeed-MII/pull/311
-        output.ttft = 0
-
+        generated_text = ""
         st = time.perf_counter()
+        most_recent_timestamp = st
+
         try:
             async with session.post(
                 url=api_url, json=payload, headers=headers
             ) as response:
                 if response.status == 200:
-                    parsed_resp = await response.json()
-                    output.latency = time.perf_counter() - st
-                    if "choices" in parsed_resp:
-                        output.generated_text = parsed_resp["choices"][0]["text"]
-                    elif "text" in parsed_resp:
-                        output.generated_text = parsed_resp["text"][0]
+                    first_chunk_received = False
+                    async for chunk_bytes in response.content:
+                        chunk_bytes = chunk_bytes.strip()
+                        if not chunk_bytes:
+                            continue
+
+                        chunk = chunk_bytes.decode("utf-8").removeprefix("data: ")
+                        if chunk != "[DONE]":
+                            data = json.loads(chunk)
+
+                            # NOTE: Some completion API might have a last
+                            # usage summary response without a token so we
+                            # want to check a token was generated
+                            if choices := data.get("choices"):
+                                # Note that text could be empty here
+                                # e.g. for special tokens
+                                text = choices[0].get("text")
+                                timestamp = time.perf_counter()
+                                # First token
+                                if not first_chunk_received:
+                                    first_chunk_received = True
+                                    ttft = time.perf_counter() - st
+                                    output.ttft = ttft
+
+                                # Decoding phase
+                                else:
+                                    output.itl.append(timestamp - most_recent_timestamp)
+                                most_recent_timestamp = timestamp
+                                generated_text += text or ""
+
+                            # Note that leaving this because of compatibility concerns
+                            # with older versions of DeepSpeed-MII
+                            # But it's probably okay to delete it.
+                            elif text := data.get("text"):
+                                # Note that text could be empty here
+                                # e.g. for special tokens
+                                timestamp = time.perf_counter()
+                                # First token
+                                if not first_chunk_received:
+                                    first_chunk_received = True
+                                    ttft = time.perf_counter() - st
+                                    output.ttft = ttft
+                                else:
+                                    output.itl.append(timestamp - most_recent_timestamp)
+                                most_recent_timestamp = timestamp
+                                generated_text += text or ""
+                            elif usage := data.get("usage"):
+                                output.output_tokens = usage.get("completion_tokens")
+                    if first_chunk_received:
+                        output.success = True
                     else:
-                        output.error = (
-                            "Unexpected response format: "
-                            "neither 'choices' nor 'text' found"
-                        )
                         output.success = False
-                    output.success = True
+                        output.error = (
+                            "Never received a valid chunk to calculate TTFT."
+                            "This response will be marked as failed!"
+                        )
+                    output.generated_text = generated_text
+                    output.latency = most_recent_timestamp - st
                 else:
                     output.error = response.reason or ""
                     output.success = False
