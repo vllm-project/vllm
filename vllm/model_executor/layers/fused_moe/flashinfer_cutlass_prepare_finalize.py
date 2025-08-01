@@ -35,6 +35,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.num_dispatchers_ = num_dispatchers
         self.use_dp = use_dp
         self.a1_gscale = a1_gscale
+        self.local_tokens = None
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:

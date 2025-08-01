@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import textwrap
+import traceback
 from itertools import product
 from typing import Optional
 
@@ -39,12 +41,29 @@ meets_package_requirements = pytest.mark.skipif(
 )
 
 
+def format_result(verbose, msg, ex=None):
+    if ex is not None:
+        x = str(ex)
+        newx = x.strip(" \n\t")[:16]
+        if len(newx) < len(x):
+            newx = newx + " ..."
+
+        prefix = "E\t"
+        print(f"{textwrap.indent(traceback.format_exc(), prefix)}")
+        print(f"FAILED {msg} - {newx}\n")
+    elif verbose:
+        print(f"PASSED {msg}")
+    else:
+        print(".", end="")
+
+
 def rank_worker(
     pgi: ProcessGroupInfo,
     vllm_config: VllmConfig,
     cpu_group,
     config: Config,
     weights: WeightTensors,
+    verbose: bool,
 ):
     current_platform.seed_everything(pgi.rank)
 
@@ -61,35 +80,51 @@ def rank_worker(
     TOPKs = config.topks
     assert isinstance(TOPKs, list)
 
+    exceptions = []
+    count = 0
+
     for m, topk in product(Ms, TOPKs):
-        print(f"Running m={m}, topk={topk} ...")
-        # override m and topk
-        cfgx = copy.deepcopy(config)
-        cfgx.Ms = m
-        cfgx.topks = topk
+        try:
+            print(f"Running m={m}, topk={topk} ...")
+            count = count + 1
+            # override m and topk
+            cfgx = copy.deepcopy(config)
+            cfgx.Ms = m
+            cfgx.topks = topk
 
-        # inputs for rank
-        rank_tensors = RankTensors.make(cfgx, pgi)
+            # inputs for rank
+            rank_tensors = RankTensors.make(cfgx, pgi)
 
-        # modular kernel out
-        mk_out = run_modular_kernel(pgi, vllm_config, cfgx, weights,
-                                    rank_tensors)
+            # modular kernel out
+            mk_out = run_modular_kernel(pgi, vllm_config, cfgx, weights,
+                                        rank_tensors)
 
-        with set_current_vllm_config(vllm_config):
-            ref_out = reference_moe_impl(cfgx, weights, rank_tensors)
+            with set_current_vllm_config(vllm_config):
+                ref_out = reference_moe_impl(cfgx, weights, rank_tensors)
 
-        torch.testing.assert_close(ref_out, mk_out, atol=3e-2, rtol=3e-2)
+            torch.testing.assert_close(ref_out, mk_out, atol=3e-2, rtol=3e-2)
+            format_result(verbose, config.describe())
+        except Exception as ex:
+            format_result(verbose, config.describe(), ex)
+            exceptions.append(ex)
+
+    if len(exceptions) > 0:
+        raise RuntimeError(
+            f"{len(exceptions)} of {count} tests failed in child process, "
+            f"rank={pgi.rank}.")
+    else:
+        print(f"{count} of {count} tests passed in child process, "
+              f"rank={pgi.rank}.")
 
 
-def run(config: Config):
+def run(config: Config, verbose: bool):
     assert config.is_valid()
-    print(f"Testing config \n{config.describe()} ...")
 
     weights: WeightTensors = WeightTensors.make(config)
 
     vllm_config, env_dict = config.make_env_data()
     parallel_launch_with_config(config.world_size, rank_worker, vllm_config,
-                                env_dict, config, weights)
+                                env_dict, config, weights, verbose)
 
 
 Ms = [32, 64]
@@ -134,7 +169,7 @@ def test_modular_kernel_combinations_multigpu(
         quant_config: FusedMoEQuantConfig,
         combination: tuple[mk.FusedMoEPrepareAndFinalize,
                            mk.FusedMoEPermuteExpertsUnpermute],
-        fused_moe_chunk_size: Optional[int], world_size: int):
+        fused_moe_chunk_size: Optional[int], world_size: int, pytestconfig):
 
     config = Config(
         Ms=Ms,
@@ -155,8 +190,8 @@ def test_modular_kernel_combinations_multigpu(
     if is_nyi_config(config):
         pytest.skip(f"Tests config {config} is nyi. Skipping ...")
 
-    print(f"{config.describe()}")
-    run(config)
+    verbosity = pytestconfig.getoption('verbose')
+    run(config, verbosity > 0)
 
 
 @pytest.mark.parametrize("k", Ks)
@@ -175,7 +210,7 @@ def test_modular_kernel_combinations_singlegpu(
         quant_config: FusedMoEQuantConfig,
         combination: tuple[mk.FusedMoEPrepareAndFinalize,
                            mk.FusedMoEPermuteExpertsUnpermute],
-        fused_moe_chunk_size: Optional[int], world_size: int):
+        fused_moe_chunk_size: Optional[int], world_size: int, pytestconfig):
     config = Config(
         Ms=Ms,
         K=k,
@@ -196,7 +231,9 @@ def test_modular_kernel_combinations_singlegpu(
     if is_nyi_config(config):
         pytest.skip(f"Tests config {config} is nyi. Skipping ...")
 
-    run(config)
+    verbosity = pytestconfig.getoption('verbose')
+
+    run(config, verbosity > 0)
 
 
 if __name__ == '__main__':
@@ -211,4 +248,4 @@ if __name__ == '__main__':
     args = parser.parse_args()
     config = make_config(args)
 
-    run(config)
+    run(config, True)

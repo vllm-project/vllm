@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
@@ -198,7 +198,7 @@ def make_test_weight(
     rows: int,
     cols: int,
     in_dtype: torch.dtype = torch.bfloat16,
-    quant_dtype: Optional[torch.dtype] = None,
+    quant_dtype: Union[torch.dtype, str, None] = None,
     block_shape: Optional[list[int]] = None,
     per_act_token_quant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
@@ -234,7 +234,7 @@ def make_test_weights(
     n: int,
     k: int,
     in_dtype: torch.dtype = torch.bfloat16,
-    quant_dtype: Optional[torch.dtype] = None,
+    quant_dtype: Union[torch.dtype, str, None] = None,
     block_shape: Optional[list[int]] = None,
     per_act_token_quant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], torch.Tensor,
@@ -245,3 +245,17 @@ def make_test_weights(
         *make_test_weight(e, k, n, in_dtype, quant_dtype, block_shape,
                           per_act_token_quant),
     )
+
+
+def per_token_cast_to_fp8(
+        x: torch.Tensor,
+        block_size: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
+    assert x.dim() == 2
+    m, n = x.shape
+    pad_size = (block_size - (n % block_size)) % block_size
+    x = torch.nn.functional.pad(x,
+                                (0, pad_size), value=0) if pad_size > 0 else x
+    x_view = x.view(m, -1, block_size)
+    x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
+    fp8_data = (x_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn)
+    return fp8_data.view(m, n + pad_size)[:, :n], (x_amax / 448.0).view(m, -1)

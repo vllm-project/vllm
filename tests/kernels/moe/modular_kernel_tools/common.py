@@ -7,6 +7,7 @@ import torch
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from tests.kernels.moe.utils import make_test_weights, per_token_cast_to_fp8
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig
 from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
@@ -31,8 +32,6 @@ from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
 from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
 
 from .parallel_utils import ProcessGroupInfo
-from .utils import (make_block_quant_fp8_weights, make_non_quant_weights,
-                    make_quant_fp8_weights, per_token_cast_to_fp8)
 
 if has_pplx():
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
@@ -95,7 +94,7 @@ class Config:
         return self.Ms
 
     @property
-    def quant_dtype(self) -> Optional[torch.dtype]:
+    def quant_dtype(self) -> Union[torch.dtype, str, None]:
         if self.quant_config is None:
             return None
         return self.quant_config.quant_dtype
@@ -344,34 +343,14 @@ class WeightTensors:
 
     @staticmethod
     def make(config: Config) -> "WeightTensors":
-
-        if config.quant_dtype is None:
-            # just make normal dtype weights
-            w1, w2 = make_non_quant_weights(e=config.E,
-                                            n=config.N,
-                                            k=config.K,
-                                            dtype=config.dtype)
-            return WeightTensors(w1=w1, w2=w2, w1_scale=None, w2_scale=None)
-
-        assert config.quant_dtype == torch.float8_e4m3fn
-        if not config.is_fp8_block_quantized():
-            w1, w2, w1_scale, w2_scale = make_quant_fp8_weights(
-                e=config.E,
-                n=config.N,
-                k=config.K,
-                per_out_channel_quant=config.is_per_out_ch_quant,
-            )
-            return WeightTensors(w1=w1,
-                                 w2=w2,
-                                 w1_scale=w1_scale,
-                                 w2_scale=w2_scale)
-
-        assert config.quant_block_shape is not None
-        w1, w2, w1_scale, w2_scale = make_block_quant_fp8_weights(
+        _, w1, w1_scale, _, w2, w2_scale = make_test_weights(
             e=config.E,
             n=config.N,
             k=config.K,
-            block_size=config.quant_block_shape,
+            in_dtype=config.dtype,
+            quant_dtype=config.quant_dtype,
+            block_shape=config.quant_block_shape,
+            per_act_token_quant=config.is_per_out_ch_quant,
         )
         return WeightTensors(w1=w1,
                              w2=w2,
@@ -560,6 +539,9 @@ def make_fused_experts(
         }
         print(f"Making CutlassExpertsFp8 {kwargs} ...")
         experts = CutlassExpertsFp8(**kwargs)
+    else:
+        raise RuntimeError(
+            f"Unknown fused experts type: {config.fused_experts_type}")
 
     return experts
 
