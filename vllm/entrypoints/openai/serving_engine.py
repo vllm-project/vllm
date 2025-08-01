@@ -615,14 +615,14 @@ class OpenAIServing:
             max_tokens = request.max_completion_tokens or request.max_tokens
         else:
             max_tokens = getattr(request, "max_tokens", None)
+
         if token_num >= self.max_model_len:
             raise ValueError(
                 f"This model's maximum context length is "
                 f"{self.max_model_len} tokens. However, you requested "
                 f"{token_num} tokens in the messages, "
                 f"Please reduce the length of the messages.")
-        elif max_tokens is not None:
-            if token_num + max_tokens > self.max_model_len:
+        elif max_tokens and token_num + max_tokens > self.max_model_len:
                 raise ValueError(
                     f"This model's maximum context length is "
                     f"{self.max_model_len} tokens. However, you requested "
