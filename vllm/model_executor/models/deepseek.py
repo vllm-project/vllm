@@ -29,7 +29,7 @@ from typing import Any, Optional, Union
 import torch
 from torch import nn
 from transformers import PretrainedConfig
-
+from safetensors.torch import load_file as load_safetensor
 from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
@@ -484,3 +484,103 @@ class DeepseekForCausalLM(nn.Module, SupportsPP):
                                                    torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+
+class DeepseekForCausalLMWithAdditionalHeads(DeepseekForCausalLM):
+    """
+    Extends DeepseekForCausalLM to add multiple binary classification heads, computed via
+    a dedicated `compute_additional_head` method using the last token embedding.
+    
+    Example score_heads_config:
+        [
+            {
+                "name": "self_harm",
+                "location": "/path/to/self_harm_head.safetensors",
+                "num_layers": 2,
+                "head_hidden_size": 4096
+            },
+            {
+                "name": "scim",
+                "location": "/path/to/scim_head.safetensors",
+                "num_layers": 1,
+                "head_hidden_size": 4096
+            }
+        ]
+    """
+    
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", score_heads_config: Optional[list] = None):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        
+        self.classifier_heads = nn.ModuleDict()
+        self.head_names = []
+        if score_heads_config is None or len(score_heads_config) == 0:
+            raise ValueError("score_heads_config is required")
+        
+        for head_config in score_heads_config:
+            head_name = head_config["name"]
+            tensor_path = head_config["location"]
+            num_layers = head_config["num_layers"]
+            head_hidden_size = head_config["head_hidden_size"]
+            
+            head = self._build_classification_head(head_hidden_size, num_layers)
+            state_dict = load_safetensor(tensor_path)
+            try:
+                head.load_state_dict(state_dict)
+            except RuntimeError as e:
+                raise RuntimeError(f"Failed to load state dict for head '{head_name}': {e}")
+            self.classifier_heads[head_name] = head
+            self.head_names.append(head_name)
+
+    def _build_classification_head(self, head_hidden_size: int, num_layers: int) -> nn.Sequential:
+        """Build a binary classification head with the specified number of layers."""
+        layers = []
+        token_hidden_size = self.config.hidden_size
+        
+        if num_layers == 1:
+            layers = [nn.Linear(token_hidden_size, 1), nn.Sigmoid()]
+        else:
+            # First layer: token_hidden_size -> head_hidden_size
+            layers.append(nn.Linear(token_hidden_size, head_hidden_size))
+            layers.append(nn.ReLU())
+            
+            # Middle layers: head_hidden_size -> head_hidden_size
+            for _ in range(num_layers - 2):
+                layers.append(nn.Linear(head_hidden_size, head_hidden_size))
+                layers.append(nn.ReLU())
+            
+            # Final layer: head_hidden_size -> 1
+            layers.append(nn.Linear(head_hidden_size, 1))
+            layers.append(nn.Sigmoid())
+        
+        return nn.Sequential(*layers)
+
+    def compute_additional_head(self, hidden_states: torch.FloatTensor) -> torch.Tensor:
+        """
+        Compute all additional binary classification head scores from the final token embedding.
+        All heads are computed in parallel for better performance.
+
+        Args:
+            hidden_states (torch.FloatTensor): all hidden states from the LM, shape (batch, seq_len, hidden_size).
+
+        Returns:
+            torch.Tensor: shape (batch, num_heads) where each column corresponds to a head in self.head_names order.
+        """
+        last_hidden = hidden_states[:, -1, :]
+        
+        head_outputs = []
+        for name in self.head_names:
+            head = self.classifier_heads[name]
+            logits = head(last_hidden)
+            head_outputs.append(logits.squeeze(-1))
+        
+        return torch.stack(head_outputs, dim=1)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """
+        Load weights for both the base model and additional classification heads.
+        """
+        # First load the base model weights
+        loaded_params = super().load_weights(weights)
+        
+        # Additional heads are loaded during initialization, so no additional loading needed here
+        return loaded_params
