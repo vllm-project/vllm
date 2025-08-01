@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 import glob
 import os
@@ -216,16 +217,6 @@ class DefaultModelLoader(BaseModelLoader):
                     xm.mark_step()
 
             weights_iterator = _xla_weights_iterator(weights_iterator)
-
-        elif current_platform.is_hpu():
-            import habana_frameworks.torch.core as htcore
-
-            def _hpu_weights_iterator(iterator: Generator):
-                for weights in iterator:
-                    yield weights
-                    htcore.mark_step()
-
-            weights_iterator = _hpu_weights_iterator(weights_iterator)
 
         if self.counter_before_loading_weights == 0.0:
             self.counter_before_loading_weights = time.perf_counter()

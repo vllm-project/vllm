@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from __future__ import annotations
 
+import tempfile
 from typing import Any, Optional, Union
 
 import pytest
@@ -110,6 +112,11 @@ def test_full_graph(
                            pass_config=PassConfig(enable_fusion=True,
                                                   enable_noop=True)), model)
         for model in models_list(keywords=["FP8-dynamic", "quantized.w8a8"])
+    ] + [
+        # Test depyf integration works
+        (CompilationConfig(level=CompilationLevel.PIECEWISE,
+                           debug_dump_path=tempfile.gettempdir()),
+         ("facebook/opt-125m", {})),
     ])
 # only test some of the models
 @create_new_process_for_each_test()

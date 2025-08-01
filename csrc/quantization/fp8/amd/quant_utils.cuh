@@ -446,8 +446,6 @@ scaled_vec_conversion<uint16_t, uint8_t>(const uint8_t& a, float scale) {
 template <>
 __inline__ __device__ uint32_t
 scaled_vec_conversion<uint32_t, uint16_t>(const uint16_t& a, float scale) {
-  [[maybe_unused]] __half2_raw h2r =
-      __hip_cvt_fp8x2_to_halfraw2(a, fp8_type::__default_interpret);
   union {
     __half2_raw h2r;
     uint32_t ui32;

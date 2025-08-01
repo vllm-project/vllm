@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import base64
@@ -8,6 +9,7 @@ from typing import Final, Literal, Optional, Union, cast
 
 import jinja2
 import numpy as np
+import torch
 from fastapi import Request
 from typing_extensions import assert_never
 
@@ -38,7 +40,8 @@ def _get_data(
     elif encoding_format == "base64":
         # Force to use float32 for base64 encoding
         # to match the OpenAI python client behavior
-        pooling_bytes = np.array(output.data, dtype="float32").tobytes()
+        pt_float32 = output.data.to(dtype=torch.float32)
+        pooling_bytes = np.array(pt_float32, dtype="float32").tobytes()
         return base64.b64encode(pooling_bytes).decode("utf-8")
 
     assert_never(encoding_format)
@@ -138,6 +141,11 @@ class OpenAIServingPooling(OpenAIServing):
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
             pooling_params = request.to_pooling_params()
+
+            try:
+                pooling_params.verify("encode", self.model_config)
+            except ValueError as e:
+                return self.create_error_response(str(e))
 
             for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"

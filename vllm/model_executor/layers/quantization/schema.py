@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This file contains the Pydantic schemas for various quantization-related
 parameters. When a relevant quantization technique is specified, these

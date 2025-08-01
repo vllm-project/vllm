@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Verify that seeded random sampling is deterministic.
 
 Run `pytest tests/samplers/test_seeded_generate.py`.

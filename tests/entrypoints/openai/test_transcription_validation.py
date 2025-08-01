@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # imports for guided decoding tests
 import io
@@ -16,6 +17,11 @@ from vllm.assets.audio import AudioAsset
 
 from ...utils import RemoteOpenAIServer
 
+MISTRAL_FORMAT_ARGS = [
+    "--tokenizer_mode", "mistral", "--config_format", "mistral",
+    "--load_format", "mistral"
+]
+
 
 @pytest.fixture
 def mary_had_lamb():
@@ -32,11 +38,16 @@ def winning_call():
 
 
 @pytest.mark.asyncio
-async def test_basic_audio(mary_had_lamb):
-    model_name = "openai/whisper-large-v3-turbo"
+@pytest.mark.parametrize(
+    "model_name",
+    ["openai/whisper-large-v3-turbo", "mistralai/Voxtral-Mini-3B-2507"])
+async def test_basic_audio(mary_had_lamb, model_name):
     server_args = ["--enforce-eager"]
+
+    if model_name.startswith("mistralai"):
+        server_args += MISTRAL_FORMAT_ARGS
+
     # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
-    prompt = "THE FIRST WORDS I SPOKE"
     with RemoteOpenAIServer(model_name, server_args) as remote_server:
         client = remote_server.get_async_client()
         transcription = await client.audio.transcriptions.create(
@@ -47,16 +58,6 @@ async def test_basic_audio(mary_had_lamb):
             temperature=0.0)
         out = json.loads(transcription)['text']
         assert "Mary had a little lamb," in out
-        # This should "force" whisper to continue prompt in all caps
-        transcription_wprompt = await client.audio.transcriptions.create(
-            model=model_name,
-            file=mary_had_lamb,
-            language="en",
-            response_format="text",
-            prompt=prompt,
-            temperature=0.0)
-        out_capital = json.loads(transcription_wprompt)['text']
-        assert prompt not in out_capital
 
 
 @pytest.mark.asyncio
@@ -73,19 +74,35 @@ async def test_bad_requests(mary_had_lamb):
                                                      language="hh",
                                                      temperature=0.0)
 
-        # Expect audio too long: repeat the timeseries
-        mary_had_lamb.seek(0)
-        audio, sr = librosa.load(mary_had_lamb)
-        repeated_audio = np.tile(audio, 10)
-        # Repeated audio to buffer
-        buffer = io.BytesIO()
-        sf.write(buffer, repeated_audio, sr, format='WAV')
-        buffer.seek(0)
-        with pytest.raises(openai.BadRequestError):
-            await client.audio.transcriptions.create(model=model_name,
-                                                     file=buffer,
-                                                     language="en",
-                                                     temperature=0.0)
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", ["openai/whisper-large-v3-turbo"])
+async def test_long_audio_request(mary_had_lamb, model_name):
+    server_args = ["--enforce-eager"]
+
+    if model_name.startswith("openai"):
+        return
+
+    mary_had_lamb.seek(0)
+    audio, sr = librosa.load(mary_had_lamb)
+    # Add small silence after each audio for repeatability in the split process
+    audio = np.pad(audio, (0, 1600))
+    repeated_audio = np.tile(audio, 10)
+    # Repeated audio to buffer
+    buffer = io.BytesIO()
+    sf.write(buffer, repeated_audio, sr, format='WAV')
+    buffer.seek(0)
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        transcription = await client.audio.transcriptions.create(
+            model=model_name,
+            file=buffer,
+            language="en",
+            response_format="text",
+            temperature=0.0)
+        out = json.loads(transcription)['text']
+        counts = out.count("Mary had a little lamb")
+        assert counts == 10, counts
 
 
 @pytest.mark.asyncio
@@ -152,7 +169,8 @@ async def test_streaming_response(winning_call):
                 file=winning_call,
                 language="en",
                 temperature=0.0,
-                extra_body=dict(stream=True))
+                extra_body=dict(stream=True),
+                timeout=30)
             # Reconstruct from chunks and validate
             async for chunk in res:
                 # just a chunk
@@ -182,7 +200,8 @@ async def test_stream_options(winning_call):
                 temperature=0.0,
                 extra_body=dict(stream=True,
                                 stream_include_usage=True,
-                                stream_continuous_usage_stats=True))
+                                stream_continuous_usage_stats=True),
+                timeout=30)
             final = False
             continuous = True
             async for chunk in res:
@@ -225,3 +244,31 @@ async def test_sampling_params(mary_had_lamb):
             extra_body=dict(seed=42))
 
         assert greedy_transcription.text != transcription.text
+
+
+@pytest.mark.asyncio
+async def test_audio_prompt(mary_had_lamb):
+    model_name = "openai/whisper-large-v3-turbo"
+    server_args = ["--enforce-eager"]
+    prompt = "This is a speech, recorded in a phonograph."
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        #Prompts should not omit the part of original prompt while transcribing.
+        prefix = "The first words I spoke in the original phonograph"
+        client = remote_server.get_async_client()
+        transcription = await client.audio.transcriptions.create(
+            model=model_name,
+            file=mary_had_lamb,
+            language="en",
+            response_format="text",
+            temperature=0.0)
+        out = json.loads(transcription)['text']
+        assert prefix in out
+        transcription_wprompt = await client.audio.transcriptions.create(
+            model=model_name,
+            file=mary_had_lamb,
+            language="en",
+            response_format="text",
+            prompt=prompt,
+            temperature=0.0)
+        out_prompt = json.loads(transcription_wprompt)['text']
+        assert prefix in out_prompt

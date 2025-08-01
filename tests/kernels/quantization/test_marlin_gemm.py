@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the marlin kernel.
 
 Run `pytest tests/kernels/marlin/test_marlin_gemm.py`.

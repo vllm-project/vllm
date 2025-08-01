@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Types for writing multimodal model tests."""
 from collections.abc import Iterable
 from enum import Enum

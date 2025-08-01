@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from .data import (DecoderOnlyInputs, EmbedsInputs, EncoderDecoderInputs,
                    ExplicitEncoderDecoderPrompt, ProcessorInputs, PromptType,

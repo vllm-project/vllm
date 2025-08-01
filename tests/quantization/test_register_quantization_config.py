@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests register custom quantization config.
 
 See https://github.com/vllm-project/vllm/issues/11926 for more details.
@@ -52,6 +53,7 @@ class CustomQuantConfig(QuantizationConfig):
 
     def __init__(self, num_bits: int = 8) -> None:
         """Initialize the quantization config."""
+        super().__init__()
         self.num_bits = num_bits
 
     def get_name(self) -> QuantizationMethods:

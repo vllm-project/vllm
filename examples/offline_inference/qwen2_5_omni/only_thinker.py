@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This example shows how to use vLLM for running offline inference
 with the correct prompt format on Qwen2.5-Omni (thinker only).

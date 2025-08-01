@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
 from typing import Optional
 
@@ -34,8 +35,8 @@ class MirroredProcessingCache:
 
     def __init__(self, model_config):
         mm_config = model_config.multimodal_config
-        disable_mm_preprocessor_cache = mm_config is not None and \
-            not mm_config.disable_mm_preprocessor_cache
+        disable_mm_preprocessor_cache = (
+            mm_config is not None and mm_config.disable_mm_preprocessor_cache)
         self.use_cache = not disable_mm_preprocessor_cache
         self.mm_cache = ProcessingCache.get_lru_cache(VLLM_MM_INPUT_CACHE_GIB,
                                                       MultiModalKwargs)

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Compare the outputs of a GPTQ model to a Marlin_24 model.
 
 Note: GPTQ and Marlin_24 do not have bitwise correctness.

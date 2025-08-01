@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This example shows how to run offline inference with an EAGLE speculative
 decoding model on neuron. To use EAGLE speculative decoding, you must use
@@ -53,7 +54,7 @@ def main():
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, \n\n\n\ Generated text: {generated_text!r}")
+        print(f"Prompt: {prompt!r}, \n\n\n Generated text: {generated_text!r}")
 
 
 if __name__ == "__main__":

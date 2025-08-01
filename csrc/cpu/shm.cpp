@@ -7,9 +7,10 @@
 
 namespace {
 #define MAX_SHM_RANK_NUM 8
-#define MAX_THREAD_NUM 12
-#define PER_THREAD_SHM_BUFFER_BYTES (4 * 1024 * 1024)
-#define MIN_THREAD_PROCESS_SIZE (8 * 1024)
+#define PER_THREAD_SHM_BUFFER_BYTES (2 * 1024 * 1024)
+static_assert(PER_THREAD_SHM_BUFFER_BYTES % 2 == 0);
+#define PER_THREAD_SHM_BUFFER_OFFSET (PER_THREAD_SHM_BUFFER_BYTES >> 1)
+#define MIN_THREAD_PROCESS_SIZE (256)
 #define MAX_P2P_SEND_TENSOR_NUM 8
 
 template <typename scalar_t>
@@ -32,10 +33,10 @@ struct KernelVecType<c10::Half> {
   using scalar_vec_t = vec_op::FP16Vec16;
 };
 
-enum class ThreadSHMStat : char { THREAD_READY = 0, SHM_DATA_READY, DONE };
-
 struct ThreadSHMContext {
-  volatile ThreadSHMStat thread_stats[MAX_SHM_RANK_NUM];
+  volatile char _curr_thread_stamp;
+  volatile char _ready_thread_stamp;
+  char _padding1[6];
   int thread_id;
   int thread_num;
   int rank;
@@ -44,14 +45,19 @@ struct ThreadSHMContext {
   int swizzled_ranks[MAX_SHM_RANK_NUM];
   void* thread_shm_ptrs[MAX_SHM_RANK_NUM];
   ThreadSHMContext* shm_contexts[MAX_SHM_RANK_NUM];
+  size_t _thread_buffer_mask;
+  char _padding2[56];
 
   ThreadSHMContext(const int thread_id, const int thread_num, const int rank,
                    const int group_size, void* thread_shm_ptr)
-      : thread_id(thread_id),
+      : _curr_thread_stamp(1),
+        _ready_thread_stamp(0),
+        thread_id(thread_id),
         thread_num(thread_num),
         rank(rank),
         group_size(group_size),
-        _spinning_count(0) {
+        _spinning_count(0),
+        _thread_buffer_mask(0) {
     static_assert(sizeof(ThreadSHMContext) % 64 == 0);
     TORCH_CHECK(group_size <= MAX_SHM_RANK_NUM);
     TORCH_CHECK((size_t)this % 64 == 0);
@@ -60,7 +66,6 @@ struct ThreadSHMContext {
       shm_contexts[i] = nullptr;
       thread_shm_ptrs[i] = nullptr;
       swizzled_ranks[i] = (i + rank) % group_size;
-      thread_stats[i] = ThreadSHMStat::DONE;
     }
     set_context(rank, this, thread_shm_ptr);
   }
@@ -77,59 +82,66 @@ struct ThreadSHMContext {
 
   template <typename T>
   T* get_thread_shm_ptr(int rank) {
-    return reinterpret_cast<T*>(thread_shm_ptrs[rank]);
+    return reinterpret_cast<T*>(
+        reinterpret_cast<int8_t*>(thread_shm_ptrs[rank]) +
+        (PER_THREAD_SHM_BUFFER_OFFSET & _thread_buffer_mask));
+  }
+
+  void next_buffer() { _thread_buffer_mask ^= 0xFFFFFFFFFFFFFFFF; }
+
+  char get_curr_stamp() const { return _curr_thread_stamp; }
+
+  char get_ready_stamp() const { return _ready_thread_stamp; }
+
+  void next_stamp() {
+    _mm_mfence();
+    _curr_thread_stamp += 1;
+  }
+
+  void commit_ready_stamp() {
+    _mm_mfence();
+    _ready_thread_stamp = _curr_thread_stamp;
   }
 
   int get_swizzled_rank(int idx) { return swizzled_ranks[idx]; }
 
-  void wait_for_all(ThreadSHMStat prev_stat) {
-    for (int idx = 0; idx < group_size; ++idx) {
+  template <typename Cond>
+  void wait_for_all(Cond&& cond) {
+    for (int idx = 1; idx < group_size; ++idx) {
       int rank = get_swizzled_rank(idx);
-      while (thread_stats[rank] == prev_stat) {
-        ++_spinning_count;
-        _mm_pause();
-      }
+      wait_for_one(rank, std::forward<Cond>(cond));
     }
-    vec_op::mem_barrier();
   }
 
-  void wait_for_one(int rank, ThreadSHMStat prev_stat) {
-    while (thread_stats[rank] == prev_stat) {
+  template <typename Cond>
+  void wait_for_one(int rank, Cond&& cond) {
+    ThreadSHMContext* rank_ctx = shm_contexts[rank];
+    for (;;) {
+      char local_curr_stamp = get_curr_stamp();
+      char local_ready_stamp = get_ready_stamp();
+      char rank_curr_stamp = rank_ctx->get_curr_stamp();
+      char rank_ready_stamp = rank_ctx->get_ready_stamp();
+      if (cond(local_curr_stamp, local_ready_stamp, rank_curr_stamp,
+               rank_ready_stamp)) {
+        break;
+      }
       ++_spinning_count;
       _mm_pause();
     }
-    vec_op::mem_barrier();
   }
 
-  void set_thread_stat(ThreadSHMStat stat) {
-    for (int idx = 0; idx < group_size; ++idx) {
-      int rank = get_swizzled_rank(idx);
-      shm_contexts[rank]->thread_stats[this->rank] = stat;
-    }
+  static bool check_no_buffer_conflict(char local_curr_stamp,
+                                       char local_ready_stamp,
+                                       char rank_curr_stamp,
+                                       char rank_ready_stamp) {
+    char temp = rank_curr_stamp + 2;
+    return local_curr_stamp != temp;
   }
 
-  void set_thread_stat(int target_rank, ThreadSHMStat stat) {
-    for (int idx = 0; idx < group_size; ++idx) {
-      int rank = get_swizzled_rank(idx);
-      shm_contexts[rank]->thread_stats[target_rank] = stat;
-    }
-  }
-
-  // barrier for all ranks in the group, used for all2all ops
-  // DONE -> THREAD_READY -> SHM_DATA_READY -> DONE -> ...
-  void barrier(ThreadSHMStat next_stat) {
-    if (next_stat == ThreadSHMStat::THREAD_READY) {
-      set_thread_stat(ThreadSHMStat::THREAD_READY);
-      wait_for_all(ThreadSHMStat::DONE);
-    } else if (next_stat == ThreadSHMStat::SHM_DATA_READY) {
-      set_thread_stat(ThreadSHMStat::SHM_DATA_READY);
-      wait_for_all(ThreadSHMStat::THREAD_READY);
-    } else if (next_stat == ThreadSHMStat::DONE) {
-      set_thread_stat(ThreadSHMStat::DONE);
-      wait_for_all(ThreadSHMStat::SHM_DATA_READY);
-    } else {
-      TORCH_CHECK(false, "Invalid next_stat to barrier.");
-    }
+  static bool check_stamp_ready(char local_curr_stamp, char local_ready_stamp,
+                                char rank_curr_stamp, char rank_ready_stamp) {
+    char temp = local_curr_stamp + 1;
+    return (local_curr_stamp == rank_ready_stamp) || (temp == rank_ready_stamp);
   }
 
   std::string to_string() const {
@@ -164,7 +176,7 @@ class SHMManager {
                       const int group_size)
       : _rank(rank),
         _group_size(group_size),
-        _thread_num(std::min(torch::get_num_threads(), MAX_THREAD_NUM)),
+        _thread_num(torch::get_num_threads()),
         _shm_names({""}),
         _shared_mem_ptrs({nullptr}),
         _shm_ctx(nullptr) {
@@ -326,7 +338,8 @@ void shm_cc_loop(ThreadSHMContext* ctx, int64_t elem_num, F&& inner_func) {
       (total_units_num + thread_num - 1) / thread_num;
   int64_t per_unit_elem_num = MIN_THREAD_PROCESS_SIZE / sizeof(scalar_t);
   int64_t max_per_thread_iteration_elem_num =
-      PER_THREAD_SHM_BUFFER_BYTES / sizeof(scalar_t);
+      (PER_THREAD_SHM_BUFFER_BYTES >> 1) /
+      sizeof(scalar_t);  // Note: double buffer
   int64_t per_thread_elem_num = per_unit_elem_num * per_thread_units_num;
 
 #pragma omp parallel for schedule(static, 1)
@@ -336,10 +349,13 @@ void shm_cc_loop(ThreadSHMContext* ctx, int64_t elem_num, F&& inner_func) {
     int64_t curr_elem_num =
         std::min(max_per_thread_iteration_elem_num, end - offset);
     ThreadSHMContext* thread_ctx = ctx + i;
+    bool fast_mode = ((end - offset) <= max_per_thread_iteration_elem_num);
 
     while (curr_elem_num > 0) {
-      inner_func(thread_ctx, offset, curr_elem_num);
+      inner_func(thread_ctx, offset, curr_elem_num, fast_mode);
 
+      thread_ctx->next_stamp();
+      thread_ctx->next_buffer();
       offset += max_per_thread_iteration_elem_num;
       curr_elem_num = std::min(max_per_thread_iteration_elem_num, end - offset);
     }
@@ -397,7 +413,7 @@ void all_reduce_sum_impl(ThreadSHMContext* ctx, scalar_t* data,
   shm_cc_ops::shm_cc_loop<scalar_t>(
       ctx, elem_num,
       [&](ThreadSHMContext* thread_ctx, int64_t data_offset,
-          int64_t data_elem_num) {
+          int64_t data_elem_num, bool fast_mode) {
         int rank = thread_ctx->rank;
         scalar_t* thread_shm_ptr =
             thread_ctx->get_thread_shm_ptr<scalar_t>(rank);
@@ -410,16 +426,17 @@ void all_reduce_sum_impl(ThreadSHMContext* ctx, scalar_t* data,
               thread_ctx->get_swizzled_rank(idx + 1));
         });
 
-        thread_ctx->barrier(ThreadSHMStat::THREAD_READY);
+        if (!fast_mode) {
+          thread_ctx->wait_for_all(ThreadSHMContext::check_no_buffer_conflict);
+        }
 
         shm_cc_ops::memcpy_to_shm(thread_shm_ptr, thread_data_ptr,
                                   thread_data_elem_num);
-
-        thread_ctx->barrier(ThreadSHMStat::SHM_DATA_READY);
-
+        thread_ctx->commit_ready_stamp();
         int64_t aligned_data_elem_num =
             (data_elem_num / vec_elem_num) * vec_elem_num;
         int64_t i = 0;
+        thread_ctx->wait_for_all(ThreadSHMContext::check_stamp_ready);
 #pragma GCC unroll 4
         for (; i < aligned_data_elem_num; i += vec_elem_num) {
           vec_t local_data(thread_data_ptr + i);  // load from cache
@@ -447,8 +464,6 @@ void all_reduce_sum_impl(ThreadSHMContext* ctx, scalar_t* data,
           reduced_data.save(thread_data_ptr + i,
                             data_elem_num - aligned_data_elem_num);
         }
-
-        thread_ctx->barrier(ThreadSHMStat::DONE);
       });
 
   return;
@@ -488,18 +503,18 @@ void shm_gather_impl(ThreadSHMContext* ctx, scalar_t* data, size_t elem_num,
   shm_cc_ops::shm_cc_loop<scalar_t>(
       ctx, elem_num,
       [&](ThreadSHMContext* thread_ctx, int64_t data_offset,
-          int64_t data_elem_num) {
+          int64_t data_elem_num, bool fast_mode) {
         int rank = thread_ctx->rank;
         scalar_t* thread_shm_ptr =
             thread_ctx->get_thread_shm_ptr<scalar_t>(rank);
 
-        thread_ctx->barrier(ThreadSHMStat::THREAD_READY);
+        if (!fast_mode) {
+          thread_ctx->wait_for_all(ThreadSHMContext::check_no_buffer_conflict);
+        }
 
-        shm_cc_ops::memcpy_to_shm(thread_shm_ptr, data + data_offset,
-                                  data_elem_num * sizeof(scalar_t));
-
-        thread_ctx->barrier(ThreadSHMStat::SHM_DATA_READY);
-
+        shm_cc_ops::memcpy(thread_shm_ptr, data + data_offset,
+                           data_elem_num * sizeof(scalar_t));
+        thread_ctx->commit_ready_stamp();
         if (rank == dst) {
           shm_cc_ops::memcpy(outputs[rank] + data_offset, data + data_offset,
                              data_elem_num * sizeof(scalar_t));
@@ -508,12 +523,12 @@ void shm_gather_impl(ThreadSHMContext* ctx, scalar_t* data, size_t elem_num,
             scalar_t* src_ptr =
                 thread_ctx->get_thread_shm_ptr<scalar_t>(src_rank);  // shm
             scalar_t* dst_ptr = outputs[src_rank] + data_offset;
-            shm_cc_ops::memcpy_from_shm(dst_ptr, src_ptr,
-                                        data_elem_num * sizeof(scalar_t));
+            thread_ctx->wait_for_one(src_rank,
+                                     ThreadSHMContext::check_stamp_ready);
+            shm_cc_ops::memcpy(dst_ptr, src_ptr,
+                               data_elem_num * sizeof(scalar_t));
           }
         }
-
-        thread_ctx->barrier(ThreadSHMStat::DONE);
       });
 
   return;
@@ -599,7 +614,7 @@ struct TensorListMeta {
   int8_t _padding[40];
 };
 
-void shm_send_tensor_list_impl(ThreadSHMContext* ctx,
+void shm_send_tensor_list_impl(ThreadSHMContext* ctx, int64_t dst,
                                const std::vector<torch::Tensor>& tensor_list) {
   CPU_KERNEL_GUARD_IN(shm_send_tensor_list_impl)
   std::vector<torch::Tensor> tensor_list_with_metadata;
@@ -620,12 +635,11 @@ void shm_send_tensor_list_impl(ThreadSHMContext* ctx,
   shm_cc_ops::shm_cc_loop<int8_t>(
       ctx, metadata->total_bytes,
       [&](ThreadSHMContext* thread_ctx, int64_t data_offset,
-          int64_t data_elem_num) {
+          int64_t data_elem_num, bool fast_mode) {
         int rank = thread_ctx->rank;
-        // Wait until the receiver set the stat to DONE
-        thread_ctx->wait_for_one(rank, ThreadSHMStat::SHM_DATA_READY);
-
         int64_t curr_shm_offset = 0;
+        thread_ctx->wait_for_one(dst,
+                                 ThreadSHMContext::check_no_buffer_conflict);
         while (curr_shm_offset < data_elem_num) {
           MemPiece frag = metadata->get_data(data_offset + curr_shm_offset);
           frag.size = std::min(frag.size, data_elem_num - curr_shm_offset);
@@ -634,8 +648,7 @@ void shm_send_tensor_list_impl(ThreadSHMContext* ctx,
               frag.ptr, frag.size);
           curr_shm_offset += frag.size;
         }
-
-        thread_ctx->set_thread_stat(rank, ThreadSHMStat::SHM_DATA_READY);
+        thread_ctx->commit_ready_stamp();
       });
 }
 
@@ -646,8 +659,7 @@ std::vector<torch::Tensor> shm_recv_tensor_list_impl(ThreadSHMContext* ctx,
   torch::Tensor metadata_tensor =
       torch::empty({sizeof(TensorListMeta)}, options);
 
-  // Wait until the sender set the stat of the thread 0 to SHM_DATA_READY
-  ctx->wait_for_one(src, ThreadSHMStat::DONE);
+  ctx->wait_for_one(src, ThreadSHMContext::check_stamp_ready);
   shm_cc_ops::memcpy(metadata_tensor.data_ptr(),
                      ctx->get_thread_shm_ptr<void>(src),
                      sizeof(TensorListMeta));
@@ -664,9 +676,8 @@ std::vector<torch::Tensor> shm_recv_tensor_list_impl(ThreadSHMContext* ctx,
   shm_cc_ops::shm_cc_loop<int8_t>(
       ctx, metadata.total_bytes,
       [&](ThreadSHMContext* thread_ctx, int64_t data_offset,
-          int64_t data_elem_num) {
-        // Wait until the sender set the stat to SHM_DATA_READY
-        thread_ctx->wait_for_one(src, ThreadSHMStat::DONE);
+          int64_t data_elem_num, bool fast_mode) {
+        ctx->wait_for_one(src, ThreadSHMContext::check_stamp_ready);
         int64_t curr_shm_offset = 0;
         while (curr_shm_offset < data_elem_num) {
           MemPiece frag = metadata.get_data(data_offset + curr_shm_offset);
@@ -677,8 +688,6 @@ std::vector<torch::Tensor> shm_recv_tensor_list_impl(ThreadSHMContext* ctx,
               frag.size);
           curr_shm_offset += frag.size;
         }
-
-        thread_ctx->set_thread_stat(src, ThreadSHMStat::DONE);
       });
 
   std::vector<torch::Tensor> tensor_list;
@@ -756,7 +765,8 @@ void shm_send_tensor_list(int64_t handle,
                           int64_t dst) {
   CPU_KERNEL_GUARD_IN(shm_send_tensor_list)
   shm_send_tensor_list_impl(
-      SHMManager::get_singleton_instance(handle)->get_shm_ctx(), tensor_list);
+      SHMManager::get_singleton_instance(handle)->get_shm_ctx(), dst,
+      tensor_list);
   CPU_KERNEL_GUARD_OUT(shm_send_tensor_list)
 }
 
