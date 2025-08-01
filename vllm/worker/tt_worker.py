@@ -176,7 +176,8 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         return self.tt_cache
 
     def init_device(self) -> None:
-        self.mesh_device = self._open_mesh_device()
+        self.mesh_device = open_mesh_device(
+            self.model_config.override_tt_config, self.trace_mode)
         self.device_config.device = self.mesh_device
 
     def load_model(self):
@@ -389,136 +390,6 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # output is List[SamplerOutput]
         return output
 
-    # TT-NN utilities
-
-    def _get_dispatch_core_type(self):
-        dispatch_core_type = ttnn.device.DispatchCoreType.WORKER
-        if ("WH_ARCH_YAML" in os.environ) and os.environ[
-                "WH_ARCH_YAML"] == "wormhole_b0_80_arch_eth_dispatch.yaml":
-            dispatch_core_type = ttnn.device.DispatchCoreType.ETH
-        return dispatch_core_type
-
-    def _get_dispatch_core_config(self, device_params):
-        dispatch_core_type = self._get_dispatch_core_type()
-
-        override_tt_config = self.model_config.override_tt_config
-        if (override_tt_config is not None
-                and "dispatch_core_axis" in override_tt_config):
-            assert override_tt_config["dispatch_core_axis"] in [
-                "row", "col"
-            ], ("Invalid dispatch_core_axis:"
-                f"{override_tt_config['dispatch_core_axis']}. "
-                "Expected: row, col.")
-            dispatch_core_axis = (ttnn.DispatchCoreAxis.COL
-                                  if override_tt_config["dispatch_core_axis"]
-                                  == "col" else ttnn.DispatchCoreAxis.ROW)
-        else:
-            dispatch_core_axis = device_params.pop(
-                "dispatch_core_axis",
-                ttnn.DispatchCoreAxis.COL if "blackhole"
-                in ttnn.get_arch_name() else ttnn.DispatchCoreAxis.ROW,
-            )
-
-        dispatch_core_config = ttnn.DispatchCoreConfig(dispatch_core_type,
-                                                       dispatch_core_axis)
-        return dispatch_core_config
-
-    def _get_fabric_config(self):
-        override_tt_config = self.model_config.override_tt_config
-        if (override_tt_config is not None
-                and "fabric_config" in override_tt_config):
-            fabric_config_str = override_tt_config["fabric_config"]
-            fabric_config_map = {
-                "DISABLED": ttnn.FabricConfig.DISABLED,
-                "FABRIC_1D": ttnn.FabricConfig.FABRIC_1D,
-                "FABRIC_1D_RING": ttnn.FabricConfig.FABRIC_1D_RING,
-                "FABRIC_2D": ttnn.FabricConfig.FABRIC_2D,
-                "CUSTOM": ttnn.FabricConfig.CUSTOM,
-            }
-            fabric_config = fabric_config_map.get(fabric_config_str)
-            assert fabric_config is not None, (
-                f"Invalid fabric_config: {fabric_config_str}. "
-                f"Expected one of {list(fabric_config_map.keys())}.")
-            return fabric_config
-        return None
-
-    # From tt-metal/conftest.py:
-    # Set fabric config to passed in value
-    # Do nothing if not set
-    # Must be called before creating the mesh device
-    def _set_fabric(self):
-        fabric_config = self._get_fabric_config()
-        if fabric_config:
-            ttnn.set_fabric_config(fabric_config)
-
-    # From tt-metal/conftest.py:
-    # Reset fabric config to DISABLED if not None, and do nothing otherwise
-    # Temporarily require previous state to be passed
-    # in as even setting it to DISABLED might be unstable
-    # This is to ensure that we don't propagate
-    # the instability to the rest of CI
-    def _reset_fabric(self):
-        fabric_config = self._get_fabric_config()
-        if fabric_config:
-            ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
-
-    def _device_params_from_override_tt_config(self):
-        override_tt_config = self.model_config.override_tt_config
-        device_params = {}
-
-        if self.trace_mode:
-            # Set the most common value as default, override later
-            device_params["trace_region_size"] = 25000000
-            if override_tt_config and "trace_region_size" in override_tt_config:
-                device_params["trace_region_size"] = override_tt_config[
-                    "trace_region_size"]
-
-        if override_tt_config and "worker_l1_size" in override_tt_config:
-            device_params["worker_l1_size"] = override_tt_config[
-                "worker_l1_size"]
-
-        return device_params
-
-    def _open_mesh_device(self):
-        num_devices_available = len(ttnn.get_device_ids())
-        mesh_grid_dict = {
-            "N150": (1, 1),
-            "P100": (1, 1),
-            "P150": (1, 1),
-            "P150x2": (1, 2),
-            "N300": (1, 2),
-            "P300": (1, 2),
-            "N150x4": (1, 4),
-            "P150x4": (1, 4),
-            "T3K": (1, 8),
-            "TG": (8, 4)
-        }
-        mesh_device_env = os.environ.get("MESH_DEVICE")
-        if mesh_device_env is not None:
-            assert mesh_device_env in mesh_grid_dict, (
-                f"Invalid MESH_DEVICE: {mesh_device_env}")
-            mesh_grid = mesh_grid_dict[mesh_device_env]
-        else:
-            mesh_grid = (1, num_devices_available)
-
-        if mesh_grid[0] * mesh_grid[1] > num_devices_available:
-            assert (f"Requested mesh grid shape {mesh_grid} is larger than "
-                    f"number of available devices {num_devices_available}")
-
-        device_params = self._device_params_from_override_tt_config()
-
-        # Set fabric before opening the device
-        self._set_fabric()
-
-        mesh_device = ttnn.open_mesh_device(
-            ttnn.MeshShape(*mesh_grid),
-            dispatch_core_config=self._get_dispatch_core_config(device_params),
-            **device_params,
-        )
-        logger.info("multidevice with %d devices and grid %s is created",
-                    mesh_device.get_num_devices(), mesh_grid)
-        return mesh_device
-
     ## Destructor (used to close devices)
 
     def __del__(self):
@@ -526,16 +397,156 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         del self.model_runner
 
         if self.mesh_device:
-            # Dump device profiler
-            ttnn.DumpDeviceProfiler(self.mesh_device)
-
-            # Close devices
-            ttnn.close_mesh_device(self.mesh_device)
-
-            # Reset fabric
-            self._reset_fabric()
-
+            close_mesh_device(self.mesh_device,
+                              self.model_config.override_tt_config)
             del self.mesh_device
 
         if hasattr(super(), '__del__'):
             super().__del__()  # type: ignore
+
+
+# TT-NN utilities, also used by V1 TTWorker
+
+
+def get_dispatch_core_type():
+    dispatch_core_type = ttnn.device.DispatchCoreType.WORKER
+    if ("WH_ARCH_YAML" in os.environ) and os.environ[
+            "WH_ARCH_YAML"] == "wormhole_b0_80_arch_eth_dispatch.yaml":
+        dispatch_core_type = ttnn.device.DispatchCoreType.ETH
+    return dispatch_core_type
+
+
+def get_dispatch_core_config(override_tt_config, device_params):
+    dispatch_core_type = get_dispatch_core_type()
+
+    if (override_tt_config is not None
+            and "dispatch_core_axis" in override_tt_config):
+        assert override_tt_config["dispatch_core_axis"] in [
+            "row", "col"
+        ], ("Invalid dispatch_core_axis:"
+            f"{override_tt_config['dispatch_core_axis']}. "
+            "Expected: row, col.")
+        dispatch_core_axis = (ttnn.DispatchCoreAxis.COL
+                              if override_tt_config["dispatch_core_axis"]
+                              == "col" else ttnn.DispatchCoreAxis.ROW)
+    else:
+        dispatch_core_axis = device_params.pop(
+            "dispatch_core_axis",
+            ttnn.DispatchCoreAxis.COL if "blackhole" in ttnn.get_arch_name()
+            else ttnn.DispatchCoreAxis.ROW,
+        )
+
+    dispatch_core_config = ttnn.DispatchCoreConfig(dispatch_core_type,
+                                                   dispatch_core_axis)
+    return dispatch_core_config
+
+
+def get_fabric_config(override_tt_config):
+    if (override_tt_config is not None
+            and "fabric_config" in override_tt_config):
+        fabric_config_str = override_tt_config["fabric_config"]
+        fabric_config_map = {
+            "DISABLED": ttnn.FabricConfig.DISABLED,
+            "FABRIC_1D": ttnn.FabricConfig.FABRIC_1D,
+            "FABRIC_1D_RING": ttnn.FabricConfig.FABRIC_1D_RING,
+            "FABRIC_2D": ttnn.FabricConfig.FABRIC_2D,
+            "CUSTOM": ttnn.FabricConfig.CUSTOM,
+        }
+        fabric_config = fabric_config_map.get(fabric_config_str)
+        assert fabric_config is not None, (
+            f"Invalid fabric_config: {fabric_config_str}. "
+            f"Expected one of {list(fabric_config_map.keys())}.")
+        return fabric_config
+    return None
+
+
+# From tt-metal/conftest.py:
+# Set fabric config to passed in value
+# Do nothing if not set
+# Must be called before creating the mesh device
+def set_fabric(override_tt_config):
+    fabric_config = get_fabric_config(override_tt_config)
+    if fabric_config:
+        ttnn.set_fabric_config(fabric_config)
+
+
+# From tt-metal/conftest.py:
+# Reset fabric config to DISABLED if not None, and do nothing otherwise
+# Temporarily require previous state to be passed
+# in as even setting it to DISABLED might be unstable
+# This is to ensure that we don't propagate
+# the instability to the rest of CI
+def reset_fabric(override_tt_config):
+    fabric_config = get_fabric_config(override_tt_config)
+    if fabric_config:
+        ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
+
+
+def device_params_from_override_tt_config(override_tt_config, trace_mode):
+    device_params = {}
+
+    if trace_mode:
+        # Set the most common value as default, override later
+        device_params["trace_region_size"] = 25000000
+        if override_tt_config and "trace_region_size" in override_tt_config:
+            device_params["trace_region_size"] = override_tt_config[
+                "trace_region_size"]
+
+    if override_tt_config and "worker_l1_size" in override_tt_config:
+        device_params["worker_l1_size"] = override_tt_config["worker_l1_size"]
+
+    return device_params
+
+
+def open_mesh_device(override_tt_config, trace_mode):
+    num_devices_available = len(ttnn.get_device_ids())
+    mesh_grid_dict = {
+        "N150": (1, 1),
+        "P100": (1, 1),
+        "P150": (1, 1),
+        "P150x2": (1, 2),
+        "N300": (1, 2),
+        "P300": (1, 2),
+        "N150x4": (1, 4),
+        "P150x4": (1, 4),
+        "T3K": (1, 8),
+        "TG": (8, 4)
+    }
+    mesh_device_env = os.environ.get("MESH_DEVICE")
+    if mesh_device_env is not None:
+        assert mesh_device_env in mesh_grid_dict, (
+            f"Invalid MESH_DEVICE: {mesh_device_env}")
+        mesh_grid = mesh_grid_dict[mesh_device_env]
+    else:
+        mesh_grid = (1, num_devices_available)
+
+    if mesh_grid[0] * mesh_grid[1] > num_devices_available:
+        assert (f"Requested mesh grid shape {mesh_grid} is larger than "
+                f"number of available devices {num_devices_available}")
+
+    device_params = device_params_from_override_tt_config(
+        override_tt_config, trace_mode)
+
+    # Set fabric before opening the device
+    set_fabric(override_tt_config)
+
+    mesh_device = ttnn.open_mesh_device(
+        ttnn.MeshShape(*mesh_grid),
+        dispatch_core_config=get_dispatch_core_config(override_tt_config,
+                                                      device_params),
+        **device_params,
+    )
+    logger.info("multidevice with %d devices and grid %s is created",
+                mesh_device.get_num_devices(), mesh_grid)
+    return mesh_device
+
+
+def close_mesh_device(mesh_device, override_tt_config):
+    # Read device profiler (no-op if not profiling with tracy)
+    ttnn.ReadDeviceProfiler(mesh_device)
+
+    # Close devices
+    ttnn.close_mesh_device(mesh_device)
+
+    # Reset fabric
+    reset_fabric(override_tt_config)
