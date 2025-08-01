@@ -416,7 +416,7 @@ class TransformersModel(nn.Module):
         self,
         hidden_states: torch.Tensor,
         additional_heads_extra_inputs: Optional[list[dict[str, Any]]],
-    ) -> Optional[torch.Tensor]:
+    ) -> Optional[Union[torch.Tensor, list[dict[str, float]]]]:
         if get_pp_group().is_last_rank and hasattr(self.model,
                                                    "compute_additional_head"):
             return self.model.compute_additional_head(
