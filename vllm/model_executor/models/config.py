@@ -330,5 +330,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
+    "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
     "GraniteMoeHybridForCausalLM": GraniteMoeHybridModelConfig,
 }
