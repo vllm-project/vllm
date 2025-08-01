@@ -366,14 +366,14 @@ class Hermes2ProToolParser(ToolParser):
                              cur_arguments_json)
 
                 # get the location where previous args differ from current.
-                #   if the second last character is a quote, the last
-                #   argument is a string, so remove the last two
-                #   characters (quote and brace).
-                #   otherwise, remove the last character (brace)
-                stripped_cur_arguments_json = cur_arguments_json[:-2] \
-                    if (cur_arguments_json[-2] == '"'
-                            or cur_arguments_json[-2] == "'") else \
-                    cur_arguments_json[:-1]
+                if cur_arguments_json[-2] in ('"', "'"):
+                    # last argument is a string,
+                    #   so remove the closing quote and brace.
+                    stripped_cur_arguments_json = cur_arguments_json[:-2]
+                else:
+                    # last argument is not a string,
+                    #   so remove the closing brace only.
+                    stripped_cur_arguments_json = cur_arguments_json[:-1]
                 if (delta_text not in stripped_cur_arguments_json):
                     return None
                 args_delta_start_loc = stripped_cur_arguments_json. \
