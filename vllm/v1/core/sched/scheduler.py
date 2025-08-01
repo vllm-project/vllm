@@ -167,7 +167,7 @@ class Scheduler(SchedulerInterface):
                                      "should be in range (0, 1).")
                 if not speculative_config.reasoning_parser:
                     raise ValueError("No reasoning_parser specified.")
-                logger.info("Enable relaxed thinking, posterior_alpha=", \
+                logger.info("Enable relaxed thinking, posterior_alpha=%s", \
                             speculative_config.posterior_alpha)
                 tokenizer = AutoTokenizer.from_pretrained(
                     self.vllm_config.model_config.tokenizer)
@@ -181,7 +181,7 @@ class Scheduler(SchedulerInterface):
                         f"{speculative_config.reasoning_parser} has " \
                          "not been registered") from e
 
-                logger.info("Use reasoning parser:", reasoning_parser)
+                logger.info("Use reasoning parser:%s", reasoning_parser)
 
                 if speculative_config.reasoning_parser == 'deepseek_r1':
                     self.think_start_token_id = \
