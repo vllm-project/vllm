@@ -10,7 +10,7 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.utils import get_ip, get_open_port
 
 if __name__ == "__main__":
-    dist.init_process_group(backend="gloo")
+    dist.init_process_group(backend=dist.Backend.GLOO)
 
     rank = dist.get_rank()
     if rank == 0:

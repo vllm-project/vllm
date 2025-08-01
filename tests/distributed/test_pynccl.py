@@ -77,8 +77,10 @@ def test_pynccl():
 def multiple_allreduce_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
     groups = [
-        torch.distributed.new_group(ranks=[0, 1], backend="gloo"),
-        torch.distributed.new_group(ranks=[2, 3], backend="gloo")
+        torch.distributed.new_group(ranks=[0, 1],
+                                    backend=torch.distributed.Backend.GLOO),
+        torch.distributed.new_group(ranks=[2, 3],
+                                    backend=torch.distributed.Backend.GLOO)
     ]
     group = groups[0] if torch.distributed.get_rank() in [0, 1] else groups[1]
     pynccl_comm = PyNcclCommunicator(group=group, device=device)
@@ -321,8 +323,10 @@ def test_pynccl_send_recv():
 def multiple_send_recv_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
     groups = [
-        torch.distributed.new_group(ranks=[0, 2], backend="gloo"),
-        torch.distributed.new_group(ranks=[1, 3], backend="gloo")
+        torch.distributed.new_group(ranks=[0, 2],
+                                    backend=torch.distributed.Backend.GLOO),
+        torch.distributed.new_group(ranks=[1, 3],
+                                    backend=torch.distributed.Backend.GLOO)
     ]
     group = groups[0] if torch.distributed.get_rank() in [0, 2] else groups[1]
     pynccl_comm = PyNcclCommunicator(group=group, device=device)

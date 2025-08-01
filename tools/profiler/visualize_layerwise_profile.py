@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 import matplotlib.pyplot as plt
 import pandas as pd
+import torch.distributed
 
 ## JSON parsing utils ####
 
@@ -192,7 +193,7 @@ def group_trace_by_operations(trace_df: pd.DataFrame) -> pd.DataFrame:
 
     # nccl ops
     def is_nccl_op(op_name: str):
-        return "nccl" in op_name.lower()
+        return torch.distributed.Backend.NCCL in op_name.lower()
 
     def is_nccl_all_reduce(op_name: str):
         return is_nccl_op(op_name) and \

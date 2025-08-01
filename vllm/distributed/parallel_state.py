@@ -225,7 +225,8 @@ class GroupCoordinator:
                 ranks, backend=torch_distributed_backend)
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
-            cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+            cpu_group = torch.distributed.new_group(
+                ranks, backend=torch.distributed.Backend.GLOO)
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
@@ -940,7 +941,7 @@ def init_distributed_environment(
     rank: int = -1,
     distributed_init_method: str = "env://",
     local_rank: int = -1,
-    backend: str = "nccl",
+    backend: str = torch.distributed.Backend.NCCL,
 ):
     logger.debug(
         "world_size=%d rank=%d local_rank=%d "
@@ -971,7 +972,7 @@ def init_distributed_environment(
                 "falling back to gloo.", backend)
             assert torch.distributed.is_gloo_available(), (
                 "Fallback Gloo backend is not available.")
-            backend = "gloo"
+            backend = torch.distributed.Backend.GLOO
         # this backend is used for WORLD
         torch.distributed.init_process_group(
             backend=backend,

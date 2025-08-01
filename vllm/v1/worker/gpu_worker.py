@@ -595,7 +595,7 @@ def init_worker_distributed_environment(
     rank: int,
     distributed_init_method: Optional[str] = None,
     local_rank: int = -1,
-    backend: str = "nccl",
+    backend: str = torch.distributed.Backend.NCCL,
 ) -> None:
     """Initialize the distributed environment."""
     parallel_config = vllm_config.parallel_config

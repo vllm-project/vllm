@@ -5,6 +5,8 @@ import os
 from functools import lru_cache
 from typing import TYPE_CHECKING, Optional
 
+import torch
+
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
@@ -30,7 +32,7 @@ class NeuronPlatform(Platform):
     device_type: str = "neuron"
     ray_device_key: str = "neuron_cores"
     supported_quantization: list[str] = ["neuron_quant", "fbgemm_fp8"]
-    dist_backend: str = "gloo"
+    dist_backend: str = torch.distributed.Backend.GLOO
     device_control_env_var: str = "NEURON_RT_VISIBLE_CORES"
 
     @classmethod

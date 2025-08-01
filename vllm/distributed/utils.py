@@ -505,7 +505,7 @@ def stateless_init_torch_distributed_process_group(
     # different systems (e.g. RPC) in case the store is multi-tenant.
     prefix_store = PrefixStore(init_method, store)
 
-    if backend == "gloo":
+    if backend == torch.distributed.Backend.GLOO:
         return init_gloo_process_group(backend=backend,
                                        prefix_store=prefix_store,
                                        group_rank=group_rank,

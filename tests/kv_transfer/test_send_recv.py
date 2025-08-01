@@ -130,7 +130,7 @@ if __name__ == "__main__":
     my_rank = int(os.environ['RANK'])
 
     torch.distributed.init_process_group(
-        backend='gloo',
+        backend=torch.distributed.Backend.GLOO,
         init_method='tcp://localhost:12398',
         world_size=2,
         rank=my_rank,

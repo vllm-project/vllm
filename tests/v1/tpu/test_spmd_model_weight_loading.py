@@ -5,6 +5,7 @@ import tempfile
 
 import numpy as np
 import pytest
+import torch.distributed
 import torch_xla.distributed.spmd as xs
 import torch_xla.runtime as xr
 
@@ -25,7 +26,7 @@ def _setup_environment(model):
             0,
             local_rank=0,
             distributed_init_method=f"file://{temp_file}",
-            backend="gloo")
+            backend=torch.distributed.Backend.GLOO)
         # Under single worker mode, full model is init first and then
         # partitioned using GSPMD.
         ensure_model_parallel_initialized(1, 1)

@@ -26,7 +26,7 @@ from pydantic import (ConfigDict, SkipValidation, TypeAdapter, field_validator,
                       model_validator)
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from torch.distributed import ProcessGroup, ReduceOp
+from torch.distributed import Backend, ProcessGroup, ReduceOp
 from typing_extensions import Self, assert_never, runtime_checkable
 
 import vllm.envs as envs
@@ -2180,7 +2180,7 @@ class ParallelConfig:
                     self.get_next_dp_init_port(),
                     self.data_parallel_rank,
                     self.data_parallel_size,
-                    backend="gloo")
+                    backend=Backend.GLOO)
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
                 if "EADDRINUSE" in str(e):

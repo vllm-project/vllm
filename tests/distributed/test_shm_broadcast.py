@@ -49,7 +49,7 @@ def worker_fn_wrapper(fn):
     # and update the environment variables in the function
     def wrapped_fn(env):
         update_environment_variables(env)
-        dist.init_process_group(backend="gloo")
+        dist.init_process_group(backend=dist.Backend.GLOO)
         fn()
 
     return wrapped_fn
