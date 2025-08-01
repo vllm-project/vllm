@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 import importlib
+import os
 from typing import Any, Callable, NoReturn
 
 import torch
@@ -68,6 +69,10 @@ def _lazy_init() -> None:
 
     if not has_deep_gemm():
         return
+
+    # Set up deep_gemm cache path
+    os.environ['DG_JIT_CACHE_DIR'] = os.path.join(
+        envs.get_default_cache_root(), "deep_gemm")
 
     _dg = importlib.import_module("deep_gemm")
 
