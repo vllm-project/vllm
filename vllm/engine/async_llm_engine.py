@@ -30,7 +30,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Device, weak_bind
+from vllm.utils import Device, deprecate_kwargs, weak_bind
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -554,14 +554,20 @@ class AsyncLLMEngine(EngineClient):
         return LLMEngine._get_executor_cls(engine_config)
 
     @classmethod
+    @deprecate_kwargs(
+        "disable_log_requests",
+        additional_message=("This argument will have no effect. "
+                            "Use `enable_log_requests` instead."),
+    )
     def from_vllm_config(
-        cls,
-        vllm_config: VllmConfig,
-        start_engine_loop: bool = True,
-        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
-        disable_log_requests: bool = False,
-        disable_log_stats: bool = False,
+            cls,
+            vllm_config: VllmConfig,
+            start_engine_loop: bool = True,
+            usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+            stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
+            enable_log_requests: bool = False,
+            disable_log_stats: bool = False,
+            disable_log_requests: bool = True,  # Deprecated, will be removed
     ) -> "AsyncLLMEngine":
         """Create an AsyncLLMEngine from the EngineArgs."""
 
@@ -569,7 +575,7 @@ class AsyncLLMEngine(EngineClient):
             vllm_config=vllm_config,
             executor_class=cls._get_executor_cls(vllm_config),
             start_engine_loop=start_engine_loop,
-            log_requests=not disable_log_requests,
+            log_requests=enable_log_requests,
             log_stats=not disable_log_stats,
             usage_context=usage_context,
             stat_loggers=stat_loggers,
@@ -598,7 +604,7 @@ class AsyncLLMEngine(EngineClient):
             usage_context=usage_context,
             stat_loggers=stat_loggers,
             disable_log_stats=engine_args.disable_log_stats,
-            disable_log_requests=engine_args.disable_log_requests,
+            enable_log_requests=engine_args.enable_log_requests,
         )
 
     @property

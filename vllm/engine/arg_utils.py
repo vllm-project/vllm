@@ -18,7 +18,7 @@ from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, List,
 import regex as re
 import torch
 from pydantic import TypeAdapter, ValidationError
-from typing_extensions import TypeIs
+from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
@@ -1704,7 +1704,23 @@ class EngineArgs:
 @dataclass
 class AsyncEngineArgs(EngineArgs):
     """Arguments for asynchronous vLLM engine."""
-    disable_log_requests: bool = False
+    enable_log_requests: bool = False
+
+    @property
+    @deprecated(
+        "`disable_log_requests` is deprecated and has been replaced with "
+        "`enable_log_requests`. This will be removed in v0.12.0. Please use "
+        "`enable_log_requests` instead.")
+    def disable_log_requests(self) -> bool:
+        return not self.enable_log_requests
+
+    @disable_log_requests.setter
+    @deprecated(
+        "`disable_log_requests` is deprecated and has been replaced with "
+        "`enable_log_requests`. This will be removed in v0.12.0. Please use "
+        "`enable_log_requests` instead.")
+    def disable_log_requests(self, value: bool):
+        self.enable_log_requests = not value
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser,
@@ -1715,9 +1731,15 @@ class AsyncEngineArgs(EngineArgs):
         load_general_plugins()
         if not async_args_only:
             parser = EngineArgs.add_cli_args(parser)
+        parser.add_argument('--enable-log-requests',
+                            action=argparse.BooleanOptionalAction,
+                            default=AsyncEngineArgs.enable_log_requests,
+                            help='Enable logging requests.')
         parser.add_argument('--disable-log-requests',
-                            action='store_true',
-                            help='Disable logging requests.')
+                            action=argparse.BooleanOptionalAction,
+                            default=not AsyncEngineArgs.enable_log_requests,
+                            help='[DEPRECATED] Disable logging requests.',
+                            deprecated=True)
         current_platform.pre_register_and_update(parser)
         return parser
 

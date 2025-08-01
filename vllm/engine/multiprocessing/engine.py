@@ -34,6 +34,7 @@ from vllm.outputs import RequestOutput
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import deprecate_kwargs
 from vllm.worker.model_runner_base import InputProcessingError
 
 logger = init_logger(__name__)
@@ -120,10 +121,20 @@ class MQLLMEngine:
             return ENGINE_DEAD_ERROR()
 
     @classmethod
-    def from_vllm_config(cls, vllm_config: VllmConfig,
-                         usage_context: UsageContext,
-                         disable_log_requests: bool, disable_log_stats: bool,
-                         ipc_path: str) -> "MQLLMEngine":
+    @deprecate_kwargs(
+        "disable_log_requests",
+        additional_message=("This argument will have no effect. "
+                            "Use `enable_log_requests` instead."),
+    )
+    def from_vllm_config(
+            cls,
+            vllm_config: VllmConfig,
+            usage_context: UsageContext,
+            enable_log_requests: bool,
+            disable_log_stats: bool,
+            ipc_path: str,
+            disable_log_requests: bool = True,  # Deprecated, will be removed
+    ) -> "MQLLMEngine":
         # Setup plugins for each process
         from vllm.plugins import load_general_plugins
         load_general_plugins()
@@ -136,7 +147,7 @@ class MQLLMEngine:
             ipc_path=ipc_path,
             usage_context=usage_context,
             use_async_sockets=use_async_sockets,
-            log_requests=(not disable_log_requests),
+            log_requests=enable_log_requests,
             log_stats=(not disable_log_stats),
         )
 
@@ -150,7 +161,7 @@ class MQLLMEngine:
             ipc_path=ipc_path,
             vllm_config=vllm_config,
             usage_context=usage_context,
-            disable_log_requests=engine_args.disable_log_requests,
+            enable_log_requests=engine_args.enable_log_requests,
             disable_log_stats=engine_args.disable_log_stats,
         )
 
@@ -436,7 +447,7 @@ def signal_handler(*_) -> None:
 
 def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
                   ipc_path: str, disable_log_stats: bool,
-                  disable_log_requests: bool, engine_alive):
+                  enable_log_requests: bool, engine_alive):
     try:
         # Ensure we can serialize transformer config before spawning
         maybe_register_config_serialize_by_value()
@@ -445,7 +456,7 @@ def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
             vllm_config=vllm_config,
             usage_context=usage_context,
             disable_log_stats=disable_log_stats,
-            disable_log_requests=disable_log_requests,
+            enable_log_requests=enable_log_requests,
             ipc_path=ipc_path)
 
         signal.signal(signal.SIGTERM, signal_handler)
