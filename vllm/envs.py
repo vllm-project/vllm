@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
+    VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
     VLLM_XLA_USE_SPMD: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
@@ -497,6 +498,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM", "0"))
                  ),
+
+    # If the env var is set, it uses a Ray Communicator wrapping
+    # vLLM's pipeline parallelism communicator to interact with Ray's
+    # Compiled Graph. Otherwise, it uses Ray's NCCL communicator.
+    # This flag is ignored if VLLM_USE_RAY_COMPILED_DAG is not set.
+    "VLLM_USE_RAY_WRAPPED_PP_COMM":
+    lambda: bool(int(os.getenv("VLLM_USE_RAY_WRAPPED_PP_COMM", "1"))),
 
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
