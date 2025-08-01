@@ -172,6 +172,18 @@ class DPCoordinatorProc:
                 bind=True,
         ) as publish_back:
 
+            # Wait until all engines subscribe.
+            for _ in self.engines:
+                if publish_back.recv() != b'\x01':
+                    logger.error(
+                        "DP Coordinator received unexpected message while "
+                        "waiting for engines to subscribe")
+                    return
+            # Send ready message to engines.
+            publish_back.send(b"READY")
+
+            logger.info("All engine subscriptions received by DP coordinator")
+
             poller = zmq.Poller()
             poller.register(publish_front, zmq.POLLIN)
             poller.register(output_back, zmq.POLLIN)
