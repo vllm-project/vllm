@@ -3,18 +3,13 @@
 # ruff: noqa: E501
 
 import json
-from collections.abc import Generator
-from typing import Optional
 
 import pytest
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              ChatCompletionToolsParam,
-                                              DeltaMessage, FunctionCall,
-                                              ToolCall)
+from vllm.entrypoints.openai.protocol import (ChatCompletionToolsParam,
+                                              FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers import MinimaxToolParser
-from vllm.transformers_utils.detokenizer import detokenize_incrementally
-from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 # Use a common model that is likely to be available
 MODEL = "MiniMaxAi/MiniMax-M1-40k"
@@ -451,7 +446,6 @@ def test_streaming_arguments_incremental_output(minimax_tool_parser):
         '<tool_calls>\n{"name": "get_current_weather", "arguments": {"city": "Seattle", "state": "WA", "unit": "celsius"}}',
         # Stage 6: Tool calls closed
         '<tool_calls>\n{"name": "get_current_weather", "arguments": {"city": "Seattle", "state": "WA", "unit": "celsius"}}\n</tool',
-
         '<tool_calls>\n{"name": "get_current_weather", "arguments": {"city": "Seattle", "state": "WA", "unit": "celsius"}}\n</tool_calls>'
     ]
 
@@ -633,7 +627,8 @@ def test_streaming_openai_compatibility(minimax_tool_parser):
             'previous': 'Text',
             'current': 'Text content</tool_',
             'delta': ' content</tool_',
-            'expected_content': ' content',  # Content part output, </tool_ buffered
+            'expected_content':
+            ' content',  # Content part output, </tool_ buffered
         },
         {
             'stage': 'Complete end tag',
@@ -696,21 +691,30 @@ def test_streaming_thinking_tag_buffering(minimax_tool_parser):
             'previous': '',
             'current': '<think>I need to use a tool. <tool_calls>',
             'delta': '<think>I need to use a tool. <tool_calls>',
-            'expected_content': '<think>I need to use a tool. <tool_calls>',  # Should pass through as content
+            'expected_content':
+            '<think>I need to use a tool. <tool_calls>',  # Should pass through as content
         },
         {
-            'stage': 'Tool call in thinking',
-            'previous': '<think>I need to use a tool. <tool_calls>',
-            'current': '<think>I need to use a tool. <tool_calls>\n{"name": "ignored_tool", "arguments": {"param": "value"}}\n</tool_calls>',
-            'delta': '\n{"name": "ignored_tool", "arguments": {"param": "value"}}\n</tool_calls>',
-            'expected_content': '\n{"name": "ignored_tool", "arguments": {"param": "value"}}\n</tool_calls>',  # </tool_calls> should be preserved in thinking tags
+            'stage':
+            'Tool call in thinking',
+            'previous':
+            '<think>I need to use a tool. <tool_calls>',
+            'current':
+            '<think>I need to use a tool. <tool_calls>\n{"name": "ignored_tool", "arguments": {"param": "value"}}\n</tool_calls>',
+            'delta':
+            '\n{"name": "ignored_tool", "arguments": {"param": "value"}}\n</tool_calls>',
+            'expected_content':
+            '\n{"name": "ignored_tool", "arguments": {"param": "value"}}\n</tool_calls>',  # </tool_calls> should be preserved in thinking tags
         },
         {
             'stage': 'Real tool call after thinking',
-            'previous': '<think>I need to use a tool. <tool_calls>\n{"name": "ignored_tool", "arguments": {"param": "value"}}\n</tool_calls></think>',
-            'current': '<think>I need to use a tool. <tool_calls>\n{"name": "ignored_tool", "arguments": {"param": "value"}}\n</tool_calls></think>\n<tool_calls>',
+            'previous':
+            '<think>I need to use a tool. <tool_calls>\n{"name": "ignored_tool", "arguments": {"param": "value"}}\n</tool_calls></think>',
+            'current':
+            '<think>I need to use a tool. <tool_calls>\n{"name": "ignored_tool", "arguments": {"param": "value"}}\n</tool_calls></think>\n<tool_calls>',
             'delta': '\n<tool_calls>',
-            'expected_content': '\n',  # Should output '\n' and suppress <tool_calls>
+            'expected_content':
+            '\n',  # Should output '\n' and suppress <tool_calls>
         }
     ]
 
@@ -748,7 +752,7 @@ def test_streaming_thinking_tag_buffering(minimax_tool_parser):
         if test_case.get('expected_tool_call'):
             assert result is not None and hasattr(result, 'tool_calls') and result.tool_calls, \
                 f"Stage {i}: Expected tool call, got {result}"
-            
+
             tool_call = result.tool_calls[0]
             assert tool_call.function.name == "real_tool", \
                 f"Expected real_tool, got {tool_call.function.name}"
