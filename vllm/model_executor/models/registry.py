@@ -60,7 +60,7 @@ _TEXT_GENERATION_MODELS = {
     "DeepseekV2ForCausalLM": ("deepseek_v2", "DeepseekV2ForCausalLM"),
     "DeepseekV3ForCausalLM": ("deepseek_v2", "DeepseekV3ForCausalLM"),
     "Dots1ForCausalLM": ("dots1", "Dots1ForCausalLM"),
-    "Ernie4_5_ForCausalLM": ("ernie45", "Ernie4_5_ForCausalLM"),
+    "Ernie4_5ForCausalLM": ("ernie45", "Ernie4_5ForCausalLM"),
     "Ernie4_5_MoeForCausalLM": ("ernie45_moe", "Ernie4_5_MoeForCausalLM"),
     "ExaoneForCausalLM": ("exaone", "ExaoneForCausalLM"),
     "Exaone4ForCausalLM": ("exaone4", "Exaone4ForCausalLM"),
@@ -129,6 +129,7 @@ _TEXT_GENERATION_MODELS = {
     "Qwen3ForCausalLM": ("qwen3", "Qwen3ForCausalLM"),
     "Qwen3MoeForCausalLM": ("qwen3_moe", "Qwen3MoeForCausalLM"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
+    "Step3TextForCausalLM": ("step3_text", "Step3TextForCausalLM"),
     "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
@@ -238,6 +239,7 @@ _MULTIMODAL_MODELS = {
     "Qwen2_5OmniModel": ("qwen2_5_omni_thinker", "Qwen2_5OmniThinkerForConditionalGeneration"),  # noqa: E501
     "Qwen2_5OmniForConditionalGeneration": ("qwen2_5_omni_thinker", "Qwen2_5OmniThinkerForConditionalGeneration"),  # noqa: E501
     "UltravoxModel": ("ultravox", "UltravoxModel"),
+    "Step3VLForConditionalGeneration": ("step3_vl", "Step3VLForConditionalGeneration"),  # noqa: E501
     "TarsierForConditionalGeneration": ("tarsier", "TarsierForConditionalGeneration"),  # noqa: E501
     "Tarsier2ForConditionalGeneration": ("qwen2_vl", "Tarsier2ForConditionalGeneration"),  # noqa: E501
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
@@ -268,8 +270,9 @@ _TRANSFORMERS_SUPPORTED_MODELS = {
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
-    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"), # noqa: E501
+    "TransformersModel": ("transformers", "TransformersModel"),
     "TransformersForCausalLM": ("transformers", "TransformersForCausalLM"),
+    "TransformersForMultimodalLM": ("transformers", "TransformersForMultimodalLM"), # noqa: E501
 }
 # yapf: enable
 
@@ -586,18 +589,6 @@ class _ModelRegistry:
 
         return architecture
 
-    def _normalize_archs(
-        self,
-        architectures: list[str],
-        model_config: ModelConfig,
-    ) -> list[str]:
-        if not architectures:
-            logger.warning("No model architectures are specified")
-
-        return [
-            self._normalize_arch(arch, model_config) for arch in architectures
-        ]
-
     def inspect_model_cls(
         self,
         architectures: Union[str, list[str]],
@@ -605,8 +596,8 @@ class _ModelRegistry:
     ) -> tuple[_ModelInfo, str]:
         if isinstance(architectures, str):
             architectures = [architectures]
-
-        normalized_archs = self._normalize_archs(architectures, model_config)
+        if not architectures:
+            raise ValueError("No model architectures are specified")
 
         # Require transformers impl
         if model_config.model_impl == ModelImpl.TRANSFORMERS:
@@ -617,13 +608,26 @@ class _ModelRegistry:
                 if model_info is not None:
                     return (model_info, arch)
 
-        for arch, normalized_arch in zip(architectures, normalized_archs):
+        # Fallback to transformers impl (after resolving convert_type)
+        if (all(arch not in self.models for arch in architectures)
+                and model_config.model_impl == ModelImpl.AUTO
+                and getattr(model_config, "convert_type", "none") == "none"):
+            arch = self._try_resolve_transformers(architectures[0],
+                                                  model_config)
+            if arch is not None:
+                model_info = self._try_inspect_model_cls(arch)
+                if model_info is not None:
+                    return (model_info, arch)
+
+        for arch in architectures:
+            normalized_arch = self._normalize_arch(arch, model_config)
             model_info = self._try_inspect_model_cls(normalized_arch)
             if model_info is not None:
                 return (model_info, arch)
 
-        # Fallback to transformers impl
-        if model_config.model_impl in (ModelImpl.AUTO, ModelImpl.TRANSFORMERS):
+        # Fallback to transformers impl (before resolving runner_type)
+        if (all(arch not in self.models for arch in architectures)
+                and model_config.model_impl == ModelImpl.AUTO):
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
             if arch is not None:
@@ -640,8 +644,8 @@ class _ModelRegistry:
     ) -> tuple[type[nn.Module], str]:
         if isinstance(architectures, str):
             architectures = [architectures]
-
-        normalized_archs = self._normalize_archs(architectures, model_config)
+        if not architectures:
+            raise ValueError("No model architectures are specified")
 
         # Require transformers impl
         if model_config.model_impl == ModelImpl.TRANSFORMERS:
@@ -652,13 +656,26 @@ class _ModelRegistry:
                 if model_cls is not None:
                     return (model_cls, arch)
 
-        for arch, normalized_arch in zip(architectures, normalized_archs):
+        # Fallback to transformers impl (after resolving convert_type)
+        if (all(arch not in self.models for arch in architectures)
+                and model_config.model_impl == ModelImpl.AUTO
+                and getattr(model_config, "convert_type", "none") == "none"):
+            arch = self._try_resolve_transformers(architectures[0],
+                                                  model_config)
+            if arch is not None:
+                model_cls = self._try_load_model_cls(arch)
+                if model_cls is not None:
+                    return (model_cls, arch)
+
+        for arch in architectures:
+            normalized_arch = self._normalize_arch(arch, model_config)
             model_cls = self._try_load_model_cls(normalized_arch)
             if model_cls is not None:
                 return (model_cls, arch)
 
-        # Fallback to transformers impl
-        if model_config.model_impl in (ModelImpl.AUTO, ModelImpl.TRANSFORMERS):
+        # Fallback to transformers impl (before resolving runner_type)
+        if (all(arch not in self.models for arch in architectures)
+                and model_config.model_impl == ModelImpl.AUTO):
             arch = self._try_resolve_transformers(architectures[0],
                                                   model_config)
             if arch is not None:
