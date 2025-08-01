@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
+    VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
     VLLM_XLA_USE_SPMD: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
@@ -68,7 +69,6 @@ if TYPE_CHECKING:
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
-    VLLM_DOCKER_BUILD_CONTEXT: bool = False
     VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
     VLLM_NO_DEPRECATION_WARNING: bool = False
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
@@ -124,6 +124,7 @@ if TYPE_CHECKING:
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: Optional[int] = None
+    VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
@@ -228,14 +229,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # If set, vllm will use precompiled binaries (*.so)
     "VLLM_USE_PRECOMPILED":
-    lambda: os.environ.get("VLLM_USE_PRECOMPILED", "").strip().lower() in
-    ("1", "true") or bool(os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
-
-    # Used to mark that setup.py is running in a Docker build context,
-    # in order to force the use of precompiled binaries.
-    "VLLM_DOCKER_BUILD_CONTEXT":
-    lambda: os.environ.get("VLLM_DOCKER_BUILD_CONTEXT", "").strip().lower() in
-    ("1", "true"),
+    lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")) or bool(
+        os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
 
     # Whether to force using nightly wheel in python build.
     # This is used for testing the nightly wheel in python build.
@@ -504,6 +499,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM":
     lambda: bool(int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM", "0"))
                  ),
+
+    # If the env var is set, it uses a Ray Communicator wrapping
+    # vLLM's pipeline parallelism communicator to interact with Ray's
+    # Compiled Graph. Otherwise, it uses Ray's NCCL communicator.
+    # This flag is ignored if VLLM_USE_RAY_COMPILED_DAG is not set.
+    "VLLM_USE_RAY_WRAPPED_PP_COMM":
+    lambda: bool(int(os.getenv("VLLM_USE_RAY_WRAPPED_PP_COMM", "1"))),
 
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
@@ -900,6 +902,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     if "VLLM_TPU_BUCKET_PADDING_GAP" in os.environ else 0,
     "VLLM_TPU_MOST_MODEL_LEN":
     lambda: maybe_convert_int(os.environ.get("VLLM_TPU_MOST_MODEL_LEN", None)),
+
+    # Whether using Pathways
+    "VLLM_TPU_USING_PATHWAYS":
+    lambda: bool("proxy" in os.getenv("JAX_PLATFORMS", "").lower()),
 
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM":

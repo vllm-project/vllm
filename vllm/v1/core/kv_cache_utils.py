@@ -567,12 +567,10 @@ def hash_request_tokens(hash_function: Any, block_size: int,
 
     ret = []
     parent_block_hash_value = None
-    for start in range(0, len(token_ids), block_size):
+    # Only full blocks will be hashed
+    for start in range(0, len(token_ids) - block_size + 1, block_size):
         end = start + block_size
         block_token_ids = token_ids[start:end]
-        # Do not hash the block if it is not full.
-        if len(block_token_ids) < block_size:
-            break
 
         if req_need_extra_keys:
             # MM and LoRA requests need extra keys for block-hash computation.
