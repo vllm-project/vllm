@@ -871,6 +871,12 @@ class ModelConfig:
 
         return None
 
+    def set_disable_mm_preprocessor_cache(self, value: bool) -> None:
+        mm_config = self.get_multimodal_config()
+
+        self.disable_mm_preprocessor_cache = value
+        mm_config.disable_mm_preprocessor_cache = value
+
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
             self.model, self.revision)
