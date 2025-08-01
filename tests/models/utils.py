@@ -331,7 +331,7 @@ def matryoshka_fy(tensor: torch.Tensor, dimensions: int):
 
 
 def softmax(data):
-    if data.shape[-1] ==1:
+    if data.shape[-1] == 1:
         return F.sigmoid(data)
     else:
         return F.softmax(data, dim=-1)

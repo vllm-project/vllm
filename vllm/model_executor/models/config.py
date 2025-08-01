@@ -45,6 +45,7 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
 
 
 class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
+
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         pooler_config = vllm_config.model_config.pooler_config
@@ -164,6 +165,7 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
 
 
 class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
+
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         pooler_config = vllm_config.model_config.pooler_config
