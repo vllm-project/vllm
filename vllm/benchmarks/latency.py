@@ -21,17 +21,8 @@ from vllm.inputs import PromptType
 from vllm.sampling_params import BeamSearchParams
 
 
-def save_to_pytorch_benchmark_format(args: argparse.Namespace,
-                                     results: dict[str, Any]) -> None:
-    pt_records = convert_to_pytorch_benchmark_format(
-        args=args,
-        metrics={"latency": results["latencies"]},
-        extra_info={k: results[k]
-                    for k in ["avg_latency", "percentiles"]})
-    if pt_records:
-        pt_file = f"{os.path.splitext(args.output_json)[0]}.pytorch.json"
-        write_to_json(pt_file, pt_records)
-
+def save_to_pytorch_benchmark_format(args: argparse.Namespace) -> None:
+    return None
 
 def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument("--input-len", type=int, default=32)
