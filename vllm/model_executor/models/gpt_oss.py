@@ -24,7 +24,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import OpenAIMoeConfig
+from vllm.transformers_utils.configs import GptOssConfig
 from vllm.utils import cdiv
 
 from .utils import extract_layer_index, maybe_prefix
@@ -34,7 +34,7 @@ class OAIAttention(nn.Module):
 
     def __init__(
         self,
-        config: OpenAIMoeConfig,
+        config: GptOssConfig,
         quant_config: Optional[QuantizationConfig] = None,
         cache_config: Optional[CacheConfig] = None,
         prefix: str = "",
@@ -133,7 +133,7 @@ class MLPBlock(torch.nn.Module):
 
     def __init__(
         self,
-        config: OpenAIMoeConfig,
+        config: GptOssConfig,
         layer_idx: int,
         quant_config: QuantizationConfig,
         prefix: str = "",
@@ -169,7 +169,7 @@ class TransformerBlock(torch.nn.Module):
 
     def __init__(
         self,
-        config: OpenAIMoeConfig,
+        config: GptOssConfig,
         quant_config: QuantizationConfig,
         prefix: str = "",
     ):
@@ -188,10 +188,10 @@ class TransformerBlock(torch.nn.Module):
         return output
 
 
-class OpenAIModel(nn.Module):
+class GptOssModel(nn.Module):
 
     def __init__(self,
-                 config: OpenAIMoeConfig,
+                 config: GptOssConfig,
                  quant_config: QuantizationConfig,
                  prefix: str = ""):
         super().__init__()
@@ -222,7 +222,7 @@ class OpenAIModel(nn.Module):
 
 
 @support_torch_compile
-class OpenAIMoeForCausalLM(nn.Module):
+class GptOssForCausalLM(nn.Module):
 
     def __init__(
         self,
@@ -233,7 +233,7 @@ class OpenAIMoeForCausalLM(nn.Module):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
-        self.model = OpenAIModel(
+        self.model = GptOssModel(
             self.model_config,
             self.quant_config,
             prefix=maybe_prefix(prefix, "model"),

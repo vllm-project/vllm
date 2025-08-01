@@ -37,7 +37,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              NemotronConfig, NVLM_D_Config,
                                              RWConfig, SpeculatorsConfig,
                                              Step3TextConfig, Step3VLConfig,
-                                             OpenAIMoeConfig, OvisConfig,
+                                             GptOssConfig, OvisConfig,
                                              RWConfig, SkyworkR1VChatConfig,
                                              SolarConfig, Telechat2Config,
                                              UltravoxConfig)
@@ -91,7 +91,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "ultravox": UltravoxConfig,
     "step3_vl": Step3VLConfig,
     "step3_text": Step3TextConfig,
-    "openai_moe": OpenAIMoeConfig,
+    "gpt_oss": GptOssConfig,
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 

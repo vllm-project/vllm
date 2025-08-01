@@ -3,7 +3,7 @@
 from transformers import PretrainedConfig
 
 
-class OpenAIMoeConfig(PretrainedConfig):
+class GptOssConfig(PretrainedConfig):
     model_type = "openai_moe"
 
     def __init__(self,
