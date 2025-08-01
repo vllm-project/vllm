@@ -192,5 +192,5 @@ llm = LLM(model="Qwen/Qwen2-Audio-7B-Instruct",
 
 !!! note
     Multi-modal processor cache is disabled when using GPU multi-modal processing
-    because GPU operations work better with larger batch size which happens less
+    because GPU operations work better with larger batch size, which happens less
     frequently when the cache is enabled.
