@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import Optional
 
 import numpy as np
 import torch
@@ -150,9 +150,11 @@ class FlashAttentionMetadataBuilder(
     # FA2 launches separte routines for prefill-decode and pure decode batches,
     # while FA3 launches a unified varlen fwd kernel for both prefill-decode
     # and pure decode batches.
-    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.ALWAYS_SEPARATE if get_flash_attn_version() == 2 \
-        else AttentionCGSupport.ALWAYS_UNIFIED
+    cudagraph_support = AttentionCGSupport.ALWAYS
+    # FA2 only enables the packed-gqa optimization for single-token decodes,
+    # so we prefer to use cudagraph for single-token decodes.
+    cudagraph_preference = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE \
+        if get_flash_attn_version() == 2 else None
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):

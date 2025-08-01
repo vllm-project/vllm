@@ -4038,6 +4038,20 @@ class CUDAGraphMode(enum.Enum):
     NONE = 0
     PIECEWISE = 1
     FULL = 2
+    FULL_DECODE_ONLY = (FULL, NONE)
+    FULL_AND_PIECEWISE = (FULL, PIECEWISE)
+
+    def decode_mode(self) -> 'CUDAGraphMode':
+        return CUDAGraphMode(self.value[0]) if \
+            isinstance(self.value, tuple) else self
+
+    def mixed_mode(self) -> 'CUDAGraphMode':
+        return CUDAGraphMode(self.value[1]) if \
+            isinstance(self.value, tuple) else self
+
+    def requires_piecewise_compilation(self) -> bool:
+        return (self.decode_mode() == CUDAGraphMode.PIECEWISE
+                or self.mixed_mode() == CUDAGraphMode.PIECEWISE)
 
 
 @config
@@ -4207,18 +4221,26 @@ class CompilationConfig:
     - NONE, no cudagraph capture.
     - PIECEWISE. (v1 default)
     - FULL.
-    For cudagraph_mode != CUDAGraphMode.NONE, it requires that all input 
-    buffers have fixed addresses and all splitting ops write their outputs 
-    to input buffers.
+    - FULL_DECODE_ONLY.
+    - FULL_AND_PIECEWISE.
 
     PIECEWISE mode build piecewise cudagraph only, keeping the cudagraph
     incompatiable ops (i.e. some attention ops) outside the cudagraph
-    for general flexibility. 
+    for general flexibility.
+    This is the default mode.
 
-    FULL mode instead try to capture full cudagraph for fully compatible
-    routines (i.e. most attention backend support pure decode batches),
-    and may fall back to piecewise cudagraph for partially imcompatible
-    routines. This may provide performance benefits for smaller models.
+    FULL mode: Capture full cudagraph for all batches. Can be good for small
+    models or workloads with small prompts; not supported by many backends.
+    Generally for performance FULL_AND_PIECEWISE is better.
+    
+    FULL_DECODE_ONLY mode: Capture full cudagraph for decode batches only.
+    Mixed prefill-decode batches are run without cudagraphs. Can be good for
+    decode instances in a P/D setup where prefill is not as important so we
+    can save some memory.
+    
+    FULL_AND_PIECEWISE mode: Capture full cudagraph for decode batches and
+    piecewise cudagraph for prefill and mixed prefill-decode batches.
+    This is like the most performant mode for most models.
 
     Currently, the cudagraph mode is only used for the v1 engine.
     Note that the cudagraph logic is generally orthogonal to the 
@@ -4263,14 +4285,6 @@ class CompilationConfig:
     performance benefits for smaller models.
     Warning: This flag is deprecated and will be removed in future releases.
     Please use cudagraph_mode instead.
-    """
-    cudagraph_separate_routine: bool = False
-    """
-    Enable distinct attention routines for mixed and pure-decode batches during
-    full cuda graph capturing. This is because some attention backends like
-    FlashMLA, FlashInfer, FA2, etc. implement different branches for mixed
-    prefill-decode and pure decode cases. This flag enables capturing separate
-    cudagraphs for each branch.
     """
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
@@ -4921,18 +4935,13 @@ class VllmConfig:
                             "attention.")
                 self.model_config.disable_cascade_attn = True
 
-            if self.compilation_config.cudagraph_mode == \
-                CUDAGraphMode.PIECEWISE:
+            if self.compilation_config.cudagraph_mode\
+                .requires_piecewise_compilation():
                 assert self.compilation_config.level == \
                     CompilationLevel.PIECEWISE, \
                     "Compilation level should be CompilationLevel.PIECEWISE "\
-                    "when cudagraph_mode is CUDAGraphMode.PIECEWISE"
-
-            if self.compilation_config.cudagraph_separate_routine:
-                assert self.compilation_config.cudagraph_mode == \
-                    CUDAGraphMode.FULL, (
-                    "cudagraph_separate_routine requires "
-                    "cudagraph_mode be CUDAGraphMode.FULL")
+                    "when cudagraph_mode piecewise cudagraphs is used, "\
+                    f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]

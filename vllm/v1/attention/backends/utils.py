@@ -73,19 +73,19 @@ class AttentionCGSupport(enum.Enum):
 
     NEVER = 0
     """NO cudagraph support"""
-    PURE_DECODE_ONLY = 1
-    """Cudagraph supported for pure decode, need to use piecewise
-    cudagraph or no cudagraph for mixed prefill-decode batches"""
-    ALWAYS_UNIFIED = 2
-    """Cudagraph always supported with unified routine"""
-    ALWAYS_SEPARATE = 3
-    """Cudagraph always supported, with better performance when separate
-    routines are used for mixed prefill-decode and pure decode batches."""
+    ALWAYS = 1
+    """Cudagraph always supported; supports mixed-prefill-decode"""
+    UNIFORM_SINGLE_TOKEN_DECODE = 2
+    """Cudagraph supported for batches the only contain query_len==1 decodes"""
+    UNIFORM_BATCH = 3
+    """Cudagraph supported for batches the only contain query lengths that are
+    the same, this can be used for spec-decode 
+        i.e. "decodes" are 1 + num_speculative_tokens"""
 
 
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention (default: no).
-    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
+    cudagraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.NEVER
 
     @abstractmethod

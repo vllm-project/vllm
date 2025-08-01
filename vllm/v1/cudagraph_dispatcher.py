@@ -52,7 +52,7 @@ class CudagraphDispatcher:
             f"Invalid cudagraph runtime mode: {runtime_mode}"
         self.cudagraph_keys[runtime_mode].add(batch_descriptor)
 
-    def initialize_cudagraph_keys(self, create_mixed_batch_full_cg: bool,
+    def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode,
                                   uniform_decode_query_len: int):
         # This should be called only after attention backend is initialized.
 
@@ -63,35 +63,26 @@ class CudagraphDispatcher:
         # trigger capturing/replaying the piecewise cudagraphs depending on
         # CompilationConfig.cudagraph_mode. In addition, if we allow lazy
         # capturing in future PR, some keys may never be triggered.
-
-        if self.piecewise_attn_compilation:
-            # add piecewise cudagraph keys.
+        if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
             for bs in self.compilation_config.cudagraph_capture_sizes:
                 self.add_cudagraph_key(
-                    CUDAGraphMode.PIECEWISE,
+                    cudagraph_mode.mixed_mode(),
                     BatchDescriptor(num_tokens=bs, uniform_decode=False))
 
-        if self.cudagraph_mode == CUDAGraphMode.FULL:
-            # full cudagraph for mix prefill-decode/general batches
-            if create_mixed_batch_full_cg:
-                for bs in self.compilation_config.cudagraph_capture_sizes:
-                    self.add_cudagraph_key(
-                        CUDAGraphMode.FULL,
-                        BatchDescriptor(num_tokens=bs, uniform_decode=False))
-
-            # always create full cudagraph for uniform batches if cudagraph
-            # separate routine is enabled.
-            if self.compilation_config.cudagraph_separate_routine:
-                max_num_tokens = uniform_decode_query_len * \
-                    self.vllm_config.scheduler_config.max_num_seqs
-                cudagraph_capture_sizes_for_decode = [
-                    x for x in self.compilation_config.cudagraph_capture_sizes
-                    if x <= max_num_tokens and x >= uniform_decode_query_len
-                ]
-                for bs in cudagraph_capture_sizes_for_decode:
-                    self.add_cudagraph_key(
-                        CUDAGraphMode.FULL,
-                        BatchDescriptor(num_tokens=bs, uniform_decode=True))
+        # if decode cudagraph mode is FULL, and we don't already have mixed
+        # mode full cudagraphs then add them here.
+        if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL \
+            and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL:
+            max_num_tokens = uniform_decode_query_len * \
+                self.vllm_config.scheduler_config.max_num_seqs
+            cudagraph_capture_sizes_for_decode = [
+                x for x in self.compilation_config.cudagraph_capture_sizes
+                if x <= max_num_tokens and x >= uniform_decode_query_len
+            ]
+            for bs in cudagraph_capture_sizes_for_decode:
+                self.add_cudagraph_key(
+                    CUDAGraphMode.FULL,
+                    BatchDescriptor(num_tokens=bs, uniform_decode=True))
         self.keys_initialized = True
 
     def dispatch(
