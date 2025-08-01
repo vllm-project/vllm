@@ -11,6 +11,8 @@ from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
+from vllm.model_executor.layers.quantization.utils.rocm_aiter_w8a8_utils import (  # noqa: E501
+    is_rocm_aiter_gemm_enabled, rocm_aiter_per_token_w8a8_scaled_mm)
 from vllm.platforms import current_platform
 
 # Input scaling factors are no longer optional in _scaled_mm starting
@@ -273,8 +275,11 @@ def torch_channelwise_w8a8_scaled_mm(*, qinput: torch.Tensor,
 
 
 def dispatch_w8a8_scaled_mm(
-        cutlass_fp8_supported: bool, per_tensor_weights: bool,
-        per_tensor_activations: bool) -> Callable[..., torch.Tensor]:
+    cutlass_fp8_supported: bool,
+    use_rocm_aiter: bool,
+    per_tensor_weights: bool,
+    per_tensor_activations: bool,
+) -> Callable[..., torch.Tensor]:
 
     # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
     if cutlass_fp8_supported:
@@ -286,6 +291,8 @@ def dispatch_w8a8_scaled_mm(
     # If torch.scaled_mm supports per-channel (weights) per-token (inputs)
     if not per_tensor_weights and not per_tensor_activations \
             and USE_ROWWISE_TORCH_SCALED_MM:
+        if use_rocm_aiter:
+            return rocm_aiter_per_token_w8a8_scaled_mm
         return torch_per_token_w8a8_scaled_mm
     # Normally, torch.scaled_mm supports per tensor weights + activations only
     # so fallback to naive if per channel or per token
@@ -308,6 +315,8 @@ class Fp8LinearOp:
                  act_quant_group_shape: GroupShape = GroupShape.PER_TENSOR,
                  pad_output: Optional[bool] = None):
         self.cutlass_fp8_supported = cutlass_fp8_supported
+        self.is_rocm_aiter_enabled = (is_rocm_aiter_gemm_enabled()
+                                      and current_platform.supports_fp8())
 
         # Note: we pad the input because torch._scaled_mm is more performant
         # for matrices with batch dimension > 16.
@@ -359,13 +368,14 @@ class Fp8LinearOp:
         else:
             qinput, x_scale = input_2d, input_scale
 
-        per_tensor_weights = (weight_scale.numel() == 1)
-        per_tensor_activations = (x_scale.numel() == 1)
+        per_tensor_weights = (weight_scale.numel()
+                              == 1) and weight_scale.dim() < 2
+        per_tensor_activations = (x_scale.numel() == 1) and x_scale.dim() < 2
 
         # TODO(luka) do this dispatch during init (after ScaledMM refactor)
         w8a8_scaled_mm_func = dispatch_w8a8_scaled_mm(
-            self.cutlass_fp8_supported, per_tensor_weights,
-            per_tensor_activations)
+            self.cutlass_fp8_supported, self.is_rocm_aiter_enabled,
+            per_tensor_weights, per_tensor_activations)
 
         return w8a8_scaled_mm_func(qinput=qinput,
                                    weight=weight,
