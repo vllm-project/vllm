@@ -27,7 +27,7 @@ from typing import Optional, Union
 
 import torch
 from torch import nn
-from transformers import CohereConfig
+from transformers import Cohere2Config, CohereConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -124,7 +124,7 @@ class CohereAttention(nn.Module):
 
     def __init__(
         self,
-        config: CohereConfig,
+        config: Union[CohereConfig, Cohere2Config],
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -181,12 +181,14 @@ class CohereAttention(nn.Module):
             is_neox_style=False,
         )
 
-        layer_idx = extract_layer_index(prefix)
-        is_sliding = config.layer_types[layer_idx] == "sliding_attention"
-        self.sliding_window = config.sliding_window if is_sliding else None
-
         # Model v2 has interleaved sliding windows, v1 does not
-        self.v1 = not is_sliding
+        self.v1 = isinstance(config, CohereConfig)
+
+        self.sliding_window = None
+        if not self.v1:
+            layer_idx = extract_layer_index(prefix)
+            if config.layer_types[layer_idx] == "sliding_attention":
+                self.sliding_window = config.sliding_window
 
         self.attn = Attention(self.num_heads,
                               self.head_dim,

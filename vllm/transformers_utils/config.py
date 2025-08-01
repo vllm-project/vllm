@@ -277,6 +277,17 @@ def is_encoder_decoder(config: PretrainedConfig) -> bool:
     return getattr(config, "is_encoder_decoder", False)
 
 
+def is_interleaved(config: PretrainedConfig) -> bool:
+    """
+    Detect if the model with this config is used with interleaved attention.
+    """
+    text_config = config.get_text_config()
+    if layer_types := getattr(text_config, "layer_types", None):
+        interleaved_types = {"full_attention", "sliding_attention"}
+        return interleaved_types.issubset(layer_types)
+    return False
+
+
 def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
     """Remap config attributes to match the expected names."""
     for old_attr, new_attr in _CONFIG_ATTRS_MAPPING.items():

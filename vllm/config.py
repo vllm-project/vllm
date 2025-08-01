@@ -39,8 +39,9 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
-    maybe_override_with_speculators_target_model, try_get_generation_config,
-    try_get_safetensors_metadata, try_get_tokenizer_config, uses_mrope)
+    is_interleaved, maybe_override_with_speculators_target_model,
+    try_get_generation_config, try_get_safetensors_metadata,
+    try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 # yapf conflicts with isort for this block
@@ -733,7 +734,8 @@ class ModelConfig:
         )
 
         # Interleaved attention is not supported by some backends in V0
-        if (not self.disable_sliding_window and self.is_interleaved
+        if (not self.disable_sliding_window
+                and is_interleaved(self.hf_text_config)
                 and not envs.VLLM_USE_V1
                 and (backend := envs.VLLM_ATTENTION_BACKEND)
                 in ("XFORMERS", "FLASHINFER")):
@@ -1642,14 +1644,6 @@ class ModelConfig:
     @property
     def is_hybrid(self) -> bool:
         return self._model_info.is_hybrid
-
-    @property
-    def is_interleaved(self) -> bool:
-        layer_types = getattr(self.hf_text_config, "layer_types", None)
-        if layer_types is None:
-            return False
-        interleaved_types = {"full_attention", "sliding_attention"}
-        return interleaved_types.issubset(layer_types)
 
     @property
     def has_noops(self) -> bool:
