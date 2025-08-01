@@ -39,8 +39,8 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
-    try_get_generation_config, try_get_safetensors_metadata,
-    try_get_tokenizer_config, uses_mrope)
+    maybe_override_with_speculators_target_model, try_get_generation_config,
+    try_get_safetensors_metadata, try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 # yapf conflicts with isort for this block
@@ -535,6 +535,15 @@ class ModelConfig:
                     "affect the random state of the Python process that "
                     "launched vLLM.", self.seed)
 
+        if self.runner != "draft":
+            # If we're not running the draft model, check for speculators config
+            # If speculators config, set model / tokenizer to be target model
+            self.model, self.tokenizer = maybe_override_with_speculators_target_model(  # noqa: E501
+                model=self.model,
+                tokenizer=self.tokenizer,
+                revision=self.revision,
+                trust_remote_code=self.trust_remote_code)
+
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(self.model,
                                                        self.served_model_name)
@@ -606,8 +615,8 @@ class ModelConfig:
                                self.config_format,
                                hf_overrides_kw=hf_overrides_kw,
                                hf_overrides_fn=hf_overrides_fn)
-        self.hf_config = hf_config
 
+        self.hf_config = hf_config
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.attention_chunk_size = getattr(self.hf_text_config,
                                             "attention_chunk_size", None)
@@ -2994,10 +3003,13 @@ class SpeculativeConfig:
                             "Chunked prefill and EAGLE are not compatible "
                             "when using V0.")
 
+                    from vllm.transformers_utils.configs import (
+                        SpeculatorsConfig)
                     from vllm.transformers_utils.configs.eagle import (
                         EAGLEConfig)
+
                     if isinstance(self.draft_model_config.hf_config,
-                                  EAGLEConfig):
+                                  (EAGLEConfig, SpeculatorsConfig)):
                         pass
                     else:
                         eagle_config = EAGLEConfig(
