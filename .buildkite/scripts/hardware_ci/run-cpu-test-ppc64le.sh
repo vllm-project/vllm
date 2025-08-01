@@ -25,12 +25,12 @@ function cpu_tests() {
 
   # offline inference
   podman exec -it "$container_id" bash -c "
-    set -e
+    set -xve
     python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m"
 
   # Run basic model test
   podman exec -it "$container_id" bash -c "
-    set -e
+    set -evx
     pip install pytest pytest-asyncio einops peft Pillow soundfile transformers_stream_generator matplotlib
     pip install sentence-transformers datamodel_code_generator
     pytest -v -s tests/models/language/generation/test_bart.py -m cpu_model
