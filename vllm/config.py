@@ -11,6 +11,7 @@ import textwrap
 import uuid
 import warnings
 from collections import Counter
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import (MISSING, Field, asdict, field, fields, is_dataclass,
                          replace)
@@ -775,6 +776,9 @@ class ModelConfig:
         if (not current_platform.is_neuron() and self.override_neuron_config):
             raise ValueError(
                 "`override_neuron_config` is only supported on Neuron.")
+
+        # Avoid running try_verify_and_update_config multiple times
+        self.config_updated = False
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -3329,7 +3333,16 @@ class MultiModalConfig:
             999 if envs.VLLM_USE_V1 else 1,
         )
 
-    # TODO: Add configs to init vision tower or not.
+    def merge_mm_processor_kwargs(
+        self,
+        inference_kwargs: Mapping[str, object],
+    ) -> dict[str, object]:
+        """
+        Get the keyword arguments to pass to the multi-modal processor
+        according to the extra arguments passed during inference.
+        """
+        kwargs = self.mm_processor_kwargs or {}
+        return kwargs | dict(inference_kwargs)
 
 
 @config
@@ -4048,7 +4061,7 @@ class PassConfig:
     """Whether to enable async TP."""
     enable_fi_allreduce_fusion: bool = False
     """Whether to enable flashinfer allreduce fusion."""
-    fi_allreduce_fusion_max_token_num: int = 1024
+    fi_allreduce_fusion_max_token_num: int = 16384
     """Max number of tokens to used in flashinfer allreduce fusion."""
 
     # TODO(luka) better pass enabling system.
@@ -4913,6 +4926,11 @@ class VllmConfig:
     def try_verify_and_update_config(self):
         if self.model_config is None:
             return
+
+        # Avoid running try_verify_and_update_config multiple times
+        if getattr(self.model_config, "config_updated", False):
+            return
+        self.model_config.config_updated = True
 
         architecture = self.model_config.architecture
         if architecture is None:
