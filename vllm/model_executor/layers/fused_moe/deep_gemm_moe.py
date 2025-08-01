@@ -4,7 +4,9 @@ import functools
 from typing import Any, Optional
 
 import torch
+from tqdm import tqdm
 
+import vllm.envs as env
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
@@ -94,10 +96,6 @@ def warmup_deepgemm_gg_contiguous_kernels(w1: torch.Tensor, w2: torch.Tensor,
     Note that this warmup is expected to happen during the model profile
     call and not during actual model inference.
     """
-
-    from tqdm import tqdm
-
-    import vllm.envs as env
 
     assert w1.size(0) == w2.size(0), (
         "w1 and w2 must have the same number of experts")
