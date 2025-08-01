@@ -361,8 +361,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   // output layout from QKmfma : QH16xT4x4 16 qheads across 16 lanes, 16 tokens
   // across 4 rows x 4 tokens per lane
 
-  const int num_context_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
-  const int last_ctx_block = num_context_blocks - 1;
+  const int num_seq_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
+  const int last_seq_block = num_seq_blocks - 1;
 
   const int* block_table_seq = block_tables + seq_idx * max_num_blocks_per_seq;
 
@@ -375,7 +375,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int kglobal_token_idx = partition_start_token_idx + klocal_token_idx;
     const int kblock_idx = (kglobal_token_idx < seq_len)
                                ? kglobal_token_idx / BLOCK_SIZE
-                               : last_ctx_block;
+                               : last_seq_block;
     kphysical_block_number[token_depth] = block_table_seq[kblock_idx];
   }
 
@@ -478,7 +478,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
           partition_start_token_idx + vlocal_token_idx;
       const int vblock_idx = (vglobal_token_idx < seq_len)
                                  ? vglobal_token_idx / BLOCK_SIZE
-                                 : last_ctx_block;
+                                 : last_seq_block;
       vphysical_block_number[vtoken_depth][vblock_depth] =
           block_table_seq[vblock_idx];
     }
@@ -862,8 +862,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     }
   } else {  // warp within context
 
-    const int num_context_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
-    const int last_ctx_block = num_context_blocks - 1;
+    const int num_seq_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
+    const int last_seq_block = num_seq_blocks - 1;
 
     const int* block_table = block_tables + seq_idx * max_num_blocks_per_seq;
     // token id within partition
@@ -874,7 +874,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     // fetch block number for k
     const int block_idx = (global_token_idx < seq_len)
                               ? global_token_idx / BLOCK_SIZE
-                              : last_ctx_block;
+                              : last_seq_block;
 
     // fetch k physical block number
     //  int32 physical_block_number leads to overflow when multiplied with
@@ -887,7 +887,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     for (int b = 0; b < VBLOCKS; b++) {
       const int vblock_idx = warp_start_block_idx + b;
       const int vblock_idx_ctx =
-          (vblock_idx <= last_ctx_block) ? vblock_idx : last_ctx_block;
+          (vblock_idx <= last_seq_block) ? vblock_idx : last_seq_block;
       vphysical_blocks[b] = block_table[vblock_idx_ctx];
     }
 
@@ -1714,8 +1714,8 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     }
   }
 
-  const int num_context_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
-  const int last_ctx_block = num_context_blocks - 1;
+  const int num_seq_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
+  const int last_seq_block = num_seq_blocks - 1;
 
   const int* block_table_seq = block_tables + seq_idx * max_num_blocks_per_seq;
 
@@ -1728,7 +1728,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int kglobal_token_idx = partition_start_token_idx + klocal_token_idx;
     const int kblock_idx = (kglobal_token_idx < seq_len)
                                ? kglobal_token_idx / BLOCK_SIZE
-                               : last_ctx_block;
+                               : last_seq_block;
     kphysical_block_number[token_depth] = block_table_seq[kblock_idx];
   }
 
@@ -1782,7 +1782,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
           partition_start_token_idx + vlocal_token_idx;
       const int vblock_idx = (vglobal_token_idx < seq_len)
                                  ? vglobal_token_idx / BLOCK_SIZE
-                                 : last_ctx_block;
+                                 : last_seq_block;
       vphysical_block_number[vtoken_depth][vblock_depth] =
           block_table_seq[vblock_idx];
     }
@@ -2480,8 +2480,8 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     }
   }
 
-  const int num_context_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
-  const int last_ctx_block = num_context_blocks - 1;
+  const int num_seq_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
+  const int last_seq_block = num_seq_blocks - 1;
 
   const int* block_table_seq = block_tables + seq_idx * max_num_blocks_per_seq;
 
@@ -2494,7 +2494,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int kglobal_token_idx = partition_start_token_idx + klocal_token_idx;
     const int kblock_idx = (kglobal_token_idx < seq_len)
                                ? kglobal_token_idx / BLOCK_SIZE
-                               : last_ctx_block;
+                               : last_seq_block;
     kphysical_block_number[token_depth] = block_table_seq[kblock_idx];
   }
 
@@ -2548,7 +2548,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
           partition_start_token_idx + vlocal_token_idx;
       const int vblock_idx = (vglobal_token_idx < seq_len)
                                  ? vglobal_token_idx / BLOCK_SIZE
-                                 : last_ctx_block;
+                                 : last_seq_block;
       vphysical_block_number[vtoken_depth][vblock_depth] =
           block_table_seq[vblock_idx];
     }
