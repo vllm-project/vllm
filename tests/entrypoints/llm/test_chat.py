@@ -6,8 +6,12 @@ import pytest
 
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.platforms import current_platform
 
-from ..openai.test_vision import TEST_IMAGE_URLS
+from ..openai.test_audio import (TEST_AUDIO_URLS,
+                                 get_dummy_messages_from_audio_url)
+from ..openai.test_vision import (TEST_IMAGE_URLS,
+                                  get_dummy_messages_from_image_url)
 
 
 @pytest.fixture(scope="function")
@@ -195,3 +199,53 @@ def test_chat_extra_kwargs(thinking_llm, enable_thinking):
     else:
         # The chat template includes dummy thinking process
         assert think_id in prompt_token_ids
+
+
+def _get_messages(modality: str):
+    if modality == "image":
+        return [
+            {
+                "role": "system",
+                "content": "You are a helpful assistant"
+            },
+            {
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "What is in this image?"
+                }]
+            },
+        ]
+
+
+@pytest.mark.parametrize(("model_id", "modality", "mm_init_kwargs"), [
+    ("Qwen/Qwen2.5-VL-3B-Instruct", "image", {
+        "use_fast": True
+    }),
+    ("Qwen/Qwen2-Audio-7B-Instruct", "audio", {}),
+])
+def test_mm_processing_gpu(model_id, modality, mm_init_kwargs):
+    if modality == "image":
+        messages = get_dummy_messages_from_image_url(TEST_IMAGE_URLS[0])
+    elif modality == "audio":
+        messages = get_dummy_messages_from_audio_url(TEST_AUDIO_URLS[0])
+    else:
+        raise NotImplementedError(modality)
+
+    device = current_platform.device_name
+    llm = LLM(
+        model=model_id,
+        max_model_len=6144,
+        max_num_seqs=2,
+        enforce_eager=True,
+        seed=0,
+        mm_processor_kwargs=mm_init_kwargs | {"device": device},
+    )
+
+    outputs = llm.chat(messages)
+    assert len(outputs) == 1
+
+    if device != "cpu":
+        match = "cannot override the device for multi-modal preprocessing"
+        with pytest.raises(ValueError, match=match):
+            llm.chat(messages, mm_processor_kwargs={"device": "cpu"})

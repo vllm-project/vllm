@@ -162,11 +162,22 @@ class InputProcessingContext(InputContext):
             requires_kw_only=False,
             allow_var_kwargs=True,
         )
+        is_gpu = allowed_kwargs.get("device", "cpu") != "cpu"
 
         def maybe_cast_dtype(x):
-            # This mimics the behavior of transformers.BatchFeature
-            if isinstance(x, torch.Tensor) and x.is_floating_point():
-                return x.to(dtype=self.model_config.dtype)
+            if isinstance(x, torch.Tensor):
+                # This mimics the behavior of transformers.BatchFeature
+                if x.is_floating_point():
+                    x = x.to(dtype=self.model_config.dtype)
+
+                # This is required because we need to transfer the data
+                # to engine core, and the serialization process expects
+                # CPU tensors.
+                # The dtype of model config is usually lower precision
+                # so we call this last to transfer less data to CPU
+                if is_gpu:
+                    x = x.cpu()
+
             return x
 
         try:

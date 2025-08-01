@@ -1810,22 +1810,13 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _get_mm_dummy_batch(self, modality: str,
                             batch_size: int) -> BatchedTensorInputs:
-        # Dummy data for pre-compiling multimodal models.
+        """Dummy data for profiling and precompiling multimodal models."""
         dummy_request_data = self.mm_registry.get_decoder_dummy_data(
             model_config=self.model_config,
             seq_len=self.max_num_tokens,
+            mm_counts={modality: batch_size},
         )
         dummy_mm_data = dummy_request_data.multi_modal_data
-
-        # Dummy data definition in V0 may contain multiple multimodal items
-        # (e.g, multiple images) for a single request, therefore here we
-        # always replicate first item by max_num_mm_items times since in V1
-        # they are scheduled to be processed separately.
-        assert isinstance(dummy_mm_data, MultiModalKwargs), (
-            "Expected dummy multimodal data to be of type "
-            f"MultiModalKwargs, got {type(dummy_mm_data)=} instead. "
-            "This is most likely due to the model not having a merged "
-            "processor.")
 
         # When models have a merged processor, their dummy data is
         # already batched `MultiModalKwargs`, therefore we take the first

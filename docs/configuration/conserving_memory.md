@@ -129,20 +129,18 @@ reduce the size of the processed multi-modal inputs, which in turn saves memory.
 
 Here are some examples:
 
-??? code
+```python
+from vllm import LLM
 
-    ```python
-    from vllm import LLM
+# Available for Qwen2-VL series models
+llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
+          mm_processor_kwargs={
+              "max_pixels": 768 * 768,  # Default is 1280 * 28 * 28
+          })
 
-    # Available for Qwen2-VL series models
-    llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
-            mm_processor_kwargs={
-                "max_pixels": 768 * 768,  # Default is 1280 * 28 * 28
-            })
-
-    # Available for InternVL series models
-    llm = LLM(model="OpenGVLab/InternVL2-2B",
-            mm_processor_kwargs={
-                "max_dynamic_patch": 4,  # Default is 12
-            })
-    ```
+# Available for InternVL series models
+llm = LLM(model="OpenGVLab/InternVL2-2B",
+          mm_processor_kwargs={
+              "max_dynamic_patch": 4,  # Default is 12
+          })
+```
