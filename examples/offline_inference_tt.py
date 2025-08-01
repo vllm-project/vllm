@@ -26,16 +26,16 @@ def register_tt_models():
     if llama_text_version == "tt_transformers":
         path_llama_text = \
             "models.tt_transformers.tt.generator_vllm:LlamaForCausalLM"
-    elif llama_text_version == "llama3_subdevices":
+    elif llama_text_version == "llama3_70b_galaxy":
         path_llama_text = \
-            "models.demos.llama3_subdevices.tt.generator_vllm:LlamaForCausalLM"
+            "models.demos.llama3_70b_galaxy.tt.generator_vllm:LlamaForCausalLM"
     elif llama_text_version == "llama2_70b":
         path_llama_text = \
             "models.demos.t3000.llama2_70b.tt.generator_vllm:TtLlamaForCausalLM"
     else:
         raise ValueError(
             f"Unsupported TT Llama version: {llama_text_version}, "
-            "pick one of [tt_transformers, llama3_subdevices, llama2_70b]")
+            "pick one of [tt_transformers, llama3_70b_galaxy, llama2_70b]")
 
     # Llama3.1/3.2 - Text
     ModelRegistry.register_model("TTLlamaForCausalLM", path_llama_text)
