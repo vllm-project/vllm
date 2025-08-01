@@ -60,7 +60,7 @@ def test_ray_runtime_env(monkeypatch: pytest.MonkeyPatch):
     }
 
     config_ref = ray.remote(create_config).options(
-        runtime_env=runtime_env, ).remote()
+        runtime_env=runtime_env).remote()
 
     config = ray.get(config_ref)
     parallel_config = config.parallel_config
