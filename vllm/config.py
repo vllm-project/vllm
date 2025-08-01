@@ -11,6 +11,7 @@ import textwrap
 import uuid
 import warnings
 from collections import Counter
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import (MISSING, Field, asdict, field, fields, is_dataclass,
                          replace)
@@ -776,6 +777,9 @@ class ModelConfig:
             raise ValueError(
                 "`override_neuron_config` is only supported on Neuron.")
 
+        # Avoid running try_verify_and_update_config multiple times
+        self.config_updated = False
+
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
@@ -856,7 +860,7 @@ class ModelConfig:
             self.tokenizer = s3_tokenizer.dir
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
-        if self.registry.is_multimodal_model(self.architectures, self):
+        if self._model_info.supports_multimodal:
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
                 media_io_kwargs=self.media_io_kwargs,
@@ -865,20 +869,13 @@ class ModelConfig:
                 disable_mm_preprocessor_cache,
                 interleave_mm_strings=self.interleave_mm_strings)
 
-        if self.limit_mm_per_prompt:
-            raise ValueError("`limit_mm_per_prompt` is only supported for "
-                             "multimodal models.")
-        if self.mm_processor_kwargs:
-            raise ValueError("`mm_processor_kwargs` is only supported for "
-                             "multimodal models.")
-        if self.disable_mm_preprocessor_cache:
-            raise ValueError("`disable_mm_preprocessor_cache` is only "
-                             "supported for multimodal models.")
-        if self.interleave_mm_strings:
-            raise ValueError("`interleave_mm_strings` is only "
-                             "supported for multimodal models.")
-
         return None
+
+    def set_disable_mm_preprocessor_cache(self, value: bool) -> None:
+        mm_config = self.get_multimodal_config()
+
+        self.disable_mm_preprocessor_cache = value
+        mm_config.disable_mm_preprocessor_cache = value
 
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
@@ -1799,6 +1796,16 @@ class CacheConfig:
     num_cpu_blocks: Optional[int] = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
 
+    kv_sharing_fast_prefill: bool = False
+    """This feature is work in progress and no prefill optimization takes place
+    with this flag enabled currently.
+
+    In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
+    some layers can skip tokens corresponding to prefill. This flag enables
+    attention metadata for eligible layers to be overriden with metadata
+    necessary for implementating this optimization in some models (e.g. Gemma3n)
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -1839,6 +1846,11 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
+
+        if self.kv_sharing_fast_prefill:
+            logger.warning_once(
+                "--kv-sharing-fast-prefill is currently work in progress "
+                "and not functional yet (i.e. no prefill savings)")
 
         return self
 
@@ -3318,7 +3330,16 @@ class MultiModalConfig:
             999 if envs.VLLM_USE_V1 else 1,
         )
 
-    # TODO: Add configs to init vision tower or not.
+    def merge_mm_processor_kwargs(
+        self,
+        inference_kwargs: Mapping[str, object],
+    ) -> dict[str, object]:
+        """
+        Get the keyword arguments to pass to the multi-modal processor
+        according to the extra arguments passed during inference.
+        """
+        kwargs = self.mm_processor_kwargs or {}
+        return kwargs | dict(inference_kwargs)
 
 
 @config
@@ -4046,7 +4067,7 @@ class PassConfig:
     """Whether to enable async TP."""
     enable_fi_allreduce_fusion: bool = False
     """Whether to enable flashinfer allreduce fusion."""
-    fi_allreduce_fusion_max_token_num: int = 1024
+    fi_allreduce_fusion_max_token_num: int = 16384
     """Max number of tokens to used in flashinfer allreduce fusion."""
 
     # TODO(luka) better pass enabling system.
@@ -4911,6 +4932,11 @@ class VllmConfig:
     def try_verify_and_update_config(self):
         if self.model_config is None:
             return
+
+        # Avoid running try_verify_and_update_config multiple times
+        if getattr(self.model_config, "config_updated", False):
+            return
+        self.model_config.config_updated = True
 
         architecture = self.model_config.architecture
         if architecture is None:

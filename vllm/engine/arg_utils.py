@@ -445,6 +445,9 @@ class EngineArgs:
     # DEPRECATED
     enable_prompt_adapter: bool = False
 
+    kv_sharing_fast_prefill: bool = \
+        CacheConfig.kv_sharing_fast_prefill
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -697,6 +700,8 @@ class EngineArgs:
                                  **cache_kwargs["cpu_offload_gb"])
         cache_group.add_argument("--calculate-kv-scales",
                                  **cache_kwargs["calculate_kv_scales"])
+        cache_group.add_argument("--kv-sharing-fast-prefill",
+                                 **cache_kwargs["kv_sharing_fast_prefill"])
 
         # Multimodal related configs
         multimodal_kwargs = get_kwargs(MultiModalConfig)
@@ -1069,6 +1074,7 @@ class EngineArgs:
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
+            kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
         )
 
         # Get the current placement group if Ray is initialized and
@@ -1190,6 +1196,18 @@ class EngineArgs:
             enable_multimodal_encoder_data_parallel=self.
             enable_multimodal_encoder_data_parallel,
         )
+
+        supports_mm_preprocessor_cache = (self.data_parallel_size == 1
+                                          or data_parallel_external_lb)
+        if (not supports_mm_preprocessor_cache
+                and model_config.is_multimodal_model
+                and not model_config.disable_mm_preprocessor_cache):
+            logger.warning(
+                "Multi-modal preprocessor cache is not compatible "
+                "with data parallelism when there does not exist a "
+                "one-to-one correspondance between API process and "
+                "EngineCore process, so the cache will be disabled.")
+            model_config.set_disable_mm_preprocessor_cache(True)
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
@@ -1411,7 +1429,7 @@ class EngineArgs:
             "PALLAS_VLLM_V1",
             "TRITON_ATTN_VLLM_V1",
             "TRITON_MLA",
-            "CUTLASS_MLA_VLLM_V1",
+            "CUTLASS_MLA",
             "FLASHMLA",
             "FLASHINFER",
             "FLASHINFER_VLLM_V1",

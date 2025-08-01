@@ -68,7 +68,6 @@ if TYPE_CHECKING:
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
-    VLLM_DOCKER_BUILD_CONTEXT: bool = False
     VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
     VLLM_NO_DEPRECATION_WARNING: bool = False
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
@@ -124,6 +123,7 @@ if TYPE_CHECKING:
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: Optional[int] = None
+    VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
@@ -227,14 +227,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # If set, vllm will use precompiled binaries (*.so)
     "VLLM_USE_PRECOMPILED":
-    lambda: os.environ.get("VLLM_USE_PRECOMPILED", "").strip().lower() in
-    ("1", "true") or bool(os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
-
-    # Used to mark that setup.py is running in a Docker build context,
-    # in order to force the use of precompiled binaries.
-    "VLLM_DOCKER_BUILD_CONTEXT":
-    lambda: os.environ.get("VLLM_DOCKER_BUILD_CONTEXT", "").strip().lower() in
-    ("1", "true"),
+    lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")) or bool(
+        os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION")),
 
     # Whether to force using nightly wheel in python build.
     # This is used for testing the nightly wheel in python build.
@@ -668,12 +662,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     (os.environ.get("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "0").strip().lower() in
      ("1", "true")),
 
-    # By default, vLLM will check the peer-to-peer capability itself,
-    # in case of broken drivers. See https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L101-L108 for details. # noqa
-    # If this env var is set to 1, vLLM will skip the peer-to-peer check,
-    # and trust the driver's peer-to-peer capability report.
+    # We assume drivers can report p2p status correctly.
+    # If the program hangs when using custom allreduce,
+    # potantially caused by a bug in the driver (535 series),
+    # if might be helpful to set VLLM_SKIP_P2P_CHECK=0
+    # so that vLLM can verify if p2p is actually working.
+    # See https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L101-L108 for details. # noqa
     "VLLM_SKIP_P2P_CHECK":
-    lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "0") == "1",
+    lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "1") == "1",
 
     # List of quantization kernels that should be disabled, used for testing
     # and performance comparisons. Currently only affects MPLinearKernel
@@ -897,6 +893,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     if "VLLM_TPU_BUCKET_PADDING_GAP" in os.environ else 0,
     "VLLM_TPU_MOST_MODEL_LEN":
     lambda: maybe_convert_int(os.environ.get("VLLM_TPU_MOST_MODEL_LEN", None)),
+
+    # Whether using Pathways
+    "VLLM_TPU_USING_PATHWAYS":
+    lambda: bool("proxy" in os.getenv("JAX_PLATFORMS", "").lower()),
 
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM":
