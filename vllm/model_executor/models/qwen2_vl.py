@@ -333,7 +333,7 @@ class Qwen2VisionAttention(nn.Module):
         if self.flash_attn_backend:
             # from vllm_flash_attn.flash_attn_interface import (
             #   flash_attn_varlen_func)
-            if self.flash_attn_backend == _Backend.ROCM_AITER_FA:
+            if self.attn_backend == _Backend.ROCM_AITER_FA:
                 from aiter import flash_attn_varlen_func
             else:
                 from flash_attn import flash_attn_varlen_func
