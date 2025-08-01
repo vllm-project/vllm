@@ -7,8 +7,10 @@ from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig
 from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
+from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
@@ -114,11 +116,23 @@ def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
         hf_overrides=model_info.hf_overrides,
     )
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
+    factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
 
     if not any(
             hasattr(model_cls, f"_parse_and_validate_{m}_input")
             for m in ["image", "video", "audio"]):
         pytest.skip(f"{model_arch} does not support tensor schema validation.")
+
+    ctx = InputProcessingContext(
+        model_config,
+        tokenizer=cached_tokenizer_from_config(model_config),
+    )
+    processing_info = factories.info(ctx)
+    supported_mm_limits = processing_info.get_supported_mm_limits()
+    limit_mm_per_prompt = {
+        modality: 3 if limit is None else limit
+        for modality, limit in supported_mm_limits.items()
+    }
 
     # Avoid calling model.forward()
     def _initialize_kv_caches_v0(self) -> None:
@@ -153,6 +167,7 @@ def test_model_tensor_schema(model_arch: str, vllm_runner: type[VllmRunner],
                 max_model_len=model_info.max_model_len,
                 load_format="dummy",
                 hf_overrides=hf_overrides,
+                limit_mm_per_prompt=limit_mm_per_prompt,
         ) as vllm_model:
             model_config = vllm_model.llm.llm_engine.model_config
             llm_engine = vllm_model.llm.llm_engine
