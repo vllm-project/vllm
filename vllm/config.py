@@ -1580,8 +1580,8 @@ class ModelConfig:
         generation config for this model.
         
         The generation config can contain information about special tokens, as
-        well as sampling parameters. Which is this method exists separately to
-        get_diff_sampling_param.
+        well as sampling parameters. Which is why this method exists separately
+        to `get_diff_sampling_param`.
 
         Returns:
             A dictionary containing the non-default generation config.
@@ -1605,9 +1605,8 @@ class ModelConfig:
 
     def get_diff_sampling_param(self) -> dict[str, Any]:
         """
-        This method returns a dictionary containing the non-default values of
-        the sampling parameters for this model with `override_generation_config`
-        applied.
+        This method returns a dictionary containing the non-default sampling
+        parameters with `override_generation_config` applied.
 
         The default sampling parameters are:
 
