@@ -316,6 +316,7 @@ def run_h2ovl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B
 def run_hyperclovax_seed_vision(
     questions: list[str], modality: str
 ) -> ModelRequestData:
@@ -1011,6 +1012,41 @@ def run_phi4mm(questions: list[str], modality: str) -> ModelRequestData:
         # Note - mm_processor_kwargs can also be passed to generate/chat calls
         mm_processor_kwargs={"dynamic_hd": 16},
         limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        lora_requests=[LoRARequest("vision", 1, vision_lora_path)],
+    )
+
+
+# HF format Phi-4-multimodal-instruct
+def run_phi4_multimodal(questions: list[str], modality: str) -> ModelRequestData:
+    """
+    Phi-4-multimodal-instruct supports both image and audio inputs. Here, we
+    show how to process image inputs.
+    """
+    assert modality == "image"
+    model_path = snapshot_download(
+        "microsoft/Phi-4-multimodal-instruct", revision="refs/pr/70"
+    )
+    # Since the vision-lora and speech-lora co-exist with the base model,
+    # we have to manually specify the path of the lora weights.
+    vision_lora_path = os.path.join(model_path, "vision-lora")
+    prompts = [
+        f"<|user|><|image|>{question}<|end|><|assistant|>" for question in questions
+    ]
+    engine_args = EngineArgs(
+        model=model_path,
+        max_model_len=5120,
+        max_num_seqs=2,
+        max_num_batched_tokens=12800,
+        enable_lora=True,
+        max_lora_rank=320,
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
+        mm_processor_kwargs={"dynamic_hd": 16},
+        limit_mm_per_prompt={"image": 1},
     )
 
     return ModelRequestData(
