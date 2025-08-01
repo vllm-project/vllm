@@ -144,7 +144,6 @@ async def lifespan(app: FastAPI):
         # Ensure app state including engine ref is gc'd
         del app.state
 
-
 @asynccontextmanager
 async def build_async_engine_client(
     args: Namespace,
@@ -198,25 +197,46 @@ async def build_async_engine_client_from_engine_args(
                 "To disable frontend multiprocessing, set VLLM_USE_V1=0.")
 
         from vllm.v1.engine.async_llm import AsyncLLM
-        async_llm: Optional[AsyncLLM] = None
-        client_index = client_config.pop(
-            "client_index") if client_config else 0
-        try:
-            async_llm = AsyncLLM.from_vllm_config(
-                vllm_config=vllm_config,
-                usage_context=usage_context,
-                disable_log_requests=engine_args.disable_log_requests,
-                disable_log_stats=engine_args.disable_log_stats,
-                client_addresses=client_config,
-                client_index=client_index)
+        from vllm.v1.engine.async_dynamic_llm import AsyncDynamicLLM
 
-            # Don't keep the dummy data in memory
-            await async_llm.reset_mm_cache()
+        if os.getenv("VLLM_DYNAMIC_LLM") == None:
+            async_llm: Optional[AsyncLLM] = None
+            client_index = client_config.pop(
+                "client_index") if client_config else 0
+            try:
+                async_llm = AsyncLLM.from_vllm_config(
+                    vllm_config=vllm_config,
+                    usage_context=usage_context,
+                    disable_log_requests=engine_args.disable_log_requests,
+                    disable_log_stats=engine_args.disable_log_stats,
+                    client_addresses=client_config,
+                    client_index=client_index)
 
-            yield async_llm
-        finally:
-            if async_llm:
-                async_llm.shutdown()
+                # Don't keep the dummy data in memory
+                await async_llm.reset_mm_cache()
+
+                yield async_llm
+            finally:
+                if async_llm:
+                    async_llm.shutdown()
+        else:
+            async_dyn_llm: Optional[AsyncDynamicLLM] = None
+            client_index = client_config.pop(
+                "client_index") if client_config else 0
+            try:
+                async_dyn_llm = AsyncDynamicLLM(
+                    vllm_config=vllm_config,
+                    usage_context=usage_context,
+                    disable_log_requests=engine_args.disable_log_requests,
+                    disable_log_stats=engine_args.disable_log_stats,
+                    client_addresses=client_config,
+                    client_index=client_index)
+
+
+                yield async_dyn_llm
+            finally:
+                if async_dyn_llm:
+                    async_dyn_llm.shutdown()
 
     # V0 AsyncLLM.
     elif (MQLLMEngineClient.is_unsupported_config(vllm_config)
@@ -1095,6 +1115,22 @@ async def scale_elastic_ep(raw_request: Request):
 async def is_scaling_elastic_ep(raw_request: Request):
     return JSONResponse({"is_scaling_elastic_ep": _scaling_elastic_ep})
 
+@router.post("/load_model",
+             dependencies=[Depends(validate_json_request)])
+async def load_model(raw_request: Request):
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400,
+                            detail="Invalid JSON format") from e  # noqa: B904
+
+    model = body.get("model")
+    client = engine_client(raw_request)
+    await client.load_model(model, raw_request.app.state)
+    return JSONResponse({
+            "message": "model loaded"})
+
+
 
 # TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
 # (requires typing_extensions >= 4.13)
@@ -1580,6 +1616,7 @@ async def init_app_state(
         for name in served_model_names
     ]
 
+    state.args = args
     state.engine_client = engine_client
     state.log_stats = not args.disable_log_stats
     state.vllm_config = vllm_config
