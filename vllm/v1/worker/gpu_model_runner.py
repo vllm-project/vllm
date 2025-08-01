@@ -606,7 +606,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _dummy_mm_kwargs(self, num_seqs: int) -> BatchedTensorInputs:
         if self.is_multimodal_raw_input_supported:
             dummy_data_modality, _ = self._get_modality_with_max_tokens()
-            return self._get_mm_dummy_batch(dummy_data_modality, num_seqs)
+            return self._get_mm_dummy_batch(dummy_data_modality, 1, num_seqs)
 
         return {}
 
@@ -2203,16 +2203,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             "and profiled with %s %s items of the maximum feature size.",
             encoder_budget, max_num_mm_items, dummy_data_modality)
 
-        return dummy_data_modality, max_num_mm_items
+        return dummy_data_modality, max_mm_items_per_req, max_num_mm_items
 
-    def _get_mm_dummy_batch(self, modality: str,
-                            batch_size: int) -> BatchedTensorInputs:
+    def _get_mm_dummy_batch(
+        self,
+        modality: str,
+        preprocessor_batch_size: int,
+        model_batch_size: int,
+    ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
         # NOTE: Use the full batch size to profile running preprocessor on GPU
         dummy_request_data = self.mm_registry.get_decoder_dummy_data(
             model_config=self.model_config,
             seq_len=self.max_num_tokens,
-            mm_counts={modality: batch_size},
+            mm_counts={modality: preprocessor_batch_size},
         )
         dummy_mm_data = dummy_request_data.multi_modal_data
 
@@ -2223,7 +2227,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
 
         batched_dummy_mm_inputs = MultiModalKwargs.batch([dummy_mm_kwargs] *
-                                                         batch_size)
+                                                         model_batch_size)
         return MultiModalKwargs.as_kwargs(
             batched_dummy_mm_inputs,
             device=self.device,
@@ -2505,11 +2509,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # TODO: handle encoder-decoder models once we support them.
         if (self.is_multimodal_model and self.max_num_encoder_input_tokens > 0
                 and self.encoder_cache_size > 0):
-            dummy_data_modality, max_num_mm_items = self._get_mm_dummy_params()
+            (
+                dummy_data_modality,
+                max_mm_items_per_req,
+                max_num_mm_items,
+            ) = self._get_mm_dummy_params()
 
             # Create dummy batch of multimodal inputs.
             batched_dummy_mm_inputs = self._get_mm_dummy_batch(
-                dummy_data_modality, max_num_mm_items)
+                dummy_data_modality, max_mm_items_per_req, max_num_mm_items)
 
             # Run multimodal encoder.
             dummy_encoder_outputs = self.model.get_multimodal_embeddings(
