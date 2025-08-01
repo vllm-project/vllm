@@ -82,7 +82,8 @@ def parse_args():
         help=("Fraction of GPU memory vLLM is allowed to allocate (0.0, 1.0]."),
     )
     parser.add_argument(
-        "--quantization", type=str,
+        "--quantization",
+        type=str,
     )
     return parser.parse_args()
 

@@ -50,8 +50,7 @@ if current_platform.is_cuda_alike():
         from .deepep_ll_prepare_finalize import (DEEPEP_QUANT_BLOCK_SHAPE,
                                                  DeepEPLLPrepareAndFinalize)
     if has_flashinfer():
-        from .flashinfer_cutlass_prepare_finalize import (
-            FlashInferCutlassMoEPrepareAndFinalize)
+        pass
 else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = None  # type: ignore
@@ -105,14 +104,14 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @staticmethod
     def _maybe_make_prepare_finalize(
-        moe: FusedMoEConfig,
-    ) -> Optional[FusedMoEPrepareAndFinalize]:
+        moe: FusedMoEConfig, ) -> Optional[FusedMoEPrepareAndFinalize]:
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
 
         prepare_finalize: Optional[FusedMoEPrepareAndFinalize] = None
 
-        assert not moe.use_flashinfer_cutlass_kernels, "Must be done in modelopt.py"
+        assert not moe.use_flashinfer_cutlass_kernels, \
+            "Must be created in modelopt.py"
 
         if moe.use_pplx_kernels:
             hidden_dim_bytes, hidden_scale_bytes = pplx_hidden_dim_scale_bytes(
@@ -207,9 +206,11 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         prepare_finalize = self.maybe_make_prepare_finalize(self.moe)
 
         if prepare_finalize is not None:
-            logger.debug("%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self))
+            logger.debug("%s for %s(%s)", prepare_finalize.__class__.__name__,
+                         self, id(self))
             assert self.topk_indices_dtype is None
-            assert self.fused_experts is None, f"Attempt to override experts for {id(self)}!"
+            assert self.fused_experts is None, \
+                f"Attempt to override experts for {id(self)}!"
             self.topk_indices_dtype = prepare_finalize.topk_indices_dtype()
             experts = self.select_gemm_impl(prepare_finalize, self.moe)
             self.fused_experts = FusedMoEModularKernel(

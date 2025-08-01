@@ -578,7 +578,7 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         super().__init__(
             FusedMoEQuantConfig(
-                quant_dtype=None, # skip quantization here
+                quant_dtype=None,  # skip quantization here
                 per_act_token_quant=per_act_token_quant,
                 per_out_ch_quant=per_out_ch_quant,
                 block_shape=block_shape,

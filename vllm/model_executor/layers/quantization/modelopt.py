@@ -946,7 +946,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         # default to TP/EP case only
         use_dp = moe.moe_parallel_config.dp_size > 1
 
-        logger.debug_once("FlashInferCutlassMoEPrepareAndFinalize use_dp=%s", use_dp)
+        logger.debug_once("FlashInferCutlassMoEPrepareAndFinalize use_dp=%s",
+                          use_dp)
 
         return FlashInferCutlassMoEPrepareAndFinalize(
             use_dp,
