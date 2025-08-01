@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import math
 
 import torch
 
 import vllm._custom_ops as ops
+from vllm.utils.deep_gemm import per_block_cast_to_fp8
 
 
 def per_token_cast_to_fp8(
@@ -18,29 +18,6 @@ def per_token_cast_to_fp8(
     x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
     fp8_data = (x_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn)
     return fp8_data.view(m, n + pad_size)[:, :n], (x_amax / 448.0).view(m, -1)
-
-
-def per_block_cast_to_fp8(
-        x: torch.Tensor, block_size_k: int,
-        block_size_n: int) -> tuple[torch.Tensor, torch.Tensor]:
-    assert x.dim() == 2
-    m, n = x.shape
-    x_padded = torch.zeros(
-        (
-            int(math.ceil(m / block_size_k)) * block_size_k,
-            int(math.ceil(n / block_size_n)) * block_size_n,
-        ),
-        dtype=x.dtype,
-        device=x.device,
-    )
-    x_padded[:m, :n] = x
-    x_view = x_padded.view(-1, block_size_k,
-                           x_padded.size(1) // block_size_k, block_size_n)
-    x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
-    x_scaled = (x_view * (448.0 / x_amax)).to(torch.float8_e4m3fn)
-    x_scaled_sub = x_scaled.view_as(x_padded)[:m, :n].contiguous()
-    scales = (x_amax / 448.0).view(x_view.size(0), x_view.size(2))
-    return x_scaled_sub, scales
 
 
 def make_non_quant_weights(
@@ -99,11 +76,9 @@ def make_block_quant_fp8_weights(
 
     for i in range(e):
         w1[i], w1_s[i] = per_block_cast_to_fp8(w1_bf16[i],
-                                               block_size_k=block_k,
-                                               block_size_n=block_n)
+                                               block_size=[block_k, block_n])
         w2[i], w2_s[i] = per_block_cast_to_fp8(w2_bf16[i],
-                                               block_size_k=block_k,
-                                               block_size_n=block_n)
+                                               block_size=[block_k, block_n])
 
     return w1, w2, w1_s, w2_s
 
