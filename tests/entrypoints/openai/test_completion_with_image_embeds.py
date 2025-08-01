@@ -3,20 +3,18 @@
 
 import base64
 import io
-import shutil
-from tempfile import TemporaryDirectory
 
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 import torch
+from transformers import AutoConfig
 
-from transformers import AutoConfig, AutoProcessor
-
-from ...utils import RemoteOpenAIServer
 from ...conftest import ImageTestAssets
+from ...utils import RemoteOpenAIServer
+
 # any model with a chat template should work here
-MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
+MODEL_NAME = "/home/jovyan/llava-1.5-7b-hf"
 CONFIG = AutoConfig.from_pretrained(MODEL_NAME)
 
 
@@ -61,13 +59,15 @@ def encode_image_embedding_to_base64(image_embedding) -> str:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("dtype", [torch.half, torch.float16, torch.float32])
 async def test_completions_with_prompt_embeds(
     client_with_image_embeds: openai.AsyncOpenAI,
     model_name: str,
     image_assets: ImageTestAssets,
+    dtype: torch.dtype,
 ):
     # Test case: Single image embeds input
-    image_embeds = image_assets[0].image_embeds
+    image_embeds = image_assets[0].image_embeds.to(dtype=dtype)
     base64_image_embedding = encode_image_embedding_to_base64(image_embeds)
     chat_completion = await client_with_image_embeds.chat.completions.create(
         messages=[
@@ -83,7 +83,8 @@ async def test_completions_with_prompt_embeds(
                         "type":
                         "text",
                         "text":
-                        "Describe these images separately. For each image, reply with a short sentence (no more than 10 words).",
+                        "Describe these images separately. For each image,"
+                        "reply with a short sentence (no more than 10 words).",
                     },
                     {
                         "type": "image_embeds",
