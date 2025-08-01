@@ -173,10 +173,11 @@ def test_compressed_tensors_w8a8_logprobs(
 
     dtype = "bfloat16"
 
-    # skip language translation prompt for the static per tensor asym model
-    if (model_path ==
-            "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Asym"
-        ):  # noqa: E501
+    # skip language translation prompt for the static per tensor models
+    if model_path in (
+            "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Sym",
+            "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Static-Per-Tensor-Asym",
+    ):
         example_prompts = example_prompts[0:-1]
 
     with hf_runner(model_path, dtype=dtype) as hf_model:
