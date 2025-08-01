@@ -1300,9 +1300,6 @@ class MiniCPMV4_0(MiniCPMV2_6):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
     def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
-        # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
-        # seems to avoid vision encoder sections for some models.
-        # See: https://huggingface.co/openbmb/MiniCPM-o-2_6-int4
         if isinstance(quant_config, (AWQConfig, AWQMarlinConfig)):
             return None
         return quant_config
@@ -1333,7 +1330,6 @@ class MiniCPMV4_0(MiniCPMV2_6):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> nn.Module:
-        # MiniCPMO GPTQ model leave resampler unquantized.
         quant_config = self._maybe_ignore_quant_config(quant_config)
         return super().init_resampler(embed_dim, vision_dim, quant_config,
                                       prefix)
