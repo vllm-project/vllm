@@ -804,6 +804,7 @@ steps:
     # requires multi-GPU testing for validation.
     - pytest -v -s -x lora/test_chatglm3_tp.py
     - pytest -v -s -x lora/test_llama_tp.py
+    - pytest -v -s -x lora/test_multi_loras_with_tp.py
 
 
 - label: Weight Loading Multiple GPU Test  # 33min
