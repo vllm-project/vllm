@@ -71,8 +71,10 @@ def _lazy_init() -> None:
         return
 
     # Set up deep_gemm cache path
-    os.environ['DG_JIT_CACHE_DIR'] = os.path.join(envs.VLLM_CACHE_ROOT,
-                                                  "deep_gemm")
+    DEEP_GEMM_JIT_CACHE_ENV_NAME = 'DG_JIT_CACHE_DIR'
+    if not os.environ.get(DEEP_GEMM_JIT_CACHE_ENV_NAME, None):
+        os.environ[DEEP_GEMM_JIT_CACHE_ENV_NAME] = os.path.join(
+            envs.VLLM_CACHE_ROOT, "deep_gemm")
 
     _dg = importlib.import_module("deep_gemm")
 
