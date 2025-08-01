@@ -8,10 +8,8 @@ from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.platforms import current_platform
 
-from ..openai.test_audio import (TEST_AUDIO_URLS,
-                                 get_dummy_messages_from_audio_url)
-from ..openai.test_vision import (TEST_IMAGE_URLS,
-                                  get_dummy_messages_from_image_url)
+from ..openai.test_audio import TEST_AUDIO_URLS, dummy_messages_from_audio_url
+from ..openai.test_vision import TEST_IMAGE_URLS, dummy_messages_from_image_url
 
 
 @pytest.fixture(scope="function")
@@ -210,10 +208,11 @@ def test_chat_extra_kwargs(thinking_llm, enable_thinking):
 def test_mm_processing_gpu(model_id, modality, mm_init_kwargs):
     device = current_platform.device_name
 
+    num_items = 2
     if modality == "image":
-        messages = get_dummy_messages_from_image_url(TEST_IMAGE_URLS[0])
+        messages = dummy_messages_from_image_url(TEST_IMAGE_URLS[:num_items])
     elif modality == "audio":
-        messages = get_dummy_messages_from_audio_url(TEST_AUDIO_URLS[0])
+        messages = dummy_messages_from_audio_url(TEST_AUDIO_URLS[:num_items])
     else:
         raise NotImplementedError(modality)
 
@@ -223,6 +222,7 @@ def test_mm_processing_gpu(model_id, modality, mm_init_kwargs):
         max_num_seqs=2,
         enforce_eager=True,
         seed=0,
+        limit_mm_per_prompt={modality: num_items},
         mm_processor_kwargs=mm_init_kwargs | {"device": device},
     )
 
@@ -241,10 +241,11 @@ def test_mm_processing_gpu_bad_device(model_id, modality, mm_init_kwargs):
     if device == "cpu":
         pytest.skip("Not applicable to CPU")
 
+    num_items = 1
     if modality == "image":
-        messages = get_dummy_messages_from_image_url(TEST_IMAGE_URLS[0])
+        messages = dummy_messages_from_image_url(TEST_IMAGE_URLS[:num_items])
     elif modality == "audio":
-        messages = get_dummy_messages_from_audio_url(TEST_AUDIO_URLS[0])
+        messages = dummy_messages_from_audio_url(TEST_AUDIO_URLS[:num_items])
     else:
         raise NotImplementedError(modality)
 
@@ -254,6 +255,7 @@ def test_mm_processing_gpu_bad_device(model_id, modality, mm_init_kwargs):
         max_num_seqs=2,
         enforce_eager=True,
         seed=0,
+        limit_mm_per_prompt={modality: num_items},
         mm_processor_kwargs=mm_init_kwargs,
     )
 

@@ -52,7 +52,7 @@ def base64_encoded_audio() -> dict[str, str]:
     }
 
 
-def get_dummy_messages_from_audio_url(
+def dummy_messages_from_audio_url(
     audio_urls: Union[str, list[str]],
     content_text: str = "What's happening in this audio?",
 ):
@@ -82,7 +82,7 @@ def get_dummy_messages_from_audio_url(
 @pytest.mark.parametrize("audio_url", [TEST_AUDIO_URLS[0]])
 async def test_single_chat_session_audio(client: openai.AsyncOpenAI,
                                          model_name: str, audio_url: str):
-    messages = get_dummy_messages_from_audio_url(audio_url)
+    messages = dummy_messages_from_audio_url(audio_url)
 
     # test single completion
     chat_completion = await client.chat.completions.create(
@@ -122,7 +122,7 @@ async def test_single_chat_session_audio(client: openai.AsyncOpenAI,
 async def test_error_on_invalid_audio_url_type(client: openai.AsyncOpenAI,
                                                model_name: str,
                                                audio_url: str):
-    messages = get_dummy_messages_from_audio_url(audio_url)
+    messages = dummy_messages_from_audio_url(audio_url)
 
     # audio_url should be a dict {"url": "some url"}, not directly a string
     with pytest.raises(openai.BadRequestError):
@@ -139,7 +139,7 @@ async def test_single_chat_session_audio_base64encoded(
         client: openai.AsyncOpenAI, model_name: str, audio_url: str,
         base64_encoded_audio: dict[str, str]):
 
-    messages = get_dummy_messages_from_audio_url(
+    messages = dummy_messages_from_audio_url(
         f"data:audio/wav;base64,{base64_encoded_audio[audio_url]}")
 
     # test single completion
@@ -235,7 +235,7 @@ async def test_single_chat_session_input_audio(
 @pytest.mark.parametrize("audio_url", TEST_AUDIO_URLS)
 async def test_chat_streaming_audio(client: openai.AsyncOpenAI,
                                     model_name: str, audio_url: str):
-    messages = messages = get_dummy_messages_from_audio_url(audio_url)
+    messages = messages = dummy_messages_from_audio_url(audio_url)
 
     # test single completion
     chat_completion = await client.chat.completions.create(
@@ -339,7 +339,7 @@ async def test_chat_streaming_input_audio(client: openai.AsyncOpenAI,
 async def test_multi_audio_input(client: openai.AsyncOpenAI, model_name: str,
                                  audio_urls: list[str]):
 
-    messages = get_dummy_messages_from_audio_url(audio_urls)
+    messages = dummy_messages_from_audio_url(audio_urls)
 
     if len(audio_urls) > MAXIMUM_AUDIOS:
         with pytest.raises(openai.BadRequestError):  # test multi-audio input

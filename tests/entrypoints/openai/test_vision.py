@@ -79,7 +79,7 @@ def base64_encoded_image() -> dict[str, str]:
     }
 
 
-def get_dummy_messages_from_image_url(
+def dummy_messages_from_image_url(
     image_urls: Union[str, list[str]],
     content_text: str = "What's in this image?",
 ):
@@ -129,7 +129,7 @@ def get_hf_prompt_tokens(model_name, content, image_url):
 async def test_single_chat_session_image(client: openai.AsyncOpenAI,
                                          model_name: str, image_url: str):
     content_text = "What's in this image?"
-    messages = get_dummy_messages_from_image_url(image_url, content_text)
+    messages = dummy_messages_from_image_url(image_url, content_text)
 
     max_completion_tokens = 10
     # test single completion
@@ -175,7 +175,7 @@ async def test_error_on_invalid_image_url_type(client: openai.AsyncOpenAI,
                                                model_name: str,
                                                image_url: str):
     content_text = "What's in this image?"
-    messages = get_dummy_messages_from_image_url(image_url, content_text)
+    messages = dummy_messages_from_image_url(image_url, content_text)
 
     # image_url should be a dict {"url": "some url"}, not directly a string
     with pytest.raises(openai.BadRequestError):
@@ -192,7 +192,7 @@ async def test_single_chat_session_image_beamsearch(client: openai.AsyncOpenAI,
                                                     model_name: str,
                                                     image_url: str):
     content_text = "What's in this image?"
-    messages = get_dummy_messages_from_image_url(image_url, content_text)
+    messages = dummy_messages_from_image_url(image_url, content_text)
 
     chat_completion = await client.chat.completions.create(
         model=model_name,
@@ -214,7 +214,7 @@ async def test_single_chat_session_image_base64encoded(
         client: openai.AsyncOpenAI, model_name: str, image_url: str,
         base64_encoded_image: dict[str, str]):
     content_text = "What's in this image?"
-    messages = get_dummy_messages_from_image_url(
+    messages = dummy_messages_from_image_url(
         f"data:image/jpeg;base64,{base64_encoded_image[image_url]}",
         content_text,
     )
@@ -267,7 +267,7 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
     image_url = TEST_IMAGE_URLS[image_idx]
     expected_res = EXPECTED_MM_BEAM_SEARCH_RES[image_idx]
 
-    messages = get_dummy_messages_from_image_url(
+    messages = dummy_messages_from_image_url(
         f"data:image/jpeg;base64,{base64_encoded_image[image_url]}")
 
     chat_completion = await client.chat.completions.create(
@@ -287,7 +287,7 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_chat_streaming_image(client: openai.AsyncOpenAI,
                                     model_name: str, image_url: str):
-    messages = get_dummy_messages_from_image_url(image_url)
+    messages = dummy_messages_from_image_url(image_url)
 
     # test single completion
     chat_completion = await client.chat.completions.create(
@@ -331,7 +331,7 @@ async def test_chat_streaming_image(client: openai.AsyncOpenAI,
     [TEST_IMAGE_URLS[:i] for i in range(2, len(TEST_IMAGE_URLS))])
 async def test_multi_image_input(client: openai.AsyncOpenAI, model_name: str,
                                  image_urls: list[str]):
-    messages = get_dummy_messages_from_image_url(image_urls)
+    messages = dummy_messages_from_image_url(image_urls)
 
     if len(image_urls) > MAXIMUM_IMAGES:
         with pytest.raises(openai.BadRequestError):  # test multi-image input
