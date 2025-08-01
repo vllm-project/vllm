@@ -13,6 +13,6 @@ if [ ! -d DeepGEMM ]; then
     git clone --recursive https://github.com/deepseek-ai/DeepGEMM
 fi
 cd DeepGEMM
-uv pip install -vvv -e .
+PIP_NO_BUILD_ISOLATION=0 pip install -vvv -e .
 
 popd
