@@ -624,7 +624,14 @@ class WhisperProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(WhisperConfig)
 
     def get_hf_processor(self, **kwargs: object) -> WhisperProcessor:
-        return self.ctx.get_hf_processor(WhisperProcessor, **kwargs)
+        # HACK: Transformers 4.53.2 has issue with whisper tokenizer to
+        # initialize processor. We use a monkeypatch to fix it here.
+        # See: https://github.com/vllm-project/vllm/issues/20224
+        processor_class = WhisperProcessor
+        tokenizer_class = ("WhisperTokenizer", "WhisperTokenizerFast")
+        if processor_class.tokenizer_class != tokenizer_class:
+            processor_class.tokenizer_class = tokenizer_class
+        return self.ctx.get_hf_processor(processor_class, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": 1}
