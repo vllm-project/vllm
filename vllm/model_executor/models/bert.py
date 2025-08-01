@@ -496,8 +496,6 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
         })
 
 
-TOKEN_TYPE_SHIFT = 30
-
 # Here we encode the token type ids together with the input ids.
 # Since we use int 32 for the input IDs and the vocabulary size
 # is way lower than 2**31, there is room to encode additional
@@ -518,6 +516,8 @@ TOKEN_TYPE_SHIFT = 30
 # the information again in the Embedding  layer. Since with bit masks
 # we can do this entirely with torch operations and without branching,
 # it works with torch compile.
+
+TOKEN_TYPE_SHIFT = 30
 
 
 def _encode_token_type_ids(input_ids: torch.Tensor,
