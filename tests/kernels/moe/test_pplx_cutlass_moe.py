@@ -193,8 +193,8 @@ def _pplx_moe(
             nvshmem_init(uid, pgi.rank, pgi.world_size)
         else:
             group_ranks = list(range(pgi.world_size))
-            cpu_group = torch.distributed.new_group(group_ranks,
-                                                    backend="gloo")
+            cpu_group = torch.distributed.new_group(
+                group_ranks, backend=torch.distributed.Backend.GLOO)
             group_name = cpu_group.group_name
 
         with set_current_vllm_config(vllm_config):

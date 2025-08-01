@@ -51,7 +51,8 @@ def _worker_parallel_launch(
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
     torch.distributed.init_process_group(
-        backend="cpu:gloo,cuda:nccl",
+        backend=f"cpu:{torch.distributed.Backend.GLOO},"
+        f"cuda:{torch.distributed.Backend.NCCL}",
         init_method=init_method,
         rank=rank,
         world_size=world_size,

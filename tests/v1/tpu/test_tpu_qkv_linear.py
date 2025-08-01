@@ -36,7 +36,7 @@ def setup_environment():
             0,
             local_rank=0,
             distributed_init_method=f"file://{temp_file}",
-            backend="gloo")
+            backend=torch.distributed.Backend.GLOO)
         ensure_model_parallel_initialized(1, 1)
         yield
 

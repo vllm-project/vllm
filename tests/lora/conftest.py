@@ -47,9 +47,9 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
 def dist_init():
     temp_file = tempfile.mkstemp()[1]
 
-    backend = "nccl"
+    backend = torch.distributed.Backend.NCCL
     if current_platform.is_cpu() or current_platform.is_tpu():
-        backend = "gloo"
+        backend = torch.distributed.Backend.GLOO
 
     init_distributed_environment(world_size=1,
                                  rank=0,
@@ -65,9 +65,9 @@ def dist_init():
 def dist_init_torch_only():
     if torch.distributed.is_initialized():
         return
-    backend = "nccl"
+    backend = torch.distributed.Backend.NCCL
     if current_platform.is_cpu():
-        backend = "gloo"
+        backend = torch.distributed.Backend.GLOO
 
     temp_file = tempfile.mkstemp()[1]
     torch.distributed.init_process_group(world_size=1,
