@@ -401,7 +401,7 @@ def merge_multimodal_embeddings_from_map(
     """
     flattened_embeddings = _flatten_embeddings(multimodal_embeddings)
     inputs_embeds[placeholder_map.dest] = flattened_embeddings[
-        placeholder_map.src]
+        placeholder_map.src].to(dtype=inputs_embeds.dtype)
     return inputs_embeds
 
 
