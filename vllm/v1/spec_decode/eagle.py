@@ -161,7 +161,7 @@ class EagleProposer:
                 hidden_states=self.hidden_states[:num_input_tokens],
                 inputs_embeds=inputs_embeds,
             )
-            if self.method == "deepseek_mtp":
+            if self.method == "deepseek_mtp" or self.method == "ernie_mtp":
                 last_hidden_states = ret_hidden_states
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
