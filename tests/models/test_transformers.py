@@ -34,8 +34,7 @@ def check_implementation(
 
     with runner_test(model, **kwargs_test, **kwargs) as model_test:
         model_config = model_test.llm.llm_engine.model_config
-        assert model_config.architecture == (
-            model_config._get_transformers_backend_cls())
+        assert model_config.using_transformers_backend()
 
         outputs_test = model_test.generate_greedy_logprobs(*args)
 
@@ -135,8 +134,7 @@ def test_quantization(
             enforce_eager=True,
             **quantization_kwargs) as vllm_model:  # type: ignore[arg-type]
         model_config = vllm_model.llm.llm_engine.model_config
-        assert model_config.architecture == (
-            model_config._get_transformers_backend_cls())
+        assert model_config.using_transformers_backend()
 
         transformers_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens=max_tokens, num_logprobs=num_logprobs)
@@ -147,6 +145,25 @@ def test_quantization(
         name_0="transformers",
         name_1="vllm",
     )
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        # Layers live in `layers`
+        "Qwen/Qwen3-Embedding-0.6B",
+        # Layers live in `model.layers`
+        "meta-llama/Llama-3.2-1B-Instruct"
+    ],
+)
+def test_embed_loading(vllm_runner, model):
+    with vllm_runner(model,
+                     max_model_len=1024,
+                     enforce_eager=True,
+                     runner="pooling",
+                     model_impl="transformers") as model_test:
+        model_config = model_test.llm.llm_engine.model_config
+        assert model_config.using_transformers_backend()
 
 
 @pytest.mark.parametrize(
@@ -169,8 +186,7 @@ def test_classify(
                      dtype=dtype,
                      model_impl="transformers") as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
-        assert model_config.architecture == (
-            model_config._get_transformers_backend_cls())
+        assert model_config.using_transformers_backend()
 
         vllm_outputs = vllm_model.classify(example_prompts)
 

@@ -812,12 +812,17 @@ class ModelConfig:
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
+        if getattr(self, "runner_type", self.runner) == "pooling":
+            return "TransformersModel"
         if self.hf_config != self.hf_text_config:
             # If 'hf_text_config' is the same as 'hf_config'. If not, it is
             # probably a composite config, i.e. multimodal
             return "TransformersForMultimodalLM"
-        else:
-            return "TransformersForCausalLM"
+        return "TransformersForCausalLM"
+
+    def using_transformers_backend(self) -> bool:
+        """Check if the model is using the Transformers backend class."""
+        return self.architecture == self._get_transformers_backend_cls()
 
     @property
     def registry(self):
