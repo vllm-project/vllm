@@ -131,6 +131,8 @@ def test_ngram_correctness(
           "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1), False),
         (("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
           "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", 1), False),
+        (("eagle3", "tencent/Hunyuan-1.8B-Instruct",
+          "AngelSlim/Hunyuan-1.8B-Instruct_eagle3", 1), False),
         pytest.param(
             ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
              "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
