@@ -29,7 +29,6 @@ class MinimaxToolParser(ToolParser):
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
 
-        # 流式工具调用状态管理
         self.current_tool_name_sent: bool = False
         self.current_tool_id: int = -1
         self.streamed_args_for_tool: list[str] = []
