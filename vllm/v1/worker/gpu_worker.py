@@ -310,8 +310,8 @@ class Worker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
-        if not self.model_config.enforce_eager:
-            self.model_runner.capture_model()
+        # if not self.model_config.enforce_eager:
+        #     self.model_runner.capture_model()
 
         # Warm up sampler and preallocate memory buffer for logits and other
         # sampling related tensors of max possible shape to avoid memory
