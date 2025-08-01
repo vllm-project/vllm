@@ -150,17 +150,17 @@ class AsyncLLM(EngineClient):
                             "Use `enable_log_requests` instead."),
     )
     def from_vllm_config(
-        cls,
-        vllm_config: VllmConfig,
-        start_engine_loop: bool = True,
-        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[list[StatLoggerFactory]] = None,
-        enable_log_requests: bool = False,
-        disable_log_stats: bool = False,
-        client_addresses: Optional[dict[str, str]] = None,
-        client_count: int = 1,
-        client_index: int = 0,
-        disable_log_requests: bool = True,  # Deprecated, will be removed
+            cls,
+            vllm_config: VllmConfig,
+            start_engine_loop: bool = True,
+            usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+            stat_loggers: Optional[list[StatLoggerFactory]] = None,
+            enable_log_requests: bool = False,
+            disable_log_stats: bool = False,
+            client_addresses: Optional[dict[str, str]] = None,
+            client_count: int = 1,
+            client_index: int = 0,
+            disable_log_requests: bool = True,  # Deprecated, will be removed
     ) -> "AsyncLLM":
         if not envs.VLLM_USE_V1:
             raise ValueError(
