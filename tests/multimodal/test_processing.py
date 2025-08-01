@@ -2,16 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import nullcontext
-from types import MethodType
-from typing import cast
+from typing import Optional, cast
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
-from transformers import ProcessorMixin
 
 from vllm.config import ModelConfig
+from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalFieldElem, MultiModalKwargs,
                                     MultiModalKwargsItem,
@@ -1013,57 +1012,91 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
         )
 
 
-class _ProcessorProxy:
+class DummyProcessor:
 
-    def __init__(self, processor: ProcessorMixin) -> None:
+    def __init__(self, a: int = 0, b: int = 0) -> None:
         super().__init__()
 
-        self.__processor = processor
-
-    def __getattr__(self, key: str):
-        return getattr(self.__processor, key)
+        self.a = a
+        self.b = b
 
     def __call__(
         self,
-        text=None,
-        images=None,
-        videos=None,
-        exists=None,
-        return_tensors=None,
-    ):
-        return dict(exists=exists)
+        a: int = 0,
+        c: int = 0,
+        return_tensors: Optional[str] = None,
+    ) -> dict[str, int]:
+        return dict(a=a, c=c)
 
 
-@pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])  # Dummy
 # yapf: disable
+@pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])  # Dummy
 @pytest.mark.parametrize(
-    ("call_kwargs", "expected_kwargs"),
+    ("config_kwargs", "inference_kwargs", "expected_kwargs"),
     [
-        # Should ignore invalid kwargs
-        ({"does_not_exist": 100}, {"exists": None}),
-        ({"exists": 1}, {"exists": 1}),
-        ({"does_not_exist": 100, "exists": 1}, {"exists": 1}),
+        ({"a": 1}, {}, {"a": 1, "b": 0}),
+        ({}, {"a": 1}, {"a": 1, "b": 0}),
+        # inference_kwargs should take precedence
+        ({"a": 1}, {"a": 2}, {"a": 2, "b": 0}),
+        # Should ignore extra kwargs
+        ({"a": 1, "c": 1}, {}, {"a": 1, "b": 0}),
+        ({"b": 1, "c": 1}, {}, {"a": 0, "b": 1}),
     ],
 )
 # yapf: enable
-def test_hf_processor_kwargs(model_id, call_kwargs, expected_kwargs):
-    model_config = ModelConfig(model_id)
+def test_hf_processor_init_kwargs(
+    model_id,
+    config_kwargs,
+    inference_kwargs,
+    expected_kwargs,
+):
+    # Should not be used since there is nothing to convert to tokens
+    mock_tokenizer = cast(AnyTokenizer, object())
 
-    processor = MULTIMODAL_REGISTRY.create_processor(model_config)
-    orig_get_hf_processor = processor.info.get_hf_processor
-
-    def get_hf_processor(self, **kwargs):
-        assert kwargs == call_kwargs
-        return _ProcessorProxy(orig_get_hf_processor())
-
-    processor.info.get_hf_processor = MethodType(get_hf_processor,
-                                                 processor.info)
-
-    out_kwargs = processor._call_hf_processor(
-        prompt="",
-        mm_data={},
-        mm_kwargs=call_kwargs,
-        tok_kwargs={},
+    ctx = InputProcessingContext(
+        model_config=ModelConfig(model_id, mm_processor_kwargs=config_kwargs),
+        tokenizer=mock_tokenizer,
     )
 
-    assert out_kwargs == expected_kwargs
+    processor = ctx.get_hf_processor(
+        DummyProcessor,  # type: ignore[arg-type]
+        **inference_kwargs,
+    )
+
+    for k, v in expected_kwargs.items():
+        assert getattr(processor, k) == v
+
+
+# yapf: disable
+@pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])  # Dummy
+@pytest.mark.parametrize(
+    ("config_kwargs", "inference_kwargs", "expected_kwargs"),
+    [
+        ({"a": 1}, {}, {"a": 1, "c": 0}),
+        ({}, {"a": 1}, {"a": 1, "c": 0}),
+        # inference_kwargs should take precedence
+        ({"a": 1}, {"a": 2}, {"a": 2, "c": 0}),
+        # Should ignore extra kwargs
+        ({"a": 1, "c": 1}, {}, {"a": 1, "c": 1}),
+        ({"b": 1, "c": 1}, {}, {"a": 0, "c": 1}),
+    ],
+)
+# yapf: enable
+def test_hf_processor_call_kwargs(
+    model_id,
+    config_kwargs,
+    inference_kwargs,
+    expected_kwargs,
+):
+    # Should not be used since there is nothing to convert to tokens
+    mock_tokenizer = cast(AnyTokenizer, object())
+
+    ctx = InputProcessingContext(
+        model_config=ModelConfig(model_id, mm_processor_kwargs=config_kwargs),
+        tokenizer=mock_tokenizer,
+    )
+
+    processor = ctx.get_hf_processor(DummyProcessor)  # type: ignore[arg-type]
+
+    result = ctx.call_hf_processor(processor, {}, inference_kwargs)
+    assert result == expected_kwargs
