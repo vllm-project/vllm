@@ -167,8 +167,9 @@ def run_multi_api_server(args: argparse.Namespace):
 
         if model_config.is_multimodal_model and not (
                 orig_disable_mm_preprocessor_cache):
-            logger.warning("Multi-model preprocessor cache will be disabled "
-                           "for api_server_count > 1")
+            logger.warning(
+                "Multi-modal preprocessor cache is not compatible "
+                "with api_server_count > 1, so the cache will be disabled.")
 
     executor_class = Executor.get_class(vllm_config)
     log_stats = not engine_args.disable_log_stats
