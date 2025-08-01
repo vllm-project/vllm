@@ -6,7 +6,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.distributed import get_dp_group
-from vllm.forward_context import get_chunked_local_tokens
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
     extract_required_args, moe_kernel_quantize_input)
@@ -77,7 +77,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             topk_weights, topk_ids, a1q, a1q_scale = \
                 get_dp_group().all_gatherv([topk_weights, topk_ids, a1q, a1q_scale], # noqa: E501
                                            dim=0,
-                                           sizes=get_chunked_local_tokens())
+                                           sizes=get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()) # noqa: E501
             a1_m, a1_n = a1q.shape
             a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
@@ -94,5 +94,8 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                                ['use_dp', 'local_tokens'])
         if use_dp:
             fused_expert_output = get_dp_group().reduce_scatterv(
-                fused_expert_output, dim=0, sizes=get_chunked_local_tokens())
+                fused_expert_output,
+                dim=0,
+                sizes=get_forward_context(
+                ).dp_metadata.get_chunk_sizes_across_dp_rank())  # noqa: E501
         output.copy_(fused_expert_output)

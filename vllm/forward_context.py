@@ -26,6 +26,26 @@ batchsize_logging_interval: float = envs.VLLM_LOG_BATCHSIZE_INTERVAL
 batchsize_forward_time: defaultdict = defaultdict(list)
 
 
+def _compute_chunked_local_num_tokens(num_tokens_across_dp_cpu: list[int],
+                                      max_num_tokens: int) -> list[list[int]]:
+    dp_size = len(num_tokens_across_dp_cpu)
+    remaining = num_tokens_across_dp_cpu.copy()
+    local_num_tokens = []
+
+    while any(t > 0 for t in remaining):
+        iteration = []
+        for i in range(dp_size):
+            to_process = min(remaining[i], max_num_tokens)
+            if to_process == 0:
+                to_process = 1  # ensure lockstep even if done
+            else:
+                remaining[i] -= to_process
+            iteration.append(to_process)
+        local_num_tokens.append(iteration)
+
+    return local_num_tokens
+
+
 @dataclass
 class DPMetadata:
     max_tokens_across_dp_cpu: torch.Tensor
@@ -77,6 +97,30 @@ class DPMetadata:
         max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp)
         cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_across_dp, dim=0)
         return DPMetadata(max_tokens_across_dp_cpu, cu_tokens_across_dp_cpu)
+
+    def set_chunked_local_tokens(self, max_chunk_size_per_rank: int):
+        cu_sizes = self.cu_tokens_across_dp_cpu
+        num_tokens_across_dp_cpu = [
+            (cu_sizes[i] -
+             cu_sizes[i - 1]).item() if i > 0 else cu_sizes[0].item()
+            for i in range(len(cu_sizes))
+        ]
+        self._chunked_local_tokens = _compute_chunked_local_num_tokens(
+            num_tokens_across_dp_cpu, max_chunk_size_per_rank)
+        return
+
+    @contextmanager
+    def chunked_sizes(self, chunk_idx: int):
+        assert self._chunked_local_tokens is not None, (
+            "chunked_local_tokens is not initialized.")
+        self.local_sizes = self._chunked_local_tokens[chunk_idx]
+        try:
+            yield self.local_sizes
+        finally:
+            self.local_sizes = None
+
+    def get_chunk_sizes_across_dp_rank(self) -> list[int]:
+        return self.local_sizes
 
 
 @dataclass
@@ -183,71 +227,3 @@ def set_forward_context(
                                 forward_stats)
 
         _forward_context = prev_context
-
-
-def _compute_chunked_local_num_tokens(num_tokens_across_dp_cpu: list[int],
-                                      max_num_tokens: int) -> list[list[int]]:
-    dp_size = len(num_tokens_across_dp_cpu)
-    remaining = num_tokens_across_dp_cpu.copy()
-    local_num_tokens = []
-
-    while any(t > 0 for t in remaining):
-        iteration = []
-        for i in range(dp_size):
-            to_process = min(remaining[i], max_num_tokens)
-            if to_process == 0:
-                to_process = 1  # ensure lockstep even if done
-            else:
-                remaining[i] -= to_process
-            iteration.append(to_process)
-        local_num_tokens.append(iteration)
-
-    return local_num_tokens
-
-
-@dataclass
-class DPLocalSizeMetadata:
-    chunked_tokens_across_dp_cpu: torch.Tensor
-    current_iter_idx: Optional[int] = None
-
-
-_dp_local_size_metadata: Optional[DPLocalSizeMetadata] = None
-
-
-def get_chunked_local_tokens() -> torch.Tensor:
-    """Access the current per-rank chunked token tensor."""
-    assert _dp_local_size_metadata is not None, (
-        "DPLocalSizeMetadata context not initialized. "
-        "Use `set_chunked_tokens_per_dp_rank()` context.")
-    idx = _dp_local_size_metadata.current_iter_idx
-    return _dp_local_size_metadata.chunked_tokens_across_dp_cpu[idx]
-
-
-@contextmanager
-def set_chunked_tokens_across_dp_cpu(max_chunk_size_per_rank: int):
-    """Initialize global context with zeroed chunked token tensor."""
-    # Compute flat per-rank sizes
-    cu_sizes = get_forward_context().dp_metadata.cu_tokens_across_dp_cpu
-    num_tokens_across_dp_cpu = [
-        (cu_sizes[i] -
-         cu_sizes[i - 1]).item() if i > 0 else cu_sizes[0].item()
-        for i in range(len(cu_sizes))
-    ]
-    chunked_local_num_tokens = _compute_chunked_local_num_tokens(
-        num_tokens_across_dp_cpu, max_chunk_size_per_rank)
-
-    global _dp_local_size_metadata
-    metadata = DPLocalSizeMetadata(
-        chunked_tokens_across_dp_cpu=chunked_local_num_tokens)
-    _dp_local_size_metadata = metadata
-    try:
-        yield metadata
-    finally:
-        _dp_local_size_metadata = None
-
-
-def set_chunk_iteration_idx(iter_idx: int) -> None:
-    global _dp_local_size_metadata
-    if _dp_local_size_metadata is None:
-        raise RuntimeError("chunk metadata not set")
-    _dp_local_size_metadata.current_iter_idx = iter_idx
