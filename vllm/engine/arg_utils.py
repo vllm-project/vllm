@@ -1197,9 +1197,8 @@ class EngineArgs:
             enable_multimodal_encoder_data_parallel,
         )
 
-        supports_mm_preprocessor_cache = (
-            parallel_config.data_parallel_size == 1
-            or parallel_config.data_parallel_size_local == 1)
+        supports_mm_preprocessor_cache = (self.data_parallel_size == 1
+                                          or data_parallel_external_lb)
         if (not supports_mm_preprocessor_cache
                 and model_config.is_multimodal_model
                 and not model_config.disable_mm_preprocessor_cache):
