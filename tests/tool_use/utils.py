@@ -133,8 +133,12 @@ CONFIGS: dict[str, ServerConfig] = {
         "model":
         "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
         "arguments": [
+            "--tokenizer-mode", "mistral",
+            "--config-format", "mistral",
+            "--load-format", "mistral",
+            "--tool-call-parser", "mistral",
             "--enforce-eager", "--no-enable-prefix-caching",
-            "--tool-call-parser", "mistral", "--chat-template",
+            "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_mistral.jinja"),
             "--ignore-patterns=\"consolidated.safetensors\""
         ],
