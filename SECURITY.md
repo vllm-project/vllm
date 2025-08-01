@@ -1,6 +1,6 @@
 # Security Policy
 
-## Reporting security issues:
+## Reporting security issues
 
 Please report security issues privately using [the vulnerability submission form](https://github.com/vllm-project/vllm/security/advisories/new).
 
