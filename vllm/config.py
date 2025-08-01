@@ -1303,26 +1303,9 @@ class ModelConfig:
             if self.use_async_output_proc:
                 self.use_async_output_proc = False
 
-    def get_hf_config_sliding_window(
-            self) -> Union[Optional[int], list[Optional[int]]]:
-        """Get the sliding window size, or None if disabled."""
-
-        # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
-        # addition to sliding window size. We check if that field is present
-        # and if it's False, return None.
-        if (hasattr(self.hf_text_config, "use_sliding_window")
-                and not self.hf_text_config.use_sliding_window):
-            return None
+    def get_sliding_window(self) -> Optional[int]:
+        """Get the sliding window size from the HF text config if present."""
         return getattr(self.hf_text_config, "sliding_window", None)
-
-    def get_sliding_window(self) -> Optional[Union[int, list[Optional[int]]]]:
-        """Get the sliding window size, or None if disabled.
-        """
-        # If user disables sliding window, return None.
-        if self.disable_sliding_window:
-            return None
-        # Otherwise get the value from the hf config.
-        return self.get_hf_config_sliding_window()
 
     def get_vocab_size(self) -> int:
         return getattr(self.hf_text_config, "vocab_size", 0)
@@ -1702,7 +1685,7 @@ class ModelConfig:
             tokenizer_config=tokenizer_config,
             max_model_len=max_model_len,
             disable_sliding_window=self.disable_sliding_window,
-            sliding_window_len=self.get_hf_config_sliding_window(),
+            sliding_window=self.get_sliding_window(),
             spec_target_max_model_len=self.spec_target_max_model_len,
             encoder_config=self.encoder_config)
         logger.info("Using max model len %s", max_model_len)
@@ -3559,7 +3542,7 @@ def _get_and_verify_max_len(
     tokenizer_config: Optional[dict],
     max_model_len: Optional[int],
     disable_sliding_window: bool,
-    sliding_window_len: Optional[Union[int, list[Optional[int]]]],
+    sliding_window: Optional[int],
     spec_target_max_model_len: Optional[int] = None,
     encoder_config: Optional[Any] = None,
 ) -> int:
@@ -3598,13 +3581,10 @@ def _get_and_verify_max_len(
 
     # If sliding window is manually disabled, max_length should be less
     # than the sliding window length in the model config.
-    if disable_sliding_window and sliding_window_len is not None:
-
-        sliding_window_len_min = get_min_sliding_window(sliding_window_len)
-        max_len_key = "sliding_window" \
-            if sliding_window_len_min < derived_max_model_len else max_len_key
-        derived_max_model_len = min(derived_max_model_len,
-                                    sliding_window_len_min)
+    if (disable_sliding_window and sliding_window is not None
+            and sliding_window < derived_max_model_len):
+        max_len_key = "sliding_window"
+        derived_max_model_len = sliding_window
 
     # Consider model_max_length in tokenizer_config
     if tokenizer_config:
@@ -3703,14 +3683,6 @@ def _get_and_verify_max_len(
                     f"{msg} To allow overriding this maximum, set "
                     "the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN=1")
     return int(max_model_len)
-
-
-def get_min_sliding_window(
-        sliding_window: Union[int, list[Optional[int]]]) -> int:
-    if isinstance(sliding_window, list):
-        return min(s for s in sliding_window if s is not None)
-
-    return sliding_window
 
 
 def get_served_model_name(model: str,
