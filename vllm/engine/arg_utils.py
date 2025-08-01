@@ -217,10 +217,12 @@ Additionally, list elements can be passed individually using `+`:
         elif contains_type(type_hints, list):
             type_hint = get_type(type_hints, list)
             types = get_args(type_hint)
-            assert len(types) == 1, (
-                "List type must have exactly one type. Got "
-                f"{type_hint} with types {types}")
-            kwargs[name]["type"] = types[0]
+            list_type = types[0]
+            if get_origin(list_type) is Union:
+                msg = "List type must contain str if it is a Union."
+                assert str in get_args(list_type), msg
+                list_type = str
+            kwargs[name]["type"] = list_type
             kwargs[name]["nargs"] = "+"
         elif contains_type(type_hints, int):
             kwargs[name]["type"] = int
