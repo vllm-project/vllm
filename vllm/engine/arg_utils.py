@@ -41,7 +41,6 @@ from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
-from vllm.v1.executor.abstract import Executor as ExecutorV1
 
 # yapf: enable
 
@@ -1446,6 +1445,7 @@ class EngineArgs:
                 and _warn_or_fallback("Engine in background thread")):
             return False
 
+        from vllm.v1.executor.abstract import Executor as ExecutorV1
         if (self.pipeline_parallel_size > 1
                 and self.distributed_executor_backend
                 not in (ParallelConfig.distributed_executor_backend, "ray",
