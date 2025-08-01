@@ -1821,7 +1821,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _get_mm_dummy_batch(
         self,
         modality: str,
-        preprocessor_batch_size: int,
+        processor_batch_size: int,
         model_batch_size: int,
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
@@ -1829,7 +1829,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         dummy_request_data = self.mm_registry.get_decoder_dummy_data(
             model_config=self.model_config,
             seq_len=self.max_num_tokens,
-            mm_counts={modality: preprocessor_batch_size},
+            mm_counts={modality: processor_batch_size},
         )
         dummy_mm_data = dummy_request_data.multi_modal_data
 
