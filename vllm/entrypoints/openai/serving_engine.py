@@ -621,14 +621,15 @@ class OpenAIServing:
                 f"{self.max_model_len} tokens. However, you requested "
                 f"{token_num} tokens in the messages, "
                 f"Please reduce the length of the messages.")
-        elif max_tokens is not None and token_num + max_tokens > self.max_model_len:
-            raise ValueError(
-                f"This model's maximum context length is "
-                f"{self.max_model_len} tokens. However, you requested "
-                f"{max_tokens + token_num} tokens "
-                f"({token_num} in the messages, "
-                f"{max_tokens} in the completion). "
-                f"Please reduce the length of the messages or completion.")
+        elif max_tokens is not None:
+            if token_num + max_tokens > self.max_model_len:
+                raise ValueError(
+                    f"This model's maximum context length is "
+                    f"{self.max_model_len} tokens. However, you requested "
+                    f"{max_tokens + token_num} tokens "
+                    f"({token_num} in the messages, "
+                    f"{max_tokens} in the completion). "
+                    f"Please reduce the length of the messages or completion.")
 
         return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
