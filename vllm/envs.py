@@ -120,6 +120,7 @@ if TYPE_CHECKING:
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_TPU_MOST_MODEL_LEN: Optional[int] = None
     VLLM_USE_DEEP_GEMM: bool = False
+    VLLM_DISABLE_DEEP_GEMM_WARMUP: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
@@ -865,6 +866,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM":
     lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "0"))),
+
+    # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
+    # JIT all the required kernels before model execution so there is no
+    # JIT'ing in the hot-path. However, this warmup increases the engine
+    # startup time by a couple of minutes.
+    # Set `VLLM_DISABLE_DEEP_GEMM_WARMUP` to disable the warmup.
+    "VLLM_DISABLE_DEEP_GEMM_WARMUP":
+    lambda: bool(int(os.getenv("VLLM_DISABLE_DEEP_GEMM_WARMUP", "0"))),
 
     # Allow use of FlashInfer MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP8":
