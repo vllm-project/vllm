@@ -19,6 +19,7 @@ from .phi4mini_tool_parser import Phi4MiniJsonToolParser
 from .pythonic_tool_parser import PythonicToolParser
 from .qwen3coder_tool_parser import Qwen3CoderToolParser
 from .step3_tool_parser import Step3ToolParser
+from .tng_tool_parser import TngToolParser
 from .xlam_tool_parser import xLAMToolParser
 
 __all__ = [
@@ -42,4 +43,5 @@ __all__ = [
     "Glm4MoeModelToolParser",
     "Qwen3CoderToolParser",
     "Step3ToolParser",
+    "TngToolParser",
 ]
