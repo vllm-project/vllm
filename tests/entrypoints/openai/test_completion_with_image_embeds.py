@@ -81,7 +81,8 @@ async def test_completions_with_prompt_embeds(
                         "type":
                         "text",
                         "text":
-                        "Describe these images separately. For each image, reply with a short sentence (no more than 10 words).",
+                        "Describe these images separately. For each image,"
+                        "reply with a short sentence (no more than 10 words).",
                     },
                     {
                         "type": "image_embeds",
