@@ -428,7 +428,7 @@ def _merge_multimodal_embeddings(
             f"Attempted to assign {expr} = {flattened.shape[0]} "
             f"multimodal tokens to {num_expected_tokens} placeholders")
 
-    inputs_embeds[is_multimodal] = flattened
+    inputs_embeds[is_multimodal] = flattened.to(dtype=inputs_embeds.dtype)
     return inputs_embeds
 
 
