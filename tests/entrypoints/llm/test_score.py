@@ -5,10 +5,11 @@ import weakref
 
 import pytest
 import torch
-import torch.nn.functional as F
 
 from vllm import LLM, PoolingParams
 from vllm.distributed import cleanup_dist_env_and_memory
+
+from ...models.utils import softmax
 
 MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 
@@ -56,5 +57,5 @@ def test_pooling_params(llm: LLM):
         w_activation, wo_activation,
         atol=1e-2), "wo_activation should not use activation."
     assert torch.allclose(
-        F.sigmoid(wo_activation), w_activation, atol=1e-2
+        softmax(wo_activation), w_activation, atol=1e-2
     ), "w_activation should be close to activation(wo_activation)."

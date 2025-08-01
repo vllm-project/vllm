@@ -87,7 +87,7 @@ class ServingScores(OpenAIServing):
 
         try:
             pooling_params.merge_default_parameters(
-                self.model_config.pooler_config)
+                "embed", self.model_config.pooler_config)
             pooling_params.verify("embed", self.model_config)
         except ValueError as e:
             return self.create_error_response(str(e))
@@ -248,7 +248,7 @@ class ServingScores(OpenAIServing):
 
         try:
             pooling_params.merge_default_parameters(
-                self.model_config.pooler_config)
+                "score", self.model_config.pooler_config)
             pooling_params.verify("score", self.model_config)
         except ValueError as e:
             return self.create_error_response(str(e))

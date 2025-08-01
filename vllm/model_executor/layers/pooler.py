@@ -80,7 +80,7 @@ class Pooler(nn.Module, ABC):
         )
 
         if resolved_config.pooling_type == PoolingType.STEP:
-            return StepPooler.from_config(resolved_config)
+            return StepPooler()
 
         return SimplePooler.from_config(resolved_config)
 
@@ -529,7 +529,7 @@ class EmbeddingPoolerHead(PoolerHead):
 class RewardPoolerHead(PoolerHead):
 
     def __init__(self) -> None:
-        super().__init__(activation=PoolerNormalize())
+        super().__init__(activation=PoolerClassify())
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
@@ -603,29 +603,11 @@ class SimplePooler(Pooler):
 
 class StepPooler(Pooler):
 
-    @classmethod
-    def from_config(cls, pooler_config: ResolvedPoolingConfig) -> "StepPooler":
-        assert pooler_config.pooling_type == PoolingType.STEP
-
-        return cls(
-            PoolerHead.from_config(pooler_config),
-            step_tag_id=pooler_config.step_tag_id,
-            returned_token_ids=pooler_config.returned_token_ids,
-        )
-
-    def __init__(
-        self,
-        head: PoolerHead,
-        *,
-        step_tag_id: Optional[int] = None,
-        returned_token_ids: Optional[list[int]] = None,
-    ) -> None:
+    def __init__(self, ) -> None:
         super().__init__()
 
         self.pooling = AllPool()
-        self.head = head
-        self.step_tag_id = step_tag_id
-        self.returned_token_ids = returned_token_ids
+        self.head = RewardPoolerHead()
 
     def extract_states(
         self,
@@ -636,10 +618,15 @@ class StepPooler(Pooler):
         prompt_token_ids = get_prompt_token_ids(pooling_metadata)
 
         pooled_data = list[torch.Tensor]()
-        returned_token_ids = self.returned_token_ids
-        step_tag_id = self.step_tag_id
 
-        for data, token_id in zip(pooled_data_lst, prompt_token_ids):
+        pooling_params = get_pooling_params(pooling_metadata)
+
+        for data, token_id, pooling_param in zip(pooled_data_lst,
+                                                 prompt_token_ids,
+                                                 pooling_params):
+            step_tag_id = pooling_param.step_tag_id
+            returned_token_ids = pooling_param.returned_token_ids
+
             if returned_token_ids is not None and len(returned_token_ids) > 0:
                 data = data[:, returned_token_ids]
 

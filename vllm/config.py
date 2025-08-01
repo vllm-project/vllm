@@ -899,15 +899,6 @@ class ModelConfig:
                     if getattr(pooler_config, k) is None:
                         setattr(pooler_config, k, v)
 
-            if self.is_matryoshka:
-                if pooler_config.normalize is None:
-                    pooler_config.normalize = True
-                elif not pooler_config.normalize:
-                    raise ValueError(
-                        "`normalize` must be enabled (set to True) "
-                        "for models that are compatible with "
-                        "Matryoshka Representation.")
-
             return pooler_config
 
         return None

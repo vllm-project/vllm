@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from copy import deepcopy
 from typing import TYPE_CHECKING, Optional
 
 import msgspec
@@ -65,18 +66,12 @@ class PoolingParams(
 
     def clone(self) -> "PoolingParams":
         """Returns a deep copy of the PoolingParams instance."""
-        return PoolingParams(
-            dimensions=self.dimensions,
-            normalize=self.normalize,
-            activation=self.activation,
-            softmax=self.softmax,
-            task=self.task,
-            requires_token_ids=self.requires_token_ids,
-        )
+        return deepcopy(self)
 
-    def verify(self,
-               task: PoolingTask,
-               model_config: Optional["ModelConfig"] = None) -> None:
+    def verify_task(
+        self,
+        task: PoolingTask,
+    ):
         if self.task is None:
             self.task = task
         elif self.task != task:
@@ -87,7 +82,15 @@ class PoolingParams(
         # which is not available in model config. So, it's not included
         # in this method
 
+    def verify(self,
+               task: PoolingTask,
+               model_config: Optional["ModelConfig"] = None) -> None:
+        self.verify_task(task)
+
         if self.task == "embed":
+            if self.normalize is None:
+                self.normalize = True
+
             if self.dimensions is not None and model_config is not None:
                 if not model_config.is_matryoshka:
                     raise ValueError(
@@ -106,8 +109,7 @@ class PoolingParams(
                             f'lead to poor results.')
                 elif self.dimensions < 1:
                     raise ValueError("Dimensions must be greater than 0")
-            if self.normalize is None:
-                self.normalize = True
+
         elif self.task in ["classify", "score"]:
             if self.activation is None:
                 self.activation = True
@@ -135,11 +137,17 @@ class PoolingParams(
                 f"{invalid_parameters} parameters")
 
     def merge_default_parameters(
-            self, pooler_config: Optional["PoolerConfig"]) -> None:
+            self, task: PoolingTask,
+            pooler_config: Optional["PoolerConfig"]) -> None:
         if pooler_config is None:
             return
 
-        for k in self.all_parameters:
+        self.verify_task(task)
+
+        assert self.task is not None, "task must be set"
+        legal_parameters = self.legal_parameters[self.task]
+
+        for k in legal_parameters:
             if getattr(pooler_config, k, None) is None:
                 continue
 

@@ -5,10 +5,11 @@ import weakref
 
 import pytest
 import torch
-import torch.nn.functional as F
 
 from vllm import LLM, PoolingParams
 from vllm.distributed import cleanup_dist_env_and_memory
+
+from ...models.utils import softmax
 
 MODEL_NAME = "internlm/internlm2-1_8b-reward"
 
@@ -47,10 +48,10 @@ def llm():
 def test_pooling_params(llm: LLM):
 
     def get_outputs(softmax):
-        outputs = llm.reward(
-            prompts, pooling_params=PoolingParams(softmax=softmax),
-        use_tqdm=False)
-        return torch.tensor([x.outputs.data for x in outputs])
+        outputs = llm.reward(prompts,
+                             pooling_params=PoolingParams(softmax=softmax),
+                             use_tqdm=False)
+        return torch.cat([x.outputs.data for x in outputs])
 
     default = get_outputs(softmax=None)
     w_softmax = get_outputs(softmax=True)
@@ -58,9 +59,8 @@ def test_pooling_params(llm: LLM):
 
     assert torch.allclose(default, w_softmax,
                           atol=1e-2), "Default should use softmax."
-    assert not torch.allclose(
-        w_softmax, wo_softmax,
-        atol=1e-2), "wo_softmax should not use softmax."
+    assert not torch.allclose(w_softmax, wo_softmax,
+                              atol=1e-2), "wo_softmax should not use softmax."
     assert torch.allclose(
-        F.softmax(wo_softmax, dim=-1), w_softmax, atol=1e-2
-    ), "w_softmax should be close to softmax(wo_softmax)."
+        softmax(wo_softmax), w_softmax,
+        atol=1e-2), "w_softmax should be close to softmax(wo_softmax)."
