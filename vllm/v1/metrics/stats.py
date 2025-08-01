@@ -78,6 +78,7 @@ class FinishedRequestStats:
     prefill_time: float = 0.0
     inference_time: float = 0.0
     decode_time: float = 0.0
+    preproc_ms: float = 0.0
 
 
 class IterationStats:
@@ -150,6 +151,7 @@ class IterationStats:
     def update_from_finished_request(self, finish_reason: "FinishReason",
                                      num_prompt_tokens: int,
                                      max_tokens_param: Optional[int],
+                                     preproc_ms: float,
                                      req_stats: RequestStateStats):
         e2e_latency = self._time_since(req_stats.arrival_time)
 
@@ -177,7 +179,8 @@ class IterationStats:
                                  queued_time=queued_time,
                                  prefill_time=prefill_time,
                                  inference_time=inference_time,
-                                 decode_time=decode_time)
+                                 decode_time=decode_time,
+                                 preproc_ms=preproc_ms)
         self.finished_requests.append(finished_req)
 
 
