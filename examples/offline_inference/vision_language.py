@@ -449,25 +449,6 @@ def run_smolvlm(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# omni-research/Tarsier-7b
-def run_tarsier(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-    model_name = "omni-research/Tarsier-7b"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=4096,
-        limit_mm_per_prompt={modality: 1},
-    )
-    prompts = [(f"USER: <image>\n{question} ASSISTANT:") for question in questions]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 # Intern-S1
 def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "internlm/Intern-S1"
@@ -1287,6 +1268,25 @@ def run_qwen2_5_omni(questions: list[str], modality: str):
         )
         for question in questions
     ]
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# omni-research/Tarsier-7b
+def run_tarsier(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "omni-research/Tarsier-7b"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        limit_mm_per_prompt={modality: 1},
+    )
+    prompts = [(f"USER: <image>\n{question} ASSISTANT:") for question in questions]
+
     return ModelRequestData(
         engine_args=engine_args,
         prompts=prompts,
