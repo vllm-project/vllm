@@ -360,7 +360,7 @@ def test_cannot_schedule_after_recv():
     BLOCK_SIZE = vllm_config.cache_config.block_size
     # Prompt will use 2 blocks + 1 block after we schedule.
     NUM_TOKENS_LOCAL = int(BLOCK_SIZE * NUM_PROMPT_BLOCKS)
-    NUM_TOKENS_REMOTE = int(BLOCK_SIZE * (NUM_PROMPT_BLOCKS + 0.5))
+    NUM_TOKENS_REMOTE = int(BLOCK_SIZE * NUM_PROMPT_BLOCKS)
 
     request_normal = create_request(request_id=1, num_tokens=NUM_TOKENS_LOCAL)
     request_remote = create_request(request_id=2,
@@ -391,14 +391,23 @@ def test_cannot_schedule_after_recv():
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 1
 
-    # Step 4: try to schedule, not enough blocks.
+    # Step 4: try to schedule, remote request is put to running list
+    # because the transfer is completed.
+    scheduler_output = scheduler.schedule()
+    model_runner_output = create_model_runner_output(reqs=[request_normal, request_remote])
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    assert len(scheduler.running) == 2
+    assert len(scheduler.waiting) == 0
+
+    # Step 5: Remote request will be put back to waiting list
+    # because it needs new block to hold generated token.
     scheduler_output = scheduler.schedule()
     model_runner_output = create_model_runner_output(reqs=[request_normal])
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 1
 
-    # Step 5: finish the request, free it.
+    # Step 6: finish the request, free it.
     scheduler_output = scheduler.schedule()
     model_runner_output = create_model_runner_output(reqs=[request_normal],
                                                      use_eos=True)
@@ -406,16 +415,17 @@ def test_cannot_schedule_after_recv():
     assert len(scheduler.running) == 0
     assert len(scheduler.waiting) == 1
 
-    # Step 6: now we can schedule (with 2 blocks computed).
+    # Step 7: now we can schedule (with 2 blocks computed),
+    # request is retrieved from preempted list.
     scheduler_output = scheduler.schedule()
     model_runner_output = create_model_runner_output(reqs=[request_remote])
-    assert (scheduler_output.scheduled_new_reqs[0].num_computed_tokens ==
+    assert (scheduler_output.scheduled_cached_reqs.num_computed_tokens[0] ==
             NUM_PROMPT_BLOCKS * BLOCK_SIZE)
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 0
 
-    # Step 7: free everything.
+    # Step 8: free everything.
     scheduler_output = scheduler.schedule()
     model_runner_output = create_model_runner_output(reqs=[request_remote],
                                                      use_eos=True)
