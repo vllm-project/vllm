@@ -25,7 +25,7 @@ TEST_VIDEO_URLS = [
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--task",
+        "--runner",
         "generate",
         "--max-model-len",
         "32768",
