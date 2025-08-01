@@ -415,6 +415,8 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation."""
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
+    enable_nano_split: bool = False
+    """Enable nano split for the model"""
 
     def compute_hash(self) -> str:
         """
@@ -4343,7 +4345,6 @@ class CompilationConfig:
                 "vllm.unified_attention",
                 "vllm.unified_attention_with_output",
                 "vllm.mamba_mixer2",
-                "vllm.all_reduce"
             ]
 
 

@@ -14,6 +14,7 @@ import torch
 import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
 
+from vllm.compilation.nano_utils import tag_graph
 import vllm.envs as envs
 from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger
@@ -234,7 +235,6 @@ def split_graph(graph: fx.GraphModule,
     # split graph by ops
     subgraph_id = 0
     node_to_subgraph_id = {}
-    subgraph_to_tag = {}
     split_op_graphs = []
     for node in graph.graph.nodes:
         if node.op in ("output", "placeholder"):
@@ -243,7 +243,6 @@ def split_graph(graph: fx.GraphModule,
             subgraph_id += 1
             node_to_subgraph_id[node] = subgraph_id
             split_op_graphs.append(subgraph_id)
-            subgraph_to_tag[subgraph_id] = str(node.target)
             subgraph_id += 1
         else:
             node_to_subgraph_id[node] = subgraph_id
@@ -270,7 +269,6 @@ def split_graph(graph: fx.GraphModule,
         module = getattr(split_gm, name)
 
         graph_id = int(name.replace("submod_", ""))
-        setattr(module, "tag", subgraph_to_tag.get(graph_id, ""))
         outputs.append(
             SplitItem(name, graph_id, (graph_id in split_op_graphs), module))
 
@@ -551,8 +549,12 @@ class VllmBackend:
         self.graph = graph
         self.configure_post_pass()
 
-        self.split_gm, self.piecewise_graphs = split_graph(
-            graph, self.compilation_config.splitting_ops)
+        if self.vllm_config.model_config.enable_nano_split:
+            self.split_gm, self.piecewise_graphs = split_graph(graph, [
+                "vllm.all_reduce"
+            ])
+        else:
+            self.split_gm, self.piecewise_graphs = split_graph(graph, self.compilation_config.splitting_ops)
 
         from torch._dynamo.utils import lazy_format_graph_code
 
@@ -590,8 +592,11 @@ class VllmBackend:
 
         if not self.compilation_config.use_cudagraph or \
             not self.compilation_config.cudagraph_copy_inputs:
-            from vllm.compilation.nano_split import init_split_manager_and_get_callable
-            return init_split_manager_and_get_callable(self.split_gm)
+            if self.vllm_config.model_config.enable_nano_split:
+                from vllm.compilation.nano_manager import init_split_manager_and_get_callable
+                return init_split_manager_and_get_callable(self.split_gm)
+            else:
+                return self.split_gm
 
         # if we need to copy input buffers for cudagraph
         from torch._guards import detect_fake_mode
