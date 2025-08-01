@@ -3,7 +3,7 @@
 
 from io import BytesIO
 from pathlib import Path
-from typing import Tuple, Union
+from typing import Union
 
 import pybase64
 import torch
@@ -26,7 +26,7 @@ def rescale_image_size(image: Image.Image,
 
 def rgba_to_rgb(
     image: Image.Image,
-    background_color: Union[Tuple[int, int, int], list[int]] = (255, 255, 255)
+    background_color: Union[tuple[int, int, int], list[int]] = (255, 255, 255)
 ) -> Image.Image:
     """Convert an RGBA image to RGB with filled background color."""
     assert image.mode == "RGBA"
@@ -74,7 +74,7 @@ class ImageMediaIO(MediaIO[Image.Image]):
         self.rgba_background_color = rgba_bg
 
     def _convert_image_mode(self, image: Image.Image) -> Image.Image:
-        """Internal method to convert image mode with custom background color."""
+        """Convert image mode with custom background color."""
         if image.mode == self.image_mode:
             return image
         elif image.mode == "RGBA" and self.image_mode == "RGB":

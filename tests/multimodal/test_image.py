@@ -38,7 +38,7 @@ def test_rgba_to_rgb():
 
 
 def test_rgba_to_rgb_custom_background():
-    """Test RGBA to RGB conversion with custom background colors using ImageMediaIO."""
+    """Test RGBA to RGB conversion with custom background colors."""
     # Create a simple RGBA image with transparent and opaque pixels
     rgba_image = Image.new("RGBA", (10, 10),
                            (255, 0, 0, 255))  # Red with full opacity

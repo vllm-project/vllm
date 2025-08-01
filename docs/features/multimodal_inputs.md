@@ -176,7 +176,7 @@ Multi-image input can be extended to perform video captioning. We show this with
 
 When loading RGBA images (images with transparency), vLLM converts them to RGB format. By default, transparent pixels are replaced with white background. You can customize this background color using the `rgba_background_color` parameter in `media_io_kwargs`.
 
-??? code "Offline Inference"
+??? code
 
     ```python
     from vllm import LLM
@@ -195,20 +195,6 @@ When loading RGBA images (images with transparency), vLLM converts them to RGB f
         model="llava-hf/llava-1.5-7b-hf", 
         media_io_kwargs={"image": {"rgba_background_color": [0, 0, 255]}}
     )
-    ```
-
-??? code "Online Inference"
-
-    ```bash
-    # Black background
-    python -m vllm.entrypoints.openai.api_server \
-        --model llava-hf/llava-1.5-7b-hf \
-        --media-io-kwargs '{"image": {"rgba_background_color": [0, 0, 0]}}'
-    
-    # Custom gray background
-    python -m vllm.entrypoints.openai.api_server \
-        --model llava-hf/llava-1.5-7b-hf \
-        --media-io-kwargs '{"image": {"rgba_background_color": [128, 128, 128]}}'
     ```
 
 !!! note
@@ -521,6 +507,20 @@ Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for
     ```bash
     export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
     ```
+
+#### Custom RGBA Background Color
+
+To use a custom background color for RGBA images, pass the `rgba_background_color` parameter via `--media-io-kwargs`:
+
+```bash
+# Example: Black background for dark theme
+vllm serve llava-hf/llava-1.5-7b-hf \
+  --media-io-kwargs '{"image": {"rgba_background_color": [0, 0, 0]}}'
+
+# Example: Custom gray background
+vllm serve llava-hf/llava-1.5-7b-hf \
+  --media-io-kwargs '{"image": {"rgba_background_color": [128, 128, 128]}}'
+```
 
 ### Audio Inputs
 
