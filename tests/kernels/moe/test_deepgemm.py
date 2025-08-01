@@ -15,13 +15,13 @@ import torch
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
-from vllm.utils import has_deep_gemm
-from vllm.utils.deep_gemm import calc_diff, per_block_cast_to_fp8
+from vllm.utils.deep_gemm import (calc_diff, is_deep_gemm_supported,
+                                  per_block_cast_to_fp8)
 
 BLOCK_SIZE = [128, 128]
 
 requires_deep_gemm = pytest.mark.skipif(
-    not has_deep_gemm(),
+    not is_deep_gemm_supported(),
     reason="Requires deep_gemm kernels",
 )
 
