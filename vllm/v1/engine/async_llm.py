@@ -146,8 +146,8 @@ class AsyncLLM(EngineClient):
 
         if envs.VLLM_TORCH_PROFILER_DIR:
             logger.info(
-                f"Torch profiler enabled. AsyncLLM CPU traces will be collected under {envs.VLLM_TORCH_PROFILER_DIR}"
-            )
+                "Torch profiler enabled. AsyncLLM CPU traces will be collected under %s",  # noqa: E501
+                envs.VLLM_TORCH_PROFILER_DIR)
             worker_name = f"{socket.gethostname()}_{os.getpid()}.async_llm"
             self.profiler = torch.profiler.profile(
                 activities=[
@@ -160,7 +160,7 @@ class AsyncLLM(EngineClient):
                     use_gzip=True))
         else:
             logger.info(
-                "Torch profiler disabled. AsyncLLM CPU traces will not be collected."
+                "Torch profiler disabled. AsyncLLM CPU traces will not be collected."  # noqa: E501
             )
             self.profiler = None
 
