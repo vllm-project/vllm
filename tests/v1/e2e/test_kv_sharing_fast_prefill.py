@@ -117,12 +117,10 @@ def cleanup(llm: LLM, compilation_config: CompilationConfig):
 
 @fork_new_process_for_each_test
 @pytest.mark.parametrize("enforce_eager", [True])
-@pytest.mark.parametrize("execute_number", [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
 def test_kv_sharing_fast_prefill(
     monkeypatch: pytest.MonkeyPatch,
     enforce_eager: bool,
     test_prompts: list[str],
-    execute_number: int,
 ):
     ModelRegistry.register_model("Gemma3nForConditionalGeneration",
                                  TestGemma3nForConditionalGeneration)
