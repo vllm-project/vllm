@@ -1,4 +1,3 @@
-
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
@@ -16,6 +15,7 @@ ARG PYTHON_VERSION=3.12
 # Example:
 # docker build --build-arg BUILD_BASE_IMAGE=registry.acme.org/mirror/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
 ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
+# TODO: Restore to base image after FlashInfer AOT wheel fixed
 ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 
 # By parameterizing the Deadsnakes repository URL, we allow third-party to use
@@ -289,7 +289,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-# TODO: Restore to base image after FlashInfer AOT wheel fixed
 FROM ${FINAL_BASE_IMAGE} AS vllm-base
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
@@ -434,6 +433,33 @@ COPY requirements/build.txt requirements/build.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/build.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+
+# Install DeepGEMM from source
+ARG DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
+ARG DEEPGEMM_GIT_REF="187656694f7f69e3e7975617a68bc3387680a7e1"
+RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
+  . /etc/environment
+    CUDA_MAJOR="${CUDA_VERSION%%.*}"
+    CUDA_MINOR="${CUDA_VERSION#${CUDA_MAJOR}.}"
+    CUDA_MINOR="${CUDA_MINOR%%.*}"
+    if [ "$CUDA_MAJOR" -ge 12 ] && [ "$CUDA_MINOR" -ge 8 ]; then
+        git clone --recursive --shallow-submodules \
+            ${DEEPGEMM_GIT_REPO} deepgemm
+        echo "🏗️  Building DeepGEMM"
+        pushd deepgemm
+            git checkout ${DEEPGEMM_GIT_REF}
+            # Build DeepGEMM
+            # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)
+            rm -rf build dist
+            rm -rf *.egg-info
+            python3 setup.py bdist_wheel
+            uv pip install --system dist/*.whl
+        popd
+        rm -rf deepgemm
+    else
+        echo "Skipping DeepGEMM installation (requires CUDA 12.8+ but got ${CUDA_VERSION})"
+    fi
+BASH
 
 #################### vLLM installation IMAGE ####################
 
