@@ -138,6 +138,7 @@ CONFIGS: dict[str, ServerConfig] = {
             "--load-format", "mistral",
             "--tool-call-parser", "mistral",
             "--enforce-eager", "--no-enable-prefix-caching",
+            "--tensor-parallel-size", "4",
             "--chat-template",
             str(VLLM_PATH / "examples/tool_chat_template_mistral.jinja"),
             "--ignore-patterns=\"consolidated.safetensors\""

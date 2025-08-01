@@ -504,6 +504,7 @@ steps:
 
 - label: OpenAI-Compatible Tool Use # 20 min
   mirror_hardwares: [amdexperimental]
+  num_gpus: 4
   fast_check: false
   source_file_dependencies:
     - vllm/
