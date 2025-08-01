@@ -335,8 +335,10 @@ class Qwen2VisionAttention(nn.Module):
             #   flash_attn_varlen_func)
             if self.attn_backend == _Backend.ROCM_AITER_FA:
                 from aiter import flash_attn_varlen_func
+                dropout_p = float(0)
             else:
                 from flash_attn import flash_attn_varlen_func
+                dropout_p = 0
 
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
@@ -347,7 +349,7 @@ class Qwen2VisionAttention(nn.Module):
                                             cu_seqlens_k=cu_seqlens,
                                             max_seqlen_q=max_seqlen,
                                             max_seqlen_k=max_seqlen,
-                                            dropout_p=0,
+                                            dropout_p=dropout_p,
                                             causal=False)
 
             context_layer = rearrange(output,

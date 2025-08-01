@@ -207,7 +207,7 @@ class CudaPlatformBase(Platform):
         return torch.cuda.max_memory_allocated(device)
 
     @classmethod
-    def get_vit_attn_backend(cls, support_fa: bool = False) -> str:
+    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
         if cls.has_device_capability(80) and support_fa:
             from transformers.utils import is_flash_attn_2_available
             if is_flash_attn_2_available():

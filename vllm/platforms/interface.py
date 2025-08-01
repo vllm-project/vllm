@@ -188,7 +188,7 @@ class Platform:
             return device_id
 
     @classmethod
-    def get_vit_attn_backend(cls, support_fa: bool = False) -> str:
+    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
         return _Backend.TORCH_SDPA
 
     @classmethod
