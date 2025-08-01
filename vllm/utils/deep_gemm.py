@@ -18,6 +18,17 @@ from vllm.utils import has_deep_gemm
 
 
 @functools.cache
+def is_deep_gemm_supported() -> bool:
+    """Return ``True`` if DeepGEMM is supported on the current platform.
+    Currently, only Hopper and Blackwell GPUs are supported.
+    """
+    supported_arch = current_platform.is_cuda() and (
+        current_platform.is_device_capability(90)
+        or current_platform.is_device_capability(100))
+    return has_deep_gemm() and supported_arch
+
+
+@functools.cache
 def is_blackwell_deep_gemm_used() -> bool:
     """Return ``True`` if vLLM is configured to use DeepGEMM on a
     Blackwell-class GPU.
@@ -142,4 +153,5 @@ __all__ = [
     "fp8_m_grouped_gemm_nt_masked",
     "per_block_cast_to_fp8",
     "is_blackwell_deep_gemm_used",
+    "is_deep_gemm_supported",
 ]
