@@ -937,7 +937,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
                               total_frames: int) -> list[int]:
         video_processor = self.get_video_processor()
 
-        video_fps = metadata.get("fps", 2.0)
+        video_fps = metadata.get("fps", video_processor.fps)
         meta_frames = metadata.get("total_num_frames", total_frames)
         max_frame_idx = meta_frames - 1
         duration = metadata.get("duration",
