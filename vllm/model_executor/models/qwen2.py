@@ -285,8 +285,7 @@ class Qwen2Model(nn.Module):
         quant_config = vllm_config.quant_config
 
         # TODO (@robertgshaw2): see if this can be moved out
-        if (cache_config.sliding_window is not None
-                and hasattr(config, "max_window_layers")):
+        if vllm_config.model_config.is_interleaved:
             assert config.max_window_layers == config.num_hidden_layers, (
                 "Sliding window for some but all layers is not supported. "
                 "This model uses sliding window but `max_window_layers` = {} "

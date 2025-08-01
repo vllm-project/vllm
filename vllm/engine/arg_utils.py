@@ -1084,6 +1084,10 @@ class EngineArgs:
                 "DualChunkFlashAttention is not supported on V1 engine. "
                 "To run the model in V0 engine, try set 'VLLM_USE_V1=0'")
 
+        sliding_window = model_config.get_sliding_window()
+        if model_config.is_interleaved:
+            sliding_window = None
+
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -1091,7 +1095,7 @@ class EngineArgs:
             cache_dtype=self.kv_cache_dtype,
             is_attention_free=model_config.is_attention_free,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
-            sliding_window=model_config.get_sliding_window(),
+            sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,

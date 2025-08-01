@@ -732,25 +732,20 @@ class ModelConfig:
             revision=self.revision,
         )
 
-        if not self.disable_sliding_window:
-            # Interleaved attention is not supported by some backends in V0
-            layer_types = getattr(self.hf_text_config, "layer_types", None)
-            if layer_types is not None:
-                is_interleaved = ("full_attention" in layer_types
-                                  and "sliding_attention" in layer_types)
-                if (is_interleaved and not envs.VLLM_USE_V1
-                        and (backend := envs.VLLM_ATTENTION_BACKEND)
-                        in ("XFORMERS", "FLASHINFER")):
-                    logger.warning_once(
-                        "%s has interleaved attention, which is currently not "
-                        "supported by the %s backend. Disabling sliding window "
-                        "and capping the max length to the sliding window size "
-                        "(%d).",
-                        self.hf_text_config.model_type,
-                        backend,
-                        self.hf_text_config.sliding_window,
-                    )
-                    self.disable_sliding_window = True
+        # Interleaved attention is not supported by some backends in V0
+        if (not self.disable_sliding_window and self.is_interleaved
+                and not envs.VLLM_USE_V1
+                and (backend := envs.VLLM_ATTENTION_BACKEND)
+                in ("XFORMERS", "FLASHINFER")):
+            logger.warning_once(
+                "%s has interleaved attention, which is currently not "
+                "supported by the %s backend. Disabling sliding window and "
+                "capping the max length to the sliding window size (%d).",
+                self.hf_text_config.model_type,
+                backend,
+                self.hf_text_config.sliding_window,
+            )
+            self.disable_sliding_window = True
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
@@ -1647,6 +1642,14 @@ class ModelConfig:
     @property
     def is_hybrid(self) -> bool:
         return self._model_info.is_hybrid
+
+    @property
+    def is_interleaved(self) -> bool:
+        layer_types = getattr(self.hf_text_config, "layer_types", None)
+        if layer_types is None:
+            return False
+        interleaved_types = {"full_attention", "sliding_attention"}
+        return interleaved_types.issubset(layer_types)
 
     @property
     def has_noops(self) -> bool:
