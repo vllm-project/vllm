@@ -331,10 +331,8 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
         return hf_processor
 
-    def get_image_processor(self):
-        hf_processor = self.get_hf_processor()
-        image_processor = hf_processor.image_processor  # type: ignore
-        return image_processor
+    def get_image_processor(self, **kwargs: object):
+        return self.get_hf_processor(**kwargs).image_processor
 
     def get_model_version(self):
         return get_version_by_config(self.get_hf_config())
