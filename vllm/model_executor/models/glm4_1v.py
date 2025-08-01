@@ -1120,16 +1120,12 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     video_placeholder,
                 )
 
-                grid_t = len(video_outputs["video_grid_thw"])
-                _, grid_h, grid_w = video_outputs["video_grid_thw"][0]
-                grid_thw = torch.tensor([[grid_t, grid_h, grid_w]])
-
-                video_grid_thw_lst.append(grid_thw)
+                video_grid_thw_lst.append(video_outputs["video_grid_thw"])
                 pixel_values_videos_lst.append(
                     video_outputs["pixel_values_videos"])
             video_outputs = dict(
                 pixel_values_videos=torch.cat(pixel_values_videos_lst),
-                video_grid_thw=torch.cat(video_grid_thw_lst),
+                video_grid_thw=video_outputs["video_grid_thw"],
             )
         else:
             video_outputs = dict()
