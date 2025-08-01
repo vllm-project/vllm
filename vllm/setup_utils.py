@@ -2,6 +2,10 @@ from pathlib import Path
 from shutil import copy, copytree, which
 from tempfile import TemporaryDirectory
 import tarfile
+from typing import Optional
+
+from packaging.version import Version
+from torch.utils.cpp_extension import CUDA_HOME
 
 
 def is_sccache_available() -> bool:
@@ -75,6 +79,21 @@ def download_toolchain(nvcc_version: str, ptxas_version: str, dst_path: Path):
             dst_path / "nvvm/bin",
         },
     )
+
+
+def maybe_patch_compiler(cuda_version: Optional[Version] = None) -> dict[Path, Path]:
+    if cuda_version is None or cuda_version != Version("12.6"):
+        return {}
+    assert CUDA_HOME is not None, "CUDA_HOME is not set"
+
+    nvcc_version = "12.6.85"
+    ptxas_version = "12.8.93"
+    temp_path = Path(__file__).parent / ".deps/nvidia-toolchain"
+    download_toolchain(nvcc_version, ptxas_version, temp_path)
+    return {
+        Path(CUDA_HOME) / "bin/ptxas": temp_path / "bin/ptxas",
+        Path(CUDA_HOME) / "nvvm/bin/cicc": temp_path / "nvvm/bin/cicc",
+    }
 
 
 class OverrideFiles:
