@@ -723,28 +723,34 @@ class ModelConfig:
             revision=self.revision,
         )
 
-        if self.disable_sliding_window:
-            self.hf_text_config.sliding_window = None
-        elif layer_types := getattr(self.hf_text_config, "layer_types", None):
-            is_interleaved = ("full_attention" in layer_types
-                              and "sliding_attention" in layer_types)
-            if (is_interleaved and not envs.VLLM_USE_V1
-                    and (backend := envs.VLLM_ATTENTION_BACKEND)
-                    in ("XFORMERS", "FLASHINFER")):
-                sliding_window_len_min = get_min_sliding_window(
-                    self.hf_text_config.sliding_window)
-
-                logger.warning_once(
-                    "%s has interleaved attention, which is currently not supported by the %s backend. Disabling sliding window and capping the max length to the sliding window size (%d).",  # noqa: E501
-                    self.hf_text_config.model_type,
-                    backend,
-                    sliding_window_len_min,
-                )
-                self.disable_sliding_window = True
+        if not self.disable_sliding_window:
+            # Interleaved attention is not supported by some backends in V0
+            layer_types = getattr(self.hf_text_config, "layer_types", None)
+            if layer_types is not None:
+                is_interleaved = ("full_attention" in layer_types
+                                  and "sliding_attention" in layer_types)
+                if (is_interleaved and not envs.VLLM_USE_V1
+                        and (backend := envs.VLLM_ATTENTION_BACKEND)
+                        in ("XFORMERS", "FLASHINFER")):
+                    logger.warning_once(
+                        "%s has interleaved attention, which is currently not "
+                        "supported by the %s backend. Disabling sliding window "
+                        "and capping the max length to the sliding window size "
+                        "(%d).",
+                        self.hf_text_config.model_type,
+                        backend,
+                        self.hf_text_config.sliding_window,
+                    )
+                    self.disable_sliding_window = True
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
         self.multimodal_config = self._init_multimodal_config()
+
+        if self.disable_sliding_window:
+            # Set after get_and_verify_max_len to ensure that max_model_len
+            # can be correctly capped to sliding window size
+            self.hf_text_config.sliding_window = None
 
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
