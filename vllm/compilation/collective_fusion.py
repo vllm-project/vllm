@@ -470,8 +470,7 @@ if flashinfer_comm is not None:
             )
         else:
             allreduce_out = tensor_model_parallel_all_reduce(allreduce_in)
-            if (scale_factor is not None and scale_out is None
-                    and fuse_rms_quant):
+            if (scale_factor is not None and scale_out is None):
                 # Do fused rms norm static fp8 quant fused op
                 if norm_out is None:
                     torch.ops._C.fused_add_rms_norm_static_fp8_quant(
@@ -490,12 +489,13 @@ if flashinfer_comm is not None:
                     torch.ops._C.rms_norm(norm_out, allreduce_out, rms_gamma,
                                           rms_eps)
                 if scale_factor is not None:
-                    if scale_out is not None:
-                        torch.ops._C.scaled_fp4_quant(quant_out, norm_out,
-                                                      scale_out, scale_factor)
-                    else:
-                        torch.ops._C.static_scaled_fp8_quant(
-                            quant_out, norm_out, scale_factor)
+                    assert scale_out is not None
+                    torch.ops._C.scaled_fp4_quant(quant_out, norm_out,
+                                                  scale_out, scale_factor)
+                    # if scale_out is not None:
+                    # else:
+                    #     torch.ops._C.static_scaled_fp8_quant(
+                    #         quant_out, norm_out, scale_factor)
             if scale_factor is None or norm_out is not None:
                 # we need to return allreduce outpput
                 # in cases of non quant fused AR + RMS norm
