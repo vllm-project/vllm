@@ -91,8 +91,6 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # trtllm API requires extra dimension q_len_per_request for MTP
         q = q.unsqueeze(1)
 
-        max_seq_len = attn_metadata.decode.seq_lens.max().item()
-
         o = trtllm_batch_decode_with_kv_cache_mla(
             query=q,
             kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
