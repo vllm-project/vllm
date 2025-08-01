@@ -77,7 +77,7 @@ def run_headless(args: argparse.Namespace):
 
     if args.api_server_count > 1:
         raise ValueError("api_server_count can't be set in headless mode")
-    # set_process_title("Headless_ProcManager")
+
     # Create the EngineConfig.
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
     usage_context = UsageContext.OPENAI_API_SERVER
@@ -141,8 +141,6 @@ def run_multi_api_server(args: argparse.Namespace):
     assert num_api_servers > 0
 
     orig_disable_mm_preprocessor_cache = args.disable_mm_preprocessor_cache
-
-    # set_process_title("ProcManager")
 
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
