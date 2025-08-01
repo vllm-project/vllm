@@ -621,7 +621,7 @@ class OpenAIServing:
                 f"{self.max_model_len} tokens. However, you requested "
                 f"{token_num} tokens in the messages, "
                 f"Please reduce the length of the messages.")
-        elif token_num + (max_tokens or 0) > self.max_model_len:
+        elif max_tokens is not None and token_num + max_tokens > self.max_model_len:
             raise ValueError(
                 f"This model's maximum context length is "
                 f"{self.max_model_len} tokens. However, you requested "
