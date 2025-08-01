@@ -13,6 +13,8 @@ from openai_harmony import (Conversation, DeveloperContent,
                             Role, StreamableParser, SystemContent, TextContent,
                             load_harmony_encoding)
 
+from typing import Any
+
 from vllm.entrypoints.openai.protocol import ResponseReasoningItem
 from vllm.utils import random_uuid
 
@@ -38,7 +40,9 @@ def get_system_message(
     reasoning_effort: Optional[Literal["high", "medium", "low"]] = None,
     start_date: Optional[str] = None,
     enable_browsing: bool = True,
+    browser_tool: Optional[Any] = None,
     enable_python: bool = True,
+    python_tool: Optional[Any] = None,
 ) -> Message:
     sys_msg_content = SystemContent.new()
     if model_identity is not None:
@@ -50,9 +54,11 @@ def get_system_message(
         start_date = datetime.datetime.now().strftime("%Y-%m-%d")
     sys_msg_content = sys_msg_content.with_conversation_start_date(start_date)
     if enable_browsing:
-        sys_msg_content = sys_msg_content.with_browser_tool()
+        assert browser_tool is not None
+        sys_msg_content = sys_msg_content.with_tools(browser_tool.tool_config)
     if enable_python:
-        sys_msg_content = sys_msg_content.with_python_tool()
+        assert python_tool is not None
+        sys_msg_content = sys_msg_content.with_tools(python_tool.tool_config)
     sys_msg = Message.from_role_and_content(Role.SYSTEM, sys_msg_content)
     return sys_msg
 

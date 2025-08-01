@@ -479,7 +479,9 @@ class OpenAIServingResponses(OpenAIServing):
             sys_msg = get_system_message(
                 reasoning_effort=reasoning_effort,
                 enable_browsing=enable_browsing,
+                browser_tool=self.browser_tool,
                 enable_python=enable_code_interpreter,
+                python_tool=self.python_tool,
             )
             messages.append(sys_msg)
             dev_msg = get_developer_message(request.instructions)
