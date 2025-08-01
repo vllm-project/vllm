@@ -201,23 +201,6 @@ def test_chat_extra_kwargs(thinking_llm, enable_thinking):
         assert think_id in prompt_token_ids
 
 
-def _get_messages(modality: str):
-    if modality == "image":
-        return [
-            {
-                "role": "system",
-                "content": "You are a helpful assistant"
-            },
-            {
-                "role": "user",
-                "content": [{
-                    "type": "text",
-                    "text": "What is in this image?"
-                }]
-            },
-        ]
-
-
 @pytest.mark.parametrize(("model_id", "modality", "mm_init_kwargs"), [
     ("Qwen/Qwen2.5-VL-3B-Instruct", "image", {
         "use_fast": True
