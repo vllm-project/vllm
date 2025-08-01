@@ -1411,10 +1411,16 @@ class FusedMoE(torch.nn.Module):
         # TODO: Once the OOM issue for the TPU backend is resolved, we will
         # switch to using the moe_forward custom op.
         if current_platform.is_tpu():
-            return self.forward_impl(hidden_states, router_logits)
+            final_hidden_states = self.forward_impl(hidden_states,
+                                                    router_logits)
         else:
-            return torch.ops.vllm.moe_forward(hidden_states, router_logits,
-                                              self.layer_name)
+            final_hidden_states = torch.ops.vllm.moe_forward(
+                hidden_states, router_logits, self.layer_name)
+        if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
+            # Default set to False. (May have to add shared expert outputs.
+            final_hidden_states = self.maybe_all_reduce_tensor_model_parallel(
+                final_hidden_states)
+        return final_hidden_states
 
     def forward_impl_chunked(self, full_hidden_states: torch.Tensor,
                              full_router_logits: torch.Tensor):
@@ -1538,10 +1544,6 @@ class FusedMoE(torch.nn.Module):
 
         if do_naive_dispatch_combine:
             final_hidden_states = get_ep_group().combine(final_hidden_states)
-        if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
-            # Default set to False. (May have to add shared expert outputs.
-            final_hidden_states = self.maybe_all_reduce_tensor_model_parallel(
-                final_hidden_states)
 
         return final_hidden_states
 
