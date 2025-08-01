@@ -17,8 +17,6 @@ logger = init_logger(__name__)
 class RequestLogger:
 
     def __init__(self, *, max_log_len: Optional[int]) -> None:
-        super().__init__()
-
         self.max_log_len = max_log_len
 
     def log_inputs(
