@@ -182,7 +182,16 @@ class Platform:
                 cls.device_control_env_var] != "":
             device_ids = os.environ[cls.device_control_env_var].split(",")
             physical_device_id = device_ids[device_id]
-            return int(physical_device_id)
+            try:
+                return int(physical_device_id)
+            except ValueError:
+                raise ValueError(
+                    f"Invalid device ID '{physical_device_id}' in "
+                    f"{cls.device_control_env_var} environment variable. "
+                    "Expected a comma-separated list of integers, "
+                    "which is the only supported format for this variable. "
+                    "See also https://github.com/vllm-project/vllm/issues/6551#issuecomment-2239800023"
+                ) from None
         else:
             return device_id
 
