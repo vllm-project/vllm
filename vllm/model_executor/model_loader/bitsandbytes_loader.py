@@ -522,10 +522,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         if is_moe_model(model):
             self.expert_params_mapping = get_moe_expert_mapping(model)
-            assert self.expert_params_mapping, AttributeError(
-                f"MoE Model {type(model).__name__} does not support "
-                "BitsAndBytes quantization yet. Ensure this model has "
-                "'get_expert_mapping' method.")
+            if not self.expert_params_mapping:
+                raise AttributeError(
+                    f"MoE Model {type(model).__name__} does not support "
+                    "BitsAndBytes quantization yet. Ensure this model has "
+                    "'get_expert_mapping' method.")
         # For some models like Molmo, we need to use hf_to_vllm_mapper
         # to ensure correct loading of weights.
         if hf_to_vllm_mapper := getattr(model, "hf_to_vllm_mapper", None):
