@@ -187,7 +187,8 @@ class cmake_build_ext(build_ext):
         # 12.6 is known to segfault when compiling flash attention,
         # instead, hack toolchain to use ptxas from 12.8
         # https://github.com/Dao-AILab/flash-attention/blob/main/hopper/setup.py#L404
-        override_files = utils.maybe_patch_compiler(get_nvcc_cuda_version() if _is_cuda() else None)
+        override_files = utils.maybe_patch_compiler(
+            get_nvcc_cuda_version() if _is_cuda() else None)
 
         with utils.OverrideFiles(override_files):
             subprocess.check_call(
