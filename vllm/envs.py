@@ -965,7 +965,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE", "163840")),
 
     # MoE routing strategy selector. Available strategies:
-    # - "softmax": Standard softmax-based routing
     # - "uniform_random": Uniform random routing for perfect load balancing
     # - "weighted_random": Weighted random routing with temperature scaling
     # Note: custom strategies may not produce correct model outputs
