@@ -209,6 +209,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                UnquantizedLinearMethod)
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
+from vllm.utils.flashinfer import has_nvidia_artifactory
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder, CommonAttentionMetadata,
     get_per_layer_parameters, infer_global_hyperparameters,
@@ -379,17 +380,16 @@ M = TypeVar("M", bound=MLACommonMetadata)
 
 
 def use_flashinfer_prefill() -> bool:
-    if flashinfer_available and not envs.VLLM_USE_CUDNN_PREFILL:
-        # For blackwell default to flashinfer prefill if its available since
-        #  its faster than FA2.
-        return current_platform.has_device_capability(100)
-    return False
+    # For blackwell default to flashinfer prefill if its available since
+    # it is faster than FA2.
+    return (flashinfer_available and not envs.VLLM_USE_CUDNN_PREFILL
+            and current_platform.is_device_capability(100))
 
 
 def use_cudnn_prefill() -> bool:
-    if flashinfer_available and envs.VLLM_USE_CUDNN_PREFILL:
-        return current_platform.has_device_capability(100)
-    return False
+    return (flashinfer_available and envs.VLLM_USE_CUDNN_PREFILL
+            and current_platform.is_device_capability(100)
+            and has_nvidia_artifactory())
 
 
 # Currently 394MB, this can be tuned based on GEMM sizes used.
@@ -406,6 +406,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
     def __init__(self,
                  kv_cache_spec: AttentionSpec,
+                 layer_names: list[str],
                  vllm_config: VllmConfig,
                  device: torch.device,
                  metadata_cls: Optional[type[M]] = None):
@@ -471,7 +472,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 BatchPrefillWithRaggedKVCacheWrapper] = []
 
             self._global_hyperparameters = infer_global_hyperparameters(
-                get_per_layer_parameters(vllm_config, MLACommonImpl))
+                get_per_layer_parameters(vllm_config, layer_names,
+                                         MLACommonImpl))
 
         if self._use_cudnn_prefill:
             self.cudnn_workspace = torch.empty(
