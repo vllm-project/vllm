@@ -167,6 +167,7 @@ def create_model_runner_output(
     reqs: list[Request],
     finished_sending: Optional[list[str]] = None,
     finished_recving: Optional[list[str]] = None,
+    finished_loading_dict: Optional[dict[str, int]] = None,
     use_eos: bool = False,
 ) -> ModelRunnerOutput:
     """Make dummy model runner output for testing."""
@@ -180,17 +181,16 @@ def create_model_runner_output(
     sampled_token_ids = [[sampled_token] for _ in req_ids]
 
     # Make output data structure.
-    return ModelRunnerOutput(
-        req_ids=req_ids,
-        req_id_to_index=req_id_to_index,
-        sampled_token_ids=sampled_token_ids,
-        spec_token_ids=None,
-        logprobs=None,
-        prompt_logprobs_dict={},
-        pooler_output=None,
-        finished_sending=finished_sending,
-        finished_recving=finished_recving,
-    )
+    return ModelRunnerOutput(req_ids=req_ids,
+                             req_id_to_index=req_id_to_index,
+                             sampled_token_ids=sampled_token_ids,
+                             spec_token_ids=None,
+                             logprobs=None,
+                             prompt_logprobs_dict={},
+                             pooler_output=None,
+                             finished_sending=finished_sending,
+                             finished_recving=finished_recving,
+                             finished_loading_dict=finished_loading_dict)
 
 
 class TestSharedStorageConnector(SharedStorageConnector):
