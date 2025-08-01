@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # flake8: noqa
 """Tests experts_int8 quantization startup and generation, 
@@ -8,7 +9,7 @@ import pytest
 
 from tests.quantization.utils import is_quant_method_supported
 
-MODELS = ["ai21labs/Jamba-tiny-random"]
+MODELS = ["ai21labs/Jamba-tiny-random", "pfnet/plamo-2-1b"]
 
 
 @pytest.mark.skipif(not is_quant_method_supported("experts_int8"),

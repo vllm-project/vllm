@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 r"""Benchmark online serving throughput with structured outputs.
 
 On the server side, run one of the following commands:
@@ -11,7 +12,6 @@ On the client side, run:
         --model <your_model> \
         --dataset json \
         --structured-output-ratio 1.0 \
-        --structured-output-backend auto \
         --request-rate 10 \
         --num-prompts 1000
 
@@ -538,20 +538,6 @@ async def benchmark(
         )
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
-    if profile:
-        print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_request.prompt,
-            api_url=base_url + "/stop_profile",
-            prompt_len=test_request.prompt_len,
-            output_len=test_request.expected_output_len,
-            extra_body={test_request.structure_type: test_request.schema},
-        )
-        profile_output = await request_func(request_func_input=profile_input)
-        if profile_output.success:
-            print("Profiler stopped")
-
     if pbar is not None:
         pbar.close()
 
@@ -569,6 +555,10 @@ async def benchmark(
 
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
+    if max_concurrency is not None:
+        print("{:<40} {:<10}".format("Maximum request concurrency:", max_concurrency))
+    if request_rate != float("inf"):
+        print("{:<40} {:<10.2f}".format("Request rate configured (RPS):", request_rate))
     print("{:<40} {:<10.2f}".format("Benchmark duration (s):", benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
     print("{:<40} {:<10}".format("Total generated tokens:", metrics.total_output))
@@ -665,6 +655,20 @@ async def benchmark(
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
 
     print("=" * 50)
+
+    if profile:
+        print("Stopping profiler...")
+        profile_input = RequestFuncInput(
+            model=model_id,
+            prompt=test_request.prompt,
+            api_url=base_url + "/stop_profile",
+            prompt_len=test_request.prompt_len,
+            output_len=test_request.expected_output_len,
+            extra_body={test_request.structure_type: test_request.schema},
+        )
+        profile_output = await request_func(request_func_input=profile_input)
+        if profile_output.success:
+            print("Profiler stopped")
 
     return result, ret
 
@@ -850,7 +854,7 @@ def main(args: argparse.Namespace):
             json.dump(results, outfile, indent=4)
 
 
-if __name__ == "__main__":
+def create_argument_parser():
     parser = FlexibleArgumentParser(
         description="Benchmark the online serving throughput."
     )
@@ -1034,5 +1038,10 @@ if __name__ == "__main__":
         help="Ratio of Structured Outputs requests",
     )
 
+    return parser
+
+
+if __name__ == "__main__":
+    parser = create_argument_parser()
     args = parser.parse_args()
     main(args)

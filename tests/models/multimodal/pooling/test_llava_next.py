@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
 import torch.nn.functional as F
@@ -63,11 +64,11 @@ def _run_test(
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
     with vllm_runner(model,
-                     task="embed",
+                     runner="pooling",
                      dtype=dtype,
                      max_model_len=4096,
                      enforce_eager=True) as vllm_model:
-        vllm_outputs = vllm_model.encode(input_texts, images=input_images)
+        vllm_outputs = vllm_model.embed(input_texts, images=input_images)
 
     with hf_runner(model, dtype=dtype,
                    auto_cls=AutoModelForImageTextToText) as hf_model:

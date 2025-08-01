@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer."""
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -9,17 +10,47 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from vllm.attention import AttentionType
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
+from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group,
                                           is_v1_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op
+
+logger = init_logger(__name__)
+USE_XFORMERS_OPS = None
+
+
+def check_xformers_availability():
+    global USE_XFORMERS_OPS
+    if USE_XFORMERS_OPS is not None:
+        return USE_XFORMERS_OPS
+
+    if current_platform.is_cuda() and current_platform.has_device_capability(
+            100):
+        # Xformers FA is not compatible with B200
+        USE_XFORMERS_OPS = False
+    else:
+        try:
+            from importlib.util import find_spec
+
+            find_spec("xformers.ops")
+            USE_XFORMERS_OPS = True
+        except ImportError:
+            USE_XFORMERS_OPS = False
+
+    # the warning only needs to be shown once
+    if not USE_XFORMERS_OPS:
+        logger.warning("Xformers is not available, falling back.")
+
+    return USE_XFORMERS_OPS
 
 
 class Attention(nn.Module):
@@ -43,12 +74,12 @@ class Attention(nn.Module):
         alibi_slopes: Optional[List[float]] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         per_layer_sliding_window: Optional[int] = None,
         use_mla: bool = False,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
         **extra_impl_args,
     ) -> None:
         """
@@ -77,6 +108,9 @@ class Attention(nn.Module):
             calculate_kv_scales = False
         if num_kv_heads is None:
             num_kv_heads = num_heads
+        assert num_heads % num_kv_heads == 0, \
+            f"num_heads ({num_heads}) is not " \
+            f"divisible by num_kv_heads ({num_kv_heads})"
 
         # The default k/v_scale is set to 1.0. This is ignored
         # when kv-cache is not fp8, and should be used with
@@ -103,6 +137,15 @@ class Attention(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
 
+        # For v1 we have backend agnostic iRoPE (local chunked attention)
+        # we have to store the flag on the layer so gpu model runner can
+        # set KVSpec appropriately (and pop it so it doesnt get passed to
+        # the backends)
+        if envs.VLLM_USE_V1:
+            self.use_irope = extra_impl_args.pop("use_irope", False)
+        else:
+            self.use_irope = extra_impl_args.get("use_irope", False)
+
         quant_method = quant_config.get_quant_method(
             self, prefix=prefix) if quant_config else None
         if quant_method is not None and not isinstance(
@@ -128,13 +171,12 @@ class Attention(nn.Module):
                                         kv_cache_dtype,
                                         block_size,
                                         is_attention_free,
-                                        blocksparse_params is not None,
                                         use_mla=use_mla)
         impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
-                             blocksparse_params, logits_soft_cap, attn_type,
-                             **extra_impl_args)
+                             logits_soft_cap, attn_type,
+                             kv_sharing_target_layer_name, **extra_impl_args)
         self.backend = backend_name_to_enum(attn_backend.get_name())
         self.dtype = dtype
 
@@ -152,6 +194,15 @@ class Attention(nn.Module):
         compilation_config.static_forward_context[prefix] = self
         self.layer_name = prefix
         self.attn_type = attn_type
+
+        if kv_sharing_target_layer_name is not None:
+            validate_kv_sharing_target(
+                prefix,
+                kv_sharing_target_layer_name,
+                compilation_config.static_forward_context,
+            )
+        self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+
         # use a placeholder kv cache tensor during init, which will be replaced
         # by bind_kv_cache
         # this variable will not be accessed if use_direct_call is True
@@ -190,7 +241,7 @@ class Attention(nn.Module):
         if self.use_output:
             output_shape = (output_shape
                             if output_shape is not None else query.shape)
-            output = torch.empty(output_shape,
+            output = torch.zeros(output_shape,
                                  dtype=query.dtype,
                                  device=query.device)
             hidden_size = output_shape[-1]
@@ -275,7 +326,9 @@ class MultiHeadAttention(nn.Module):
         self.scale = scale
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
 
-        assert self.num_heads % self.num_kv_heads == 0
+        assert self.num_heads % self.num_kv_heads == 0, \
+            f"num_heads ({self.num_heads}) is not " \
+            f"divisible by num_kv_heads ({self.num_kv_heads})"
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         dtype = torch.get_default_dtype()
@@ -285,12 +338,21 @@ class MultiHeadAttention(nn.Module):
                                         block_size=16,
                                         is_attention_free=False)
         backend = backend_name_to_enum(attn_backend.get_name())
-        if backend in {_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1}:
-            backend = _Backend.XFORMERS
+        if current_platform.is_rocm():
+            # currently, only torch_sdpa is supported on rocm
+            self.attn_backend = _Backend.TORCH_SDPA
+        else:
+            if backend in (_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1,
+                           _Backend.FLEX_ATTENTION):
+                backend = _Backend.XFORMERS
 
-        self.attn_backend = backend if backend in {
-            _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.PALLAS_VLLM_V1
-        } else _Backend.TORCH_SDPA
+            self.attn_backend = backend if backend in {
+                _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.PALLAS_VLLM_V1
+            } else _Backend.TORCH_SDPA
+
+        if (self.attn_backend == _Backend.XFORMERS
+                and not check_xformers_availability()):
+            self.attn_backend = _Backend.TORCH_SDPA
 
     def forward(
         self,
@@ -414,6 +476,7 @@ def unified_attention_with_output(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    output_scale: Optional[torch.Tensor] = None,
 ) -> None:
     wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
@@ -428,7 +491,8 @@ def unified_attention_with_output(
                       value,
                       kv_cache,
                       attn_metadata,
-                      output=output)
+                      output=output,
+                      output_scale=output_scale)
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
 
@@ -439,6 +503,7 @@ def unified_attention_with_output_fake(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    output_scale: Optional[torch.Tensor] = None,
 ) -> None:
     return
 

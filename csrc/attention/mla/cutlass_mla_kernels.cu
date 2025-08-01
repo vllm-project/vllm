@@ -119,7 +119,7 @@ typename T::Fmha::Arguments args_from_options(
       {static_cast<ElementOut*>(out.data_ptr()), stride_O,
        static_cast<ElementAcc*>(nullptr), stride_LSE},
       hw_info,
-      -1,       // split_kv
+      1,        // split_kv
       nullptr,  // is_var_split_kv
   };
   // TODO(kaixih@nvidia): When split_kv=-1 and is_var_split_kv=false, we compute
@@ -207,7 +207,7 @@ void cutlass_mla_decode_sm100a(torch::Tensor const& out,
               "page_table must be a 32-bit integer tensor");
 
   auto in_dtype = q_nope.dtype();
-  at::cuda::CUDAGuard device_guard{(char)q_nope.get_device()};
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(q_nope));
   const cudaStream_t stream =
       at::cuda::getCurrentCUDAStream(q_nope.get_device());
   if (in_dtype == at::ScalarType::Half) {

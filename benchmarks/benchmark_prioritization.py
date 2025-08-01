@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark offline prioritization."""
 
 import argparse
@@ -160,7 +161,7 @@ def main(args: argparse.Namespace):
             json.dump(results, f, indent=4)
 
 
-if __name__ == "__main__":
+def create_argument_parser():
     parser = FlexibleArgumentParser(description="Benchmark the throughput.")
     parser.add_argument(
         "--backend", type=str, choices=["vllm", "hf", "mii"], default="vllm"
@@ -203,6 +204,12 @@ if __name__ == "__main__":
     )
 
     parser = EngineArgs.add_cli_args(parser)
+
+    return parser
+
+
+if __name__ == "__main__":
+    parser = create_argument_parser()
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model

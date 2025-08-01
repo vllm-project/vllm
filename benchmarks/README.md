@@ -81,8 +81,12 @@ become available.
 
 **Note**: HuggingFace dataset's `dataset-name` should be set to `hf`
 
----
-## Example - Online Benchmark
+## 🚀 Example - Online Benchmark
+
+<details>
+<summary>Show more</summary>
+
+<br/>
 
 First start serving your model
 
@@ -95,7 +99,7 @@ Then run the benchmarking script
 ```bash
 # download dataset
 # wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-python3 vllm/benchmarks/benchmark_serving.py \
+vllm bench serve \
   --backend vllm \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --endpoint /v1/completions \
@@ -106,38 +110,39 @@ python3 vllm/benchmarks/benchmark_serving.py \
 
 If successful, you will see the following output
 
-```
+```text
 ============ Serving Benchmark Result ============
-Successful requests:                     10        
-Benchmark duration (s):                  5.78      
-Total input tokens:                      1369      
-Total generated tokens:                  2212      
-Request throughput (req/s):              1.73      
-Output token throughput (tok/s):         382.89    
-Total Token throughput (tok/s):          619.85    
+Successful requests:                     10
+Benchmark duration (s):                  5.78
+Total input tokens:                      1369
+Total generated tokens:                  2212
+Request throughput (req/s):              1.73
+Output token throughput (tok/s):         382.89
+Total Token throughput (tok/s):          619.85
 ---------------Time to First Token----------------
-Mean TTFT (ms):                          71.54     
-Median TTFT (ms):                        73.88     
-P99 TTFT (ms):                           79.49     
+Mean TTFT (ms):                          71.54
+Median TTFT (ms):                        73.88
+P99 TTFT (ms):                           79.49
 -----Time per Output Token (excl. 1st token)------
-Mean TPOT (ms):                          7.91      
-Median TPOT (ms):                        7.96      
-P99 TPOT (ms):                           8.03      
+Mean TPOT (ms):                          7.91
+Median TPOT (ms):                        7.96
+P99 TPOT (ms):                           8.03
 ---------------Inter-token Latency----------------
-Mean ITL (ms):                           7.74      
-Median ITL (ms):                         7.70      
-P99 ITL (ms):                            8.39      
+Mean ITL (ms):                           7.74
+Median ITL (ms):                         7.70
+P99 ITL (ms):                            8.39
 ==================================================
 ```
 
 ### Custom Dataset
+
 If the dataset you want to benchmark is not supported yet in vLLM, even then you can benchmark on it using `CustomDataset`. Your data needs to be in `.jsonl` format and needs to have "prompt" field per entry, e.g., data.jsonl
 
-```
+```json
 {"prompt": "What is the capital of India?"}
 {"prompt": "What is the capital of Iran?"}
 {"prompt": "What is the capital of China?"}
-``` 
+```
 
 ```bash
 # start server
@@ -146,7 +151,7 @@ VLLM_USE_V1=1 vllm serve meta-llama/Llama-3.1-8B-Instruct --disable-log-requests
 
 ```bash
 # run benchmarking script
-python3 benchmarks/benchmark_serving.py --port 9001 --save-result --save-detailed \
+vllm bench serve --port 9001 --save-result --save-detailed \
   --backend vllm \
   --model meta-llama/Llama-3.1-8B-Instruct \
   --endpoint /v1/completions \
@@ -170,7 +175,7 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct --disable-log-requests
 ```
 
 ```bash
-python3 vllm/benchmarks/benchmark_serving.py \
+vllm bench serve \
   --backend openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
@@ -190,7 +195,7 @@ VLLM_USE_V1=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
 ```
 
 ``` bash
-python3 benchmarks/benchmark_serving.py \
+vllm bench serve \
     --model meta-llama/Meta-Llama-3-8B-Instruct \
     --dataset-name hf \
     --dataset-path likaixin/InstructCoder \
@@ -203,10 +208,10 @@ python3 benchmarks/benchmark_serving.py \
 vllm serve Qwen/Qwen2-VL-7B-Instruct --disable-log-requests
 ```
 
-**`lmms-lab/LLaVA-OneVision-Data`**
+`lmms-lab/LLaVA-OneVision-Data`:
 
 ```bash
-python3 vllm/benchmarks/benchmark_serving.py \
+vllm bench serve \
   --backend openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
@@ -217,10 +222,10 @@ python3 vllm/benchmarks/benchmark_serving.py \
   --num-prompts 10
 ```
 
-**`Aeala/ShareGPT_Vicuna_unfiltered`**
+`Aeala/ShareGPT_Vicuna_unfiltered`:
 
 ```bash
-python3 vllm/benchmarks/benchmark_serving.py \
+vllm bench serve \
   --backend openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
@@ -230,10 +235,10 @@ python3 vllm/benchmarks/benchmark_serving.py \
   --num-prompts 10
 ```
 
-**`AI-MO/aimo-validation-aime`**
+`AI-MO/aimo-validation-aime`:
 
 ``` bash
-python3 vllm/benchmarks/benchmark_serving.py \
+vllm bench serve \
     --model Qwen/QwQ-32B \
     --dataset-name hf \
     --dataset-path AI-MO/aimo-validation-aime \
@@ -241,10 +246,10 @@ python3 vllm/benchmarks/benchmark_serving.py \
     --seed 42
 ```
 
-**`philschmid/mt-bench`**
+`philschmid/mt-bench`:
 
 ``` bash
-python3 vllm/benchmarks/benchmark_serving.py \
+vllm bench serve \
     --model Qwen/QwQ-32B \
     --dataset-name hf \
     --dataset-path philschmid/mt-bench \
@@ -257,7 +262,7 @@ When using OpenAI-compatible backends such as `vllm`, optional sampling
 parameters can be specified. Example client command:
 
 ```bash
-python3 vllm/benchmarks/benchmark_serving.py \
+vllm bench serve \
   --backend vllm \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --endpoint /v1/completions \
@@ -269,11 +274,34 @@ python3 vllm/benchmarks/benchmark_serving.py \
   --num-prompts 10
 ```
 
----
-## Example - Offline Throughput Benchmark
+### Running With Ramp-Up Request Rate
+
+The benchmark tool also supports ramping up the request rate over the
+duration of the benchmark run. This can be useful for stress testing the
+server or finding the maximum throughput that it can handle, given some latency budget.
+
+Two ramp-up strategies are supported:
+
+- `linear`: Increases the request rate linearly from a start value to an end value.
+- `exponential`: Increases the request rate exponentially.
+
+The following arguments can be used to control the ramp-up:
+
+- `--ramp-up-strategy`: The ramp-up strategy to use (`linear` or `exponential`).
+- `--ramp-up-start-rps`: The request rate at the beginning of the benchmark.
+- `--ramp-up-end-rps`: The request rate at the end of the benchmark.
+
+</details>
+
+## 📈 Example - Offline Throughput Benchmark
+
+<details>
+<summary>Show more</summary>
+
+<br/>
 
 ```bash
-python3 vllm/benchmarks/benchmark_throughput.py \
+vllm bench throughput \
   --model NousResearch/Hermes-3-Llama-3.1-8B \
   --dataset-name sonnet \
   --dataset-path vllm/benchmarks/sonnet.txt \
@@ -282,7 +310,7 @@ python3 vllm/benchmarks/benchmark_throughput.py \
 
 If successful, you will see the following output
 
-```
+```text
 Throughput: 7.15 requests/s, 4656.00 total tokens/s, 1072.15 output tokens/s
 Total num prompt tokens:  5014
 Total num output tokens:  1500
@@ -290,8 +318,8 @@ Total num output tokens:  1500
 
 ### VisionArena Benchmark for Vision Language Models
 
-``` bash
-python3 vllm/benchmarks/benchmark_throughput.py \
+```bash
+vllm bench throughput \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --backend vllm-chat \
   --dataset-name hf \
@@ -302,7 +330,7 @@ python3 vllm/benchmarks/benchmark_throughput.py \
 
 The `num prompt tokens` now includes image token counts
 
-```
+```text
 Throughput: 2.55 requests/s, 4036.92 total tokens/s, 326.90 output tokens/s
 Total num prompt tokens:  14527
 Total num output tokens:  1280
@@ -313,7 +341,7 @@ Total num output tokens:  1280
 ``` bash
 VLLM_WORKER_MULTIPROC_METHOD=spawn \
 VLLM_USE_V1=1 \
-python3 vllm/benchmarks/benchmark_throughput.py \
+vllm bench throughput \
     --dataset-name=hf \
     --dataset-path=likaixin/InstructCoder \
     --model=meta-llama/Meta-Llama-3-8B-Instruct \
@@ -326,7 +354,7 @@ python3 vllm/benchmarks/benchmark_throughput.py \
     "prompt_lookup_min": 2}'
 ```
 
-```
+```text
 Throughput: 104.77 requests/s, 23836.22 total tokens/s, 10477.10 output tokens/s
 Total num prompt tokens:  261136
 Total num output tokens:  204800
@@ -334,10 +362,10 @@ Total num output tokens:  204800
 
 ### Other HuggingFaceDataset Examples
 
-**`lmms-lab/LLaVA-OneVision-Data`**
+`lmms-lab/LLaVA-OneVision-Data`:
 
 ```bash
-python3 vllm/benchmarks/benchmark_throughput.py \
+vllm bench throughput \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --backend vllm-chat \
   --dataset-name hf \
@@ -347,10 +375,10 @@ python3 vllm/benchmarks/benchmark_throughput.py \
   --num-prompts 10
 ```
 
-**`Aeala/ShareGPT_Vicuna_unfiltered`**
+`Aeala/ShareGPT_Vicuna_unfiltered`:
 
 ```bash
-python3 vllm/benchmarks/benchmark_throughput.py \
+vllm bench throughput \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --backend vllm-chat \
   --dataset-name hf \
@@ -359,10 +387,10 @@ python3 vllm/benchmarks/benchmark_throughput.py \
   --num-prompts 10
 ```
 
-**`AI-MO/aimo-validation-aime`**
+`AI-MO/aimo-validation-aime`:
 
 ```bash
-python3 benchmarks/benchmark_throughput.py \
+vllm bench throughput \
   --model Qwen/QwQ-32B \
   --backend vllm \
   --dataset-name hf \
@@ -371,12 +399,12 @@ python3 benchmarks/benchmark_throughput.py \
   --num-prompts 10
 ```
 
-### Benchmark with LoRA Adapters
+Benchmark with LoRA adapters:
 
 ``` bash
 # download dataset
 # wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-python3 vllm/benchmarks/benchmark_throughput.py \
+vllm bench throughput \
   --model meta-llama/Llama-2-7b-hf \
   --backend vllm \
   --dataset_path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
@@ -387,3 +415,204 @@ python3 vllm/benchmarks/benchmark_throughput.py \
   --enable-lora \
   --lora-path yard1/llama-2-7b-sql-lora-test
   ```
+
+</details>
+
+## 🛠️ Example - Structured Output Benchmark
+
+<details>
+<summary>Show more</summary>
+
+<br/>
+
+Benchmark the performance of structured output generation (JSON, grammar, regex).
+
+### Server Setup
+
+```bash
+vllm serve NousResearch/Hermes-3-Llama-3.1-8B --disable-log-requests
+```
+
+### JSON Schema Benchmark
+
+```bash
+python3 benchmarks/benchmark_serving_structured_output.py \
+  --backend vllm \
+  --model NousResearch/Hermes-3-Llama-3.1-8B \
+  --dataset json \
+  --structured-output-ratio 1.0 \
+  --request-rate 10 \
+  --num-prompts 1000
+```
+
+### Grammar-based Generation Benchmark
+
+```bash
+python3 benchmarks/benchmark_serving_structured_output.py \
+  --backend vllm \
+  --model NousResearch/Hermes-3-Llama-3.1-8B \
+  --dataset grammar \
+  --structure-type grammar \
+  --request-rate 10 \
+  --num-prompts 1000
+```
+
+### Regex-based Generation Benchmark
+
+```bash
+python3 benchmarks/benchmark_serving_structured_output.py \
+  --backend vllm \
+  --model NousResearch/Hermes-3-Llama-3.1-8B \
+  --dataset regex \
+  --request-rate 10 \
+  --num-prompts 1000
+```
+
+### Choice-based Generation Benchmark
+
+```bash
+python3 benchmarks/benchmark_serving_structured_output.py \
+  --backend vllm \
+  --model NousResearch/Hermes-3-Llama-3.1-8B \
+  --dataset choice \
+  --request-rate 10 \
+  --num-prompts 1000
+```
+
+### XGrammar Benchmark Dataset
+
+```bash
+python3 benchmarks/benchmark_serving_structured_output.py \
+  --backend vllm \
+  --model NousResearch/Hermes-3-Llama-3.1-8B \
+  --dataset xgrammar_bench \
+  --request-rate 10 \
+  --num-prompts 1000
+```
+
+</details>
+
+## 📚 Example - Long Document QA Benchmark
+
+<details>
+<summary>Show more</summary>
+
+<br/>
+
+Benchmark the performance of long document question-answering with prefix caching.
+
+### Basic Long Document QA Test
+
+```bash
+python3 benchmarks/benchmark_long_document_qa_throughput.py \
+  --model meta-llama/Llama-2-7b-chat-hf \
+  --enable-prefix-caching \
+  --num-documents 16 \
+  --document-length 2000 \
+  --output-len 50 \
+  --repeat-count 5
+```
+
+### Different Repeat Modes
+
+```bash
+# Random mode (default) - shuffle prompts randomly
+python3 benchmarks/benchmark_long_document_qa_throughput.py \
+  --model meta-llama/Llama-2-7b-chat-hf \
+  --enable-prefix-caching \
+  --num-documents 8 \
+  --document-length 3000 \
+  --repeat-count 3 \
+  --repeat-mode random
+
+# Tile mode - repeat entire prompt list in sequence
+python3 benchmarks/benchmark_long_document_qa_throughput.py \
+  --model meta-llama/Llama-2-7b-chat-hf \
+  --enable-prefix-caching \
+  --num-documents 8 \
+  --document-length 3000 \
+  --repeat-count 3 \
+  --repeat-mode tile
+
+# Interleave mode - repeat each prompt consecutively
+python3 benchmarks/benchmark_long_document_qa_throughput.py \
+  --model meta-llama/Llama-2-7b-chat-hf \
+  --enable-prefix-caching \
+  --num-documents 8 \
+  --document-length 3000 \
+  --repeat-count 3 \
+  --repeat-mode interleave
+```
+
+</details>
+
+## 🗂️ Example - Prefix Caching Benchmark
+
+<details>
+<summary>Show more</summary>
+
+<br/>
+
+Benchmark the efficiency of automatic prefix caching.
+
+### Fixed Prompt with Prefix Caching
+
+```bash
+python3 benchmarks/benchmark_prefix_caching.py \
+  --model meta-llama/Llama-2-7b-chat-hf \
+  --enable-prefix-caching \
+  --num-prompts 1 \
+  --repeat-count 100 \
+  --input-length-range 128:256
+```
+
+### ShareGPT Dataset with Prefix Caching
+
+```bash
+# download dataset
+# wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+
+python3 benchmarks/benchmark_prefix_caching.py \
+  --model meta-llama/Llama-2-7b-chat-hf \
+  --dataset-path /path/ShareGPT_V3_unfiltered_cleaned_split.json \
+  --enable-prefix-caching \
+  --num-prompts 20 \
+  --repeat-count 5 \
+  --input-length-range 128:256
+```
+
+</details>
+
+## ⚡ Example - Request Prioritization Benchmark
+
+<details>
+<summary>Show more</summary>
+
+<br/>
+
+Benchmark the performance of request prioritization in vLLM.
+
+### Basic Prioritization Test
+
+```bash
+python3 benchmarks/benchmark_prioritization.py \
+  --model meta-llama/Llama-2-7b-chat-hf \
+  --input-len 128 \
+  --output-len 64 \
+  --num-prompts 100 \
+  --scheduling-policy priority
+```
+
+### Multiple Sequences per Prompt
+
+```bash
+python3 benchmarks/benchmark_prioritization.py \
+  --model meta-llama/Llama-2-7b-chat-hf \
+  --input-len 128 \
+  --output-len 64 \
+  --num-prompts 100 \
+  --scheduling-policy priority \
+  --n 2
+```
+
+</details>

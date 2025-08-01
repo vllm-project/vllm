@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Callable
 
@@ -91,13 +92,13 @@ def _run_test(
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
     with vllm_runner(model,
-                     task="embed",
+                     runner="pooling",
                      dtype=dtype,
                      enforce_eager=True,
                      max_model_len=8192) as vllm_model:
-        tokenizer = vllm_model.model.get_tokenizer()
+        tokenizer = vllm_model.llm.get_tokenizer()
         texts = [
-            # this is necessary because vllm_model.encode will not apply any
+            # this is necessary because vllm_model.embed will not apply any
             # templating to the prompt, and therefore lacks an image_pad
             # token unless one is inserted beforehand (the (28,28) image
             # above is converted to an image pad token by the chat template).
@@ -108,7 +109,7 @@ def _run_test(
             # vllm will replace the pad token with the actual image,
             # which may be a placeholder image, later.
         ]
-        vllm_outputs = vllm_model.encode(texts, images=input_images)
+        vllm_outputs = vllm_model.embed(texts, images=input_images)
 
     hf_outputs = []
     with hf_runner(model,

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import weakref
 
@@ -22,6 +23,12 @@ TOKEN_IDS = [
     [0, 2, 1],
     [0, 3, 1, 2],
 ]
+
+
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines):
+    """We can run both engines for this test."""
+    pass
 
 
 @pytest.fixture(scope="module")
@@ -103,3 +110,22 @@ def test_multiple_sampling_params(llm: LLM):
     # sampling_params is None, default params should be applied
     outputs = llm.generate(PROMPTS, sampling_params=None)
     assert len(PROMPTS) == len(outputs)
+
+
+def test_max_model_len():
+    max_model_len = 20
+    llm = LLM(
+        model=MODEL_NAME,
+        max_model_len=max_model_len,
+        gpu_memory_utilization=0.10,
+        enforce_eager=True,  # reduce test time
+    )
+    sampling_params = SamplingParams(max_tokens=max_model_len + 10)
+    outputs = llm.generate(PROMPTS, sampling_params)
+    for output in outputs:
+        num_total_tokens = len(output.prompt_token_ids) + len(
+            output.outputs[0].token_ids)
+        # Total tokens must not exceed max_model_len.
+        # It can be less if generation finishes due to other reasons (e.g., EOS)
+        # before reaching the absolute model length limit.
+        assert num_total_tokens <= max_model_len

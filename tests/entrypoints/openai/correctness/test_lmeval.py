@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This file test accuracy of the vLLM server via LMEval.
 It uses local-completions, which interacts with vLLM
@@ -68,8 +69,9 @@ def run_test(more_args):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda()
-                    and not current_platform.is_tpu(),
-                    reason="V1 currently only supported on CUDA and TPU")
+                    and not current_platform.is_tpu()
+                    and not current_platform.is_xpu(),
+                    reason="V1 currently only supported on CUDA, XPU and TPU")
 def test_lm_eval_accuracy_v1_engine(monkeypatch: pytest.MonkeyPatch):
     """Run with the V1 Engine."""
 

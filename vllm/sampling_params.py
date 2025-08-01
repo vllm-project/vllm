@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sampling parameters for text generation."""
 import copy
 from dataclasses import dataclass
@@ -8,7 +9,6 @@ from typing import Annotated, Any, Optional, Union
 
 import msgspec
 from pydantic import BaseModel
-from typing_extensions import deprecated
 
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
@@ -82,27 +82,6 @@ class GuidedDecodingParams:
             raise ValueError(
                 "You can only use one kind of guided decoding but multiple are "
                 f"specified: {self.__dict__}")
-
-        if self.backend is not None and ":" in self.backend:
-            self._extract_backend_options()
-
-    @deprecated(
-        "Passing guided decoding backend options inside backend in the format "
-        "'backend:...' is deprecated. This will be removed in v0.10.0. Please "
-        "use the dedicated arguments '--disable-fallback', "
-        "'--disable-any-whitespace' and '--disable-additional-properties' "
-        "instead.")
-    def _extract_backend_options(self):
-        """Extract backend options from the backend string."""
-        assert isinstance(self.backend, str)
-        self.backend, options = self.backend.split(":")
-        options_set = set(options.strip().split(","))
-        if "no-fallback" in options_set:
-            self.disable_fallback = True
-        if "disable-any-whitespace" in options_set:
-            self.disable_any_whitespace = True
-        if "no-additional-properties" in options_set:
-            self.disable_additional_properties = True
 
 
 class RequestOutputKind(Enum):
@@ -197,8 +176,8 @@ class SamplingParams(
             processor which only retains scores for the given token ids.
             Defaults to None.
         extra_args: Arbitrary additional args, that can be used by custom
-            sampling implementations. Not used by any in-tree sampling
-            implementations.
+            sampling implementations, plugins, etc. Not used by any in-tree
+            sampling implementations.
     """
 
     n: int = 1
@@ -389,6 +368,17 @@ class SamplingParams(
                              f"type {type(self.n)}")
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
+        if self.best_of is not None:
+            if not isinstance(self.best_of, int):
+                raise ValueError(
+                    f"best_of must be an integer, got {type(self.best_of)}")
+            if self.best_of < 1:
+                raise ValueError(
+                    f"best_of must be at least 1, got {self.best_of}")
+            if self.best_of < self.n:
+                raise ValueError(
+                    f"best_of must be greater than or equal to n, "
+                    f"got n={self.n} and best_of={self.best_of}.")
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise ValueError("presence_penalty must be in [-2, 2], got "
                              f"{self.presence_penalty}.")

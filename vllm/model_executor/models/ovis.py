@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from https://github.com/huggingface/transformers/blob/v4.39.3/src/transformers/models/ovis/modeling_ovis.py
 # Copyright 2023 The vLLM team.
@@ -24,7 +25,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.nn.functional import gumbel_softmax, pad, softmax
-from transformers import BaseImageProcessor, BatchFeature
+from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -47,8 +48,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.ovis import (BaseVisualTokenizerConfig,
-                                                  OvisConfig)
 from vllm.transformers_utils.processors.ovis import OvisProcessor
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -82,7 +81,7 @@ class VisualTokenizer(torch.nn.Module):
 
     def __init__(
         self,
-        config: BaseVisualTokenizerConfig,
+        config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
@@ -106,7 +105,7 @@ class VisualTokenizer(torch.nn.Module):
 
     def _init_backbone(
         self,
-        config: BaseVisualTokenizerConfig,
+        config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> nn.Module:
@@ -246,14 +245,12 @@ class VisualEmbedding(torch.nn.Embedding):
 
 class OvisProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_config(self):
-        return self.ctx.get_hf_config(OvisConfig)
-
-    def get_hf_processor(self, **kwargs):
+    def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(
             OvisProcessor,
             image_pad_token=self.get_image_pad_token(),
             image_segment_len=self.get_image_segment_len(),
+            **kwargs,
         )
 
     def get_image_segment_len(self) -> int:
@@ -273,16 +270,13 @@ class OvisProcessingInfo(BaseProcessingInfo):
         text_model_type = hf_text_config.model_type
         return IMAGE_PAD_TOKEN_MAP.get(text_model_type)
 
-    def get_image_processor(self) -> BaseImageProcessor:
-        return self.get_hf_processor().image_processor  # type: ignore
-
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
     def get_image_size_with_most_features(self) -> ImageSize:
         height, width = self.get_hf_processor().get_image_size()
         hs = self.get_hf_config().visual_tokenizer_config.hidden_stride
-        # NOTE(Isotr0py): 9 is `max_partion` hardcoded in original code
+        # NOTE(Isotr0py): 9 is `max_partition` hardcoded in original code
         # https://huggingface.co/AIDC-AI/Ovis2-1B/blob/main/modeling_ovis.py#L96
         return ImageSize(width=width * hs * 9, height=height * hs * 9)
 
@@ -334,6 +328,7 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if not mm_data:
             # Avoid warning from HF logger for text-only input
@@ -345,6 +340,7 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
         hf_processor = self.info.get_hf_processor()
@@ -402,12 +398,19 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
                                         dummy_inputs=OvisDummyInputsBuilder)
 class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
-        self.config: OvisConfig = config
+        self.config: PretrainedConfig = config
         self.llm = init_vllm_registered_model(
             vllm_config=vllm_config.with_hf_config(config.get_text_config()),
             prefix=maybe_prefix(prefix, "llm"),
@@ -498,11 +501,11 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
 
         return tuple(vision_embeddings)
 
-    def get_multimodal_embeddings(
-            self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
+    def get_multimodal_embeddings(self,
+                                  **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return None
+            return []
 
         image_features = self._process_image_input(image_input)
 
@@ -514,7 +517,8 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.llm.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None:
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, multimodal_embeddings,
                 self.image_pad_token_id)

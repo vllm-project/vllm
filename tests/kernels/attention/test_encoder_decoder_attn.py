@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Tests:
 
@@ -45,7 +46,7 @@ CUDA_DEVICE = "cuda:0"
 MAX_DEC_SEQ_LENS = [128]
 MAX_ENC_SEQ_LENS = [128]
 
-# Narrow teest-cases for unsupported-scenario
+# Narrow test-cases for unsupported-scenario
 # tests
 HEAD_SIZES_FOR_UNSUPP = [HEAD_SIZES[0]]
 
@@ -98,7 +99,7 @@ class TestResources(NamedTuple):
     Attributes:
 
     * scale: 1/sqrt(d) scale factor for attn
-    * attn_backend: implementatino of abstraction
+    * attn_backend: implementations of abstraction
                     attention interface using
                     a particular kernel library
                     i.e. XFormers
