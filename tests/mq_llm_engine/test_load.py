@@ -16,7 +16,7 @@ NUM_EXPECTED_TOKENS = 10
 NUM_REQUESTS = 10000
 
 # Scenarios to test for num generated token.
-ENGINE_ARGS = AsyncEngineArgs(model=MODEL, disable_log_requests=True)
+ENGINE_ARGS = AsyncEngineArgs(model=MODEL)
 
 
 @pytest.fixture(scope="function")
