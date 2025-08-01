@@ -394,7 +394,8 @@ def test_cannot_schedule_after_recv():
     # Step 4: try to schedule, remote request is put to running list
     # because the transfer is completed.
     scheduler_output = scheduler.schedule()
-    model_runner_output = create_model_runner_output(reqs=[request_normal, request_remote])
+    model_runner_output = create_model_runner_output(
+        reqs=[request_normal, request_remote])
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.running) == 2
     assert len(scheduler.waiting) == 0

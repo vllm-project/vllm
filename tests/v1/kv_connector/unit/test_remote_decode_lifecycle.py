@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-import math
 
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.request import FinishReason, RequestStatus
@@ -125,8 +124,7 @@ def test_short_prompt_lifecycle():
     eco = scheduler.update_from_output(scheduler_output, model_runner_output)
     kv_transfer_params = eco[0].outputs[0].kv_transfer_params
 
-    assert (len(
-        kv_transfer_params["remote_block_ids"]) == 1)
+    assert (len(kv_transfer_params["remote_block_ids"]) == 1)
 
     # Confirm we do not have any memory leaks after req lifecycle.
     # We need to mark sending finish to clear data for persistent batch.
@@ -180,7 +178,8 @@ def test_prefix_cache_lifecycle():
     # Ensure we send all block ids, including the partial blocks,
     # even if there is a cache hit.
     assert (len(
-        kv_transfer_params["remote_block_ids"]) == (NUM_EXTERNAL_FULL_BLOCKS + 1))
+        kv_transfer_params["remote_block_ids"]) == (NUM_EXTERNAL_FULL_BLOCKS +
+                                                    1))
 
     # STEP (2): Ensure it is freed.
     scheduler_output = scheduler.schedule()
