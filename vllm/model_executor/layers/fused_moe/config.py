@@ -70,9 +70,6 @@ class FusedMoEQuantConfig:
     per_out_ch_quant: bool = False
     block_shape: Optional[list[int]] = None
 
-    # TODO: add rest of gscale + alphas?
-    is_fp4_scale_swizzled: bool = False  # ???????????
-
     # TODO: add col major flag?
     # add detailed quant info for input, intermediates, weights, etc?
 

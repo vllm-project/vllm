@@ -568,7 +568,7 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         g2_alphas: torch.Tensor,
         a1_gscale: torch.Tensor,
         a2_gscale: torch.Tensor,
-        device: torch.device,  # needed?
+        device: torch.device,  # TODO(bnell): is this needed?
         max_experts_per_worker: int,
         out_dtype: torch.dtype,
         per_act_token_quant: bool,
@@ -578,7 +578,7 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         super().__init__(
             FusedMoEQuantConfig(
-                quant_dtype=None,
+                quant_dtype=None, # skip quantization here
                 per_act_token_quant=per_act_token_quant,
                 per_out_ch_quant=per_out_ch_quant,
                 block_shape=block_shape,
@@ -587,7 +587,7 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         self.out_dtype = out_dtype
         self.use_batched_format = use_batched_format
 
-        # put this stuff into quant config?
+        # TODO(bnell): put this stuff into quant config?
         self.g1_alphas = g1_alphas
         self.g2_alphas = g2_alphas
         self.a1_gscale = a1_gscale
@@ -612,7 +612,6 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        # TODO: double check
         return TopKWeightAndReduceNoOP()
 
     def workspace_shapes(
@@ -716,7 +715,7 @@ def cutlass_moe_fp4(
                                 "is currently not supported for "
                                 "ModelOptNvFp4FusedMoE's cutlass_moe_fp4.")
     fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),  # skip quant?
+        MoEPrepareAndFinalizeNoEP(),
         CutlassExpertsFp4(
             g1_alphas,
             g2_alphas,
@@ -724,7 +723,7 @@ def cutlass_moe_fp4(
             a2_gscale,
             device,
             max_experts_per_worker=e,
-            out_dtype=a.dtype,  # XXXXXXXXXXX TODO: double check or None?
+            out_dtype=a.dtype,
             per_act_token_quant=False,
             per_out_ch_quant=False,
             use_batched_format=False,
