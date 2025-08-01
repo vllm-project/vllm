@@ -174,6 +174,16 @@ class RocmPlatform(Platform):
     ]
 
     @classmethod
+    def get_vit_attn_backend(cls, support_fa: bool = False) -> str:
+        if support_fa:
+            if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA
+                    and on_gfx9()):
+                return _Backend.ROCM_AITER_FA
+            elif on_mi3xx():
+                return _Backend.FLASH_ATTN
+        return _Backend.TORCH_SDPA
+
+    @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1,
                              use_mla) -> str:

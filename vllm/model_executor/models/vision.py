@@ -7,7 +7,6 @@ from typing import Final, Generic, Optional, Protocol, TypeVar, Union
 import torch
 from transformers import PretrainedConfig
 
-import vllm.envs as envs
 from vllm.attention.selector import get_env_variable_attn_backend
 from vllm.logger import init_logger
 from vllm.platforms import _Backend, current_platform
@@ -79,30 +78,7 @@ def get_vit_attn_backend(support_fa: bool = False) -> _Backend:
     if selected_backend is not None:
         return selected_backend
 
-    if current_platform.is_cuda():
-        if current_platform.has_device_capability(80) and support_fa:
-            from transformers.utils import is_flash_attn_2_available
-            if is_flash_attn_2_available():
-                return _Backend.FLASH_ATTN
-            logger.warning_once(
-                "Current `vllm-flash-attn` has a bug inside vision "
-                "module, so we use xformers backend instead. You can "
-                "run `pip install flash-attn` to use flash-attention "
-                "backend.")
-        # Fallback for Volta/Turing GPUs or FA not supported
-        return _Backend.XFORMERS
-
-    if current_platform.is_rocm() and support_fa:
-        from vllm.platforms.rocm import on_gfx9, on_mi3xx
-        if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA
-                and on_gfx9()):
-            return _Backend.ROCM_AITER_FA
-        elif on_mi3xx():
-            return _Backend.FLASH_ATTN
-        return _Backend.TORCH_SDPA
-
-    # Default backend for other platforms
-    return _Backend.TORCH_SDPA
+    return current_platform.get_vit_attn_backend(support_fa)
 
 
 def resolve_visual_encoder_outputs(
