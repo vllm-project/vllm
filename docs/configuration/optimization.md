@@ -131,7 +131,7 @@ Note that MoE layers will be sharded according to the product of the tensor para
 
 ## Multi-modal processing
 
-### Multi-modal processor cache
+### Processor Cache
 
 By default, the multi-modal processor cache is enabled to avoid repeatedly calling Hugging Face processors
 on the same multi-modal inputs, which commonly occurs in multi-turn conversations.
@@ -146,7 +146,7 @@ llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
           disable_mm_preprocessor_cache=True)
 ```
 
-### Parallel multi-modal processing
+### Parallel Processing
 
 You can run input processing in parallel via [API server scale-out](../serving/data_parallel_deployment.md#internal-load-balancing).
 This is useful when input processing (which is run inside the API server)
@@ -164,10 +164,10 @@ vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4 -dp 2
     API server scale-out is only available for online inference.
 
 !!! note
-    Multi-modal processing cache is disabled when API server scale-out is enabled
+    Multi-modal processor cache is disabled when API server scale-out is enabled
     because it requires a one-to-one correspondance between API and engine core processes.
 
-### GPU multi-modal processing
+### GPU-accelerated Processing
 
 You can speed up input processing by running Hugging Face processors on the GPU.
 To support this, the processor must accept a `device` argument in its call signature.
@@ -191,6 +191,6 @@ llm = LLM(model="Qwen/Qwen2-Audio-7B-Instruct",
 ```
 
 !!! note
-    Multi-modal processing cache is disabled when using GPU multi-modal processing
+    Multi-modal processor cache is disabled when using GPU multi-modal processing
     because GPU operations work better with larger batch size which happens less
     frequently when the cache is enabled.
