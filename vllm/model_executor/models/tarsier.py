@@ -178,13 +178,11 @@ class TarsierProcessingInfo(BaseProcessingInfo):
         return get_vision_encoder_info(self.get_hf_config())
 
     def get_hf_processor(self, **kwargs: object) -> TarsierProcessor:
-        hf_processor = self.ctx.get_hf_processor(TarsierProcessor, **kwargs)
-        # Patch for patch_size if needed (copied from vLLM LLaVA)
-        if hasattr(hf_processor,
-                   'patch_size') and hf_processor.patch_size is None:
-            patch_size = self.get_vision_encoder_info().get_patch_size()
-            hf_processor.patch_size = patch_size
-        return hf_processor
+        vision_info = self.get_vision_encoder_info()
+
+        kwargs.setdefault("patch_size", vision_info.get_patch_size())
+
+        return self.ctx.get_hf_processor(TarsierProcessor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
