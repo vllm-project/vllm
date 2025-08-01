@@ -139,7 +139,7 @@ on the same multi-modal inputs, which commonly occurs in multi-turn conversation
 You can adjust the size of the cache via `VLLM_MM_INPUT_CACHE_GIB` environment variable (default 4 GiB).
 The actual memory usage is double of this value because the cache is mirrored across API and engine core processes.
 
-If you do not benefit much from the cache, you can disable it explicitly via `disable_mm_preprocessor_cache`:
+If you do not benefit much from the cache, you can disable it completely via `disable_mm_preprocessor_cache`:
 
 ```python
 llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
