@@ -218,7 +218,7 @@ class GraniteMoeHybridModelConfig(VerifyAndUpdateConfig):
             config.max_model_len)
 
 
-class OpenAIMoeForCausalLMConfig(VerifyAndUpdateConfig):
+class GptOssConfig(VerifyAndUpdateConfig):
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -320,5 +320,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "XLMRobertaModel": JinaRobertaModelConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "GraniteMoeHybridForCausalLM": GraniteMoeHybridModelConfig,
-    "OpenAIMoeForCausalLM": OpenAIMoeForCausalLMConfig,
+    "GptOssForCausalLM": GptOssConfig,
 }
