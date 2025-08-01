@@ -397,9 +397,9 @@ if flashinfer_comm is not None:
     # to use flashinfer fused allreduce
     _FI_MAX_SIZES = {
         2: 64 * MiB,  # 64MB
-        4: MiB,  # 1MB
-        6: MiB // 2,  # 512KB
-        8: MiB // 2,  # 512KB
+        4: 32 * MiB,  # 32MB
+        6: 32 * MiB,  # 32MB
+        8: 32 * MiB,  # 32MB
     }
     # opt for a more conservative default value
     # when world size is not in _FI_MAX_SIZES
@@ -488,6 +488,7 @@ if flashinfer_comm is not None:
                     torch.ops._C.rms_norm(norm_out, allreduce_out, rms_gamma,
                                           rms_eps)
                 if scale_factor is not None:
+                    assert scale_out is not None
                     torch.ops._C.scaled_fp4_quant(quant_out, norm_out,
                                                   scale_out, scale_factor)
             if scale_factor is None or norm_out is not None:
