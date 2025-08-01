@@ -981,6 +981,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
                 FlashInferExperts)
             logger.debug_once("Using FlashInferExperts")
+            # TODO(bnell): put scales in FusedMoEQuantConfig?
             experts = FlashInferExperts(
                 g1_alphas=self.layer.g1_alphas,
                 g2_alphas=self.layer.g2_alphas,
