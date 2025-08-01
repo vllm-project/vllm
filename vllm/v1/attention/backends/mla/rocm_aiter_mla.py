@@ -125,18 +125,18 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             block_offsets = torch.arange(page_size,
                                          device=device,
                                          dtype=torch.int32)
-            expanded_block_table = block_table.unsqueeze(
+            expanded_block_table = block_table_tensor.unsqueeze(
                 -1) * page_size + block_offsets
             flat_block_table = expanded_block_table.view(
-                block_table.size(0), -1)
+                block_table_tensor.size(0), -1)
 
             max_model_len = flat_block_table.size(1)
             mask = torch.arange(
                 max_model_len,
                 device=device).unsqueeze(0) < seq_lens.unsqueeze(1)
 
-            # e.g. block_table = [[1, 2, 4], [3, 5, 0]], seq_lens = [5, 3] and page_size = 2,
-            # then paged_kv_indices = [1, 2, 4, 5, 8, 3, 4, 10]
+            # e.g. block_table = [[1, 2, 4], [3, 5, 0]], seq_lens = [5, 3] and
+            # page_size = 2, then paged_kv_indices = [1, 2, 4, 5, 8, 3, 4, 10]
             paged_kv_indices = flat_block_table[mask]
             paged_kv_indptr = torch.cat([
                 torch.zeros(1, dtype=seq_lens.dtype, device=device),
