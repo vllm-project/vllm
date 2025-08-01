@@ -69,8 +69,12 @@ def make_block_quant_fp8_weights(
                        dtype=torch.float32)
 
     for i in range(e):
-        w1[i], w1_s[i] = per_block_cast_to_fp8(w1_bf16[i])
-        w2[i], w2_s[i] = per_block_cast_to_fp8(w2_bf16[i])
+        w1[i], w1_s[i] = per_block_cast_to_fp8(w1_bf16[i],
+                                               block_size=block_size,
+                                               use_ue8m0=True)
+        w2[i], w2_s[i] = per_block_cast_to_fp8(w2_bf16[i],
+                                               block_size=block_size,
+                                               use_ue8m0=True)
 
     return w1, w2, w1_s, w2_s
 
