@@ -957,6 +957,8 @@ def load_smolvlm(question: str, image_urls: list[str]) -> ModelRequestData:
 def load_step3(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "stepfun-ai/step3-fp8"
 
+    # NOTE: Below are verified configurations for step3-fp8
+    # on 8xH100 GPUs.
     engine_args = EngineArgs(
         model=model_name,
         max_num_batched_tokens=4096,
