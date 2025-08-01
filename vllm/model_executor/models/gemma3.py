@@ -147,7 +147,7 @@ class Gemma3Attention(nn.Module):
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         layer_idx = extract_layer_index(prefix)
-        self.is_sliding = config.layer_types[layer_idx] == "sliding_window"
+        self.is_sliding = config.layer_types[layer_idx] == "sliding_attention"
         sliding_window = config.sliding_window if self.is_sliding else None
 
         # Initialize the rotary embedding.

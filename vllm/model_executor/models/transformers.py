@@ -536,7 +536,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             # Handle interleaved sliding window attention
             sliding_window = None
             if (hasattr(self.config, "layer_types")
-                    and self.config.layer_types[i] == "sliding_window"):
+                    and self.config.layer_types[i] == "sliding_attention"):
                 sliding_window = self.config.sliding_window
 
             attention_instances[i] = Attention(

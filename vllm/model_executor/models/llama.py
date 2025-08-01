@@ -169,7 +169,7 @@ class LlamaAttention(nn.Module):
 
         sliding_window = None
         if layer_types := getattr(config, "layer_types", None):
-            is_sliding = layer_types[layer_idx] == "sliding_window"
+            is_sliding = layer_types[layer_idx] == "sliding_attention"
             if is_sliding:
                 sliding_window = config.sliding_window
 

@@ -182,7 +182,7 @@ class CohereAttention(nn.Module):
         )
 
         layer_idx = extract_layer_index(prefix)
-        is_sliding = config.layer_types[layer_idx] == "sliding_window"
+        is_sliding = config.layer_types[layer_idx] == "sliding_attention"
         self.sliding_window = config.sliding_window if is_sliding else None
 
         # Model v2 has interleaved sliding windows, v1 does not

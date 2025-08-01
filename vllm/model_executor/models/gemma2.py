@@ -145,7 +145,7 @@ class Gemma2Attention(nn.Module):
         )
 
         layer_idx = extract_layer_index(prefix)
-        is_sliding = config.layer_types[layer_idx] == "sliding_window"
+        is_sliding = config.layer_types[layer_idx] == "sliding_attention"
         sliding_window = config.sliding_window if is_sliding else None
 
         self.attn = Attention(self.num_heads,

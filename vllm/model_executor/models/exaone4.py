@@ -160,7 +160,7 @@ class Exaone4Attention(nn.Module):
             is_neox_style = False
 
         layer_idx = extract_layer_index(prefix)
-        is_sliding = config.layer_types[layer_idx] == "sliding_window"
+        is_sliding = config.layer_types[layer_idx] == "sliding_attention"
         self.sliding_window = config.sliding_window if is_sliding else None
 
         # apply rotary embeddings to every layer
