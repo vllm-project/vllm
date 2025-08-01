@@ -250,7 +250,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         # Detect attention implementation.
         self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
         if self.attn_backend not in {
-                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS
+                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.FLASH_ATTN_VLLM_V1,
         }:
             raise RuntimeError(
                 f"Qwen2.5-VL does not support {self.attn_backend} backend now."
@@ -305,6 +305,24 @@ class Qwen2_5_VisionAttention(nn.Module):
             # from vllm_flash_attn.flash_attn_interface import (
             #   flash_attn_varlen_func)
             from flash_attn import flash_attn_varlen_func
+
+            q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
+
+            output = flash_attn_varlen_func(q,
+                                            k,
+                                            v,
+                                            cu_seqlens_q=cu_seqlens,
+                                            cu_seqlens_k=cu_seqlens,
+                                            max_seqlen_q=max_seqlen,
+                                            max_seqlen_k=max_seqlen,
+                                            dropout_p=0,
+                                            causal=False)
+
+            context_layer = rearrange(output,
+                                      "(b s) ... -> b s ...",
+                                      b=batch_size)
+        elif self.attn_backend == _Backend.FLASH_ATTN_VLLM_V1:
+            from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
 
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
@@ -639,7 +657,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         cu_seqlens: torch.Tensor,
     ) -> tuple[Optional[int], Optional[list[int]]]:
         max_seqlen, seqlens = None, None
-        if self.attn_backend == _Backend.FLASH_ATTN:
+        if self.attn_backend in [_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1]:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         elif self.attn_backend == _Backend.XFORMERS:
             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()

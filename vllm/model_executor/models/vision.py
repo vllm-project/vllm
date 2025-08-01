@@ -84,16 +84,7 @@ def get_vit_attn_backend(support_fa: bool = False) -> _Backend:
         if current_platform.is_cuda():
             device_available = current_platform.has_device_capability(80)
             if device_available and support_fa:
-                from transformers.utils import is_flash_attn_2_available
-                if is_flash_attn_2_available():
-                    selected_backend = _Backend.FLASH_ATTN
-                else:
-                    logger.warning_once(
-                        "Current `vllm-flash-attn` has a bug inside vision "
-                        "module, so we use xformers backend instead. You can "
-                        "run `pip install flash-attn` to use flash-attention "
-                        "backend.")
-                    selected_backend = _Backend.XFORMERS
+                selected_backend = _Backend.FLASH_ATTN
             else:
                 # For Volta and Turing GPUs, use xformers instead.
                 selected_backend = _Backend.XFORMERS
