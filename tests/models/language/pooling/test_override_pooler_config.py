@@ -4,6 +4,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from tests.models.utils import softmax
 from vllm.config import PoolerConfig
 
 
@@ -45,7 +46,7 @@ def test_classify_models_using_activation(
         assert not torch.allclose(
             wo_activation, w_activation,
             atol=1e-2), "override_pooler_config is not working"
-        assert torch.allclose(F.softmax(wo_activation, dim=-1), w_activation,
+        assert torch.allclose(softmax(wo_activation), w_activation,
                               1e-3 if dtype == "float" else 1e-2)
 
 
@@ -89,14 +90,14 @@ def test_embed_models_using_normalize(
 @pytest.mark.parametrize(
     "model",
     [
-        "Qwen/Qwen2.5-Math-PRM-7B",
+        "internlm/internlm2-1_8b-reward",
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])
 def test_reward_models_using_softmax(
     hf_runner,
     vllm_runner,
-    math_step_prompts,
+    example_prompts,
     model: str,
     dtype: str,
 ) -> None:
@@ -106,14 +107,14 @@ def test_reward_models_using_softmax(
             max_model_len=1024,
             dtype=dtype,
             override_pooler_config=PoolerConfig(softmax=False)) as vllm_model:
-        wo_softmax = vllm_model.encode(math_step_prompts)
+        wo_softmax = vllm_model.encode(example_prompts)
 
     with vllm_runner(
             model,
             max_model_len=1024,
             dtype=dtype,
             override_pooler_config=PoolerConfig(softmax=True)) as vllm_model:
-        w_softmax = vllm_model.encode(math_step_prompts)
+        w_softmax = vllm_model.encode(example_prompts)
 
     for wo, w in zip(wo_softmax, w_softmax):
         wo = torch.tensor(wo)
@@ -122,5 +123,5 @@ def test_reward_models_using_softmax(
         assert not torch.allclose(
             wo, w, atol=1e-2), "override_pooler_config softmax is not working"
         assert torch.allclose(
-            F.softmax(wo, dim=-1), w,
+            softmax(wo), w,
             atol=1e-2), "w_softmax should be close to softmax(wo_softmax)."
