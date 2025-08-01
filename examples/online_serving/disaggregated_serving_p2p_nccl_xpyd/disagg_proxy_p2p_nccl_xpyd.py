@@ -128,6 +128,8 @@ async def handle_request():
         prefill_request = original_request_data.copy()
         # change max_tokens = 1 to let it only do prefill
         prefill_request["max_tokens"] = 1
+        if "max_completion_tokens" in prefill_request:
+            prefill_request["max_completion_tokens"] = 1
 
         global count
         global prefill_instances
