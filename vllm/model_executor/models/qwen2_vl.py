@@ -69,8 +69,6 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
-from vllm.transformers_utils.processor import (
-    cached_image_processor_from_config)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -752,73 +750,15 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen2VLConfig)
 
-    def get_hf_processor(
-        self,
-        *,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
-        size: Optional[dict[str, int]] = None,
-        **kwargs: object,
-    ) -> Qwen2VLProcessor:
+    def get_hf_processor(self, **kwargs: object) -> Qwen2VLProcessor:
         return self.ctx.get_hf_processor(
             Qwen2VLProcessor,
-            image_processor=self.get_image_processor(min_pixels=min_pixels,
-                                                     max_pixels=max_pixels,
-                                                     size=size,
-                                                     use_fast=kwargs.get(
-                                                         "use_fast", True)),
+            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
 
-    def _get_image_processor_kwargs(
-        self,
-        *,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
-        size: Optional[dict[str, int]] = None,
-        **kwargs: object,
-    ):
-        mm_config = self.ctx.model_config.get_multimodal_config()
-        if mm_config.mm_processor_kwargs:
-            kwargs.update(mm_config.mm_processor_kwargs)
-
-        if min_pixels is not None:
-            kwargs["min_pixels"] = min_pixels
-
-            if size is None:
-                size = {"shortest_edge": min_pixels}
-            else:
-                size["shortest_edge"] = min_pixels
-
-        if max_pixels is not None:
-            kwargs["max_pixels"] = max_pixels
-
-            if size is None:
-                size = {"longest_edge": max_pixels}
-            else:
-                size["longest_edge"] = max_pixels
-
-        if size is not None:
-            kwargs["size"] = size
-
-        return kwargs
-
-    def get_image_processor(
-        self,
-        *,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
-        size: Optional[dict[str, int]] = None,
-        **kwargs: object,
-    ) -> Qwen2VLImageProcessor:
-        kwargs["use_fast"] = kwargs.get("use_fast", True)
-        return cached_image_processor_from_config(
-            self.ctx.model_config,
-            **self._get_image_processor_kwargs(min_pixels=min_pixels,
-                                               max_pixels=max_pixels,
-                                               size=size,
-                                               **kwargs),
-        )
+    def get_image_processor(self, **kwargs: object) -> Qwen2VLImageProcessor:
+        return self.get_hf_processor(**kwargs).image_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
@@ -1022,20 +962,6 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]
 
     def _get_data_parser(self) -> MultiModalDataParser:
         return Qwen2VLMultiModalDataParser()
-
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        mm_kwargs = self.info._get_image_processor_kwargs(**mm_kwargs)
-        return self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
-            dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, **tok_kwargs),
-        )
 
     def _get_prompt_updates(
         self,

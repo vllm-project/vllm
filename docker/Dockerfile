@@ -1,4 +1,3 @@
-
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
@@ -16,6 +15,7 @@ ARG PYTHON_VERSION=3.12
 # Example:
 # docker build --build-arg BUILD_BASE_IMAGE=registry.acme.org/mirror/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
 ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
+# TODO: Restore to base image after FlashInfer AOT wheel fixed
 ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 
 # By parameterizing the Deadsnakes repository URL, we allow third-party to use
@@ -206,7 +206,16 @@ ARG SCCACHE_REGION_NAME=us-west-2
 ARG SCCACHE_S3_NO_CREDENTIALS=0
 
 # Flag to control whether to use pre-built vLLM wheels
-ARG VLLM_USE_PRECOMPILED=""
+ARG VLLM_USE_PRECOMPILED
+# TODO: in setup.py VLLM_USE_PRECOMPILED is sensitive to truthiness, it will take =0 as "true", this should be fixed
+ENV VLLM_USE_PRECOMPILED=""
+RUN if [ "${VLLM_USE_PRECOMPILED}" = "1" ]; then \
+        export VLLM_USE_PRECOMPILED=1 && \
+        echo "Using precompiled wheels"; \
+    else \
+        unset VLLM_USE_PRECOMPILED && \
+        echo "Leaving VLLM_USE_PRECOMPILED unset to build wheels from source"; \
+    fi
 
 # if USE_SCCACHE is set, use sccache to speed up compilation
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -223,8 +232,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && export SCCACHE_S3_NO_CREDENTIALS=${SCCACHE_S3_NO_CREDENTIALS} \
         && export SCCACHE_IDLE_TIMEOUT=0 \
         && export CMAKE_BUILD_TYPE=Release \
-        && export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \
-        && export VLLM_DOCKER_BUILD_CONTEXT=1 \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
         && sccache --show-stats; \
@@ -238,20 +245,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         # Clean any existing CMake artifacts
         rm -rf .deps && \
         mkdir -p .deps && \
-        export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" && \
-        export VLLM_DOCKER_BUILD_CONTEXT=1 && \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
-    fi
-
-# When using precompiled wheels, keep only the newest manylinux1 wheel and delete others
-RUN if [ "$VLLM_USE_PRECOMPILED" = "1" ]; then \
-        echo "Cleaning up extra wheels in dist/..." && \
-        # Identify the most recent manylinux1_x86_64 wheel
-        KEEP_WHEEL=$(ls -t dist/*manylinux1_x86_64.whl 2>/dev/null | head -n1) && \
-        if [ -n "$KEEP_WHEEL" ]; then \
-            echo "Keeping wheel: $KEEP_WHEEL"; \
-            find dist/ -type f -name "*.whl" ! -path "${KEEP_WHEEL}" -delete; \
-        fi; \
     fi
 
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
@@ -289,7 +283,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-# TODO: Restore to base image after FlashInfer AOT wheel fixed
 FROM ${FINAL_BASE_IMAGE} AS vllm-base
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
@@ -370,7 +363,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi
 
 # Install vllm wheel first, so that torch etc will be installed.
-# !bang
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system dist/*.whl --verbose \
@@ -434,6 +426,33 @@ COPY requirements/build.txt requirements/build.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/build.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+
+# Install DeepGEMM from source
+ARG DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
+ARG DEEPGEMM_GIT_REF="187656694f7f69e3e7975617a68bc3387680a7e1"
+RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
+  . /etc/environment
+    CUDA_MAJOR="${CUDA_VERSION%%.*}"
+    CUDA_MINOR="${CUDA_VERSION#${CUDA_MAJOR}.}"
+    CUDA_MINOR="${CUDA_MINOR%%.*}"
+    if [ "$CUDA_MAJOR" -ge 12 ] && [ "$CUDA_MINOR" -ge 8 ]; then
+        git clone --recursive --shallow-submodules \
+            ${DEEPGEMM_GIT_REPO} deepgemm
+        echo "🏗️  Building DeepGEMM"
+        pushd deepgemm
+            git checkout ${DEEPGEMM_GIT_REF}
+            # Build DeepGEMM
+            # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)
+            rm -rf build dist
+            rm -rf *.egg-info
+            python3 setup.py bdist_wheel
+            uv pip install --system dist/*.whl
+        popd
+        rm -rf deepgemm
+    else
+        echo "Skipping DeepGEMM installation (requires CUDA 12.8+ but got ${CUDA_VERSION})"
+    fi
+BASH
 
 #################### vLLM installation IMAGE ####################
 
