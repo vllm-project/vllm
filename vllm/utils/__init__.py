@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, Tuple, TypeVar, Union, cast, overload)
+                    Optional, TextIO, Tuple, TypeVar, Union, cast, overload)
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -166,6 +166,10 @@ GB_bytes = 1_000_000_000
 
 GiB_bytes = 1 << 30
 """The number of bytes in one gibibyte (GiB)."""
+
+# ANSI color codes
+CYAN = '\033[1;36m'
+RESET = '\033[0;0m'
 
 STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.half,
@@ -1664,6 +1668,12 @@ class FlexibleArgumentParser(ArgumentParser):
         # Enable the deprecated kwarg for Python 3.12 and below
 
         def parse_known_args(self, args=None, namespace=None):
+            if args is not None and "--disable-log-requests" in args:
+                # Special case warning because the warning below won't trigger
+                # if –-disable-log-requests because its value is default.
+                logger.warning_once(
+                    "argument '--disable-log-requests' is deprecated. This "
+                    "will be removed in v0.12.0.")
             namespace, args = super().parse_known_args(args, namespace)
             for action in FlexibleArgumentParser._deprecated:
                 if (hasattr(namespace, dest := action.dest)
@@ -2008,49 +2018,6 @@ def supports_kw(
                 and last_param.name != kw_name)
 
     return False
-
-
-def resolve_mm_processor_kwargs(
-    init_kwargs: Optional[Mapping[str, object]],
-    inference_kwargs: Optional[Mapping[str, object]],
-    callable: Callable[..., object],
-    *,
-    requires_kw_only: bool = True,
-    allow_var_kwargs: bool = False,
-) -> dict[str, Any]:
-    """Applies filtering to eliminate invalid mm_processor_kwargs, i.e.,
-    those who are not explicit keywords to the given callable (of one is
-    given; otherwise no filtering is done), then merges the kwarg dicts,
-    giving priority to inference_kwargs if there are any collisions.
-
-    In the case that no kwarg overrides are provided, returns an empty
-    dict so that it can still be kwarg expanded into the callable later on.
-
-    If allow_var_kwargs=True, allows for things that can be expanded into
-    kwargs as long as they aren't naming collision for var_kwargs or potential
-    positional arguments.
-    """
-    # Filter inference time multimodal processor kwargs provided
-    runtime_mm_kwargs = get_allowed_kwarg_only_overrides(
-        callable,
-        overrides=inference_kwargs,
-        requires_kw_only=requires_kw_only,
-        allow_var_kwargs=allow_var_kwargs,
-    )
-
-    # Filter init time multimodal processor kwargs provided
-    init_mm_kwargs = get_allowed_kwarg_only_overrides(
-        callable,
-        overrides=init_kwargs,
-        requires_kw_only=requires_kw_only,
-        allow_var_kwargs=allow_var_kwargs,
-    )
-
-    # Merge the final processor kwargs, prioritizing inference
-    # time values over the initialization time values.
-    mm_processor_kwargs = {**init_mm_kwargs, **runtime_mm_kwargs}
-
-    return mm_processor_kwargs
 
 
 def get_allowed_kwarg_only_overrides(
@@ -2886,26 +2853,27 @@ def _maybe_force_spawn():
     if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "spawn":
         return
 
-    reason = None
-    if cuda_is_initialized():
-        reason = "CUDA is initialized"
-    elif xpu_is_initialized():
-        reason = "XPU is initialized"
-    elif is_in_ray_actor():
+    reasons = []
+    if is_in_ray_actor():
         # even if we choose to spawn, we need to pass the ray address
         # to the subprocess so that it knows how to connect to the ray cluster.
         # env vars are inherited by subprocesses, even if we use spawn.
         import ray
         os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
-        reason = "In a Ray actor and can only be spawned"
+        reasons.append("In a Ray actor and can only be spawned")
 
-    if reason is not None:
+    if cuda_is_initialized():
+        reasons.append("CUDA is initialized")
+    elif xpu_is_initialized():
+        reasons.append("XPU is initialized")
+
+    if reasons:
         logger.warning(
             "We must use the `spawn` multiprocessing start method. "
             "Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. "
             "See https://docs.vllm.ai/en/latest/usage/"
             "troubleshooting.html#python-multiprocessing "
-            "for more information. Reason: %s", reason)
+            "for more information. Reasons: %s", "; ".join(reasons))
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
@@ -3284,14 +3252,71 @@ def has_deep_gemm() -> bool:
     return _has_module("deep_gemm")
 
 
-def bind_process_name(name: str, suffix: str = "") -> None:
-    """Bind the process name to a specific name with an optional suffix.
+def set_process_title(name: str,
+                      suffix: str = "",
+                      append: bool = False) -> None:
+    """
+    Set the current process title to a specific name with an
+    optional suffix.
 
     Args:
-        name: The base name to bind the process to.
+        name: The title to assign to the current process.
         suffix: An optional suffix to append to the base name.
+        append: Whether to append to the existing process title.
     """
-    name = f"{envs.VLLM_PROCESS_NAME_PREFIX}::{name}"
     if suffix:
         name = f"{name}_{suffix}"
+    if append:
+        name = f"{setproctitle.getproctitle()}_{name}"
+    else:
+        name = f"{envs.VLLM_PROCESS_NAME_PREFIX}::{name}"
     setproctitle.setproctitle(name)
+
+
+def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
+    """Prepend each output line with process-specific prefix"""
+
+    prefix = f"{CYAN}({worker_name} pid={pid}){RESET} "
+    file_write = file.write
+
+    def write_with_prefix(s: str):
+        if not s:
+            return
+        if file.start_new_line:  # type: ignore[attr-defined]
+            file_write(prefix)
+        idx = 0
+        while (next_idx := s.find('\n', idx)) != -1:
+            next_idx += 1
+            file_write(s[idx:next_idx])
+            if next_idx == len(s):
+                file.start_new_line = True  # type: ignore[attr-defined]
+                return
+            file_write(prefix)
+            idx = next_idx
+        file_write(s[idx:])
+        file.start_new_line = False  # type: ignore[attr-defined]
+
+    file.start_new_line = True  # type: ignore[attr-defined]
+    file.write = write_with_prefix  # type: ignore[method-assign]
+
+
+def decorate_logs(process_name: Optional[str] = None) -> None:
+    """
+    Adds a process-specific prefix to each line of output written to stdout and
+    stderr.
+
+    This function is intended to be called before initializing the api_server,
+    engine_core, or worker classes, so that all subsequent output from the
+    process is prefixed with the process name and PID. This helps distinguish
+    log output from different processes in multi-process environments.
+
+    Args:
+        process_name: Optional; the name of the process to use in the prefix.
+            If not provided, the current process name from the multiprocessing
+            context is used.
+    """
+    if process_name is None:
+        process_name = get_mp_context().current_process().name
+    pid = os.getpid()
+    _add_prefix(sys.stdout, process_name, pid)
+    _add_prefix(sys.stderr, process_name, pid)
