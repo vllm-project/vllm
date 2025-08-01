@@ -542,7 +542,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 logical_to_physical_map is not None or \
                 logical_replica_count is not None:
             raise NotImplementedError("Expert load balancing is not supported "
-                                      "for CPU.")
+                                      "for XPU.")
         assert custom_routing_function is None
         return layer.ipex_fusion(
             x,
