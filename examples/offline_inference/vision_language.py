@@ -439,6 +439,41 @@ def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+def run_llama4(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=4,
+        tensor_parallel_size=8,
+        gpu_memory_utilization=0.4,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    messages = [
+        [
+            {
+                "role": "user",
+                "content": [{"type": "image"}, {"type": "text", "text": f"{question}"}],
+            }
+        ]
+        for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=False
+    )
+    stop_token_ids = None
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        stop_token_ids=stop_token_ids,
+    )
+
+
 # LLaVA-1.5
 def run_llava(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -678,41 +713,6 @@ def run_mllama(questions: list[str], modality: str) -> ModelRequestData:
     return ModelRequestData(
         engine_args=engine_args,
         prompts=prompts,
-    )
-
-
-def run_llama4(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-
-    model_name = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=8192,
-        max_num_seqs=4,
-        tensor_parallel_size=8,
-        gpu_memory_utilization=0.4,
-        limit_mm_per_prompt={modality: 1},
-    )
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    messages = [
-        [
-            {
-                "role": "user",
-                "content": [{"type": "image"}, {"type": "text", "text": f"{question}"}],
-            }
-        ]
-        for question in questions
-    ]
-    prompts = tokenizer.apply_chat_template(
-        messages, add_generation_prompt=True, tokenize=False
-    )
-    stop_token_ids = None
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        stop_token_ids=stop_token_ids,
     )
 
 
@@ -1255,6 +1255,7 @@ model_example_map = {
     "internvl_chat": run_internvl,
     "keye_vl": run_keye_vl,
     "kimi_vl": run_kimi_vl,
+    "llama4": run_llama4,
     "llava": run_llava,
     "llava-next": run_llava_next,
     "llava-next-video": run_llava_next_video,
@@ -1264,7 +1265,6 @@ model_example_map = {
     "minicpmv": run_minicpmv,
     "mistral3": run_mistral3,
     "mllama": run_mllama,
-    "llama4": run_llama4,
     "molmo": run_molmo,
     "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,
