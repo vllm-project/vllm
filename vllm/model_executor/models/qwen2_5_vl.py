@@ -43,7 +43,7 @@ from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
-from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY, SiluAndMul
+from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -183,7 +183,7 @@ class Qwen2_5_VisionMLP(nn.Module):
                                            bias=bias,
                                            quant_config=quant_config,
                                            prefix=f"{prefix}.down_proj")
-        self.act_fn = SiluAndMul()
+        self.act_fn = act_fn
 
     def forward(self, x: torch.Tensor):
         gate_up, _ = self.gate_up_proj(x)
@@ -544,7 +544,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 dim=self.hidden_size,
                 num_heads=self.num_heads,
                 mlp_hidden_dim=vision_config.intermediate_size,
-                act_fn=_ACTIVATION_REGISTRY[vision_config.hidden_act],
+                act_fn=get_act_and_mul_fn(vision_config.hidden_act),
                 norm_layer=norm_layer,
                 quant_config=quant_config,
                 prefix=f"{prefix}.blocks.{layer_idx}")
