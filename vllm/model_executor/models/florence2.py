@@ -761,12 +761,6 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
 
 class Florence2ProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_config(self):
-        return self.ctx.get_hf_config()
-
-    def get_hf_processor(self):
-        return self.ctx.get_hf_processor()
-
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
 

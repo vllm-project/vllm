@@ -11,6 +11,7 @@ import textwrap
 import uuid
 import warnings
 from collections import Counter
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import (MISSING, Field, asdict, field, fields, is_dataclass,
                          replace)
@@ -869,6 +870,12 @@ class ModelConfig:
                 interleave_mm_strings=self.interleave_mm_strings)
 
         return None
+
+    def set_disable_mm_preprocessor_cache(self, value: bool) -> None:
+        mm_config = self.get_multimodal_config()
+
+        self.disable_mm_preprocessor_cache = value
+        mm_config.disable_mm_preprocessor_cache = value
 
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
@@ -3332,7 +3339,16 @@ class MultiModalConfig:
             999 if envs.VLLM_USE_V1 else 1,
         )
 
-    # TODO: Add configs to init vision tower or not.
+    def merge_mm_processor_kwargs(
+        self,
+        inference_kwargs: Mapping[str, object],
+    ) -> dict[str, object]:
+        """
+        Get the keyword arguments to pass to the multi-modal processor
+        according to the extra arguments passed during inference.
+        """
+        kwargs = self.mm_processor_kwargs or {}
+        return kwargs | dict(inference_kwargs)
 
 
 @config
@@ -4051,7 +4067,7 @@ class PassConfig:
     """Whether to enable async TP."""
     enable_fi_allreduce_fusion: bool = False
     """Whether to enable flashinfer allreduce fusion."""
-    fi_allreduce_fusion_max_token_num: int = 1024
+    fi_allreduce_fusion_max_token_num: int = 16384
     """Max number of tokens to used in flashinfer allreduce fusion."""
 
     # TODO(luka) better pass enabling system.
