@@ -1125,7 +1125,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     video_outputs["pixel_values_videos"])
             video_outputs = dict(
                 pixel_values_videos=torch.cat(pixel_values_videos_lst),
-                video_grid_thw=video_outputs["video_grid_thw"],
+                video_grid_thw=torch.cat(video_grid_thw_lst),
             )
         else:
             video_outputs = dict()
