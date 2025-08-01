@@ -208,6 +208,8 @@ def test_chat_extra_kwargs(thinking_llm, enable_thinking):
     ("Qwen/Qwen2-Audio-7B-Instruct", "audio", {}),
 ])
 def test_mm_processing_gpu(model_id, modality, mm_init_kwargs):
+    device = current_platform.device_name
+
     if modality == "image":
         messages = get_dummy_messages_from_image_url(TEST_IMAGE_URLS[0])
     elif modality == "audio":
@@ -215,7 +217,6 @@ def test_mm_processing_gpu(model_id, modality, mm_init_kwargs):
     else:
         raise NotImplementedError(modality)
 
-    device = current_platform.device_name
     llm = LLM(
         model=model_id,
         max_model_len=6144,
@@ -228,7 +229,34 @@ def test_mm_processing_gpu(model_id, modality, mm_init_kwargs):
     outputs = llm.chat(messages)
     assert len(outputs) == 1
 
-    if device != "cpu":
-        match = "cannot override the device for multi-modal preprocessing"
-        with pytest.raises(ValueError, match=match):
-            llm.chat(messages, mm_processor_kwargs={"device": "cpu"})
+
+@pytest.mark.parametrize(("model_id", "modality", "mm_init_kwargs"), [
+    ("Qwen/Qwen2.5-VL-3B-Instruct", "image", {
+        "use_fast": True
+    }),
+    ("Qwen/Qwen2-Audio-7B-Instruct", "audio", {}),
+])
+def test_mm_processing_gpu_bad_device(model_id, modality, mm_init_kwargs):
+    device = current_platform.device_name
+    if device == "cpu":
+        pytest.skip("Not applicable to CPU")
+
+    if modality == "image":
+        messages = get_dummy_messages_from_image_url(TEST_IMAGE_URLS[0])
+    elif modality == "audio":
+        messages = get_dummy_messages_from_audio_url(TEST_AUDIO_URLS[0])
+    else:
+        raise NotImplementedError(modality)
+
+    llm = LLM(
+        model=model_id,
+        max_model_len=6144,
+        max_num_seqs=2,
+        enforce_eager=True,
+        seed=0,
+        mm_processor_kwargs=mm_init_kwargs,
+    )
+
+    match = "cannot override the device for multi-modal preprocessing"
+    with pytest.raises(ValueError, match=match):
+        llm.chat(messages, mm_processor_kwargs={"device": device})
