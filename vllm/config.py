@@ -39,8 +39,8 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder,
-    try_get_generation_config, try_get_safetensors_metadata,
-    try_get_tokenizer_config, uses_mrope)
+    maybe_override_with_speculators_target_model, try_get_generation_config,
+    try_get_safetensors_metadata, try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 # yapf conflicts with isort for this block
@@ -535,6 +535,15 @@ class ModelConfig:
                     "affect the random state of the Python process that "
                     "launched vLLM.", self.seed)
 
+        if self.runner != "draft":
+            # If we're not running the draft model, check for speculators config
+            # If speculators config, set model / tokenizer to be target model
+            self.model, self.tokenizer = maybe_override_with_speculators_target_model(  # noqa: E501
+                model=self.model,
+                tokenizer=self.tokenizer,
+                revision=self.revision,
+                trust_remote_code=self.trust_remote_code)
+
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(self.model,
                                                        self.served_model_name)
@@ -606,8 +615,8 @@ class ModelConfig:
                                self.config_format,
                                hf_overrides_kw=hf_overrides_kw,
                                hf_overrides_fn=hf_overrides_fn)
-        self.hf_config = hf_config
 
+        self.hf_config = hf_config
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.attention_chunk_size = getattr(self.hf_text_config,
                                             "attention_chunk_size", None)
@@ -803,12 +812,17 @@ class ModelConfig:
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
+        if getattr(self, "runner_type", self.runner) == "pooling":
+            return "TransformersModel"
         if self.hf_config != self.hf_text_config:
             # If 'hf_text_config' is the same as 'hf_config'. If not, it is
             # probably a composite config, i.e. multimodal
             return "TransformersForMultimodalLM"
-        else:
-            return "TransformersForCausalLM"
+        return "TransformersForCausalLM"
+
+    def using_transformers_backend(self) -> bool:
+        """Check if the model is using the Transformers backend class."""
+        return self.architecture == self._get_transformers_backend_cls()
 
     @property
     def registry(self):
@@ -870,6 +884,12 @@ class ModelConfig:
                 interleave_mm_strings=self.interleave_mm_strings)
 
         return None
+
+    def set_disable_mm_preprocessor_cache(self, value: bool) -> None:
+        mm_config = self.get_multimodal_config()
+
+        self.disable_mm_preprocessor_cache = value
+        mm_config.disable_mm_preprocessor_cache = value
 
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
@@ -1560,7 +1580,18 @@ class ModelConfig:
         return self.multimodal_config
 
     def try_get_generation_config(self) -> dict[str, Any]:
-        if self.generation_config in ("auto", "vllm"):
+        """
+        This method attempts to retrieve the non-default values of the
+        generation config for this model.
+        
+        The generation config can contain information about special tokens, as
+        well as sampling parameters. Which is why this method exists separately
+        to `get_diff_sampling_param`.
+
+        Returns:
+            A dictionary containing the non-default generation config.
+        """
+        if self.generation_config in {"auto", "vllm"}:
             config = try_get_generation_config(
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
@@ -1579,13 +1610,18 @@ class ModelConfig:
 
     def get_diff_sampling_param(self) -> dict[str, Any]:
         """
-        This method returns a dictionary containing the parameters
-        that differ from the default sampling parameters. If
-        `generation_config` is `"vllm"`, an empty dictionary is returned.
+        This method returns a dictionary containing the non-default sampling
+        parameters with `override_generation_config` applied.
+
+        The default sampling parameters are:
+
+        - vLLM's neutral defaults if `self.generation_config="vllm"`
+        - the model's defaults if `self.generation_config="auto"`
+        - as defined in `generation_config.json` if
+            `self.generation_config="path/to/generation_config/dir"`
 
         Returns:
-            dict[str, Any]: A dictionary with the differing sampling
-            parameters, if `generation_config` is `"vllm"` an empty dictionary.
+            A dictionary containing the non-default sampling parameters.
         """
         if self.generation_config == "vllm":
             config = {}
@@ -2974,10 +3010,13 @@ class SpeculativeConfig:
                             "Chunked prefill and EAGLE are not compatible "
                             "when using V0.")
 
+                    from vllm.transformers_utils.configs import (
+                        SpeculatorsConfig)
                     from vllm.transformers_utils.configs.eagle import (
                         EAGLEConfig)
+
                     if isinstance(self.draft_model_config.hf_config,
-                                  EAGLEConfig):
+                                  (EAGLEConfig, SpeculatorsConfig)):
                         pass
                     else:
                         eagle_config = EAGLEConfig(
