@@ -32,7 +32,7 @@ if printf '%s\n' "${FILES[@]}" | grep -q "^docker/Dockerfile$"; then
   # Store old image hash in a variable if the file exists
   OLD_HASH=""
   if [ -f "$TARGET_GRAPH_FILE" ]; then
-    OLD_HASH=$(sha256sum "$TARGET_GRAPH_FILE")
+    OLD_HASH=$(md5sum "$TARGET_GRAPH_FILE")
   fi
   
   # Generate Dockerfile graph
@@ -69,7 +69,7 @@ if printf '%s\n' "${FILES[@]}" | grep -q "^docker/Dockerfile$"; then
   fi
   
   # Check if the graph has changed
-  NEW_HASH=$(sha256sum "$TARGET_GRAPH_FILE")
+  NEW_HASH=$(md5sum "$TARGET_GRAPH_FILE")
   if [ "$NEW_HASH" != "$OLD_HASH" ]; then
     echo "Graph has changed. Please stage the updated file: $TARGET_GRAPH_FILE"
     exit 1
