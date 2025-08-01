@@ -12,6 +12,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     extract_required_args, moe_kernel_quantize_input)
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
+
 class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def __init__(
@@ -92,10 +93,6 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
          local_tokens) = extract_required_args(extra_finalize_args,
                                                ['use_dp', 'local_tokens'])
         if use_dp:
-            chunked_sz = get_chunked_local_tokens()
             fused_expert_output = get_dp_group().reduce_scatterv(
-                fused_expert_output,
-                dim=0,
-                sizes=get_chunked_local_tokens()
-            )
+                fused_expert_output, dim=0, sizes=get_chunked_local_tokens())
         output.copy_(fused_expert_output)

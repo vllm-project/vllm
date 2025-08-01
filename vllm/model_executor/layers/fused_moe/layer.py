@@ -1464,11 +1464,12 @@ class FusedMoE(torch.nn.Module):
         max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp_cpu
         moe_dp_chunk_size_per_rank = self.moe_config.max_num_tokens
         num_tokens = full_hidden_states.size(0)
-        from vllm.forward_context import (set_chunked_tokens_across_dp_cpu, set_chunk_iteration_idx) 
+        from vllm.forward_context import (set_chunk_iteration_idx,
+                                          set_chunked_tokens_across_dp_cpu)
         with set_chunked_tokens_across_dp_cpu(moe_dp_chunk_size_per_rank):
             for chunk_iter_idx, chunk_start_ in enumerate(
-                range(0, max_tokens_across_dp, moe_dp_chunk_size_per_rank)
-            ):
+                    range(0, max_tokens_across_dp,
+                          moe_dp_chunk_size_per_rank)):
                 chunk_start = chunk_start_
                 chunk_end = min(chunk_start + moe_dp_chunk_size_per_rank,
                                 max_tokens_across_dp)
