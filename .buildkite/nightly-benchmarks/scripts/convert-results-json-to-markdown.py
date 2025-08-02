@@ -217,7 +217,7 @@ if __name__ == "__main__":
 
             for index, arg in enumerate(parse_args):
                 if arg in out["client_command"]["args"]:
-                    raw_result.update({col_mapping[index]: arg})
+                    raw_result.update({col_mapping[index]: out["client_command"]["args"][arg]})
             # Add Server, Client command
             raw_result.update(command)
 
