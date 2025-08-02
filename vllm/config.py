@@ -4084,6 +4084,9 @@ class KVEventsConfig:
     this topic to receive events.
     """
 
+    port: Optional[int] = None
+    """The port on which the vLLM instance listens."""
+
 
 class CompilationLevel:
     # constants for the levels of the compilation process
