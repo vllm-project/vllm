@@ -213,7 +213,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Target device of vLLM, supporting [cuda (by default),
     # rocm, neuron, cpu]
     "VLLM_TARGET_DEVICE":
-    lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda"),
+    lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda").lower(),
 
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
