@@ -3,7 +3,8 @@
 """Inference-only MiniMaxText01 model."""
 import copy
 import math
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+import typing
 from typing import Optional, Union
 
 import regex as re
@@ -15,10 +16,11 @@ from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import (CacheConfig, VllmConfig,
+                         get_current_vllm_config)
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
-    get_pp_group, get_tensor_model_parallel_rank,
+    get_ep_group, get_pp_group, get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import CustomOp
@@ -42,7 +44,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import HasInnerState, IsHybrid, SupportsV0Only
+from .interfaces import MixtureOfExperts, HasInnerState, IsHybrid, SupportsV0Only
 from .minimax_cache import MinimaxCacheManager, MinimaxCacheParams
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
 
@@ -231,6 +233,7 @@ class MiniMaxText01MoE(nn.Module):
 
     def __init__(
         self,
+        config: PretrainedConfig,
         num_experts: int,
         top_k: int,
         hidden_size: int,
@@ -239,6 +242,7 @@ class MiniMaxText01MoE(nn.Module):
         layer_idx: int = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "moe",
+        enable_eplb: bool = False,
     ) -> None:
         super().__init__()
 
@@ -249,6 +253,12 @@ class MiniMaxText01MoE(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // self.tp_size
         self.quant_config = quant_config
+
+        self.ep_group = get_ep_group().device_group
+        self.ep_rank = self.ep_group.rank()
+        self.ep_size = self.ep_group.size()
+        self.n_routed_experts: int = config.n_routed_experts
+        self.n_shared_experts: int = config.n_shared_experts
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -264,6 +274,22 @@ class MiniMaxText01MoE(nn.Module):
         )
         self.gate.weight.weight_loader = MiniMaxText01MoE.gate_weight_loader
 
+        # Load balancing settings.
+        vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
+        self.enable_eplb = enable_eplb
+
+        self.n_redundant_experts = parallel_config.num_redundant_experts
+        self.n_logical_experts = self.n_routed_experts
+        self.n_physical_experts = (self.n_logical_experts +
+                                   self.n_redundant_experts)
+        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+
+        self.physical_expert_start = (self.ep_rank *
+                                      self.n_local_physical_experts)
+        self.physical_expert_end = (self.physical_expert_start +
+                                    self.n_local_physical_experts)
+
         self.experts = FusedMoE(
             num_experts=self.num_total_experts,
             top_k=self.top_k,
@@ -275,7 +301,9 @@ class MiniMaxText01MoE(nn.Module):
             quant_config=self.quant_config,
             tp_size=self.tp_size,
             prefix=f"{prefix}.experts",
-        )
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts)
+
         return
 
     @staticmethod
@@ -592,6 +620,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
         layer_id: int = None,
         linear_layer_id: Optional[int] = None,
         prefix: str = "decoder",
+        enable_eplb: bool = False,
     ) -> None:
         self._ilayer = layer_id
         self._irank = get_tensor_model_parallel_rank()
@@ -659,7 +688,8 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 intermediate_size=config.intermediate_size,
                 layer_idx=self._ilayer,
                 quant_config=quant_config,
-                prefix=prefix)
+                prefix=prefix,
+                enable_eplb=enable_eplb)
 
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -788,7 +818,7 @@ class MiniMaxText01Model(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        vllm_config: VllmConfig,
         quant_config: Optional[QuantizationConfig] = None,
         cache_config: Optional[CacheConfig] = None,
         scheduler_config=None,
@@ -796,8 +826,11 @@ class MiniMaxText01Model(nn.Module):
     ) -> None:
         super().__init__()
 
+        config = vllm_config.model_config.hf_config
         self.padding_idx = config.pad_token_id
-        self.vocab_size = config.vocab_size
+        self.vocab_size = config.vocab_size        
+        enable_eplb = vllm_config.parallel_config.enable_eplb
+        self.config = config
 
         self.decoder_attention_types = getattr(
             config, "attn_type_list", False) or getattr(
@@ -860,7 +893,8 @@ class MiniMaxText01Model(nn.Module):
 
             return MiniMaxText01DecoderLayer(layer_config,
                                              **decoder_kwargs,
-                                             prefix=prefix)
+                                             prefix=prefix,
+                                             enable_eplb=enable_eplb)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, layer_fn, prefix=f"{prefix}.layers")
@@ -1003,7 +1037,7 @@ class MiniMaxText01Model(nn.Module):
 
 
 class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
-                               SupportsV0Only):
+                               SupportsV0Only, MixtureOfExperts):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
 
@@ -1046,7 +1080,44 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
             1 for attn_type in self.model.decoder_attention_types
             if attn_type == 1)
         self.kv_cache = [torch.tensor([]) for _ in range(flash_layer_count)]
-        return
+        self.expert_weights = []
+
+        # Set MoE hyperparameters
+        self.num_moe_layers = (config.num_hidden_layers -
+                               config.first_k_dense_replace)
+        self.num_expert_groups = config.n_group
+
+        self.moe_layers: list[FusedMoE] = []
+        for layer in self.model.layers:
+            assert isinstance(layer, MiniMaxText01DecoderLayer)
+            if isinstance(layer.mlp, MiniMaxText01MoE):
+                self.moe_layers.append(layer.mlp.experts)
+       
+        # Pick last one layer since the first ones may be dense layers.
+        example_moe = typing.cast(
+            MiniMaxText01MoE, self.model.layers[config.num_hidden_layers - 1].mlp)
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_shared_experts = example_moe.n_shared_experts
+        self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        for layer_idx, layer in enumerate(self.moe_layers):
+            # Register the expert weights.
+            self.expert_weights.append(layer.get_expert_weights())
+            layer.set_eplb_state(
+                moe_layer_idx=layer_idx,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+            )
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         return self.model.minimax_cache.copy_inputs_before_cuda_graphs(
@@ -1114,66 +1185,42 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid,
         def is_moe_weight(name: str) -> bool:
             return "block_sparse_moe" in name and not name.endswith(".bias")
 
-        def get_expert_id(param_name):
-            pattern = r'model\.layers\.\d+\.block_sparse_moe\.experts\.(\d+)\.'
-            match = re.search(pattern, param_name)
-            if match:
-                return match.group(1)
-            return None
-
         def load_sparse_moe_weight(name: str, loaded_weight: torch.Tensor,
                                    self) -> None:
-            if isinstance(self.config.num_local_experts, list):
-                expert_params_mapping = [
-                    ("w13_weight"
-                     if weight_name in ["w1", "w3"] else "w2_weight",
-                     f"experts.{expert_id}.{weight_name}.weight", expert_id)
-                    for expert_id in range(max(self.config.num_local_experts))
-                    for weight_name in ["w1", "w2", "w3"]
-                ]
-            else:
-                expert_params_mapping = [
-                    ("w13_scale" if weight_name in ["w1", "w3"] else
-                     "w2_scale", f"{expert_id}.{weight_name}.weight_scale",
-                     expert_id, weight_name)
-                    for expert_id in range(self.config.num_local_experts)
-                    for weight_name in ["w1", "w2", "w3"]
-                ] + [("w13_weight" if weight_name in ["w1", "w3"] else
-                      "w2_weight", f"{expert_id}.{weight_name}.weight",
-                      expert_id, weight_name)
-                     for expert_id in range(self.config.num_local_experts)
-                     for weight_name in ["w1", "w2", "w3"]]
-            for (param_name, weight_name, expert_id,
-                 shard_id) in expert_params_mapping:
-                name_expert_id = get_expert_id(name)
-                if name_expert_id is not None and int(name_expert_id) != int(
-                        expert_id):
-                    continue
+            expert_params_mapping = FusedMoE.make_expert_params_mapping(
+                ckpt_gate_proj_name="w1",
+                ckpt_down_proj_name="w2",
+                ckpt_up_proj_name="w3",
+                num_experts=self.config.n_routed_experts,
+                num_redundant_experts=self.num_redundant_experts,
+            )
+
+            for mapping in expert_params_mapping:
+                param_name, weight_name, expert_id, shard_id = mapping  
                 if weight_name not in name:
                     continue
-                name = name.replace(weight_name, param_name)
-                if is_pp_missing_parameter(name, self):
+
+                name_mapped = name.replace(weight_name, param_name)
+                if is_pp_missing_parameter(name_mapped, self):
                     return
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
-                weight_loader(param,
-                              loaded_weight,
-                              weight_name,
-                              expert_id=expert_id,
-                              shard_id=shard_id)
-                loaded_params.add(name)
-                break
-            else:
-                if is_pp_missing_parameter(name, self):
-                    return
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader = weight_loader_with_alias(name)(weight_loader)
-                weight_loader(param, loaded_weight)
-                loaded_params.add(name)
-            return
+
+                param = params_dict[name_mapped]
+                # We should ask the weight loader to return success or not
+                # here since otherwise we may skip experts with other
+                # available replicas.
+                weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
+
+                success = weight_loader(        
+                    param,
+                    loaded_weight,
+                    name_mapped,
+                    shard_id=shard_id,
+                    expert_id=expert_id,
+                    return_success=True,
+                )
+                if success:
+                    loaded_params.add(name_mapped)
+                return
 
         def is_shared_mlp_weight(name: str) -> bool:
             return "shared_mlp" in name and not name.endswith(".bias")
