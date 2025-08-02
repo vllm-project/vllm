@@ -340,8 +340,8 @@ async def benchmark(
 
     # Reuses connections across requests to reduce TLS handshake overhead.
     connector = aiohttp.TCPConnector(
-        limit=max_concurrency or 100,
-        limit_per_host=max_concurrency or 100,
+        limit=max_concurrency or 0,
+        limit_per_host=max_concurrency or 0,
         ttl_dns_cache=300,
         use_dns_cache=True,
         keepalive_timeout=60,
