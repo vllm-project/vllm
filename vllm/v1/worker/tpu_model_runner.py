@@ -33,6 +33,7 @@ from vllm.model_executor.models.interfaces_base import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
                                     PlaceholderRange)
+from vllm.multimodal.profiling import DummyDecoderData
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
@@ -1314,6 +1315,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         for mode, max_items_per_seq in max_items_per_seq_by_modality.items():
             max_items_per_prompt = max_items_per_prompt_by_modality[mode]
+            dummy_mm_data = self._get_mm_decoder_dummy_data(
+                mode,
+                max_items_per_prompt,
+            )
 
             logger.info(
                 "Compiling Multimodal %s Encoder with different input"
@@ -1322,9 +1327,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # No padding for MM encoder just yet.
             for num_items in range(1, max_items_per_seq + 1):
                 logger.info("  -- mode: %s items: %d", mode, num_items)
-                batched_dummy_mm_inputs = self._get_mm_dummy_batch(
+                batched_dummy_mm_inputs = self._get_mm_decoder_dummy_batch(
                     mode,
-                    max_items_per_prompt,
+                    dummy_mm_data,
                     num_items,
                 )
                 # Run multimodal encoder.
@@ -1554,9 +1559,13 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
 
                 # Create dummy batch of multimodal inputs.
-                batched_dummy_mm_inputs = self._get_mm_dummy_batch(
+                dummy_mm_data = self._get_mm_decoder_dummy_data(
                     dummy_modality,
                     max_mm_items_per_prompt,
+                )
+                batched_dummy_mm_inputs = self._get_mm_decoder_dummy_batch(
+                    dummy_modality,
+                    dummy_mm_data,
                     max_mm_items_per_req,
                 )
 
@@ -1799,20 +1808,27 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.grammar_bitmask_cpu[:num_reqs].to(logits.device), \
             self.structured_decode_arange.to(logits.device)
 
-    def _get_mm_dummy_batch(
+    def _get_mm_decoder_dummy_data(
         self,
         modality: str,
         processor_batch_size: int,
-        model_batch_size: int,
-    ) -> BatchedTensorInputs:
-        """Dummy data for profiling and precompiling multimodal models."""
+    ) -> DummyDecoderData:
+        """Dummy data for profiling and precompiling multimodal processor."""
         # Result in the maximum GPU consumption of HF processor
-        dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
+        return self.mm_registry.get_decoder_dummy_data(
             model_config=self.model_config,
             seq_len=self.max_num_tokens,
             mm_counts={modality: processor_batch_size},
             disable_cache=True,
         )
+
+    def _get_mm_decoder_dummy_batch(
+        self,
+        modality: str,
+        dummy_decoder_data: DummyDecoderData,
+        model_batch_size: int,
+    ) -> BatchedTensorInputs:
+        """Dummy data for profiling and precompiling multimodal models."""
         dummy_mm_data = dummy_decoder_data.multi_modal_data
 
         # Result in the maximum GPU consumption of the model
