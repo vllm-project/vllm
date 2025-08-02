@@ -535,9 +535,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         return self._model_config
 
     @cached_property
-    def model_cls(self):
+    def model_cls(self) -> type[SupportsMultiModal]:
         from vllm.model_executor.model_loader import get_model_cls
-        return get_model_cls(self.model_config)
+        model_cls = get_model_cls(self.model_config)
+        return cast(type[SupportsMultiModal], model_cls)
 
     @property
     def allowed_local_media_path(self):
@@ -547,31 +548,23 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     def mm_registry(self):
         return MULTIMODAL_REGISTRY
 
+    @cached_property
+    def mm_processor(self):
+        return self.mm_registry.create_processor(self.model_config)
+
     def add(self, modality: ModalityStr, item: _T) -> Optional[str]:
         """
         Add a multi-modal item to the current prompt and returns the
         placeholder string to use, if any.
         """
-        mm_registry = self.mm_registry
-        model_config = self.model_config
-        model_cls = cast(SupportsMultiModal, self.model_cls)
-
         input_modality = modality.replace("_embeds", "")
+        num_items = len(self._items_by_modality[modality]) + 1
 
-        mm_processor = mm_registry.create_processor(model_config)
-        allowed_counts = mm_processor.info.get_allowed_mm_limits()
-        allowed_count = allowed_counts.get(input_modality, 0)
-
-        current_count = len(self._items_by_modality[modality]) + 1
-        if current_count > allowed_count:
-            raise ValueError(
-                f"At most {allowed_count} {modality}(s) may be provided in "
-                "one request. You can set `--limit-mm-per-prompt` to "
-                "increase this limit if the model supports it.")
+        self.mm_processor.validate_num_items(input_modality, num_items)
 
         self._items_by_modality[modality].append(item)
 
-        return model_cls.get_placeholder_str(modality, current_count)
+        return self.model_cls.get_placeholder_str(modality, num_items)
 
     @abstractmethod
     def create_parser(self) -> "BaseMultiModalContentParser":
